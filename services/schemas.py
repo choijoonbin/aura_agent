@@ -17,6 +17,7 @@ class VoucherRow(BaseModel):
     budget_exceeded: bool | None = None
     case_id: int | None = None
     case_type: str | None = None
+    severity: str | None = None
     case_status: str | None = None
 
 

@@ -16,7 +16,9 @@ class FiDocHeader(Base):
     gjahr: Mapped[str] = mapped_column(String(4), primary_key=True)
 
     user_id: Mapped[int | None] = mapped_column(BigInteger)
+    doc_source: Mapped[str | None] = mapped_column(String(10))
     budat: Mapped[object | None] = mapped_column(Date)
+    cpudt: Mapped[object | None] = mapped_column(Date)
     cputm: Mapped[object | None] = mapped_column(Time)
     blart: Mapped[str | None] = mapped_column(String(2))
     waers: Mapped[str | None] = mapped_column(String(5))
@@ -30,6 +32,8 @@ class FiDocHeader(Base):
 
     created_at: Mapped[object | None] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[object | None] = mapped_column(DateTime(timezone=True))
+    created_by: Mapped[int | None] = mapped_column(BigInteger)
+    updated_by: Mapped[int | None] = mapped_column(BigInteger)
 
 
 class FiDocItem(Base):

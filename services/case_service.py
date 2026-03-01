@@ -23,6 +23,23 @@ def _is_weekend(budat) -> bool:
     return bool(budat and budat.weekday() >= 5)
 
 
+def _fallback_case_type(header: FiDocHeader) -> str:
+    return header.intended_risk_type or "NORMAL_BASELINE"
+
+
+def _fallback_case_status(header: FiDocHeader) -> str:
+    return "NEW"
+
+
+def _fallback_severity(header: FiDocHeader) -> str:
+    risk = (header.intended_risk_type or "").upper()
+    if risk in {"HOLIDAY_USAGE", "LIMIT_EXCEED", "PRIVATE_USE_RISK"}:
+        return "HIGH" if (header.budget_exceeded_flag or "").upper() == "Y" else "MEDIUM"
+    if risk in {"UNUSUAL_PATTERN", "SPLIT_PAYMENT", "DUPLICATE_SUSPECT"}:
+        return "MEDIUM"
+    return "LOW"
+
+
 def list_vouchers(db: Session, queue: str = "all", limit: int = 50) -> list[VoucherRow]:
     """
     queue=all: 내 전표 목록 (user_id=1)
@@ -49,6 +66,7 @@ def list_vouchers(db: Session, queue: str = "all", limit: int = 50) -> list[Vouc
             FiDocHeader,
             AgentCase.case_id,
             AgentCase.case_type,
+            AgentCase.severity,
             AgentCase.status,
             sub_amount.c.amount,
         )
@@ -82,7 +100,10 @@ def list_vouchers(db: Session, queue: str = "all", limit: int = 50) -> list[Vouc
     rows = db.execute(stmt).all()
 
     out: list[VoucherRow] = []
-    for header, case_id, case_type, case_status, amount in rows:
+    for header, case_id, case_type, severity, case_status, amount in rows:
+        effective_case_type = case_type or _fallback_case_type(header)
+        effective_case_status = case_status or _fallback_case_status(header)
+        effective_severity = severity or _fallback_severity(header)
         out.append(
             VoucherRow(
                 voucher_key=f"{header.bukrs}-{header.belnr}-{header.gjahr}",
@@ -97,8 +118,9 @@ def list_vouchers(db: Session, queue: str = "all", limit: int = 50) -> list[Vouc
                 mcc_code=header.mcc_code,
                 budget_exceeded=(header.budget_exceeded_flag or "").upper() == "Y",
                 case_id=case_id,
-                case_type=case_type,
-                case_status=case_status,
+                case_type=effective_case_type,
+                severity=effective_severity,
+                case_status=effective_case_status,
             )
         )
     return out

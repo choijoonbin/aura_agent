@@ -14,9 +14,16 @@ from agent.aura_bridge import run_agent_analysis
 from db.session import get_db
 from services.agent_studio_service import get_agent_detail, list_agents
 from services.case_service import build_analysis_payload, list_vouchers
-from services.demo_data_service import clear_demo_data, seed_holiday_violations
+from services.demo_data_service import clear_demo_data, list_demo_scenarios, list_seeded_demo_cases, seed_demo_scenarios
 from services.persistence_service import persist_analysis_result
 from services.rag_library_service import get_rag_document_detail, list_rag_documents
+from services.runtime_persistence_service import (
+    get_latest_run_id_by_case,
+    get_persisted_timeline,
+    get_run_aux_state,
+    list_run_ids_by_case,
+    log_run_event,
+)
 from services.schemas import AnalysisStartResponse, HitlSubmitRequest, HitlSubmitResponse
 from services.stream_runtime import runtime
 from utils.config import ensure_source_paths, settings
@@ -90,6 +97,7 @@ async def _run_analysis_task(
     intended_risk_type: str | None,
 ) -> None:
     last_payload: dict[str, Any] | None = None
+    voucher_key = case_id.replace("POC-", "")
     try:
         async for ev_type, ev_payload in run_agent_analysis(
             case_id,
@@ -98,6 +106,34 @@ async def _run_analysis_task(
         ):
             data = ev_payload if isinstance(ev_payload, dict) else {"value": ev_payload}
             await runtime.publish(run_id, ev_type, data)
+            try:
+                from db.session import SessionLocal
+                with SessionLocal() as persist_db:
+                    stage = data.get("phase") or data.get("node") or ev_type.lower()
+                    stored_event_type = ev_type
+                    if ev_type == "AGENT_EVENT" and data.get("event_type") == "HITL_REQUESTED":
+                        stored_event_type = "HITL_REQUESTED"
+                    elif ev_type == "completed":
+                        stored_event_type = "RUN_COMPLETED"
+                    elif ev_type == "failed":
+                        stored_event_type = "RUN_FAILED"
+                    metadata = {
+                        "stored_event_type": stored_event_type,
+                        "payload": data,
+                    }
+                    if ev_type in {"completed", "failed"}:
+                        metadata["result"] = data
+                    log_run_event(
+                        persist_db,
+                        run_id=run_id,
+                        case_id=case_id,
+                        voucher_key=voucher_key,
+                    stage=str(stage),
+                    event_type=stored_event_type,
+                    metadata=metadata,
+                )
+            except Exception:
+                pass
             if ev_type in {"completed", "failed"}:
                 last_payload = {
                     "run_id": run_id,
@@ -109,6 +145,20 @@ async def _run_analysis_task(
     except Exception as e:
         fail_payload = {"error": str(e), "stage": "runner"}
         await runtime.publish(run_id, "failed", fail_payload)
+        try:
+            from db.session import SessionLocal
+            with SessionLocal() as persist_db:
+                log_run_event(
+                    persist_db,
+                    run_id=run_id,
+                    case_id=case_id,
+                    voucher_key=voucher_key,
+                    stage="runner",
+                    event_type="RUN_FAILED",
+                    metadata={"stored_event_type": "RUN_FAILED", "payload": fail_payload, "result": fail_payload},
+                )
+        except Exception:
+            pass
         last_payload = {
             "run_id": run_id,
             "case_id": case_id,
@@ -138,6 +188,22 @@ async def start_analysis(voucher_key: str, db: Session = Depends(get_db)) -> Ana
     run_id = str(uuid.uuid4())
     case_id = payload["case_id"]
     runtime.create_run(case_id=case_id, run_id=run_id, mode="primary")
+    try:
+        log_run_event(
+            db,
+            run_id=run_id,
+            case_id=case_id,
+            voucher_key=voucher_key,
+            stage="start",
+            event_type="RUN_CREATED",
+            metadata={
+                "stored_event_type": "RUN_CREATED",
+                "lineage": runtime.get_lineage(run_id),
+                "body_evidence": payload["body_evidence"],
+            },
+        )
+    except Exception:
+        pass
     asyncio.create_task(
         _run_analysis_task(
             run_id=run_id,
@@ -177,6 +243,32 @@ async def submit_hitl(run_id: str, request: HitlSubmitRequest, db: Session = Dep
 
     hitl_payload = request.model_dump()
     runtime.set_hitl_response(run_id, hitl_payload)
+    try:
+        log_run_event(
+            db,
+            run_id=run_id,
+            case_id=case_id,
+            voucher_key=voucher_key,
+            stage="hitl",
+            event_type="HITL_RESPONSE",
+            metadata={"stored_event_type": "HITL_RESPONSE", "hitl_response": hitl_payload},
+        )
+        log_run_event(
+            db,
+            run_id=resumed_run_id,
+            case_id=case_id,
+            voucher_key=voucher_key,
+            stage="start",
+            event_type="RUN_CREATED",
+            metadata={
+                "stored_event_type": "RUN_CREATED",
+                "lineage": runtime.get_lineage(resumed_run_id),
+                "parent_run_id": run_id,
+                "body_evidence": payload["body_evidence"],
+            },
+        )
+    except Exception:
+        pass
     payload["body_evidence"]["hitlResponse"] = hitl_payload
     payload["body_evidence"]["hitlSourceRunId"] = run_id
 
@@ -205,19 +297,27 @@ def get_latest_analysis(voucher_key: str, db: Session = Depends(get_db)) -> dict
         raise HTTPException(status_code=404, detail=str(e)) from e
 
     case_id = payload["case_id"]
-    run_id = runtime.latest_run_of_case(case_id)
+    run_id = runtime.latest_run_of_case(case_id) or get_latest_run_id_by_case(db, case_id=case_id)
     if not run_id:
         return {"case_id": case_id, "run_id": None, "result": None}
 
     result = runtime.get_result(run_id)
+    aux = get_run_aux_state(db, run_id=run_id)
+    if result is None and aux.get("result_payload") is not None:
+        result = {
+            "run_id": run_id,
+            "case_id": case_id,
+            "event_type": "completed",
+            "result": aux.get("result_payload"),
+        }
     return {
         "case_id": case_id,
         "run_id": run_id,
         "result": result,
-        "timeline_count": len(runtime.get_timeline(run_id)),
-        "hitl_request": runtime.get_hitl_request(run_id),
-        "hitl_response": runtime.get_hitl_response(run_id),
-        "lineage": runtime.get_lineage(run_id),
+        "timeline_count": len(runtime.get_timeline(run_id)) or len(get_persisted_timeline(db, run_id=run_id)),
+        "hitl_request": runtime.get_hitl_request(run_id) or aux.get("hitl_request"),
+        "hitl_response": runtime.get_hitl_response(run_id) or aux.get("hitl_response"),
+        "lineage": runtime.get_lineage(run_id) or aux.get("lineage"),
     }
 
 
@@ -229,36 +329,51 @@ def get_analysis_history(voucher_key: str, db: Session = Depends(get_db)) -> dic
         raise HTTPException(status_code=404, detail=str(e)) from e
 
     case_id = payload["case_id"]
-    run_ids = runtime.list_runs_of_case(case_id)
+    run_ids = runtime.list_runs_of_case(case_id) or list_run_ids_by_case(db, case_id=case_id)
     items = []
     for run_id in run_ids:
         result = runtime.get_result(run_id) or {}
-        final = result.get("result") or {}
+        aux = get_run_aux_state(db, run_id=run_id)
+        final = result.get("result") or aux.get("result_payload") or {}
         items.append({
             "run_id": run_id,
             "status": final.get("status"),
             "severity": final.get("severity"),
             "score": final.get("score"),
             "reasonText": final.get("reasonText"),
-            "lineage": runtime.get_lineage(run_id),
-            "hitl_request": runtime.get_hitl_request(run_id),
-            "hitl_response": runtime.get_hitl_response(run_id),
+            "lineage": runtime.get_lineage(run_id) or aux.get("lineage"),
+            "hitl_request": runtime.get_hitl_request(run_id) or aux.get("hitl_request"),
+            "hitl_response": runtime.get_hitl_response(run_id) or aux.get("hitl_response"),
         })
     return {"case_id": case_id, "items": items}
 
 
 @app.get("/api/v1/analysis-runs/{run_id}/events")
 def get_run_events(run_id: str) -> dict[str, Any]:
+    from db.session import SessionLocal
     events = runtime.get_timeline(run_id)
     result = runtime.get_result(run_id)
+    hitl_request = runtime.get_hitl_request(run_id)
+    hitl_response = runtime.get_hitl_response(run_id)
+    lineage = runtime.get_lineage(run_id)
+    if not events or result is None or lineage is None:
+        with SessionLocal() as db:
+            if not events:
+                events = get_persisted_timeline(db, run_id=run_id)
+            aux = get_run_aux_state(db, run_id=run_id)
+            if result is None and aux.get("result_payload") is not None:
+                result = {"run_id": run_id, "event_type": "completed", "result": aux.get("result_payload")}
+            hitl_request = hitl_request or aux.get("hitl_request")
+            hitl_response = hitl_response or aux.get("hitl_response")
+            lineage = lineage or aux.get("lineage")
     return {
         "run_id": run_id,
         "events": events,
         "event_count": len(events),
         "result": result,
-        "hitl_request": runtime.get_hitl_request(run_id),
-        "hitl_response": runtime.get_hitl_response(run_id),
-        "lineage": runtime.get_lineage(run_id),
+        "hitl_request": hitl_request,
+        "hitl_response": hitl_response,
+        "lineage": lineage,
     }
 
 
@@ -290,8 +405,22 @@ async def stream_analysis(run_id: str):
 
 
 @app.post("/api/v1/demo/seed")
-def demo_seed(count: int = Query(10, ge=1, le=50), db: Session = Depends(get_db)) -> dict[str, Any]:
-    return seed_holiday_violations(db, count=count)
+def demo_seed(
+    scenario: str = Query("HOLIDAY_USAGE"),
+    count: int = Query(5, ge=1, le=50),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    return seed_demo_scenarios(db, scenario=scenario, count=count)
+
+
+@app.get("/api/v1/demo/scenarios")
+def demo_scenarios() -> dict[str, Any]:
+    return {"items": list_demo_scenarios()}
+
+
+@app.get("/api/v1/demo/seeded")
+def demo_seeded(db: Session = Depends(get_db)) -> dict[str, Any]:
+    return {"items": list_seeded_demo_cases(db)}
 
 
 @app.delete("/api/v1/demo/seed")
