@@ -1,0 +1,299 @@
+from __future__ import annotations
+
+import asyncio
+import json
+import uuid
+from datetime import datetime, timezone
+from typing import Any
+
+from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi.responses import StreamingResponse
+from sqlalchemy.orm import Session
+
+from agent.aura_bridge import run_agent_analysis
+from db.session import get_db
+from services.agent_studio_service import get_agent_detail, list_agents
+from services.case_service import build_analysis_payload, list_vouchers
+from services.demo_data_service import clear_demo_data, seed_holiday_violations
+from services.persistence_service import persist_analysis_result
+from services.rag_library_service import get_rag_document_detail, list_rag_documents
+from services.schemas import AnalysisStartResponse, HitlSubmitRequest, HitlSubmitResponse
+from services.stream_runtime import runtime
+from utils.config import ensure_source_paths, settings
+
+
+app = FastAPI(title="MaterTask PoC API", version="0.3.0")
+
+
+@app.on_event("startup")
+async def startup() -> None:
+    ensure_source_paths()
+
+
+@app.get("/health")
+def health() -> dict[str, Any]:
+    return {
+        "ok": True,
+        "env": settings.app_env,
+        "tenant_id": settings.default_tenant_id,
+        "user_id": settings.default_user_id,
+        "time": datetime.now(timezone.utc).isoformat(),
+        "agent_runtime_mode": settings.agent_runtime_mode,
+        "enable_multi_agent": settings.enable_multi_agent,
+        "enable_langgraph_if_available": settings.enable_langgraph_if_available,
+    }
+
+
+@app.get("/api/v1/vouchers")
+def get_vouchers(
+    queue: str = Query("all", pattern="^(all|pending)$"),
+    limit: int = Query(50, ge=1, le=200),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    rows = list_vouchers(db, queue=queue, limit=limit)
+    return {"items": [r.model_dump() for r in rows], "total": len(rows)}
+
+
+@app.get("/api/v1/rag/documents")
+def get_rag_documents(db: Session = Depends(get_db)) -> dict[str, Any]:
+    items = list_rag_documents(db)
+    return {"items": items, "total": len(items)}
+
+
+@app.get("/api/v1/rag/documents/{doc_id}")
+def get_rag_document(doc_id: int, db: Session = Depends(get_db)) -> dict[str, Any]:
+    item = get_rag_document_detail(db, doc_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="rag document not found")
+    return item
+
+
+@app.get("/api/v1/agents")
+def get_agents(db: Session = Depends(get_db)) -> dict[str, Any]:
+    items = list_agents(db)
+    return {"items": items, "total": len(items)}
+
+
+@app.get("/api/v1/agents/{agent_id}")
+def get_agent(agent_id: int, db: Session = Depends(get_db)) -> dict[str, Any]:
+    item = get_agent_detail(db, agent_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="agent not found")
+    return item
+
+
+async def _run_analysis_task(
+    *,
+    run_id: str,
+    case_id: str,
+    body_evidence: dict[str, Any],
+    intended_risk_type: str | None,
+) -> None:
+    last_payload: dict[str, Any] | None = None
+    try:
+        async for ev_type, ev_payload in run_agent_analysis(
+            case_id,
+            body_evidence=body_evidence,
+            intended_risk_type=intended_risk_type,
+        ):
+            data = ev_payload if isinstance(ev_payload, dict) else {"value": ev_payload}
+            await runtime.publish(run_id, ev_type, data)
+            if ev_type in {"completed", "failed"}:
+                last_payload = {
+                    "run_id": run_id,
+                    "case_id": case_id,
+                    "event_type": ev_type,
+                    "result": data,
+                    "completed_at": datetime.now(timezone.utc).isoformat(),
+                }
+    except Exception as e:
+        fail_payload = {"error": str(e), "stage": "runner"}
+        await runtime.publish(run_id, "failed", fail_payload)
+        last_payload = {
+            "run_id": run_id,
+            "case_id": case_id,
+            "event_type": "failed",
+            "result": fail_payload,
+            "completed_at": datetime.now(timezone.utc).isoformat(),
+        }
+    finally:
+        if last_payload is not None:
+            runtime.set_result(run_id, last_payload)
+            try:
+                from db.session import SessionLocal
+                with SessionLocal() as persist_db:
+                    persist_analysis_result(persist_db, run_id=run_id, result_payload=last_payload)
+            except Exception:
+                pass
+        await runtime.close(run_id)
+
+
+@app.post("/api/v1/cases/{voucher_key}/analysis-runs", response_model=AnalysisStartResponse)
+async def start_analysis(voucher_key: str, db: Session = Depends(get_db)) -> AnalysisStartResponse:
+    try:
+        payload = build_analysis_payload(db, voucher_key)
+    except Exception as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+
+    run_id = str(uuid.uuid4())
+    case_id = payload["case_id"]
+    runtime.create_run(case_id=case_id, run_id=run_id, mode="primary")
+    asyncio.create_task(
+        _run_analysis_task(
+            run_id=run_id,
+            case_id=case_id,
+            body_evidence=payload["body_evidence"],
+            intended_risk_type=payload.get("intended_risk_type"),
+        )
+    )
+    return AnalysisStartResponse(
+        accepted=True,
+        run_id=run_id,
+        case_id=case_id,
+        stream_path=f"/api/v1/analysis-runs/{run_id}/stream",
+    )
+
+
+@app.post("/api/v1/analysis-runs/{run_id}/hitl", response_model=HitlSubmitResponse)
+async def submit_hitl(run_id: str, request: HitlSubmitRequest, db: Session = Depends(get_db)) -> HitlSubmitResponse:
+    source_result = runtime.get_result(run_id)
+    lineage = runtime.get_lineage(run_id)
+    if not source_result or not lineage:
+        raise HTTPException(status_code=404, detail="source run not found")
+
+    hitl_request = runtime.get_hitl_request(run_id)
+    if not hitl_request:
+        raise HTTPException(status_code=400, detail="no pending HITL request for this run")
+
+    case_id = lineage["case_id"]
+    voucher_key = case_id.replace("POC-", "")
+    try:
+        payload = build_analysis_payload(db, voucher_key)
+    except Exception as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+
+    resumed_run_id = str(uuid.uuid4())
+    runtime.create_run(case_id=case_id, run_id=resumed_run_id, parent_run_id=run_id, mode="hitl_resume")
+
+    hitl_payload = request.model_dump()
+    runtime.set_hitl_response(run_id, hitl_payload)
+    payload["body_evidence"]["hitlResponse"] = hitl_payload
+    payload["body_evidence"]["hitlSourceRunId"] = run_id
+
+    asyncio.create_task(
+        _run_analysis_task(
+            run_id=resumed_run_id,
+            case_id=case_id,
+            body_evidence=payload["body_evidence"],
+            intended_risk_type=payload.get("intended_risk_type"),
+        )
+    )
+
+    return HitlSubmitResponse(
+        accepted=True,
+        source_run_id=run_id,
+        resumed_run_id=resumed_run_id,
+        stream_path=f"/api/v1/analysis-runs/{resumed_run_id}/stream",
+    )
+
+
+@app.get("/api/v1/cases/{voucher_key}/analysis/latest")
+def get_latest_analysis(voucher_key: str, db: Session = Depends(get_db)) -> dict[str, Any]:
+    try:
+        payload = build_analysis_payload(db, voucher_key)
+    except Exception as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+
+    case_id = payload["case_id"]
+    run_id = runtime.latest_run_of_case(case_id)
+    if not run_id:
+        return {"case_id": case_id, "run_id": None, "result": None}
+
+    result = runtime.get_result(run_id)
+    return {
+        "case_id": case_id,
+        "run_id": run_id,
+        "result": result,
+        "timeline_count": len(runtime.get_timeline(run_id)),
+        "hitl_request": runtime.get_hitl_request(run_id),
+        "hitl_response": runtime.get_hitl_response(run_id),
+        "lineage": runtime.get_lineage(run_id),
+    }
+
+
+@app.get("/api/v1/cases/{voucher_key}/analysis/history")
+def get_analysis_history(voucher_key: str, db: Session = Depends(get_db)) -> dict[str, Any]:
+    try:
+        payload = build_analysis_payload(db, voucher_key)
+    except Exception as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+
+    case_id = payload["case_id"]
+    run_ids = runtime.list_runs_of_case(case_id)
+    items = []
+    for run_id in run_ids:
+        result = runtime.get_result(run_id) or {}
+        final = result.get("result") or {}
+        items.append({
+            "run_id": run_id,
+            "status": final.get("status"),
+            "severity": final.get("severity"),
+            "score": final.get("score"),
+            "reasonText": final.get("reasonText"),
+            "lineage": runtime.get_lineage(run_id),
+            "hitl_request": runtime.get_hitl_request(run_id),
+            "hitl_response": runtime.get_hitl_response(run_id),
+        })
+    return {"case_id": case_id, "items": items}
+
+
+@app.get("/api/v1/analysis-runs/{run_id}/events")
+def get_run_events(run_id: str) -> dict[str, Any]:
+    events = runtime.get_timeline(run_id)
+    result = runtime.get_result(run_id)
+    return {
+        "run_id": run_id,
+        "events": events,
+        "event_count": len(events),
+        "result": result,
+        "hitl_request": runtime.get_hitl_request(run_id),
+        "hitl_response": runtime.get_hitl_response(run_id),
+        "lineage": runtime.get_lineage(run_id),
+    }
+
+
+@app.get("/api/v1/analysis-runs/{run_id}/stream")
+async def stream_analysis(run_id: str):
+    q = runtime.get_queue(run_id)
+    if q is None:
+        raise HTTPException(status_code=404, detail="run_id not found")
+
+    async def event_gen():
+        yield "event: started\ndata: {}\n\n"
+        while True:
+            ev_type, payload = await q.get()
+            if ev_type == "done":
+                yield "event: completed\ndata: [DONE]\n\n"
+                break
+            data = json.dumps(payload, ensure_ascii=False, default=str)
+            yield f"event: {ev_type}\ndata: {data}\n\n"
+
+    return StreamingResponse(
+        event_gen(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@app.post("/api/v1/demo/seed")
+def demo_seed(count: int = Query(10, ge=1, le=50), db: Session = Depends(get_db)) -> dict[str, Any]:
+    return seed_holiday_violations(db, count=count)
+
+
+@app.delete("/api/v1/demo/seed")
+def demo_seed_clear(db: Session = Depends(get_db)) -> dict[str, Any]:
+    return clear_demo_data(db)

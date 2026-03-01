@@ -1,0 +1,100 @@
+# MaterTask Cursor Rules
+
+## 1. Project Goal
+This project is not a simple port. It is a PoC for an enterprise-grade agentic AI finance audit assistant.
+The codebase must evolve toward:
+- autonomous agent orchestration
+- evidence-grounded decisions
+- explainable execution traces
+- explicit HITL checkpoints
+- reproducible, inspectable behavior
+
+## 2. Core Architecture Rules
+- Keep all runnable logic inside `/Users/joonbinchoi/Work/MaterTask`.
+- FastAPI is the single backend runtime.
+- Streamlit is the single UI runtime.
+- PostgreSQL schema is reused as-is. Do not change existing DB schema unless explicitly required.
+- Default PoC identity is fixed to `tenant_id=1`, `user_id=1`.
+- No auth, no JWT, no gateway dependency inside PoC.
+
+## 3. Agent Rules
+- Do not regress to a fixed linear pipeline if an agentic option is available.
+- The default runtime should prefer LangGraph-based orchestration.
+- Agent flow must remain explicit:
+  - analyze/intake
+  - plan
+  - execute tool(s)
+  - verify
+  - finalize
+- Tool choice must be data-driven, not hardcoded by case type alone.
+- Legacy Aura logic may be reused only as a tool or specialist sub-agent, not as the sole orchestration layer.
+
+## 4. Skills Rules
+- Agent capabilities must be organized as skills/tools with clear contracts.
+- A skill must have:
+  - stable name
+  - description
+  - input/output contract
+  - evidence/fact oriented result payload
+- Prefer adding new capabilities as skills instead of bloating one large analysis function.
+- Skills must return facts or structured findings, not only natural language.
+
+## 5. Evidence and Grounding Rules
+- Never generate a strong violation claim without evidence.
+- If evidence is missing, downgrade to hold/review/HITL.
+- Do not hardcode regulation article conclusions in final reasoning.
+- Streamed messages must represent actual runtime events, not fabricated progress text.
+- Final user-facing reasoning must be grounded in collected facts and tool outputs.
+
+## 6. HITL Rules
+- HITL is mandatory when:
+  - critical input fields are missing
+  - evidence is insufficient
+  - policy interpretation is ambiguous
+  - specialist tool results conflict
+- HITL must be explicit in payloads via structured fields like:
+  - `hitl_request`
+  - `reasons`
+  - `questions`
+  - `handoff`
+- HITL is not failure. It is a first-class enterprise control point.
+
+## 7. Streaming Rules
+- Prefer structured event streaming over free-form monologue.
+- Primary SSE event family is `AGENT_EVENT`.
+- Every important runtime action should map to a real event:
+  - NODE_START
+  - NODE_END
+  - PLAN_READY
+  - TOOL_CALL
+  - TOOL_RESULT
+  - GATE_APPLIED
+  - HITL_REQUESTED
+- Avoid fake reasoning text that cannot be tied to real execution.
+
+## 8. Quality Rules
+- Favor correctness over verbosity.
+- Favor structured outputs over ad-hoc strings.
+- Favor tool results over prompt-only inference.
+- Any new feature should preserve inspectability in:
+  - latest analysis response
+  - run events API
+  - SSE stream
+  - Streamlit agent studio
+
+## 9. Implementation Rules
+- Use ASCII by default.
+- Keep modules small and purpose-specific.
+- Put reusable orchestration logic under `agent/`.
+- Put DB query composition under `services/` or `db/`.
+- Update `README.md` when runtime behavior or startup requirements change.
+- Do not create `reamde.md`.
+
+## 10. Target Direction
+This PoC should visibly demonstrate:
+- LangGraph orchestration
+- autonomous tool selection
+- specialist/skill-based analysis
+- explainable event stream
+- human-in-the-loop escalation
+- enterprise audit-readiness mindset
