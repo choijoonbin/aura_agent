@@ -11,7 +11,7 @@ from utils.config import settings
 
 RESOURCE_TYPE = "analysis_run"
 ACTOR_AGENT_ID = "mater_poc_langgraph"
-ACTOR_DISPLAY_NAME = "MaterTask LangGraph Agent"
+ACTOR_DISPLAY_NAME = "AruaAgent LangGraph Agent"
 
 
 def _json_default(value: Any) -> str:

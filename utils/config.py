@@ -3,9 +3,12 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from dotenv import load_dotenv
 
+if TYPE_CHECKING:
+    from langfuse.langchain import CallbackHandler
 
 load_dotenv()
 
@@ -42,9 +45,38 @@ class Settings:
     agent_runtime_mode: str = os.getenv("AGENT_RUNTIME_MODE", "langgraph")
     enable_multi_agent: bool = os.getenv("ENABLE_MULTI_AGENT", "true").lower() == "true"
     enable_langgraph_if_available: bool = os.getenv("ENABLE_LANGGRAPH_IF_AVAILABLE", "true").lower() == "true"
+    enable_legacy_aura_specialist: bool = os.getenv("ENABLE_LEGACY_AURA_SPECIALIST", "false").lower() == "true"
+
+    # Langfuse (observability, optional)
+    langfuse_enabled: bool = os.getenv("LANGFUSE_ENABLED", "false").lower() == "true"
+    langfuse_public_key: str | None = os.getenv("LANGFUSE_PUBLIC_KEY") or None
+    langfuse_secret_key: str | None = os.getenv("LANGFUSE_SECRET_KEY") or None
+    langfuse_host: str | None = os.getenv("LANGFUSE_HOST") or None
 
 
 settings = Settings()
+
+
+def get_langfuse_handler(session_id: str | None = None) -> "CallbackHandler | None":
+    """
+    Langfuse CallbackHandler를 반환합니다.
+    - LANGFUSE_ENABLED=true 이고 PUBLIC/SECRET/HOST 가 설정된 경우에만 반환.
+    - session_id(예: run_id)를 넘기면 Langfuse 대시보드에서 해당 실행을 세션별로 조회 가능.
+    """
+    if not settings.langfuse_enabled:
+        return None
+    if not (settings.langfuse_public_key and settings.langfuse_secret_key and settings.langfuse_host):
+        return None
+    try:
+        from langfuse.langchain import CallbackHandler
+        os.environ.setdefault("LANGFUSE_PUBLIC_KEY", settings.langfuse_public_key)
+        os.environ.setdefault("LANGFUSE_SECRET_KEY", settings.langfuse_secret_key)
+        os.environ.setdefault("LANGFUSE_HOST", settings.langfuse_host)
+        if session_id:
+            os.environ["LANGFUSE_SESSION_ID"] = session_id
+        return CallbackHandler(public_key=settings.langfuse_public_key)
+    except Exception:
+        return None
 
 
 def ensure_source_paths() -> None:

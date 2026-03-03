@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 
 
-RULEBOOK_ROOT = Path("/Users/joonbinchoi/Work/MaterTask/규정집")
+RULEBOOK_ROOT = Path("/Users/joonbinchoi/Work/AruaAgent/규정집")
 UPLOAD_ROOT = RULEBOOK_ROOT / "uploads"
 UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
 

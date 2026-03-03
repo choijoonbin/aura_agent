@@ -1,1 +1,1 @@
-"""UI modules for MaterTask Streamlit app."""
+"""UI modules for AruaAgent Streamlit app."""

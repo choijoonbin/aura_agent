@@ -29,7 +29,7 @@ from services.stream_runtime import runtime
 from utils.config import ensure_source_paths, settings
 
 
-app = FastAPI(title="MaterTask PoC API", version="0.3.0")
+app = FastAPI(title="AruaAgent PoC API", version="0.3.0")
 
 
 @app.on_event("startup")
@@ -103,6 +103,7 @@ async def _run_analysis_task(
             case_id,
             body_evidence=body_evidence,
             intended_risk_type=intended_risk_type,
+            run_id=run_id,
         ):
             data = ev_payload if isinstance(ev_payload, dict) else {"value": ev_payload}
             await runtime.publish(run_id, ev_type, data)

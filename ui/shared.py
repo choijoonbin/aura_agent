@@ -17,7 +17,10 @@ def inject_css() -> None:
           --mt-primary: #2563eb;
           --mt-primary-soft: #dbeafe;
           --mt-border: #e5e7eb;
+          --mt-border-strong: #cbd5e1;
           --mt-bg-soft: #f8fafc;
+          --mt-bg-page: #f1f5f9;
+          --mt-surface: #ffffff;
           --mt-text-soft: #64748b;
           --mt-text-strong: #0f172a;
           --mt-danger-soft: #fef2f2;
@@ -42,43 +45,53 @@ def inject_css() -> None:
         }}
         section[data-testid="stSidebar"] > div:first-child {{ padding-top: {sidebar_padding_top} !important; }}
         section[data-testid="stSidebar"] * {{ color: #e5e7eb; }}
-        section[data-testid="stSidebar"] .stSelectbox [data-baseweb="select"] > div,
-        section[data-testid="stSidebar"] .stSelectbox [data-baseweb="select"] {{
-          background-color: rgba(255,255,255,0.07) !important;
-          border-color: rgba(255,255,255,0.18) !important;
-          border-radius: 10px !important;
-        }}
-        section[data-testid="stSidebar"] .stSelectbox [data-baseweb="select"] *, section[data-testid="stSidebar"] .stSelectbox svg path {{ color: #e5e7eb !important; fill:#e5e7eb !important; background-color: transparent !important; }}
-        section[data-testid="stSidebar"] code {{ color: #93c5fd !important; background: rgba(255,255,255,0.08) !important; }}
         section[data-testid="stSidebar"] button[data-testid="baseButton-headerNoPadding"], [data-testid="collapsedControl"], [data-testid="stSidebarCollapsedControl"], [data-testid="stSidebarCollapseButton"], [data-testid="stToolbar"], #MainMenu {{ display: none !important; }}
-        .mt-sidebar-title {{ font-size: 1.15rem; font-weight: 800; color: white; margin-bottom: 0.2rem; }}
-        .mt-sidebar-sub {{ font-size: 0.82rem; color: #94a3b8; margin-bottom: 1rem; }}
-        .mt-sidebar-title-row {{ display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; margin-bottom: 0.35rem; }}
-        .nav-link, .nav-link * {{ color: #e5e7eb !important; }}
-        .nav-link-selected, .nav-link-selected * {{ color: #ffffff !important; }}
-        .mt-page-title {{ font-size: 1.8rem; font-weight: 800; color: #0f172a; }}
-        .mt-page-sub {{ font-size: 0.96rem; color: var(--mt-text-soft); margin-top: 4px; line-height: 1.55; }}
-        .mt-card {{ padding: 16px 18px; border-radius: 18px; border: 1px solid var(--mt-border); background: rgba(255,255,255,0.95); box-shadow: 0 12px 30px rgba(15,23,42,0.04); height: 100%; }}
+        .mt-sidebar-title {{ font-size: 1.2rem; font-weight: 800; color: white; margin-bottom: 0.2rem; }}
+        .mt-sidebar-sub {{ font-size: 0.84rem; color: #94a3b8; margin-bottom: 1rem; line-height: 1.6; }}
+        .mt-page-title {{ font-size: 1.95rem; font-weight: 800; color: #0f172a; letter-spacing: -0.02em; }}
+        .mt-page-sub {{ font-size: 0.98rem; color: var(--mt-text-soft); margin-top: 6px; line-height: 1.6; max-width: 70ch; }}
+        .mt-card {{ padding: 18px 20px; border-radius: 20px; border: 1px solid var(--mt-border); background: rgba(255,255,255,0.96); box-shadow: 0 12px 30px rgba(15,23,42,0.05); height: 100%; }}
         .mt-card-quiet {{ padding: 14px 16px; border-radius: 16px; border: 1px solid var(--mt-border); background: #fff; box-shadow: 0 8px 22px rgba(15,23,42,0.04); }}
-        .mt-kpi {{ padding: 16px 18px; border-radius: 18px; border: 1px solid var(--mt-border); background: rgba(255,255,255,0.96); box-shadow: 0 10px 24px rgba(15,23,42,0.04); }}
-        .mt-kpi-label {{ font-size: 0.82rem; color: var(--mt-text-soft); font-weight: 700; }}
-        .mt-kpi-value {{ font-size: 2rem; font-weight: 800; color: #0f172a; line-height: 1.15; }}
-        .mt-kpi-foot {{ font-size: 0.82rem; color: var(--mt-text-soft); }}
-        .mt-section-title {{ font-size: 1.02rem; font-weight: 800; color: #0f172a; margin-bottom: 10px; }}
+        .mt-panel-header {{ display:flex; align-items:flex-start; justify-content:space-between; gap:12px; margin-bottom:14px; }}
+        .mt-panel-title {{ font-size:1.02rem; font-weight:800; color:#0f172a; letter-spacing:-0.01em; }}
+        .mt-panel-sub {{ font-size:0.84rem; color:#64748b; line-height:1.55; margin-top:4px; }}
+        .mt-kpi {{ padding: 18px 20px; border-radius: 18px; border: 1px solid var(--mt-border); background: rgba(255,255,255,0.98); box-shadow: 0 10px 24px rgba(15,23,42,0.05); min-height: 132px; }}
+        .mt-kpi-label {{ font-size: 0.82rem; color: var(--mt-text-soft); font-weight: 800; text-transform: uppercase; letter-spacing: 0.04em; }}
+        .mt-kpi-value {{ font-size: 2.15rem; font-weight: 800; color: #0f172a; line-height: 1.1; margin-top: 10px; }}
+        .mt-kpi-foot {{ font-size: 0.84rem; color: var(--mt-text-soft); margin-top: 8px; line-height: 1.5; }}
+        .mt-section-card {{ padding: 18px 20px; border-radius: 22px; border: 1px solid var(--mt-border); background: rgba(255,255,255,0.96); box-shadow: 0 12px 30px rgba(15,23,42,0.05); }}
+        .mt-section-card-tight {{ padding: 14px 16px; border-radius: 18px; border: 1px solid var(--mt-border); background: rgba(255,255,255,0.98); box-shadow: 0 8px 22px rgba(15,23,42,0.04); }}
         .mt-case-title {{ font-size: 1rem; font-weight: 800; color: var(--mt-text-strong); line-height: 1.35; }}
-        .mt-case-sub {{ font-size: 0.84rem; color: var(--mt-text-soft); margin-top: 4px; }}
+        .mt-case-sub {{ font-size: 0.84rem; color: var(--mt-text-soft); margin-top: 4px; line-height: 1.55; }}
+        .mt-case-meta {{ display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-top:8px; }}
         .mt-badge {{ display:inline-block; padding:4px 10px; border-radius:999px; font-size:0.72rem; font-weight:700; border:1px solid var(--mt-border); background:#fff; color:#334155; margin-right:6px; margin-bottom:6px; }}
         .mt-badge-blue {{ background:#eff6ff; color:#1d4ed8; border-color:#bfdbfe; }}
         .mt-badge-red {{ background:#fef2f2; color:#dc2626; border-color:#fecaca; }}
         .mt-badge-amber {{ background:#fffbeb; color:#d97706; border-color:#fde68a; }}
         .mt-badge-green {{ background:#ecfdf5; color:#059669; border-color:#a7f3d0; }}
+        .mt-meta-pill {{ display:inline-flex; align-items:center; gap:6px; padding:6px 10px; border-radius:999px; background:#f8fafc; border:1px solid #e2e8f0; color:#334155; font-size:0.76rem; font-weight:700; margin-right:8px; margin-bottom:8px; }}
+        .mt-divider {{ height:1px; background:linear-gradient(90deg, rgba(203,213,225,0.15), rgba(203,213,225,0.9), rgba(203,213,225,0.15)); margin:14px 0 16px 0; }}
         .mt-stream-shell {{ background: radial-gradient(circle at 1px 1px, rgba(15,23,42,0.10) 1px, transparent 0); background-size: 14px 14px; background-color:#f8fafc; border:1px dashed #dbe2ea; border-radius:18px; padding:14px; }}
         .mt-stream-card {{ padding: 14px 16px; border-radius: 16px; border: 1px solid var(--mt-border); background: #fff; margin-bottom: 10px; }}
+        .mt-legend {{ display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin: 8px 0 14px 0; }}
+        .mt-legend-item {{ display:inline-flex; align-items:center; gap:8px; padding:8px 10px; border-radius:12px; background:#fff; border:1px solid #e2e8f0; font-size:0.78rem; color:#334155; }}
+        .mt-legend-dot {{ width:10px; height:10px; border-radius:999px; display:inline-block; }}
+        .mt-grid-2 {{ display:grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap:12px; }}
+        .mt-grid-3 {{ display:grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap:12px; }}
         .mt-mini {{ font-size: 0.78rem; color: var(--mt-text-soft); }}
-        div[data-testid="stTabs"] button[role="tab"] {{ font-weight: 700; }}
+        .mt-chip-row {{ display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-top:10px; }}
+        .mt-caption-strong {{ font-size:0.8rem; color:#475569; font-weight:700; }}
+        .mt-hero-title {{ font-size: 1.25rem; font-weight: 800; color:#0f172a; letter-spacing:-0.02em; }}
+        .mt-hero-sub {{ font-size: 0.9rem; color:#64748b; line-height:1.6; }}
+        .mt-empty-box {{ padding: 20px 22px; border-radius: 18px; border: 1px dashed #cbd5e1; background: #f8fafc; color:#475569; }}
+        div[data-testid="stTabs"] button[role="tab"] {{ font-weight: 700; padding-top: 0.6rem !important; padding-bottom: 0.7rem !important; }}
+        div[data-testid="stTabs"] button[role="tab"][aria-selected="true"] {{ color: #2563eb !important; }}
         .stButton button[kind="primary"], .stButton button[kind="primary"] * {{ color: #ffffff !important; background: #2563eb !important; border-color: #2563eb !important; }}
         .stButton button[kind="secondary"], .stButton button[kind="secondary"] * {{ color: #0f172a !important; background: #ffffff !important; border-color: #cbd5e1 !important; }}
-        .stButton button, .stDownloadButton button {{ border-radius: 12px !important; font-weight: 700 !important; box-shadow: none !important; }}
+        .stButton button, .stDownloadButton button {{ border-radius: 12px !important; font-weight: 700 !important; box-shadow: none !important; min-height: 42px !important; }}
+        .stChatMessage {{ background: transparent !important; }}
+        .stMetric label, .stMetric div {{ color:#0f172a !important; }}
+        .stTabs [data-baseweb="tab-panel"] {{ padding-top: 1rem !important; }}
         </style>
     """
     st.markdown(css_template.format(sidebar_width=sidebar_width, sidebar_padding_top=sidebar_padding_top), unsafe_allow_html=True)
@@ -147,7 +160,19 @@ def case_type_badge(case_type: str | None) -> str:
 
 
 def render_page_header(title: str, subtitle: str, right_html: str | None = None) -> None:
-    with stylable_container(key=f"page_header_{title}", css_styles="""{padding: 20px 24px; border: 1px solid #e5e7eb; background: rgba(255,255,255,0.92); border-radius: 20px; box-shadow: 0 12px 40px rgba(15,23,42,0.05); margin-bottom: 16px;}"""):
+    with stylable_container(
+        key=f"page_header_{title}",
+        css_styles="""
+        {
+          padding: 22px 26px;
+          border: 1px solid #e5e7eb;
+          background: rgba(255,255,255,0.94);
+          border-radius: 22px;
+          box-shadow: 0 12px 40px rgba(15,23,42,0.05);
+          margin-bottom: 16px;
+        }
+        """,
+    ):
         cols = st.columns([0.78, 0.22])
         with cols[0]:
             st.markdown(f'<div class="mt-page-title">{title}</div>', unsafe_allow_html=True)
@@ -158,8 +183,30 @@ def render_page_header(title: str, subtitle: str, right_html: str | None = None)
                 st.markdown(right_html, unsafe_allow_html=True)
 
 
+def render_panel_header(title: str, subtitle: str = "") -> None:
+    subtitle_html = f'<div class="mt-panel-sub">{subtitle}</div>' if subtitle else ''
+    st.markdown(
+        f'<div class="mt-panel-header"><div><div class="mt-panel-title">{title}</div>{subtitle_html}</div></div>',
+        unsafe_allow_html=True,
+    )
+
+
 def render_kpi_card(label: str, value: str, foot: str = "") -> None:
     st.markdown(f'<div class="mt-kpi"><div class="mt-kpi-label">{label}</div><div class="mt-kpi-value">{value}</div><div class="mt-kpi-foot">{foot}</div></div>', unsafe_allow_html=True)
+
+
+def render_empty_state(message: str) -> None:
+    st.markdown(f'<div class="mt-empty-box">{message}</div>', unsafe_allow_html=True)
+
+
+def render_legend(items: list[tuple[str, str]]) -> None:
+    html = ['<div class="mt-legend">']
+    for color, label in items:
+        html.append(
+            f'<div class="mt-legend-item"><span class="mt-legend-dot" style="background:{color}"></span>{label}</div>'
+        )
+    html.append("</div>")
+    st.markdown("".join(html), unsafe_allow_html=True)
 
 
 def draw_agent_graph() -> Digraph:

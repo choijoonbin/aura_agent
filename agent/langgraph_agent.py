@@ -7,7 +7,9 @@ from langgraph.graph import END, START, StateGraph
 
 from agent.event_schema import AgentEvent
 from agent.hitl import build_hitl_request
+from agent.reasoning_notes import generate_working_note
 from agent.skills import SKILL_REGISTRY
+from utils.config import settings
 
 
 class AgentState(TypedDict, total=False):
@@ -132,7 +134,8 @@ def _plan_from_flags(flags: dict[str, Any]) -> list[dict[str, Any]]:
         plan.append({"tool": "merchant_risk_probe", "reason": "업종/MCC 위험 확인", "owner": "planner"})
     plan.append({"tool": "document_evidence_probe", "reason": "전표 증거 수집", "owner": "specialist"})
     plan.append({"tool": "policy_rulebook_probe", "reason": "내부 규정 조항 조회", "owner": "specialist"})
-    plan.append({"tool": "legacy_aura_deep_audit", "reason": "기존 Aura 심층 검토", "owner": "specialist"})
+    if settings.enable_legacy_aura_specialist:
+        plan.append({"tool": "legacy_aura_deep_audit", "reason": "기존 Aura 심층 검토", "owner": "specialist"})
     return plan
 
 
@@ -175,22 +178,110 @@ def _score(flags: dict[str, Any], tool_results: list[dict[str, Any]]) -> dict[st
 
 async def intake_node(state: AgentState) -> AgentState:
     flags = _derive_flags(state["body_evidence"])
+    start_note = await generate_working_note(
+        node="intake",
+        role="intake_agent",
+        context={
+            "case_id": state["case_id"],
+            "occurredAt": state["body_evidence"].get("occurredAt"),
+            "merchantName": state["body_evidence"].get("merchantName"),
+            "amount": state["body_evidence"].get("amount"),
+            "raw_body_keys": sorted(state["body_evidence"].keys()),
+        },
+        fallback_message="입력 데이터를 정규화합니다.",
+        fallback_thought="전표 입력값에서 핵심 위험 신호를 추출해야 합니다.",
+        fallback_action="입력 필드와 파생 신호를 정규화합니다.",
+        fallback_observation="정규화 전 입력 점검을 시작했습니다.",
+    )
+    end_note = await generate_working_note(
+        node="intake",
+        role="intake_agent",
+        context={
+            "case_id": state["case_id"],
+            "flags": flags,
+        },
+        fallback_message="입력 정규화가 완료되었습니다.",
+        fallback_thought="추출된 신호를 다음 계획 단계로 넘길 수 있습니다.",
+        fallback_action="핵심 위험 신호를 구조화했습니다.",
+        fallback_observation="핵심 위험 신호를 추출했습니다.",
+    )
     return {
         "flags": flags,
         "pending_events": [
-            AgentEvent(event_type="NODE_START", node="intake", phase="analyze", message="입력 데이터를 정규화합니다.", thought="전표 입력값에서 휴일, 시간대, 근태, 예산, 업종 신호를 먼저 추출해야 합니다.", action="입력 필드와 파생 신호를 정규화합니다.", metadata={"role": "intake_agent"}).to_payload(),
-            AgentEvent(event_type="NODE_END", node="intake", phase="analyze", message="입력 정규화가 완료되었습니다.", observation="핵심 위험 신호를 추출했습니다.", metadata={"role": "intake_agent", **flags}).to_payload(),
+            AgentEvent(
+                event_type="NODE_START",
+                node="intake",
+                phase="analyze",
+                message=start_note["message"],
+                thought=start_note["thought"],
+                action=start_note["action"],
+                observation=start_note["observation"],
+                metadata={"role": "intake_agent", "note_source": start_note.get("source", "fallback")},
+            ).to_payload(),
+            AgentEvent(
+                event_type="NODE_END",
+                node="intake",
+                phase="analyze",
+                message=end_note["message"],
+                thought=end_note["thought"],
+                action=end_note["action"],
+                observation=end_note["observation"],
+                metadata={"role": "intake_agent", "note_source": end_note.get("source", "fallback"), **flags},
+            ).to_payload(),
         ],
     }
 
 
 async def planner_node(state: AgentState) -> AgentState:
     plan = _plan_from_flags(state["flags"])
+    start_note = await generate_working_note(
+        node="planner",
+        role="planner_agent",
+        context={
+            "case_id": state["case_id"],
+            "flags": state["flags"],
+        },
+        fallback_message="조사 계획을 수립합니다.",
+        fallback_thought="위험 신호별로 어떤 조사 순서가 효율적인지 정해야 합니다.",
+        fallback_action="위험 신호별 조사 순서를 계산합니다.",
+        fallback_observation="계획 수립에 필요한 신호를 검토합니다.",
+    )
+    plan_ready_note = await generate_working_note(
+        node="planner",
+        role="planner_agent",
+        context={
+            "case_id": state["case_id"],
+            "flags": state["flags"],
+            "plan": plan,
+        },
+        fallback_message="조사 계획이 확정되었습니다.",
+        fallback_thought="수집 우선순위와 생략 가능한 경로를 함께 정리했습니다.",
+        fallback_action="도구 선택 순서와 조사 의도를 결정했습니다.",
+        fallback_observation="도구 선택 순서와 조사 의도를 결정했습니다.",
+    )
     return {
         "plan": plan,
         "pending_events": [
-            AgentEvent(event_type="NODE_START", node="planner", phase="plan", message="조사 계획을 수립합니다.", thought="어떤 규정과 어떤 도구가 이 케이스를 가장 빨리 설명할 수 있는지 우선순위를 정해야 합니다.", action="위험 신호별 조사 순서를 계산합니다.", metadata={"role": "planner_agent"}).to_payload(),
-            AgentEvent(event_type="PLAN_READY", node="planner", phase="plan", message="조사 계획이 확정되었습니다.", observation="도구 선택 순서와 조사 의도를 결정했습니다.", metadata={"role": "planner_agent", "plan": plan}).to_payload(),
+            AgentEvent(
+                event_type="NODE_START",
+                node="planner",
+                phase="plan",
+                message=start_note["message"],
+                thought=start_note["thought"],
+                action=start_note["action"],
+                observation=start_note["observation"],
+                metadata={"role": "planner_agent", "note_source": start_note.get("source", "fallback")},
+            ).to_payload(),
+            AgentEvent(
+                event_type="PLAN_READY",
+                node="planner",
+                phase="plan",
+                message=plan_ready_note["message"],
+                thought=plan_ready_note["thought"],
+                action=plan_ready_note["action"],
+                observation=plan_ready_note["observation"],
+                metadata={"role": "planner_agent", "note_source": plan_ready_note.get("source", "fallback"), "plan": plan},
+            ).to_payload(),
         ],
     }
 
@@ -201,31 +292,62 @@ async def execute_node(state: AgentState) -> AgentState:
     for step in state["plan"]:
         skip, reason = _should_skip_skill(step, state=state, tool_results=tool_results)
         if skip:
+            skip_note = await generate_working_note(
+                node="execute",
+                role="specialist_agent",
+                context={
+                    "case_id": state["case_id"],
+                    "tool": step["tool"],
+                    "reason": step["reason"],
+                    "existing_tool_results": tool_results,
+                    "skip_reason": reason,
+                },
+                fallback_message=f"도구 생략: {step['tool']}",
+                fallback_thought="이미 확보된 증거로 다음 판단을 이어갈 수 있습니다.",
+                fallback_action="추가 specialist 호출을 생략합니다.",
+                fallback_observation=reason or "기존 증거가 충분합니다.",
+            )
             pending_events.append(
                 AgentEvent(
                     event_type="TOOL_SKIPPED",
                     node="executor",
                     phase="execute",
                     tool=step["tool"],
-                    message=f"도구 생략: {step['tool']}",
-                    thought="이미 수집된 규정/전표 근거가 충분하므로 추가 specialist 호출 비용을 줄일 수 있습니다.",
-                    action="legacy specialist 호출 생략",
-                    observation=reason,
-                    metadata={"reason": reason, "role": "specialist_agent", "owner": step.get("owner")},
+                    message=skip_note["message"],
+                    thought=skip_note["thought"],
+                    action=skip_note["action"],
+                    observation=skip_note["observation"],
+                    metadata={"reason": reason, "role": "specialist_agent", "owner": step.get("owner"), "note_source": skip_note.get("source", "fallback")},
                 ).to_payload()
             )
             continue
         skill = SKILL_REGISTRY[step["tool"]]
+        call_note = await generate_working_note(
+            node="execute",
+            role="specialist_agent",
+            context={
+                "case_id": state["case_id"],
+                "tool": skill.name,
+                "reason": step["reason"],
+                "flags": state.get("flags"),
+                "tool_results_so_far": [r.get("skill") for r in tool_results],
+            },
+            fallback_message=f"도구 호출: {skill.name}",
+            fallback_thought=f"{step['reason']}에 대한 사실을 확보해야 합니다.",
+            fallback_action=f"{skill.name} 실행",
+            fallback_observation="도구 실행 전 상태를 정리했습니다.",
+        )
         pending_events.append(
             AgentEvent(
                 event_type="TOOL_CALL",
                 node="executor",
                 phase="execute",
                 tool=skill.name,
-                message=f"도구 호출: {skill.name}",
-                thought=f"{step['reason']}에 대한 사실을 확보해야 합니다.",
-                action=f"{skill.name} 실행",
-                metadata={"reason": step["reason"], "role": "specialist_agent", "owner": step.get("owner")},
+                message=call_note["message"],
+                thought=call_note["thought"],
+                action=call_note["action"],
+                observation=call_note["observation"],
+                metadata={"reason": step["reason"], "role": "specialist_agent", "owner": step.get("owner"), "note_source": call_note.get("source", "fallback")},
             ).to_payload()
         )
         result = await skill.handler({
@@ -234,15 +356,31 @@ async def execute_node(state: AgentState) -> AgentState:
             "intended_risk_type": state.get("intended_risk_type"),
         })
         tool_results.append(result)
+        result_note = await generate_working_note(
+            node="execute",
+            role="specialist_agent",
+            context={
+                "case_id": state["case_id"],
+                "tool": skill.name,
+                "reason": step["reason"],
+                "tool_result": result,
+            },
+            fallback_message=result.get("summary") or f"도구 완료: {skill.name}",
+            fallback_thought="수집한 사실이 다음 판단 단계에 어떤 영향을 주는지 정리합니다.",
+            fallback_action=f"{skill.name} 결과를 반영합니다.",
+            fallback_observation=(result.get("summary") or "도구 결과 수집 완료"),
+        )
         pending_events.append(
             AgentEvent(
                 event_type="TOOL_RESULT",
                 node="executor",
                 phase="execute",
                 tool=skill.name,
-                message=result.get("summary") or f"도구 완료: {skill.name}",
-                observation=(result.get("summary") or "도구 결과 수집 완료"),
-                metadata={**result, "role": "specialist_agent"},
+                message=result_note["message"],
+                thought=result_note["thought"],
+                action=result_note["action"],
+                observation=result_note["observation"],
+                metadata={**result, "role": "specialist_agent", "note_source": result_note.get("source", "fallback")},
             ).to_payload()
         )
     score = _score(state["flags"], tool_results)
@@ -265,11 +403,54 @@ async def critic_node(state: AgentState) -> AgentState:
         "risk_of_overclaim": bool(missing),
         "recommend_hold": bool(missing and not state["flags"].get("hasHitlResponse")),
     }
+    start_note = await generate_working_note(
+        node="critic",
+        role="critic_agent",
+        context={
+            "case_id": state["case_id"],
+            "tool_results": state.get("tool_results", []),
+            "missing_fields": missing,
+        },
+        fallback_message="전문 도구 결과와 입력 품질을 교차 검토합니다.",
+        fallback_thought="입력 누락과 근거 부족을 점검해 과잉 주장을 막아야 합니다.",
+        fallback_action="과잉 주장 가능성과 누락 필드를 점검합니다.",
+        fallback_observation="비판적 재검토를 시작했습니다.",
+    )
+    end_note = await generate_working_note(
+        node="critic",
+        role="critic_agent",
+        context={
+            "case_id": state["case_id"],
+            "critique": critique,
+        },
+        fallback_message="비판적 재검토가 완료되었습니다.",
+        fallback_thought="확정 주장 전에 추가 보류 조건을 정리했습니다.",
+        fallback_action="과잉 주장 위험과 추가 검토 필요 여부를 정리했습니다.",
+        fallback_observation="과잉 주장 위험과 추가 검토 필요 여부를 정리했습니다.",
+    )
     return {
         "critique": critique,
         "pending_events": [
-            AgentEvent(event_type="NODE_START", node="critic", phase="reflect", message="전문 도구 결과와 입력 품질을 교차 검토합니다.", thought="성급한 결론을 막기 위해 입력 품질과 근거 일치성을 다시 검토해야 합니다.", action="과잉 주장 가능성과 누락 필드를 점검합니다.", metadata={"role": "critic_agent"}).to_payload(),
-            AgentEvent(event_type="NODE_END", node="critic", phase="reflect", message="비판적 재검토가 완료되었습니다.", observation="과잉 주장 위험과 추가 검토 필요 여부를 정리했습니다.", metadata={"role": "critic_agent", **critique}).to_payload(),
+            AgentEvent(
+                event_type="NODE_START",
+                node="critic",
+                phase="reflect",
+                message=start_note["message"],
+                thought=start_note["thought"],
+                action=start_note["action"],
+                observation=start_note["observation"],
+                metadata={"role": "critic_agent", "note_source": start_note.get("source", "fallback")},
+            ).to_payload(),
+            AgentEvent(
+                event_type="NODE_END",
+                node="critic",
+                phase="reflect",
+                message=end_note["message"],
+                thought=end_note["thought"],
+                action=end_note["action"],
+                observation=end_note["observation"],
+                metadata={"role": "critic_agent", "note_source": end_note.get("source", "fallback"), **critique},
+            ).to_payload(),
         ],
     }
 
@@ -283,13 +464,80 @@ async def verify_node(state: AgentState) -> AgentState:
         "needs_hitl": needs_hitl,
         "quality_signals": ["HITL_REQUIRED"] if needs_hitl else ["OK"],
     }
+    start_note = await generate_working_note(
+        node="verify",
+        role="verifier_agent",
+        context={
+            "case_id": state["case_id"],
+            "critique": state.get("critique"),
+            "tool_results": state.get("tool_results", []),
+        },
+        fallback_message="근거 정합성과 추가 검토 필요 여부를 확인합니다.",
+        fallback_thought="사람 검토가 필요한 조건인지 게이트를 판정해야 합니다.",
+        fallback_action="검증 게이트와 HITL 조건을 평가합니다.",
+        fallback_observation="검증 게이트 적용 전 상태를 정리했습니다.",
+    )
+    gate_note = await generate_working_note(
+        node="verify",
+        role="verifier_agent",
+        context={
+            "case_id": state["case_id"],
+            "verification": verification,
+            "hitl_request": hitl_request,
+        },
+        fallback_message="검증 게이트 적용이 완료되었습니다.",
+        fallback_thought="자동 진행 여부와 사람 검토 전환 여부를 결정했습니다.",
+        fallback_action="검증 게이트 결과를 확정했습니다.",
+        fallback_observation=("사람 검토 필요" if needs_hitl else "자동 진행 가능"),
+    )
     events = [
-        AgentEvent(event_type="NODE_START", node="verifier", phase="verify", message="근거 정합성과 추가 검토 필요 여부를 확인합니다.", thought="현재 증거만으로 확정할 수 있는지, 사람 검토가 필요한지 결정해야 합니다.", action="검증 게이트와 HITL 조건을 평가합니다.", metadata={"role": "verifier_agent"}).to_payload(),
-        AgentEvent(event_type="GATE_APPLIED", node="verifier", phase="verify", message="검증 게이트 적용이 완료되었습니다.", decision_code="HITL_REQUIRED" if needs_hitl else "READY", observation=("사람 검토 필요" if needs_hitl else "자동 진행 가능"), metadata={"role": "verifier_agent", **verification}).to_payload(),
+        AgentEvent(
+            event_type="NODE_START",
+            node="verifier",
+            phase="verify",
+            message=start_note["message"],
+            thought=start_note["thought"],
+            action=start_note["action"],
+            observation=start_note["observation"],
+            metadata={"role": "verifier_agent", "note_source": start_note.get("source", "fallback")},
+        ).to_payload(),
+        AgentEvent(
+            event_type="GATE_APPLIED",
+            node="verifier",
+            phase="verify",
+            message=gate_note["message"],
+            decision_code="HITL_REQUIRED" if needs_hitl else "READY",
+            thought=gate_note["thought"],
+            action=gate_note["action"],
+            observation=gate_note["observation"],
+            metadata={"role": "verifier_agent", "note_source": gate_note.get("source", "fallback"), **verification},
+        ).to_payload(),
     ]
     if hitl_request:
+        hitl_note = await generate_working_note(
+            node="verify",
+            role="verifier_agent",
+            context={
+                "case_id": state["case_id"],
+                "hitl_request": hitl_request,
+            },
+            fallback_message="사람 검토가 필요한 케이스로 분류되었습니다.",
+            fallback_thought="현재 자동 확정은 위험해 사람 검토를 우선해야 합니다.",
+            fallback_action="재무 검토자에게 소명 요청을 생성합니다.",
+            fallback_observation="HITL 요청이 생성되었습니다.",
+        )
         events.append(
-            AgentEvent(event_type="HITL_REQUESTED", node="verifier", phase="verify", message="사람 검토가 필요한 케이스로 분류되었습니다.", decision_code="HITL_REQUIRED", thought="입력 또는 근거가 부족해 자동 확정은 위험합니다.", action="재무 검토자에게 소명 요청을 생성합니다.", metadata=hitl_request).to_payload()
+            AgentEvent(
+                event_type="HITL_REQUESTED",
+                node="verifier",
+                phase="verify",
+                message=hitl_note["message"],
+                decision_code="HITL_REQUIRED",
+                thought=hitl_note["thought"],
+                action=hitl_note["action"],
+                observation=hitl_note["observation"],
+                metadata={**hitl_request, "note_source": hitl_note.get("source", "fallback")},
+            ).to_payload()
         )
     return {"verification": verification, "hitl_request": hitl_request, "pending_events": events}
 
@@ -308,16 +556,60 @@ async def reporter_node(state: AgentState) -> AgentState:
         summary += " 사람 검토가 필요한 상태입니다."
     else:
         summary += " 현재 수집된 증거 기준으로 추가 검토 우선순위가 높습니다."
+    start_note = await generate_working_note(
+        node="report",
+        role="reporter_agent",
+        context={
+            "case_id": state["case_id"],
+            "score_breakdown": score,
+            "policy_refs": _top_policy_refs(state.get("tool_results", []), limit=2),
+        },
+        fallback_message="사용자에게 제시할 보고 문안을 구성합니다.",
+        fallback_thought="핵심 사실과 규정 근거를 짧고 명확한 보고 문장으로 바꿔야 합니다.",
+        fallback_action="보고용 설명 문장을 구성합니다.",
+        fallback_observation="보고 문안 생성을 시작했습니다.",
+    )
+    end_note = await generate_working_note(
+        node="report",
+        role="reporter_agent",
+        context={
+            "case_id": state["case_id"],
+            "summary": summary,
+        },
+        fallback_message=summary,
+        fallback_thought="사용자에게 전달할 보고 요약이 준비되었습니다.",
+        fallback_action="최종 요약 문장을 정리했습니다.",
+        fallback_observation="사용자용 요약 문안이 준비되었습니다.",
+    )
     return {
         "pending_events": [
-            AgentEvent(event_type="NODE_START", node="reporter", phase="report", message="사용자에게 제시할 보고 문안을 구성합니다.", thought="분석 과정에서 모은 사실과 검증 결과를 사람이 이해할 수 있는 문장으로 바꿔야 합니다.", action="보고용 설명 문장을 구성합니다.", metadata={"role": "reporter_agent"}).to_payload(),
-            AgentEvent(event_type="NODE_END", node="reporter", phase="report", message=summary, observation="사용자용 요약 문안이 준비되었습니다.", metadata={"role": "reporter_agent"}).to_payload(),
+            AgentEvent(
+                event_type="NODE_START",
+                node="reporter",
+                phase="report",
+                message=start_note["message"],
+                thought=start_note["thought"],
+                action=start_note["action"],
+                observation=start_note["observation"],
+                metadata={"role": "reporter_agent", "note_source": start_note.get("source", "fallback")},
+            ).to_payload(),
+            AgentEvent(
+                event_type="NODE_END",
+                node="reporter",
+                phase="report",
+                message=end_note["message"],
+                thought=end_note["thought"],
+                action=end_note["action"],
+                observation=end_note["observation"],
+                metadata={"role": "reporter_agent", "summary": summary, "note_source": end_note.get("source", "fallback")},
+            ).to_payload(),
         ],
     }
 
 
 async def finalizer_node(state: AgentState) -> AgentState:
     score = state["score_breakdown"]
+    hitl_request = state.get("hitl_request")
     reason, status = _build_grounded_reason(state)
     final = {
         "caseId": state["case_id"],
@@ -367,14 +659,26 @@ async def run_langgraph_agentic_analysis(
     *,
     body_evidence: dict[str, Any],
     intended_risk_type: str | None = None,
+    run_id: str | None = None,
 ):
+    from utils.config import get_langfuse_handler
+
     graph = build_agent_graph()
     initial_state: AgentState = {
         "case_id": case_id,
         "body_evidence": body_evidence,
         "intended_risk_type": intended_risk_type,
     }
-    async for chunk in graph.astream(initial_state, stream_mode="updates"):
+    config: dict[str, Any] = {}
+    if run_id:
+        handler = get_langfuse_handler(session_id=run_id)
+        if handler:
+            config = {
+                "callbacks": [handler],
+                "configurable": {"thread_id": run_id},
+                "tags": ["matertask", "analysis", f"case:{case_id}"],
+            }
+    async for chunk in graph.astream(initial_state, stream_mode="updates", config=config):
         for _node, update in chunk.items():
             for ev in update.get("pending_events", []) or []:
                 if ev.get("event_type") == "SCORE_BREAKDOWN":

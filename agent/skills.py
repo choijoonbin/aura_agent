@@ -104,6 +104,17 @@ async def policy_rulebook_probe(context: dict[str, Any]) -> dict[str, Any]:
 
 
 async def legacy_aura_deep_audit(context: dict[str, Any]) -> dict[str, Any]:
+    if not settings.enable_legacy_aura_specialist:
+        return {
+            "skill": "legacy_aura_deep_audit",
+            "ok": True,
+            "facts": {
+                "disabled": True,
+                "reason": "PoC 독립 실행 모드에서 legacy Aura specialist를 비활성화했습니다.",
+            },
+            "trace": [],
+            "summary": "legacy Aura 심층 감사 호출이 비활성화되어 생략되었습니다.",
+        }
     case_id = context["case_id"]
     body_evidence = context["body_evidence"]
     intended_risk_type = context.get("intended_risk_type")

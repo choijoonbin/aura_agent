@@ -12,6 +12,7 @@
 - [설치 및 실행](#-설치-및-실행)
 - [환경 변수 설정](#-환경-변수-설정)
 - [API 엔드포인트](#-api-엔드포인트)
+- [Langfuse 통합](#-langfuse-통합)
 - [사용 예시](#-사용-예시)
 - [주의사항](#-주의사항)
 
@@ -83,7 +84,7 @@
 ## 📁 프로젝트 구조
 
 ```
-MaterTask/
+AruaAgent/
 ├── main.py                      # FastAPI 엔트리
 ├── app.py                       # Streamlit 엔트리 (UI)
 ├── requirements.txt             # Python 의존성
@@ -216,7 +217,7 @@ graph TD
 ### 1. 저장소 클론 및 의존성 설치
 
 ```bash
-cd /Users/joonbinchoi/Work/MaterTask
+cd /Users/joonbinchoi/Work/AruaAgent
 python3 -m venv .venv
 source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
@@ -282,7 +283,7 @@ DWP_BACKEND_PATH=/path/to/dwp-backend
 DWP_FRONTEND_PATH=/path/to/dwp-frontend
 
 # 에이전트 런타임
-# native: MaterTask 내부 자율형 에이전트 우선
+# native: AruaAgent 내부 자율형 에이전트 우선
 # aura: legacy aura 전용 모드
 # hybrid: native + aura 병행
 AGENT_RUNTIME_MODE=langgraph
@@ -302,8 +303,24 @@ ENABLE_LANGGRAPH_IF_AVAILABLE=true
 | `API_BASE_URL` | Streamlit이 호출할 FastAPI 주소 | http://localhost:8010 |
 | `AGENT_RUNTIME_MODE` | 에이전트 런타임 모드 | langgraph |
 | `ENABLE_MULTI_AGENT` | 멀티 에이전트 역할 분리 사용 | true |
+| `LANGFUSE_ENABLED` | Langfuse 추적 활성화 | false |
+| `LANGFUSE_PUBLIC_KEY` | Langfuse Public Key | - |
+| `LANGFUSE_SECRET_KEY` | Langfuse Secret Key | - |
+| `LANGFUSE_HOST` | Langfuse 서버 URL | https://cloud.langfuse.com |
 
 > 참고: [`.env.example`](.env.example) — 환경 변수 예시, [`utils/config.py`](utils/config.py) — 설정 로드
+
+## 🔍 Langfuse 통합
+
+연결 시 **테스트·분석 실행 시** LangGraph 실행과 LLM 호출을 [Langfuse 대시보드](https://cloud.langfuse.com)에서 추적·모니터링할 수 있습니다.
+
+1. **Langfuse 계정**: https://cloud.langfuse.com 에서 계정 생성 후 프로젝트 선택
+2. **키 발급**: 프로젝트 설정에서 Public Key / Secret Key 확인
+3. **환경 변수**: `.env`에 `LANGFUSE_ENABLED=true`, `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, `LANGFUSE_HOST` 설정
+4. **분석 실행**: AI 워크스페이스에서 분석 실행 시 `run_id`가 세션 ID로 전달되어 대시보드에서 run별로 조회 가능
+5. **비활성화**: `LANGFUSE_ENABLED=false`(기본값)이면 전송하지 않음
+
+> 참고: [`utils/config.py`](utils/config.py) — `get_langfuse_handler`, [`agent/langgraph_agent.py`](agent/langgraph_agent.py) — astream config에 callbacks 전달
 
 ## 📡 API 엔드포인트
 
@@ -394,5 +411,5 @@ with requests.get(
 
 ---
 
-**프로젝트**: Aura Agent AI PoC (MaterTask)  
+**프로젝트**: Aura Agent AI PoC (AruaAgent)  
 **목적**: 엔터프라이즈급 에이전트형 금융 감사 어시스턴트 PoC

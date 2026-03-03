@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import streamlit as st
+from streamlit_extras.stylable_container import stylable_container
 
 from agent.langgraph_agent import build_agent_graph
 from agent.skills import SKILL_REGISTRY
 from ui.api_client import get
-from ui.shared import draw_agent_graph, draw_skill_execution_graph, fmt_dt, render_graph_image, render_page_header
+from ui.shared import draw_agent_graph, draw_skill_execution_graph, fmt_dt, render_empty_state, render_graph_image, render_legend, render_page_header, render_panel_header
 
 
 @st.cache_resource
@@ -26,15 +27,21 @@ def render_agent_studio_page() -> None:
     selected_id = st.session_state.get("mt_selected_agent_id") or agents[0]["agent_id"]
     left, right = st.columns([0.28, 0.72])
     with left:
+        render_panel_header("활성 에이전트", "현재 PoC에서 사용 가능한 활성 에이전트 정의입니다.")
         for agent in agents:
-            label = f"{agent.get('name') or '-'} ({agent.get('agent_key') or '-'})"
-            if st.button(label, key=f"agent_{agent['agent_id']}", use_container_width=True, type="primary" if int(agent['agent_id']) == int(selected_id) else "secondary"):
-                st.session_state["mt_selected_agent_id"] = agent["agent_id"]
-                st.rerun()
+            with stylable_container(
+                key=f"studio_agent_pick_{agent['agent_id']}",
+                css_styles=f"""{{padding: 10px 10px 8px 10px; border-radius: 14px; border: {'2px solid #2563eb' if int(agent['agent_id']) == int(selected_id) else '1px solid #e5e7eb'}; background: rgba(255,255,255,0.98); box-shadow: 0 6px 18px rgba(15,23,42,0.04); margin-bottom: 0.55rem;}}"""
+            ):
+                st.caption(agent.get("agent_key") or "-")
+                if st.button(agent.get('name') or '-', key=f"agent_{agent['agent_id']}", use_container_width=True, type="primary" if int(agent['agent_id']) == int(selected_id) else "secondary"):
+                    st.session_state["mt_selected_agent_id"] = agent["agent_id"]
+                    st.rerun()
     with right:
         detail = get(f"/api/v1/agents/{selected_id}")
-        st.markdown(f"## {detail.get('name') or '-'}")
-        st.caption(f"agent_key={detail.get('agent_key') or '-'} / domain={detail.get('domain') or '-'}")
+        with stylable_container(key=f"studio_hero_{selected_id}", css_styles="""{padding: 18px 20px; border-radius: 18px; border: 1px solid #e5e7eb; background: rgba(255,255,255,0.98); box-shadow: 0 10px 24px rgba(15,23,42,0.05); margin-bottom: 12px;}"""):
+            st.markdown(f"## {detail.get('name') or '-'}")
+            st.caption(f"agent_key={detail.get('agent_key') or '-'} / domain={detail.get('domain') or '-'}")
         tabs = st.tabs(["모델", "프롬프트", "도구", "지식", "그래프"])
         with tabs[0]:
             c1, c2, c3 = st.columns(3)
@@ -43,24 +50,41 @@ def render_agent_studio_page() -> None:
             c3.metric("max_tokens", str(detail.get("max_tokens") or "-"))
             st.caption(f"active={detail.get('is_active')} / updated_at={fmt_dt(detail.get('updated_at'))}")
         with tabs[1]:
+            render_panel_header("프롬프트", "현재 시스템 프롬프트와 변경 이력을 점검합니다.")
             current_prompt = detail.get("current_prompt") or {}
             st.text_area("Current System Prompt", value=str(current_prompt.get("system_instruction") or ""), height=320)
             with st.expander("Prompt History"):
                 st.json(detail.get("prompt_history") or [])
         with tabs[2]:
-            for skill_name, skill in SKILL_REGISTRY.items():
-                with st.expander(skill_name):
-                    st.write(skill.description or "-")
+            render_panel_header("런타임 스킬", "LangGraph execute 단계에서 실제 호출 가능한 스킬 목록입니다.")
+            skill_cols = st.columns(2)
+            for idx, (skill_name, skill) in enumerate(SKILL_REGISTRY.items()):
+                with skill_cols[idx % 2]:
+                    with stylable_container(
+                        key=f"skill_card_{skill_name}",
+                        css_styles="""{padding: 14px 16px; border-radius: 16px; border: 1px solid #e5e7eb; background: rgba(255,255,255,0.98); box-shadow: 0 8px 22px rgba(15,23,42,0.04); min-height: 128px; margin-bottom: 0.7rem;}"""
+                    ):
+                        st.caption("runtime skill")
+                        st.markdown(f"**{skill_name}**")
+                        st.write(skill.description or "-")
         with tabs[3]:
+            render_panel_header("연결 지식", "이 에이전트가 참조하는 문서와 지식 자산입니다.")
             docs = detail.get("documents") or []
             if docs:
                 for doc in docs:
                     st.markdown(f"- **{doc.get('title')}** · status={doc.get('status')} · doc_id={doc.get('doc_id')}")
             else:
-                st.info("연결된 지식 문서가 없습니다.")
+                render_empty_state("연결된 지식 문서가 없습니다.")
         with tabs[4]:
             graph_tabs = st.tabs(["메인 오케스트레이션", "스킬 실행 흐름"])
             with graph_tabs[0]:
+                render_legend(
+                    [
+                        ("#f5f3ff", "에이전트 메인 노드"),
+                        ("#fffbeb", "조건부 HITL 노드"),
+                        ("#94a3b8", "상태 전이"),
+                    ]
+                )
                 render_graph_image("메인 오케스트레이션 그래프", None, draw_agent_graph(), "현재 PoC에서 실제 실행되는 메인 에이전트 오케스트레이션입니다.")
                 st.markdown("""
 **단계별 설명**
@@ -77,6 +101,12 @@ def render_agent_studio_page() -> None:
 10. **END**: 저장/조회 가능한 결과로 종료
 """)
             with graph_tabs[1]:
+                render_legend(
+                    [
+                        ("#eff6ff", "실행 스킬 노드"),
+                        ("#94a3b8", "실행/집계 흐름"),
+                    ]
+                )
                 render_graph_image("실행 스킬 그래프", None, draw_skill_execution_graph(), "execute 노드 내부에서 호출되는 런타임 skill 흐름입니다.")
                 st.markdown("""
 **단계별 설명**
