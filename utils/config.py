@@ -47,6 +47,9 @@ class Settings:
     enable_langgraph_if_available: bool = os.getenv("ENABLE_LANGGRAPH_IF_AVAILABLE", "true").lower() == "true"
     enable_legacy_aura_specialist: bool = os.getenv("ENABLE_LEGACY_AURA_SPECIALIST", "false").lower() == "true"
 
+    # Reasoning note LLM label (shown in UI when note_source is "llm")
+    reasoning_llm_label: str = os.getenv("REASONING_LLM_LABEL", "LLM")
+
     # Langfuse (observability, optional)
     langfuse_enabled: bool = os.getenv("LANGFUSE_ENABLED", "false").lower() == "true"
     langfuse_public_key: str | None = os.getenv("LANGFUSE_PUBLIC_KEY") or None

@@ -15,8 +15,6 @@ MENU_OPTIONS = [
 
 def render_sidebar() -> str:
     with st.sidebar:
-        st.markdown('<div class="mt-sidebar-title-row"><div class="mt-sidebar-title">Arua Agent AI POC</div></div>', unsafe_allow_html=True)
-        st.markdown('<div class="mt-sidebar-sub">Agentic AI workspace, studio, policy library, and demo controls.</div>', unsafe_allow_html=True)
         options = [item[0] for item in MENU_OPTIONS]
         selected = option_menu(
             menu_title=None,

@@ -11,6 +11,7 @@ from ui.workspace import render_ai_workspace_page
 
 st.set_page_config(page_title="Aura Agent AI", layout="wide", initial_sidebar_state="expanded")
 inject_css()
+st.markdown('<div class="mt-app-header">Aura Agent AI</div>', unsafe_allow_html=True)
 
 selected_menu = render_sidebar()
 

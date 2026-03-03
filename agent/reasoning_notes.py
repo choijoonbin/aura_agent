@@ -78,6 +78,12 @@ async def generate_working_note(
         from core.llm.client import get_llm_client
 
         client = get_llm_client(None)
+        note_model = getattr(client, "model", None) or getattr(client, "model_name", None)
+        if isinstance(note_model, str):
+            note_model = note_model.strip() or None
+        if not note_model and hasattr(client, "get_default_model"):
+            note_model = getattr(client.get_default_model(), "name", None)
+        note_model = note_model or settings.reasoning_llm_label
         prompt = [
             {
                 "role": "system",
@@ -113,6 +119,7 @@ async def generate_working_note(
             "action": _trim(payload.get("action"), fallback["action"]),
             "observation": _trim(payload.get("observation"), fallback["observation"]),
             "source": "llm",
+            "note_model": note_model,
         }
     except Exception:
         return fallback

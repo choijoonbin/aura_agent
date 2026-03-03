@@ -13,7 +13,12 @@ from sqlalchemy.orm import Session
 from agent.aura_bridge import run_agent_analysis
 from db.session import get_db
 from services.agent_studio_service import get_agent_detail, list_agents
-from services.case_service import build_analysis_payload, list_vouchers
+from services.case_service import (
+    build_analysis_payload,
+    list_vouchers,
+    run_case_screening,
+    upsert_agent_case_from_screening_result,
+)
 from services.demo_data_service import clear_demo_data, list_demo_scenarios, list_seeded_demo_cases, seed_demo_scenarios
 from services.persistence_service import persist_analysis_result
 from services.rag_library_service import get_rag_document_detail, list_rag_documents
@@ -29,7 +34,7 @@ from services.stream_runtime import runtime
 from utils.config import ensure_source_paths, settings
 
 
-app = FastAPI(title="AruaAgent PoC API", version="0.3.0")
+app = FastAPI(title="AuraAgent PoC API", version="0.3.0")
 
 
 @app.on_event("startup")
@@ -107,6 +112,28 @@ async def _run_analysis_task(
         ):
             data = ev_payload if isinstance(ev_payload, dict) else {"value": ev_payload}
             await runtime.publish(run_id, ev_type, data)
+
+            # 분석 실행 중 스크리닝 결과가 나오면 agent_case에 반영 (한 번만)
+            if ev_type == "AGENT_EVENT" and data.get("event_type") == "SCREENING_RESULT":
+                meta = data.get("metadata") or {}
+                ct = meta.get("case_type")
+                sev = meta.get("severity")
+                sc = meta.get("score")
+                if ct and sev is not None and sc is not None:
+                    try:
+                        from db.session import SessionLocal
+                        with SessionLocal() as persist_db:
+                            upsert_agent_case_from_screening_result(
+                                persist_db,
+                                voucher_key,
+                                case_type=ct,
+                                severity=str(sev),
+                                score=float(sc) / 100.0,
+                                reason_text=str(data.get("observation") or data.get("message") or ""),
+                            )
+                    except Exception:
+                        pass
+
             try:
                 from db.session import SessionLocal
                 with SessionLocal() as persist_db:
@@ -177,6 +204,21 @@ async def _run_analysis_task(
             except Exception:
                 pass
         await runtime.close(run_id)
+
+
+@app.post("/api/v1/cases/{voucher_key}/screen")
+def screen_voucher(voucher_key: str, db: Session = Depends(get_db)) -> dict[str, Any]:
+    """
+    Phase 0 — Screening.
+    Classifies a raw voucher into a case type using deterministic signal analysis.
+    Creates or updates an AgentCase row with the result.
+    Must be called before analysis-runs for proper case type assignment.
+    """
+    try:
+        result = run_case_screening(db, voucher_key)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    return result
 
 
 @app.post("/api/v1/cases/{voucher_key}/analysis-runs", response_model=AnalysisStartResponse)

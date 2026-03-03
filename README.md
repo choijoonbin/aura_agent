@@ -32,13 +32,25 @@
 ## ✨ 주요 기능
 
 ### 1. LangGraph 기반 에이전트 런타임
-- **intake**: 전표 입력 정규화, 휴일/시간대/근태/예산/업종 신호 추출
-- **planner**: 위험 신호별 조사 계획 수립 및 도구 선택
+
+2단계 프로세스 (원본 aura-platform 흐름 충실히 구현):
+
+**Phase 0 — 스크리닝 (Screening)**
+- **screener**: 원시 전표 신호에서 케이스 유형을 자율 분류 (BE 힌트 없음)
+  - `hr_status`, `mcc_code`, `budat`, `cputm`, `budget_exceeded_flag` 등 원시 신호 기반 결정론적 스코어링
+  - `HOLIDAY_USAGE` / `LIMIT_EXCEED` / `PRIVATE_USE_RISK` / `UNUSUAL_PATTERN` / `NORMAL_BASELINE` 분류
+  - 결과를 `AgentCase` 테이블에 저장 후 분석 Phase에 전달
+  - 독립 호출 가능: `POST /api/v1/cases/{voucher_key}/screen`
+
+**Phase 1 — 심층 분석 (Analysis)**
+- **intake**: 전표 입력 정규화, 스크리닝 결과 기반 신호 확정
+- **planner**: 케이스 유형별 조사 계획 수립 및 도구 선택
 - **execute**: skill/tool 순차 실행 (policy_rulebook_probe, document_evidence_probe 등)
 - **verify**: 점수 산정, HITL 필요 여부 판단
 - **finalize**: 최종 결과 생성 및 근거 기반 설명
 
-> 참고: [`agent/langgraph_agent.py`](agent/langgraph_agent.py#L176-L343) — intake/planner/execute/verify/finalizer 노드 구현
+> 참고: [`agent/screener.py`](agent/screener.py) — 결정론적 스크리닝 엔진  
+> 참고: [`agent/langgraph_agent.py`](agent/langgraph_agent.py) — screener→intake→planner→execute→verify→finalizer 노드 구현
 
 ### 2. Skill 기반 도구 확장
 - **policy_rulebook_probe**: 내부 규정집 조항 조회, 키워드 후보 수집 → 조항 단위 그룹화 → 문맥 확장
@@ -74,6 +86,14 @@
 
 > 참고: [`app.py`](app.py#L1192) — AI 워크스페이스, [`app.py`](app.py#L1332) — 에이전트 스튜디오, [`app.py`](app.py#L1479) — 규정문서 라이브러리, [`app.py`](app.py#L1607) — 시연 데이터 제어
 
+**에이전트 스트림 UI (아이콘·문구·날짜)**  
+- **아이콘 구분**: Streamlit `st.chat_message(role)`에서 **사람 모양** = `role="user"` (TOOL_CALL, TOOL_RESULT, TOOL_SKIPPED 이벤트), **로봇 모양** = `role="assistant"` (NODE_START, NODE_END, PLAN_READY 등 그 외). 즉 도구 호출/결과는 사용자(도구) 측, 노드 진행은 에이전트 측으로 표시합니다. 이 role 기준은 **PoC UI에서만** 정의되어 있으며(`ui/workspace.py`), 백엔드 이벤트 스키마에는 role 필드가 없습니다.  
+- **생각/행동/관찰 문구**: `agent/reasoning_notes.py`의 `generate_working_note()`가 Aura LLM을 호출해 **message/thought/action/observation** JSON을 생성하고, 실패 시 `agent/langgraph_agent.py` 각 노드의 **fallback_thought, fallback_action, fallback_observation** (하드코딩 한글)을 사용합니다.
+- **캡션·도구**: TOOL_CALL/TOOL_RESULT/TOOL_SKIPPED는 `노드 / TOOL_CALL: 도구명` 형식으로 표시합니다. 도구명에 마우스를 올리면 `agent/skills.py`의 해당 도구 **description**이 툴팁으로 표시됩니다.
+- **LLM 라벨**: LLM이 생성한 문구일 때 어떤 모델인지 표시합니다. `core.llm.client`에서 `model`/`model_name`을 가져오고, 없으면 환경변수 **REASONING_LLM_LABEL**(기본 `"LLM"`)을 사용합니다. 예: `GPT-4o`, `Claude 3.5 Sonnet` 등으로 설정 가능합니다.  
+- **날짜 형식**: UI에서는 모두 **한국 시간(KST) yyyy-mm-dd hh:mm:ss**로 표시합니다 (`ui/shared.py`의 `fmt_dt_korea()`).  
+- **스트림 vs 조회 데이터**: 분석 시작 시 **SSE 스트림**에서는 이벤트가 **카드 형식**(타임스탬프·노드·이벤트타입·도구명·LLM/정의문구·메시지·생각/행동/관찰)으로 한 카드씩 전달되며, 메시지는 단어 단위로 타이핑되듯 표시되고 이벤트 사이에는 "다음 이벤트 수신 중..."이 노출됩니다. 스트림이 끝나면 `st.rerun()` 후 **API로 해당 run의 이벤트 타임라인**을 조회해 동일한 이벤트를 `st.chat_message(role)` 카드로 다시 표시합니다. 즉 **내용은 동일한 런 이벤트**이며, 먼저는 실시간 카드 스트리밍, 이후에는 저장된 이벤트 조회 표시입니다.
+
 ### 6. RAG 규정집 통합
 - 규정집 계층형 후보 수집 및 조항 재정렬
 - 청킹 실험실: TXT 업로드, 하이브리드/조항 우선/슬라이딩 윈도우 전략
@@ -81,10 +101,16 @@
 
 > 참고: [`services/policy_service.py`](services/policy_service.py) — 규정집 후보 수집/조항 재정렬, [`services/rag_library_service.py`](services/rag_library_service.py) — RAG 문서 라이브러리, [`services/rag_chunk_lab_service.py`](services/rag_chunk_lab_service.py) — 청킹 실험실
 
+### 7. BE(dwp-backend)·Aura 정합성
+- **케이스 목록 데이터**: 전표(fi_doc_header, fi_doc_item)를 기준으로 조회하고, 배지용 값(상태·심각도·유형)은 agent_case와 LEFT OUTER JOIN으로 가져옵니다. 스크리닝 전에는 case_type/severity가 없어 "미분류/낮음"으로 표시됩니다.
+- **테스트 데이터 생성**: `services/demo_data_service.py`의 시나리오별 필드(hr_status, mcc_code, budget_flag, day_mode, hour)는 BE `DemoViolationService`의 `setContextForScenario`·`preferredMccCodes`·`resolveBudgetExceededFlag` 규칙과 동일하게 적용됨. (HOLIDAY_USAGE는 budget N, LIMIT_EXCEED는 budget Y 등.)
+- **스크리닝 입력**: `case_service._build_screening_body()`는 BE `DetectBatchService.buildFlattenedBatchItem()`와 동일한 핵심 필드(occurredAt, hrStatus, hrStatusRaw, mccCode, budgetExceeded, isHoliday)로 구성하며, **intended_risk_type은 포함하지 않음** — Aura가 원시 전표 신호만으로 케이스 유형 분류.
+- **스크리닝 → 분석 흐름**: (1) 에이전트가 스크리닝으로 유형을 판단한 뒤 결과를 `agent_case`에 저장(업데이트). (2) 이후 **분석 버튼**을 누르면 BE와 동일하게, 스크리닝 결과(`case_type`, `screening_reason_text`)와 전표/evidence 필드를 담은 `body_evidence`를 에이전트에 넘기고, 에이전트는 그 값을 기준으로 심층 분석을 수행.
+
 ## 📁 프로젝트 구조
 
 ```
-AruaAgent/
+AuraAgent/
 ├── main.py                      # FastAPI 엔트리
 ├── app.py                       # Streamlit 엔트리 (UI)
 ├── requirements.txt             # Python 의존성
@@ -217,7 +243,7 @@ graph TD
 ### 1. 저장소 클론 및 의존성 설치
 
 ```bash
-cd /Users/joonbinchoi/Work/AruaAgent
+cd /Users/joonbinchoi/Work/AuraAgent
 python3 -m venv .venv
 source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
@@ -283,7 +309,7 @@ DWP_BACKEND_PATH=/path/to/dwp-backend
 DWP_FRONTEND_PATH=/path/to/dwp-frontend
 
 # 에이전트 런타임
-# native: AruaAgent 내부 자율형 에이전트 우선
+# native: AuraAgent 내부 자율형 에이전트 우선
 # aura: legacy aura 전용 모드
 # hybrid: native + aura 병행
 AGENT_RUNTIME_MODE=langgraph
@@ -329,7 +355,8 @@ ENABLE_LANGGRAPH_IF_AVAILABLE=true
 
 ### 전표 및 분석
 - **GET** `/api/v1/vouchers?queue=all|pending&limit=50` — 전표 목록 조회
-- **POST** `/api/v1/cases/{voucher_key}/analysis-runs` — 분석 실행 시작
+- **POST** `/api/v1/cases/{voucher_key}/screen` — Phase 0 스크리닝 (케이스 유형 분류, AgentCase 생성/갱신)
+- **POST** `/api/v1/cases/{voucher_key}/analysis-runs` — Phase 1 분석 시작 (screener_node 자동 포함)
 - **GET** `/api/v1/analysis-runs/{run_id}/stream` — SSE 스트림 구독
 - **GET** `/api/v1/cases/{voucher_key}/analysis/latest` — 최신 분석 결과
 - **GET** `/api/v1/cases/{voucher_key}/analysis/history` — 케이스별 분석 이력
@@ -411,5 +438,5 @@ with requests.get(
 
 ---
 
-**프로젝트**: Aura Agent AI PoC (AruaAgent)  
+**프로젝트**: Aura Agent AI PoC (AuraAgent)  
 **목적**: 엔터프라이즈급 에이전트형 금융 감사 어시스턴트 PoC

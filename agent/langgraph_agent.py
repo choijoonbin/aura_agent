@@ -8,6 +8,7 @@ from langgraph.graph import END, START, StateGraph
 from agent.event_schema import AgentEvent
 from agent.hitl import build_hitl_request
 from agent.reasoning_notes import generate_working_note
+from agent.screener import run_screening
 from agent.skills import SKILL_REGISTRY
 from utils.config import settings
 
@@ -16,6 +17,8 @@ class AgentState(TypedDict, total=False):
     case_id: str
     body_evidence: dict[str, Any]
     intended_risk_type: str | None
+    # Screening result populated by screener_node (before intake)
+    screening_result: dict[str, Any] | None
     flags: dict[str, Any]
     plan: list[dict[str, Any]]
     tool_results: list[dict[str, Any]]
@@ -176,6 +179,78 @@ def _score(flags: dict[str, Any], tool_results: list[dict[str, Any]]) -> dict[st
     }
 
 
+async def screener_node(state: AgentState) -> AgentState:
+    """
+    Phase 0 — Screening.
+    Runs deterministic signal analysis on raw body_evidence to classify
+    the case_type BEFORE the agent begins deep analysis.
+    This mirrors the original aura-platform /detect/screen flow.
+    """
+    body = state["body_evidence"]
+
+    # If case_type was already screened (AgentCase exists), skip re-screening
+    # but still emit the SCREENING_RESULT event so it shows in the stream.
+    pre_classified = body.get("case_type") or body.get("intended_risk_type")
+    if pre_classified and pre_classified not in ("UNKNOWN", "NORMAL_BASELINE", ""):
+        screening = {
+            "case_type": pre_classified,
+            "severity": body.get("severity") or "MEDIUM",
+            "score": body.get("screening_score") or 0,
+            "reasons": ["기존 스크리닝 결과를 사용합니다."],
+            "reason_text": f"기존 분류: {pre_classified}",
+        }
+    else:
+        screening = run_screening(body)
+
+    # Propagate screened case_type into body_evidence so downstream nodes use it
+    updated_body = {**body, "case_type": screening["case_type"], "intended_risk_type": screening["case_type"]}
+
+    label_map = {
+        "HOLIDAY_USAGE": "휴일/휴무 중 사용 의심",
+        "LIMIT_EXCEED": "한도 초과 의심",
+        "PRIVATE_USE_RISK": "사적 사용 위험",
+        "UNUSUAL_PATTERN": "비정상 패턴",
+        "NORMAL_BASELINE": "정상 범위",
+    }
+    label = label_map.get(screening["case_type"], screening["case_type"])
+    severity = screening.get("severity", "MEDIUM")
+    score = screening.get("score", 0)
+    reason_text = screening.get("reason_text", "")
+
+    return {
+        "body_evidence": updated_body,
+        "intended_risk_type": screening["case_type"],
+        "screening_result": screening,
+        "pending_events": [
+            AgentEvent(
+                event_type="NODE_START",
+                node="screener",
+                phase="screen",
+                message=f"전표 신호 분석을 시작합니다.",
+                thought="원시 전표 데이터에서 위반 유형을 식별합니다.",
+                action="결정론적 신호 추출 및 스코어링",
+                observation="hr_status, mcc_code, budat, cputm 등 신호를 분석합니다.",
+                metadata={"role": "screener"},
+            ).to_payload(),
+            AgentEvent(
+                event_type="SCREENING_RESULT",
+                node="screener",
+                phase="screen",
+                message=f"스크리닝 완료: [{label}] — 중요도 {severity} / 점수 {score}",
+                thought=f"데이터 신호 기반으로 '{screening['case_type']}' 유형으로 분류되었습니다.",
+                action="케이스 유형 분류 완료",
+                observation=reason_text,
+                metadata={
+                    "case_type": screening["case_type"],
+                    "severity": severity,
+                    "score": score,
+                    "reasons": screening.get("reasons", []),
+                },
+            ).to_payload(),
+        ],
+    }
+
+
 async def intake_node(state: AgentState) -> AgentState:
     flags = _derive_flags(state["body_evidence"])
     start_note = await generate_working_note(
@@ -216,7 +291,7 @@ async def intake_node(state: AgentState) -> AgentState:
                 thought=start_note["thought"],
                 action=start_note["action"],
                 observation=start_note["observation"],
-                metadata={"role": "intake_agent", "note_source": start_note.get("source", "fallback")},
+                metadata={"role": "intake_agent", "note_source": start_note.get("source", "fallback"), "note_model": start_note.get("note_model")},
             ).to_payload(),
             AgentEvent(
                 event_type="NODE_END",
@@ -226,7 +301,7 @@ async def intake_node(state: AgentState) -> AgentState:
                 thought=end_note["thought"],
                 action=end_note["action"],
                 observation=end_note["observation"],
-                metadata={"role": "intake_agent", "note_source": end_note.get("source", "fallback"), **flags},
+                metadata={"role": "intake_agent", "note_source": end_note.get("source", "fallback"), "note_model": end_note.get("note_model"), **flags},
             ).to_payload(),
         ],
     }
@@ -270,7 +345,7 @@ async def planner_node(state: AgentState) -> AgentState:
                 thought=start_note["thought"],
                 action=start_note["action"],
                 observation=start_note["observation"],
-                metadata={"role": "planner_agent", "note_source": start_note.get("source", "fallback")},
+                metadata={"role": "planner_agent", "note_source": start_note.get("source", "fallback"), "note_model": start_note.get("note_model")},
             ).to_payload(),
             AgentEvent(
                 event_type="PLAN_READY",
@@ -280,7 +355,7 @@ async def planner_node(state: AgentState) -> AgentState:
                 thought=plan_ready_note["thought"],
                 action=plan_ready_note["action"],
                 observation=plan_ready_note["observation"],
-                metadata={"role": "planner_agent", "note_source": plan_ready_note.get("source", "fallback"), "plan": plan},
+                metadata={"role": "planner_agent", "note_source": plan_ready_note.get("source", "fallback"), "note_model": plan_ready_note.get("note_model"), "plan": plan},
             ).to_payload(),
         ],
     }
@@ -307,6 +382,7 @@ async def execute_node(state: AgentState) -> AgentState:
                 fallback_action="추가 specialist 호출을 생략합니다.",
                 fallback_observation=reason or "기존 증거가 충분합니다.",
             )
+            skipped_skill = SKILL_REGISTRY.get(step["tool"])
             pending_events.append(
                 AgentEvent(
                     event_type="TOOL_SKIPPED",
@@ -317,7 +393,14 @@ async def execute_node(state: AgentState) -> AgentState:
                     thought=skip_note["thought"],
                     action=skip_note["action"],
                     observation=skip_note["observation"],
-                    metadata={"reason": reason, "role": "specialist_agent", "owner": step.get("owner"), "note_source": skip_note.get("source", "fallback")},
+                    metadata={
+                        "reason": reason,
+                        "role": "specialist_agent",
+                        "owner": step.get("owner"),
+                        "note_source": skip_note.get("source", "fallback"),
+                        "note_model": skip_note.get("note_model"),
+                        "tool_description": skipped_skill.description if skipped_skill else None,
+                    },
                 ).to_payload()
             )
             continue
@@ -347,7 +430,14 @@ async def execute_node(state: AgentState) -> AgentState:
                 thought=call_note["thought"],
                 action=call_note["action"],
                 observation=call_note["observation"],
-                metadata={"reason": step["reason"], "role": "specialist_agent", "owner": step.get("owner"), "note_source": call_note.get("source", "fallback")},
+                metadata={
+                    "reason": step["reason"],
+                    "role": "specialist_agent",
+                    "owner": step.get("owner"),
+                    "note_source": call_note.get("source", "fallback"),
+                    "note_model": call_note.get("note_model"),
+                    "tool_description": skill.description,
+                },
             ).to_payload()
         )
         result = await skill.handler({
@@ -380,7 +470,13 @@ async def execute_node(state: AgentState) -> AgentState:
                 thought=result_note["thought"],
                 action=result_note["action"],
                 observation=result_note["observation"],
-                metadata={**result, "role": "specialist_agent", "note_source": result_note.get("source", "fallback")},
+                metadata={
+                    **result,
+                    "role": "specialist_agent",
+                    "note_source": result_note.get("source", "fallback"),
+                    "note_model": result_note.get("note_model"),
+                    "tool_description": skill.description,
+                },
             ).to_payload()
         )
     score = _score(state["flags"], tool_results)
@@ -439,7 +535,7 @@ async def critic_node(state: AgentState) -> AgentState:
                 thought=start_note["thought"],
                 action=start_note["action"],
                 observation=start_note["observation"],
-                metadata={"role": "critic_agent", "note_source": start_note.get("source", "fallback")},
+                metadata={"role": "critic_agent", "note_source": start_note.get("source", "fallback"), "note_model": start_note.get("note_model")},
             ).to_payload(),
             AgentEvent(
                 event_type="NODE_END",
@@ -449,7 +545,7 @@ async def critic_node(state: AgentState) -> AgentState:
                 thought=end_note["thought"],
                 action=end_note["action"],
                 observation=end_note["observation"],
-                metadata={"role": "critic_agent", "note_source": end_note.get("source", "fallback"), **critique},
+                metadata={"role": "critic_agent", "note_source": end_note.get("source", "fallback"), "note_model": end_note.get("note_model"), **critique},
             ).to_payload(),
         ],
     }
@@ -499,7 +595,7 @@ async def verify_node(state: AgentState) -> AgentState:
             thought=start_note["thought"],
             action=start_note["action"],
             observation=start_note["observation"],
-            metadata={"role": "verifier_agent", "note_source": start_note.get("source", "fallback")},
+            metadata={"role": "verifier_agent", "note_source": start_note.get("source", "fallback"), "note_model": start_note.get("note_model")},
         ).to_payload(),
         AgentEvent(
             event_type="GATE_APPLIED",
@@ -510,7 +606,7 @@ async def verify_node(state: AgentState) -> AgentState:
             thought=gate_note["thought"],
             action=gate_note["action"],
             observation=gate_note["observation"],
-            metadata={"role": "verifier_agent", "note_source": gate_note.get("source", "fallback"), **verification},
+            metadata={"role": "verifier_agent", "note_source": gate_note.get("source", "fallback"), "note_model": gate_note.get("note_model"), **verification},
         ).to_payload(),
     ]
     if hitl_request:
@@ -536,7 +632,7 @@ async def verify_node(state: AgentState) -> AgentState:
                 thought=hitl_note["thought"],
                 action=hitl_note["action"],
                 observation=hitl_note["observation"],
-                metadata={**hitl_request, "note_source": hitl_note.get("source", "fallback")},
+                metadata={**hitl_request, "note_source": hitl_note.get("source", "fallback"), "note_model": hitl_note.get("note_model")},
             ).to_payload()
         )
     return {"verification": verification, "hitl_request": hitl_request, "pending_events": events}
@@ -591,7 +687,7 @@ async def reporter_node(state: AgentState) -> AgentState:
                 thought=start_note["thought"],
                 action=start_note["action"],
                 observation=start_note["observation"],
-                metadata={"role": "reporter_agent", "note_source": start_note.get("source", "fallback")},
+                metadata={"role": "reporter_agent", "note_source": start_note.get("source", "fallback"), "note_model": start_note.get("note_model")},
             ).to_payload(),
             AgentEvent(
                 event_type="NODE_END",
@@ -601,7 +697,7 @@ async def reporter_node(state: AgentState) -> AgentState:
                 thought=end_note["thought"],
                 action=end_note["action"],
                 observation=end_note["observation"],
-                metadata={"role": "reporter_agent", "summary": summary, "note_source": end_note.get("source", "fallback")},
+                metadata={"role": "reporter_agent", "summary": summary, "note_source": end_note.get("source", "fallback"), "note_model": end_note.get("note_model")},
             ).to_payload(),
         ],
     }
@@ -636,6 +732,9 @@ async def finalizer_node(state: AgentState) -> AgentState:
 
 def build_agent_graph():
     workflow = StateGraph(AgentState)
+    # Phase 0: Screening (case type classification from raw signals)
+    workflow.add_node("screener", screener_node)
+    # Phase 1-7: Deep analysis
     workflow.add_node("intake", intake_node)
     workflow.add_node("planner", planner_node)
     workflow.add_node("execute", execute_node)
@@ -643,7 +742,8 @@ def build_agent_graph():
     workflow.add_node("verify", verify_node)
     workflow.add_node("reporter", reporter_node)
     workflow.add_node("finalizer", finalizer_node)
-    workflow.add_edge(START, "intake")
+    workflow.add_edge(START, "screener")
+    workflow.add_edge("screener", "intake")
     workflow.add_edge("intake", "planner")
     workflow.add_edge("planner", "execute")
     workflow.add_edge("execute", "critic")

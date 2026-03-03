@@ -11,14 +11,20 @@ from db.models import FiDocHeader, FiDocItem
 from utils.config import settings
 
 
+# BE(dwp-backend) DemoViolationService 시나리오와 동일한 필드 규칙 적용.
+# BE: setContextForScenario → hr_status, mcc_code, budget_exceeded_flag
+#     preferredMccCodes(HOLIDAY)=5813,5812,5814 / LIMIT=7011,4722,5812 / PRIVATE=7992,5813,7011 / UNUSUAL=4722,7011,7992,5813 / DEFAULT=5812,5814
+#     resolveBudgetExceededFlag: SPLIT_PAYMENT,LIMIT_EXCEED,OVER_LIMIT→Y / UNUSUAL→random / else N
+#     HOLIDAY_USAGE는 budget N (휴일 사용 의심은 한도초과와 별개).
+# BE screen-batch 요청에는 intended_risk_type 미포함 → Aura가 원시 신호만으로 스크리닝.
 SCENARIO_PROFILES: dict[str, dict[str, Any]] = {
     "HOLIDAY_USAGE": {
         "label": "휴일 사용 의심",
         "description": "주말/휴무일 심야 식대 사용 시나리오",
         "blart": "SA",
-        "hr_status": "LEAVE",
-        "mcc_code": "5813",
-        "budget_flag": "Y",
+        "hr_status": "LEAVE",  # BE: weekend→OFF, calendar or fallback
+        "mcc_code": "5813",   # BE preferred: 5813, 5812, 5814
+        "budget_flag": "N",   # BE: HOLIDAY_USAGE는 N
         "merchant_name": "심야 식대",
         "item_text": "휴일 야간 식대",
         "amount_range": (30000, 150000),
@@ -32,12 +38,12 @@ SCENARIO_PROFILES: dict[str, dict[str, Any]] = {
         "description": "높은 금액의 접대/업무 식대 한도 초과 시나리오",
         "blart": "SA",
         "hr_status": "WORK",
-        "mcc_code": "5812",
-        "budget_flag": "Y",
+        "mcc_code": "5812",   # BE preferred: 7011, 4722, 5812
+        "budget_flag": "Y",   # BE: LIMIT_EXCEED→Y
         "merchant_name": "고액 식대",
         "item_text": "고액 접대비",
         "amount_range": (250000, 900000),
-        "hour_candidates": [18, 19, 20],
+        "hour_candidates": [12, 12, 13],  # BE: 12:xx
         "day_mode": "weekday",
         "belnr_prefix": "L",
         "risk_type": "LIMIT_EXCEED",
@@ -47,7 +53,7 @@ SCENARIO_PROFILES: dict[str, dict[str, Any]] = {
         "description": "업무 외 목적이 의심되는 개인성 지출 시나리오",
         "blart": "SA",
         "hr_status": "LEAVE",
-        "mcc_code": "7992",
+        "mcc_code": "7992",   # BE preferred: 7992, 5813, 7011
         "budget_flag": "N",
         "merchant_name": "레저 시설",
         "item_text": "개인성 레저 지출",
@@ -62,8 +68,8 @@ SCENARIO_PROFILES: dict[str, dict[str, Any]] = {
         "description": "평소와 다른 시간대/업종/금액 조합 시나리오",
         "blart": "SA",
         "hr_status": "WORK",
-        "mcc_code": "5814",
-        "budget_flag": "N",
+        "mcc_code": "5813",   # BE preferred: 4722, 7011, 7992, 5813
+        "budget_flag": "N",   # BE: random Y/N — PoC에서는 N 고정 가능
         "merchant_name": "심야 간편식",
         "item_text": "비정상 패턴 식대",
         "amount_range": (120000, 300000),
@@ -74,10 +80,10 @@ SCENARIO_PROFILES: dict[str, dict[str, Any]] = {
     },
     "NORMAL_BASELINE": {
         "label": "정상 비교군",
-        "description": "정상 업무 시간대의 일반 식대 시나리오",
+        "description": "정상 업무 시간대의 일반 식대 시나리오 (BE DEFAULT/NORMAL)",
         "blart": "SA",
         "hr_status": "WORK",
-        "mcc_code": "5812",
+        "mcc_code": "5812",   # BE preferred: 5812, 5814
         "budget_flag": "N",
         "merchant_name": "일반 식대",
         "item_text": "정상 업무 식대",
@@ -127,25 +133,39 @@ def seed_demo_scenarios(db: Session, scenario: str, count: int = 5) -> dict[str,
     target_day = _next_day(profile["day_mode"])
     inserted = 0
     keys: list[str] = []
+    prefix = profile["belnr_prefix"]
+    gjahr_str = str(target_day.year)
+
+    # Find next available index so repeated "생성" clicks always add new records
+    existing_count = db.scalar(
+        select(func.count(FiDocHeader.belnr)).where(
+            FiDocHeader.tenant_id == tenant_id,
+            FiDocHeader.bukrs == "1000",
+            FiDocHeader.belnr.like(f"{prefix}%"),
+            FiDocHeader.gjahr == gjahr_str,
+        )
+    ) or 0
+    start_index = existing_count + 1
 
     for i in range(count):
-        belnr = f"{profile['belnr_prefix']}{i+1:09d}"[-10:]
+        belnr = f"{prefix}{start_index + i:09d}"[-10:]
         exists = db.scalar(
             select(FiDocHeader).where(
                 FiDocHeader.tenant_id == tenant_id,
                 FiDocHeader.bukrs == "1000",
                 FiDocHeader.belnr == belnr,
-                FiDocHeader.gjahr == str(target_day.year),
+                FiDocHeader.gjahr == gjahr_str,
             )
         )
         if exists:
             continue
 
+        seq = start_index + i
         header = FiDocHeader(
             tenant_id=tenant_id,
             bukrs="1000",
             belnr=belnr,
-            gjahr=str(target_day.year),
+            gjahr=gjahr_str,
             user_id=user_id,
             doc_source="POC",
             budat=target_day,
@@ -157,9 +177,9 @@ def seed_demo_scenarios(db: Session, scenario: str, count: int = 5) -> dict[str,
             ),
             blart=profile["blart"],
             waers="KRW",
-            bktxt=f"POC {profile['merchant_name']} {i+1}",
-            xblnr=f"DEMO-{scenario}-{i+1}",
-            intended_risk_type=profile["risk_type"],
+            bktxt=f"POC {profile['merchant_name']} {seq}",
+            xblnr=f"DEMO-{scenario}-{seq}",
+            intended_risk_type=None,  # Raw data: screener_node will classify during analysis
             hr_status=profile["hr_status"],
             mcc_code=profile["mcc_code"],
             budget_exceeded_flag=profile["budget_flag"],
@@ -172,7 +192,7 @@ def seed_demo_scenarios(db: Session, scenario: str, count: int = 5) -> dict[str,
             tenant_id=tenant_id,
             bukrs="1000",
             belnr=belnr,
-            gjahr=str(target_day.year),
+            gjahr=gjahr_str,
             buzei="001",
             hkont="0000601000",
             wrbtr=random.randint(*profile["amount_range"]),
@@ -183,7 +203,7 @@ def seed_demo_scenarios(db: Session, scenario: str, count: int = 5) -> dict[str,
         db.add(header)
         db.add(item)
         inserted += 1
-        keys.append(f"1000-{belnr}-{target_day.year}")
+        keys.append(f"1000-{belnr}-{gjahr_str}")
 
     db.commit()
     return {"scenario": scenario, "inserted": inserted, "voucher_keys": keys}

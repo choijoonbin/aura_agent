@@ -1,1 +1,1 @@
-"""UI modules for AruaAgent Streamlit app."""
+"""UI modules for AuraAgent Streamlit app."""
