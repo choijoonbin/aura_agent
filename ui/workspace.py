@@ -220,7 +220,7 @@ def render_timeline_cards(events: list[dict[str, Any]], *, view_mode: str = "bus
 
 
 def summarize_process_timeline(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    node_order = ["screener", "intake", "planner", "execute", "critic", "verify", "reporter", "finalizer"]
+    node_order = ["screener", "intake", "planner", "execute", "critic", "verify", "hitl_pause", "reporter", "finalizer"]
     node_labels = {
         "screener": "신호 분석 / 케이스 분류",
         "intake": "입력 해석",
@@ -228,6 +228,7 @@ def summarize_process_timeline(events: list[dict[str, Any]]) -> list[dict[str, A
         "execute": "근거 수집 실행",
         "critic": "비판적 검토",
         "verify": "검증 및 HITL 판단",
+        "hitl_pause": "HITL 대기 (run 조기 종료)",
         "reporter": "보고 문장 생성",
         "finalizer": "결과 확정",
     }
@@ -385,7 +386,7 @@ def render_hitl_panel(latest_bundle: dict[str, Any]) -> None:
 
 def build_workspace_plan_steps(latest_bundle: dict[str, Any]) -> list[dict[str, Any]]:
     timeline = latest_bundle.get("timeline") or []
-    node_order = ["screener", "intake", "planner", "execute", "critic", "verify", "reporter", "finalizer"]
+    node_order = ["screener", "intake", "planner", "execute", "critic", "verify", "hitl_pause", "reporter", "finalizer"]
     meta = {
         "screener": ("신호 분석 / 케이스 분류", "원시 전표 신호를 분석해 위반 유형을 식별합니다 (BE 힌트 없음)."),
         "intake": ("입력 해석", "전표 입력값과 위험 신호를 정규화합니다."),
@@ -393,6 +394,7 @@ def build_workspace_plan_steps(latest_bundle: dict[str, Any]) -> list[dict[str, 
         "execute": ("근거 수집 실행", "휴일/예산/업종/전표/규정 근거를 실제로 조회합니다."),
         "critic": ("비판적 검토", "과잉 주장과 반례 가능성을 다시 점검합니다."),
         "verify": ("검증 및 HITL 판단", "자동 판정 가능 여부와 사람 검토 필요 여부를 결정합니다."),
+        "hitl_pause": ("HITL 대기", "사람 검토 필요로 run 조기 종료. HITL 응답 후 새 run으로 재개됩니다."),
         "reporter": ("보고 문장 생성", "근거 중심 설명 문장과 최종 요약을 만듭니다."),
         "finalizer": ("결과 확정", "상태, 점수, 이력, 저장 payload를 최종 확정합니다."),
     }
@@ -407,7 +409,7 @@ def build_workspace_plan_steps(latest_bundle: dict[str, Any]) -> list[dict[str, 
         event_type = str(payload.get("event_type") or "").upper()
         if node in meta:
             seen.add(node)
-            if event_type in {"NODE_END", "COMPLETE", "REPORT_READY", "RESULT_FINALIZED"}:
+            if event_type in {"NODE_END", "COMPLETE", "REPORT_READY", "RESULT_FINALIZED", "HITL_PAUSE"}:
                 completed.add(node)
             if event_type in {"NODE_START", "PLAN_READY", "TOOL_CALL", "TOOL_RESULT"}:
                 running = node
@@ -544,7 +546,7 @@ def render_workspace_case_queue(items: list[dict[str, Any]], selected_key: str |
 def render_workspace_chat_panel(selected: dict[str, Any], latest_bundle: dict[str, Any]) -> None:
     result = ((latest_bundle.get("result") or {}).get("result") or {})
     timeline = latest_bundle.get("timeline") or []
-    render_panel_header("에이전트 스트림", "실행 중인 에이전트의 생각, 행동, 관찰을 대화형 흐름으로 표시합니다.")
+    render_panel_header("에이전트 대화 (라이브 스트림)", "실행 중인 에이전트의 reasoning note·도구 호출을 실시간으로 표시합니다.")
     st.markdown(
         status_badge(result.get("status") if result else selected.get("case_status"))
         + severity_badge(result.get("severity") if result else selected.get("severity"))
@@ -600,6 +602,7 @@ def render_workspace_chat_panel(selected: dict[str, Any], latest_bundle: dict[st
     if not timeline:
         _es_l, es_mid, _es_r = st.columns([0.02, 0.96, 0.02])
         with es_mid:
+            st.caption("에이전트 대화: 실행 중 reasoning note·도구 호출이 실시간으로 표시됩니다.")
             render_empty_state("분석을 시작하면 LangGraph 실행 로그와 보고 문장이 여기에 실시간으로 표시됩니다.")
         return
     # role: PoC에서 도구 호출/결과는 "user"(사람 아이콘), 노드 진행은 "assistant"(로봇 아이콘)로 구분해 표시합니다.
@@ -642,7 +645,7 @@ def render_workspace_results(latest_bundle: dict[str, Any], debug_mode: bool) ->
     result = ((latest_bundle.get("result") or {}).get("result") or {})
     critique = result.get("critique") or {}
     policy_refs = result.get("policy_refs") or []
-    render_panel_header("최종 판단", "상태, 점수, 규정 근거, 품질 신호를 하나의 결과 화면으로 묶어 보여줍니다.")
+    render_panel_header("결과 (verdict + score + citation)", "상태, 점수, 규정 근거, 품질 신호를 하나의 결과 화면으로 보여줍니다.")
     st.markdown(
         f"""
         <div class="mt-card-quiet">
@@ -725,7 +728,7 @@ def render_ai_workspace_page() -> None:
                 exec_logs = build_workspace_execution_logs(latest_bundle)
                 tabs = st.tabs(["사고 과정", "작업 계획", "실행 로그", "결과"])
                 with tabs[0]:
-                    render_panel_header("사고 과정", "분석이 끝난 뒤 노드별로 무엇을 판단했고 어떤 행동을 했는지 요약합니다.")
+                    render_panel_header("사고 과정 (실행 후 구조화 리뷰)", "분석 완료 후 노드별 판단·행동 요약입니다.")
                     render_process_story(timeline, debug_mode=debug_mode)
                 with tabs[1]:
                     render_panel_header("작업 계획", "Planner가 생성한 실행 단계와 현재 진행 상태입니다.")
@@ -739,7 +742,7 @@ def render_ai_workspace_page() -> None:
                                 st.markdown(status_badge(step["status"] if step["status"] != "진행중" else "IN_REVIEW"), unsafe_allow_html=True)
                 with tabs[2]:
                     tool_results = ((latest_bundle.get("result") or {}).get("result") or {}).get("tool_results") or []
-                    render_panel_header("도구 실행 요약", "현재 분석 런에서 실제 호출된 스킬과 결과를 집계합니다.")
+                    render_panel_header("실행 로그 (orchestration)", "TOOL_CALL / TOOL_RESULT / HITL 등 오케스트레이션 이벤트와 도구 실행 요약입니다.")
                     render_tool_trace_summary(tool_results)
                     if exec_logs:
                         st.markdown("#### 실행 이벤트")
@@ -754,6 +757,41 @@ def render_ai_workspace_page() -> None:
                         render_empty_state("표시할 실행 로그가 없습니다.")
                 with tabs[3]:
                     render_workspace_results(latest_bundle, debug_mode)
+                    run_id = latest_bundle.get("run_id")
+                    if run_id:
+                        with st.expander("Run 진단 (관찰 지표)", expanded=False):
+                            try:
+                                diag = get(f"/api/v1/analysis-runs/{run_id}/diagnostics")
+                                history = latest_bundle.get("history") or []
+                                other_runs = [h for h in history if h.get("run_id") and h.get("run_id") != run_id]
+                                compare_run_id = None
+                                if other_runs:
+                                    opts = ["— 비교 안 함 —"] + [f"{h['run_id'][:8]}… ({h.get('status') or '-'})" for h in other_runs]
+                                    sel = st.selectbox("다른 Run과 비교", opts, key=f"run_compare_{selected_key or 'default'}")
+                                    if sel and sel != "— 비교 안 함 —":
+                                        compare_run_id = other_runs[opts.index(sel) - 1].get("run_id")
+                                if compare_run_id:
+                                    diag2 = get(f"/api/v1/analysis-runs/{compare_run_id}/diagnostics")
+                                    st.caption(f"왼쪽: 현재 Run ({run_id[:8]}…) · 오른쪽: 비교 Run ({compare_run_id[:8]}…)")
+                                    col_a, col_b = st.columns(2)
+                                    with col_a:
+                                        st.metric("Tool 성공률", f"{(diag.get('tool_call_success_rate') or 0) * 100:.1f}%" if diag.get("tool_call_success_rate") is not None else "-", f"{diag.get('tool_call_ok', 0)}/{diag.get('tool_call_total', 0)}")
+                                        st.metric("Citation coverage", f"{(diag.get('citation_coverage') or 0) * 100:.1f}%" if diag.get("citation_coverage") is not None else "-", "")
+                                        st.metric("HITL 요청", "예" if diag.get("hitl_requested") else "아니오", "재개 성공" if diag.get("resume_success") else "")
+                                        st.metric("Fallback 비율", f"{(diag.get('fallback_usage_rate') or 0) * 100:.1f}%" if diag.get("fallback_usage_rate") is not None else "-", f"이벤트 {diag.get('event_count', 0)}건")
+                                    with col_b:
+                                        st.metric("Tool 성공률", f"{(diag2.get('tool_call_success_rate') or 0) * 100:.1f}%" if diag2.get("tool_call_success_rate") is not None else "-", f"{diag2.get('tool_call_ok', 0)}/{diag2.get('tool_call_total', 0)}")
+                                        st.metric("Citation coverage", f"{(diag2.get('citation_coverage') or 0) * 100:.1f}%" if diag2.get("citation_coverage") is not None else "-", "")
+                                        st.metric("HITL 요청", "예" if diag2.get("hitl_requested") else "아니오", "재개 성공" if diag2.get("resume_success") else "")
+                                        st.metric("Fallback 비율", f"{(diag2.get('fallback_usage_rate') or 0) * 100:.1f}%" if diag2.get("fallback_usage_rate") is not None else "-", f"이벤트 {diag2.get('event_count', 0)}건")
+                                else:
+                                    c1, c2, c3, c4 = st.columns(4)
+                                    c1.metric("Tool 성공률", f"{(diag.get('tool_call_success_rate') or 0) * 100:.1f}%" if diag.get("tool_call_success_rate") is not None else "-", f"{diag.get('tool_call_ok', 0)}/{diag.get('tool_call_total', 0)}")
+                                    c2.metric("Citation coverage", f"{(diag.get('citation_coverage') or 0) * 100:.1f}%" if diag.get("citation_coverage") is not None else "-", "")
+                                    c3.metric("HITL 요청", "예" if diag.get("hitl_requested") else "아니오", "재개 성공" if diag.get("resume_success") else "")
+                                    c4.metric("Fallback 비율", f"{(diag.get('fallback_usage_rate') or 0) * 100:.1f}%" if diag.get("fallback_usage_rate") is not None else "-", f"이벤트 {diag.get('event_count', 0)}건")
+                            except Exception:
+                                st.caption("진단 API를 불러올 수 없습니다.")
                     render_hitl_panel(latest_bundle)
                     st.markdown("#### 분석 이력")
                     render_hitl_history(latest_bundle.get("history") or [])

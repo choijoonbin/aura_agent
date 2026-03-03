@@ -10,7 +10,7 @@ from ui.shared import render_empty_state, render_kpi_card, render_page_header, r
 
 
 def render_rag_library_page() -> None:
-    render_page_header("규정문서 라이브러리", "규정 문서, 청킹 품질, 재청킹 실험을 한 화면에서 관리합니다.")
+    render_page_header("규정문서 라이브러리", "규정 문서·retrieval·청킹 실험을 한 화면에서 관리합니다. policy_rulebook_probe는 여기 인덱싱된 청크를 검색합니다.")
     data = get("/api/v1/rag/documents")
     items = data.get("items") or []
     total = data.get("total") or len(items)
@@ -56,7 +56,7 @@ def render_rag_library_page() -> None:
             else:
                 render_empty_state("표시할 문서가 없습니다.")
     with top_tabs[1]:
-        render_panel_header("청킹 실험실", "업로드한 규정 텍스트에 전략을 바꿔 적용하며 청킹 결과를 비교합니다.")
+        render_panel_header("청킹 실험실", "업로드한 규정 텍스트에 전략을 바꿔 적용하며 청킹 결과를 비교합니다. 전략별 차이는 청크 수·평균 길이로 확인할 수 있습니다.")
         local_files = list_rulebook_files()
         upload = st.file_uploader("규정 TXT 업로드", type=["txt"])
         if upload is not None:

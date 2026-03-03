@@ -4,7 +4,7 @@ import streamlit as st
 from streamlit_extras.stylable_container import stylable_container
 
 from agent.langgraph_agent import build_agent_graph
-from agent.skills import SKILL_REGISTRY
+from agent.skills import get_langchain_tools
 from ui.api_client import get
 from ui.shared import draw_agent_graph, draw_skill_execution_graph, fmt_dt, render_empty_state, render_graph_image, render_legend, render_page_header, render_panel_header
 
@@ -71,17 +71,19 @@ def render_agent_studio_page() -> None:
             with st.expander("Prompt History"):
                 st.json(detail.get("prompt_history") or [])
         with tabs[2]:
-            render_panel_header("런타임 스킬", "LangGraph execute 단계에서 실제 호출 가능한 스킬 목록입니다.")
+            render_panel_header("런타임 도구", "실제 runtime graph에서 사용하는 LangChain tool 목록입니다.")
+            st.caption("Phase C: execute 노드는 plan 기반으로 이 도구들을 호출합니다.")
+            tools = get_langchain_tools()
             skill_cols = st.columns(2)
-            for idx, (skill_name, skill) in enumerate(SKILL_REGISTRY.items()):
+            for idx, tool in enumerate(tools):
                 with skill_cols[idx % 2]:
                     with stylable_container(
-                        key=f"skill_card_{skill_name}",
+                        key=f"skill_card_{getattr(tool, 'name', idx)}",
                         css_styles="""{padding: 14px 16px; border-radius: 16px; border: 1px solid #e5e7eb; background: rgba(255,255,255,0.98); box-shadow: 0 8px 22px rgba(15,23,42,0.04); min-height: 128px; margin-bottom: 0.7rem;}"""
                     ):
-                        st.caption("runtime skill")
-                        st.markdown(f"**{skill_name}**")
-                        st.write(skill.description or "-")
+                        st.caption("LangChain tool")
+                        st.markdown(f"**{getattr(tool, 'name', '-')}**")
+                        st.write(getattr(tool, "description", None) or "-")
         with tabs[3]:
             render_panel_header("연결 지식", "이 에이전트가 참조하는 문서와 지식 자산입니다.")
             docs = detail.get("documents") or []
@@ -93,6 +95,7 @@ def render_agent_studio_page() -> None:
         with tabs[4]:
             graph_tabs = st.tabs(["메인 오케스트레이션", "스킬 실행 흐름"])
             with graph_tabs[0]:
+                st.caption("실제 runtime graph. screener → intake → planner → execute → critic → verify → hitl_pause/reporter → finalizer.")
                 render_legend(
                     [
                         ("#f5f3ff", "에이전트 메인 노드"),
@@ -100,7 +103,7 @@ def render_agent_studio_page() -> None:
                         ("#94a3b8", "상태 전이"),
                     ]
                 )
-                render_graph_image("메인 오케스트레이션 그래프", None, draw_agent_graph(), "현재 PoC에서 실제 실행되는 메인 에이전트 오케스트레이션입니다.")
+                render_graph_image("메인 오케스트레이션 그래프", None, draw_agent_graph(), "실제 runtime graph (screener → intake → planner → execute → critic → verify → hitl_pause/reporter → finalizer)입니다.")
                 st.markdown("""
 **단계별 설명**
 

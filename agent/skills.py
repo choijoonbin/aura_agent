@@ -4,10 +4,12 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Awaitable, Callable
 
+from langchain_core.tools import StructuredTool
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
 from agent.aura_bridge import run_legacy_aura_analysis
+from agent.tool_schemas import SkillContextInput
 from services.policy_service import search_policy_chunks
 from utils.config import settings
 
@@ -138,6 +140,7 @@ async def legacy_aura_deep_audit(context: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+# Transitional: Phase A에서 LangChain tool schema로 승격. Phase C까지 registry direct dispatch 사용 후 ToolNode로 전환. (docs/phase0-prep.md)
 SKILL_REGISTRY: dict[str, AgentSkill] = {
     "holiday_compliance_probe": AgentSkill(
         name="holiday_compliance_probe",
@@ -170,3 +173,28 @@ SKILL_REGISTRY: dict[str, AgentSkill] = {
         handler=legacy_aura_deep_audit,
     ),
 }
+
+
+def _make_langchain_tool(skill_name: str) -> StructuredTool:
+    """Phase A: LangChain StructuredTool로 스킬을 감싼다. 입력/출력 스키마 부여."""
+    skill = SKILL_REGISTRY[skill_name]
+
+    async def _invoke(inp: SkillContextInput) -> dict[str, Any]:
+        ctx: dict[str, Any] = {
+            "case_id": inp.case_id,
+            "body_evidence": inp.body_evidence,
+            "intended_risk_type": inp.intended_risk_type,
+        }
+        return await skill.handler(ctx)
+
+    return StructuredTool(
+        name=skill.name,
+        description=skill.description,
+        args_schema=SkillContextInput,
+        coroutine=_invoke,
+    )
+
+
+def get_langchain_tools() -> list[StructuredTool]:
+    """Phase A: 등록된 모든 스킬을 LangChain tool 목록으로 반환. Phase C에서 ToolNode 바인딩용."""
+    return [_make_langchain_tool(name) for name in SKILL_REGISTRY]

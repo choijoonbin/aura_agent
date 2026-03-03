@@ -284,6 +284,16 @@ Streamlit 앱은 `http://localhost:8502`에서 실행됩니다.
 
 > 참고: [`main.py`](main.py) — FastAPI 앱, [`app.py`](app.py) — Streamlit 앱
 
+### 5. 테스트 실행
+
+그래프·도구 스키마·HITL·citation 관련 단위 테스트:
+
+```bash
+pytest tests/ -v
+```
+
+> 참고: [`docs/langgraph-langchain-comparison.md`](docs/langgraph-langchain-comparison.md) Section 8.13 테스트 전략, [`tests/`](tests/) — test_graph, test_tool_schema, test_interrupt_resume, test_citation_binding
+
 ## ⚙️ 환경 변수 설정
 
 ### `.env` 파일 예시

@@ -1,3 +1,10 @@
+"""
+Phase E: 실행 상태·이벤트·최종 결과 분리.
+- Event log: get_timeline(run_id) — 스트림 이벤트 시퀀스 (orchestration + AGENT_EVENT).
+- Final result: get_result(run_id) — run 종료 시 한 번 저장되는 결과 (completed/failed/hitl_required).
+- Latest: latest_run_of_case(case_id) — 해당 케이스의 최신 run_id.
+- History: list_runs_of_case(case_id) — 해당 케이스의 run_id 목록 (과거 포함).
+"""
 from __future__ import annotations
 
 import asyncio

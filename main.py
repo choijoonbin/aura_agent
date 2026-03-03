@@ -22,6 +22,7 @@ from services.case_service import (
 from services.demo_data_service import clear_demo_data, list_demo_scenarios, list_seeded_demo_cases, seed_demo_scenarios
 from services.persistence_service import persist_analysis_result
 from services.rag_library_service import get_rag_document_detail, list_rag_documents
+from services.run_diagnostics import get_run_diagnostics
 from services.runtime_persistence_service import (
     get_latest_run_id_by_case,
     get_persisted_timeline,
@@ -142,7 +143,7 @@ async def _run_analysis_task(
                     if ev_type == "AGENT_EVENT" and data.get("event_type") == "HITL_REQUESTED":
                         stored_event_type = "HITL_REQUESTED"
                     elif ev_type == "completed":
-                        stored_event_type = "RUN_COMPLETED"
+                        stored_event_type = "HITL_REQUIRED" if data.get("status") == "HITL_REQUIRED" else "RUN_COMPLETED"
                     elif ev_type == "failed":
                         stored_event_type = "RUN_FAILED"
                     metadata = {
@@ -418,6 +419,37 @@ def get_run_events(run_id: str) -> dict[str, Any]:
         "hitl_response": hitl_response,
         "lineage": lineage,
     }
+
+
+@app.get("/api/v1/analysis-runs/{run_id}/diagnostics")
+def get_run_diagnostics_endpoint(run_id: str) -> dict[str, Any]:
+    """Phase H: run 단위 관찰 지표 (tool success, HITL, citation coverage, fallback rate)."""
+    from db.session import SessionLocal
+
+    events = runtime.get_timeline(run_id)
+    result = runtime.get_result(run_id)
+    lineage = runtime.get_lineage(run_id)
+    hitl_request = runtime.get_hitl_request(run_id)
+    hitl_response = runtime.get_hitl_response(run_id)
+    if not events:
+        with SessionLocal() as db:
+            events = get_persisted_timeline(db, run_id=run_id)
+    with SessionLocal() as db:
+        aux = get_run_aux_state(db, run_id=run_id)
+        if result is None and aux.get("result_payload") is not None:
+            result = {"run_id": run_id, "event_type": "completed", "result": aux.get("result_payload")}
+        lineage = lineage or aux.get("lineage")
+        hitl_request = hitl_request or aux.get("hitl_request")
+        hitl_response = hitl_response or aux.get("hitl_response")
+    if result is None and not lineage and not events:
+        raise HTTPException(status_code=404, detail="run not found")
+    return get_run_diagnostics(
+        result=result or {"run_id": run_id},
+        timeline=events,
+        lineage=lineage,
+        hitl_request=hitl_request,
+        hitl_response=hitl_response,
+    )
 
 
 @app.get("/api/v1/analysis-runs/{run_id}/stream")

@@ -1,3 +1,9 @@
+"""
+Phase E: Event log와 final result 분리 저장.
+- Event log: log_run_event() — agent_activity_log에 이벤트별 행 적재 (RUN_CREATED, AGENT_EVENT, HITL_REQUESTED, RUN_COMPLETED 등).
+- Final result: persist_analysis_result() (persistence_service) — run 종료 시 최종 결과만 별도 저장.
+- Latest / History: get_latest_run_id_by_case(), list_run_ids_by_case() — 케이스별 최신 run 및 run 목록.
+"""
 from __future__ import annotations
 
 import json

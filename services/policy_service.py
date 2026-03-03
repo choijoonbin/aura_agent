@@ -84,6 +84,34 @@ def build_policy_keywords(body_evidence: dict[str, Any]) -> list[str]:
     return _dedupe_keep_order(expanded)
 
 
+def query_rewrite_for_retrieval(body_evidence: dict[str, Any]) -> dict[str, Any]:
+    """
+    Phase F: retrieval용 구조화 쿼리. query rewrite(risk_type, mcc, hr_status, occurredAt, document evidence) 반영.
+    hierarchical retrieval / rerank 단계에서 사용할 수 있도록 동일 입력을 반환한다.
+    """
+    risk_type = str(body_evidence.get("case_type") or body_evidence.get("intended_risk_type") or "")
+    keywords = build_policy_keywords(body_evidence)
+    doc = body_evidence.get("document") or {}
+    items = doc.get("items") or []
+    line_hints = []
+    for item in items[:3]:
+        if item.get("sgtxt"):
+            line_hints.append(str(item["sgtxt"]))
+        if item.get("hkont"):
+            line_hints.append(str(item["hkont"]))
+    return {
+        "risk_type": risk_type,
+        "keywords": keywords,
+        "mcc_code": body_evidence.get("mccCode"),
+        "mcc_name": body_evidence.get("mccName"),
+        "hr_status": body_evidence.get("hrStatus") or body_evidence.get("hrStatusRaw"),
+        "occurred_at": body_evidence.get("occurredAt"),
+        "is_holiday": bool(body_evidence.get("isHoliday")),
+        "document_line_hints": line_hints,
+        "merchant_name": body_evidence.get("merchantName"),
+    }
+
+
 def _build_candidate_sql(keyword_count: int) -> str:
     score_terms: list[str] = []
     filters: list[str] = []

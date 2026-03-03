@@ -7,10 +7,31 @@ from langgraph.graph import END, START, StateGraph
 
 from agent.event_schema import AgentEvent
 from agent.hitl import build_hitl_request
+from agent.output_models import (
+    Citation,
+    CriticOutput,
+    PlanStep,
+    PlannerOutput,
+    ReporterOutput,
+    ReporterSentence,
+    VerifierGate,
+    VerifierOutput,
+)
 from agent.reasoning_notes import generate_working_note
 from agent.screener import run_screening
-from agent.skills import SKILL_REGISTRY
+from agent.skills import get_langchain_tools
+from agent.tool_schemas import SkillContextInput
 from utils.config import settings
+
+# Phase C: plan 기반 도구 실행은 LangChain tool 호출로만 수행 (registry direct dispatch 제거)
+_TOOLS_BY_NAME: dict[str, Any] = {}
+
+
+def _get_tools_by_name() -> dict[str, Any]:
+    if not _TOOLS_BY_NAME:
+        for t in get_langchain_tools():
+            _TOOLS_BY_NAME[t.name] = t
+    return _TOOLS_BY_NAME
 
 
 class AgentState(TypedDict, total=False):
@@ -28,6 +49,11 @@ class AgentState(TypedDict, total=False):
     hitl_request: dict[str, Any] | None
     final_result: dict[str, Any]
     pending_events: list[dict[str, Any]]
+    # Phase B: structured output (planner/critic/verifier/reporter)
+    planner_output: dict[str, Any]
+    critic_output: dict[str, Any]
+    verifier_output: dict[str, Any]
+    reporter_output: dict[str, Any]
 
 
 def _format_occurred_at(value: Any) -> str:
@@ -309,6 +335,23 @@ async def intake_node(state: AgentState) -> AgentState:
 
 async def planner_node(state: AgentState) -> AgentState:
     plan = _plan_from_flags(state["flags"])
+    steps = [
+        PlanStep(
+            tool_name=step["tool"],
+            purpose=step.get("reason", ""),
+            required=True,
+            skip_condition=None,
+            owner=step.get("owner"),
+        )
+        for step in plan
+    ]
+    planner_output = PlannerOutput(
+        objective="위험 신호별 조사 순서에 따라 증거를 수집하고 규정 근거를 확보한다.",
+        steps=steps,
+        stop_after_sufficient_evidence=True,
+        tool_budget=len(plan),
+        rationale="플래그(휴일/예산/MCC 등)와 기본 조사 경로로 도구 순서를 결정했다.",
+    )
     start_note = await generate_working_note(
         node="planner",
         role="planner_agent",
@@ -336,6 +379,7 @@ async def planner_node(state: AgentState) -> AgentState:
     )
     return {
         "plan": plan,
+        "planner_output": planner_output.model_dump(),
         "pending_events": [
             AgentEvent(
                 event_type="NODE_START",
@@ -362,33 +406,37 @@ async def planner_node(state: AgentState) -> AgentState:
 
 
 async def execute_node(state: AgentState) -> AgentState:
+    # Phase C: plan 기반 도구 실행은 LangChain tool 호출만 사용 (registry direct dispatch 제거)
+    tools_by_name = _get_tools_by_name()
     tool_results: list[dict[str, Any]] = []
     pending_events: list[dict[str, Any]] = []
     for step in state["plan"]:
+        tool_name = step.get("tool", "")
         skip, reason = _should_skip_skill(step, state=state, tool_results=tool_results)
         if skip:
+            tool_obj = tools_by_name.get(tool_name)
+            tool_description = getattr(tool_obj, "description", None) if tool_obj else None
             skip_note = await generate_working_note(
                 node="execute",
                 role="specialist_agent",
                 context={
                     "case_id": state["case_id"],
-                    "tool": step["tool"],
-                    "reason": step["reason"],
+                    "tool": tool_name,
+                    "reason": step.get("reason"),
                     "existing_tool_results": tool_results,
                     "skip_reason": reason,
                 },
-                fallback_message=f"도구 생략: {step['tool']}",
+                fallback_message=f"도구 생략: {tool_name}",
                 fallback_thought="이미 확보된 증거로 다음 판단을 이어갈 수 있습니다.",
                 fallback_action="추가 specialist 호출을 생략합니다.",
                 fallback_observation=reason or "기존 증거가 충분합니다.",
             )
-            skipped_skill = SKILL_REGISTRY.get(step["tool"])
             pending_events.append(
                 AgentEvent(
                     event_type="TOOL_SKIPPED",
                     node="executor",
                     phase="execute",
-                    tool=step["tool"],
+                    tool=tool_name,
                     message=skip_note["message"],
                     thought=skip_note["thought"],
                     action=skip_note["action"],
@@ -399,25 +447,29 @@ async def execute_node(state: AgentState) -> AgentState:
                         "owner": step.get("owner"),
                         "note_source": skip_note.get("source", "fallback"),
                         "note_model": skip_note.get("note_model"),
-                        "tool_description": skipped_skill.description if skipped_skill else None,
+                        "tool_description": tool_description,
                     },
                 ).to_payload()
             )
             continue
-        skill = SKILL_REGISTRY[step["tool"]]
+        tool = tools_by_name.get(tool_name)
+        if not tool:
+            tool_results.append({"skill": tool_name, "ok": False, "facts": {}, "summary": f"알 수 없는 도구: {tool_name}"})
+            continue
+        tool_description = getattr(tool, "description", None) or ""
         call_note = await generate_working_note(
             node="execute",
             role="specialist_agent",
             context={
                 "case_id": state["case_id"],
-                "tool": skill.name,
-                "reason": step["reason"],
+                "tool": tool_name,
+                "reason": step.get("reason"),
                 "flags": state.get("flags"),
                 "tool_results_so_far": [r.get("skill") for r in tool_results],
             },
-            fallback_message=f"도구 호출: {skill.name}",
-            fallback_thought=f"{step['reason']}에 대한 사실을 확보해야 합니다.",
-            fallback_action=f"{skill.name} 실행",
+            fallback_message=f"도구 호출: {tool_name}",
+            fallback_thought=f"{step.get('reason', '')}에 대한 사실을 확보해야 합니다.",
+            fallback_action=f"{tool_name} 실행",
             fallback_observation="도구 실행 전 상태를 정리했습니다.",
         )
         pending_events.append(
@@ -425,39 +477,42 @@ async def execute_node(state: AgentState) -> AgentState:
                 event_type="TOOL_CALL",
                 node="executor",
                 phase="execute",
-                tool=skill.name,
+                tool=tool_name,
                 message=call_note["message"],
                 thought=call_note["thought"],
                 action=call_note["action"],
                 observation=call_note["observation"],
                 metadata={
-                    "reason": step["reason"],
+                    "reason": step.get("reason"),
                     "role": "specialist_agent",
                     "owner": step.get("owner"),
                     "note_source": call_note.get("source", "fallback"),
                     "note_model": call_note.get("note_model"),
-                    "tool_description": skill.description,
+                    "tool_description": tool_description,
                 },
             ).to_payload()
         )
-        result = await skill.handler({
-            "case_id": state["case_id"],
-            "body_evidence": state["body_evidence"],
-            "intended_risk_type": state.get("intended_risk_type"),
-        })
+        inp = SkillContextInput(
+            case_id=state["case_id"],
+            body_evidence=state["body_evidence"],
+            intended_risk_type=state.get("intended_risk_type"),
+        )
+        result = await tool.ainvoke(inp.model_dump())
+        if not isinstance(result, dict):
+            result = {"skill": tool_name, "ok": False, "facts": {}, "summary": str(result)}
         tool_results.append(result)
         result_note = await generate_working_note(
             node="execute",
             role="specialist_agent",
             context={
                 "case_id": state["case_id"],
-                "tool": skill.name,
-                "reason": step["reason"],
+                "tool": tool_name,
+                "reason": step.get("reason"),
                 "tool_result": result,
             },
-            fallback_message=result.get("summary") or f"도구 완료: {skill.name}",
+            fallback_message=result.get("summary") or f"도구 완료: {tool_name}",
             fallback_thought="수집한 사실이 다음 판단 단계에 어떤 영향을 주는지 정리합니다.",
-            fallback_action=f"{skill.name} 결과를 반영합니다.",
+            fallback_action=f"{tool_name} 결과를 반영합니다.",
             fallback_observation=(result.get("summary") or "도구 결과 수집 완료"),
         )
         pending_events.append(
@@ -465,7 +520,7 @@ async def execute_node(state: AgentState) -> AgentState:
                 event_type="TOOL_RESULT",
                 node="executor",
                 phase="execute",
-                tool=skill.name,
+                tool=tool_name,
                 message=result_note["message"],
                 thought=result_note["thought"],
                 action=result_note["action"],
@@ -475,7 +530,7 @@ async def execute_node(state: AgentState) -> AgentState:
                     "role": "specialist_agent",
                     "note_source": result_note.get("source", "fallback"),
                     "note_model": result_note.get("note_model"),
-                    "tool_description": skill.description,
+                    "tool_description": tool_description,
                 },
             ).to_payload()
         )
@@ -499,6 +554,14 @@ async def critic_node(state: AgentState) -> AgentState:
         "risk_of_overclaim": bool(missing),
         "recommend_hold": bool(missing and not state["flags"].get("hasHitlResponse")),
     }
+    critic_output = CriticOutput(
+        overclaim_risk=critique["risk_of_overclaim"],
+        contradictions=[],
+        missing_counter_evidence=missing,
+        recommend_hold=critique["recommend_hold"],
+        rationale="입력 누락 필드가 있으면 과잉 주장 위험이 있어 보류를 권고한다." if missing else "추가 보류 조건 없이 진행 가능하다.",
+        has_legacy_result=critique["has_legacy_result"],
+    )
     start_note = await generate_working_note(
         node="critic",
         role="critic_agent",
@@ -526,6 +589,7 @@ async def critic_node(state: AgentState) -> AgentState:
     )
     return {
         "critique": critique,
+        "critic_output": critic_output.model_dump(),
         "pending_events": [
             AgentEvent(
                 event_type="NODE_START",
@@ -560,6 +624,15 @@ async def verify_node(state: AgentState) -> AgentState:
         "needs_hitl": needs_hitl,
         "quality_signals": ["HITL_REQUIRED"] if needs_hitl else ["OK"],
     }
+    gate = VerifierGate.HITL_REQUIRED if needs_hitl else VerifierGate.READY
+    verifier_output = VerifierOutput(
+        grounded=not needs_hitl,
+        needs_hitl=needs_hitl,
+        missing_evidence=hitl_request.get("reasons", []) if hitl_request else [],
+        gate=gate,
+        rationale="사람 검토가 필요하면 HITL_REQUIRED, 아니면 READY로 진행한다.",
+        quality_signals=verification["quality_signals"],
+    )
     start_note = await generate_working_note(
         node="verify",
         role="verifier_agent",
@@ -635,7 +708,46 @@ async def verify_node(state: AgentState) -> AgentState:
                 metadata={**hitl_request, "note_source": hitl_note.get("source", "fallback"), "note_model": hitl_note.get("note_model")},
             ).to_payload()
         )
-    return {"verification": verification, "hitl_request": hitl_request, "pending_events": events}
+    return {"verification": verification, "verifier_output": verifier_output.model_dump(), "hitl_request": hitl_request, "pending_events": events}
+
+
+def _route_after_verify(state: AgentState) -> str:
+    """Phase D: HITL 필요 시 reporter로 가지 않고 hitl_pause로 끝낸다."""
+    if state.get("hitl_request"):
+        return "hitl_pause"
+    return "reporter"
+
+
+async def hitl_pause_node(state: AgentState) -> AgentState:
+    """Phase D: HITL 필요 시 실행. reporter/finalizer 없이 부분 결과로 run을 종료한다."""
+    score = state.get("score_breakdown") or {}
+    hitl_request = state.get("hitl_request") or {}
+    partial = {
+        "caseId": state["case_id"],
+        "status": "HITL_REQUIRED",
+        "reasonText": "사람 검토 입력을 기다립니다.",
+        "score": (score.get("final_score") or 0) / 100,
+        "severity": "HIGH" if (score.get("final_score") or 0) >= 70 else ("MEDIUM" if (score.get("final_score") or 0) >= 40 else "LOW"),
+        "analysis_mode": "langgraph_agentic",
+        "score_breakdown": score,
+        "quality_gate_codes": state.get("verification", {}).get("quality_signals", []),
+        "hitl_request": hitl_request,
+        "tool_results": state.get("tool_results", []),
+        "policy_refs": (_find_tool_result(state.get("tool_results", []), "policy_rulebook_probe") or {}).get("facts", {}).get("policy_refs", []) or [],
+        "critique": state.get("critique"),
+        "planner_output": state.get("planner_output"),
+        "critic_output": state.get("critic_output"),
+        "verifier_output": state.get("verifier_output"),
+    }
+    ev = AgentEvent(
+        event_type="HITL_PAUSE",
+        node="hitl_pause",
+        phase="verify",
+        message="사람 검토가 필요하여 이번 run을 여기서 종료합니다. HITL 응답 후 새 run으로 재개됩니다.",
+        observation="interrupt",
+        metadata={"hitl_request": hitl_request},
+    ).to_payload()
+    return {"final_result": partial, "pending_events": [ev]}
 
 
 async def reporter_node(state: AgentState) -> AgentState:
@@ -652,6 +764,17 @@ async def reporter_node(state: AgentState) -> AgentState:
         summary += " 사람 검토가 필요한 상태입니다."
     else:
         summary += " 현재 수집된 증거 기준으로 추가 검토 우선순위가 높습니다."
+    verdict = "HITL_REQUIRED" if hitl_request else "READY"
+    refs = _top_policy_refs(state.get("tool_results", []), limit=5)
+    citations_list = []
+    for ref in refs:
+        cids = ref.get("chunk_ids") or []
+        chunk_id = str(cids[0]) if cids else None
+        citations_list.append(Citation(chunk_id=chunk_id, article=ref.get("article") or "조항 미상", title=ref.get("parent_title")))
+    sentences_list: list[ReporterSentence] = [
+        ReporterSentence(sentence=summary, citations=citations_list),
+    ]
+    reporter_output = ReporterOutput(summary=summary, verdict=verdict, sentences=sentences_list)
     start_note = await generate_working_note(
         node="report",
         role="reporter_agent",
@@ -678,6 +801,7 @@ async def reporter_node(state: AgentState) -> AgentState:
         fallback_observation="사용자용 요약 문안이 준비되었습니다.",
     )
     return {
+        "reporter_output": reporter_output.model_dump(),
         "pending_events": [
             AgentEvent(
                 event_type="NODE_START",
@@ -721,6 +845,10 @@ async def finalizer_node(state: AgentState) -> AgentState:
         "policy_refs": (_find_tool_result(state["tool_results"], "policy_rulebook_probe") or {}).get("facts", {}).get("policy_refs", []) or [],
         "critique": state.get("critique"),
         "hitl_response": (state["body_evidence"].get("hitlResponse") or None),
+        "planner_output": state.get("planner_output"),
+        "critic_output": state.get("critic_output"),
+        "verifier_output": state.get("verifier_output"),
+        "reporter_output": state.get("reporter_output"),
     }
     return {
         "final_result": final,
@@ -740,6 +868,7 @@ def build_agent_graph():
     workflow.add_node("execute", execute_node)
     workflow.add_node("critic", critic_node)
     workflow.add_node("verify", verify_node)
+    workflow.add_node("hitl_pause", hitl_pause_node)  # Phase D: HITL 시 run 조기 종료
     workflow.add_node("reporter", reporter_node)
     workflow.add_node("finalizer", finalizer_node)
     workflow.add_edge(START, "screener")
@@ -748,7 +877,8 @@ def build_agent_graph():
     workflow.add_edge("planner", "execute")
     workflow.add_edge("execute", "critic")
     workflow.add_edge("critic", "verify")
-    workflow.add_edge("verify", "reporter")
+    workflow.add_conditional_edges("verify", _route_after_verify, {"hitl_pause": "hitl_pause", "reporter": "reporter"})
+    workflow.add_edge("hitl_pause", END)
     workflow.add_edge("reporter", "finalizer")
     workflow.add_edge("finalizer", END)
     return workflow.compile()
