@@ -27,10 +27,11 @@ MENU_OPTIONS = [
 
 
 def inject_css() -> None:
-    st.markdown(
-        """
+    sidebar_width = "280px"
+    sidebar_padding_top = "1rem"
+    css_template = """
         <style>
-        :root {
+        :root {{
           --mt-primary: #2563eb;
           --mt-primary-soft: #dbeafe;
           --mt-border: #e5e7eb;
@@ -40,149 +41,148 @@ def inject_css() -> None:
           --mt-danger-soft: #fef2f2;
           --mt-success-soft: #ecfdf5;
           --mt-warning-soft: #fffbeb;
-        }
-        .stApp { background: linear-gradient(180deg, #f8fafc 0%, #eef2ff 100%); }
-        [data-testid="stAppViewContainer"] > .main {
+        }}
+        .stApp {{ background: linear-gradient(180deg, #f8fafc 0%, #eef2ff 100%); }}
+        [data-testid="stAppViewContainer"] > .main {{
           background: transparent !important;
-        }
-        [data-testid="block-container"] {
+        }}
+        [data-testid="block-container"] {{
           padding-top: 1.25rem !important;
           padding-bottom: 1.25rem !important;
           max-width: 100% !important;
-        }
+        }}
         .stApp, .stApp p, .stApp li, .stApp label, .stApp span, .stApp div, .stApp small,
-        .stApp strong, .stApp em, .stApp code {
+        .stApp strong, .stApp em, .stApp code {{
           color: var(--mt-text-strong);
-        }
-        .stApp h1, .stApp h2, .stApp h3, .stApp h4, .stApp h5, .stApp h6 {
+        }}
+        .stApp h1, .stApp h2, .stApp h3, .stApp h4, .stApp h5, .stApp h6 {{
           color: var(--mt-text-strong);
-        }
-        header[data-testid="stHeader"] {
+        }}
+        header[data-testid="stHeader"] {{
           background: transparent !important;
           height: 0 !important;
           min-height: 0 !important;
           border: none !important;
           box-shadow: none !important;
-        }
-        header[data-testid="stHeader"] * {
+        }}
+        header[data-testid="stHeader"] * {{
           display: none !important;
-        }
+        }}
 
-        /* ── SIDEBAR ─────────────────────────────────────────── */
-        section[data-testid="stSidebar"] {
+        section[data-testid="stSidebar"] {{
           background: #111827 !important;
           border-right: 1px solid rgba(255,255,255,0.08) !important;
           top: 0 !important;
           padding-top: 0 !important;
           z-index: 999900 !important;
-          min-width: 280px !important;
-        }
-        section[data-testid="stSidebar"] > div:first-child {
-          padding-top: 1rem !important;
-        }
-        section[data-testid="stSidebar"] * { color: #e5e7eb; }
+          min-width: {sidebar_width} !important;
+          max-width: {sidebar_width} !important;
+        }}
+        section[data-testid="stSidebar"] > div:first-child {{
+          padding-top: {sidebar_padding_top} !important;
+        }}
+        section[data-testid="stSidebar"] * {{ color: #e5e7eb; }}
 
-        /* sidebar selectbox */
         section[data-testid="stSidebar"] .stSelectbox [data-baseweb="select"] > div,
-        section[data-testid="stSidebar"] .stSelectbox [data-baseweb="select"] {
+        section[data-testid="stSidebar"] .stSelectbox [data-baseweb="select"] {{
           background-color: rgba(255,255,255,0.07) !important;
           border-color: rgba(255,255,255,0.18) !important;
           border-radius: 10px !important;
-        }
-        section[data-testid="stSidebar"] .stSelectbox [data-baseweb="select"] * {
+        }}
+        section[data-testid="stSidebar"] .stSelectbox [data-baseweb="select"] * {{
           color: #e5e7eb !important;
           background-color: transparent !important;
-        }
+        }}
         section[data-testid="stSidebar"] .stSelectbox svg,
-        section[data-testid="stSidebar"] .stSelectbox svg path {
+        section[data-testid="stSidebar"] .stSelectbox svg path {{
           fill: #e5e7eb !important;
-        }
+        }}
 
-        /* sidebar expander / checkbox / code */
         section[data-testid="stSidebar"] .stCheckbox label,
         section[data-testid="stSidebar"] .stCheckbox span,
         section[data-testid="stSidebar"] .stExpander summary,
         section[data-testid="stSidebar"] .stExpander summary *,
-        section[data-testid="stSidebar"] .stExpander [data-testid="stExpanderDetails"] * {
+        section[data-testid="stSidebar"] .stExpander [data-testid="stExpanderDetails"] * {{
           color: #e5e7eb !important;
-        }
-        section[data-testid="stSidebar"] code {
+        }}
+        section[data-testid="stSidebar"] code {{
           color: #93c5fd !important;
           background: rgba(255,255,255,0.08) !important;
-        }
+        }}
 
-        section[data-testid="stSidebar"] button[data-testid="baseButton-headerNoPadding"] {
+        section[data-testid="stSidebar"] button[data-testid="baseButton-headerNoPadding"] {{
           display: none !important;
-        }
+        }}
         [data-testid="collapsedControl"],
         [data-testid="stSidebarCollapsedControl"],
-        [data-testid="stSidebarCollapseButton"] {
+        [data-testid="stSidebarCollapseButton"] {{
           display: none !important;
-        }
+        }}
         [data-testid="stToolbar"],
-        #MainMenu {
+        #MainMenu {{
           display: none !important;
-        }
-        .mt-sidebar-title { font-size: 1.15rem; font-weight: 800; color: white; margin-bottom: 0.2rem; }
-        .mt-sidebar-sub { font-size: 0.82rem; color: #94a3b8; margin-bottom: 1rem; }
-        .nav-link, .nav-link * { color: #e5e7eb !important; }
-        .nav-link-selected, .nav-link-selected * { color: #ffffff !important; }
-        .mt-page-header {
+        }}
+        .mt-sidebar-title {{ font-size: 1.15rem; font-weight: 800; color: white; margin-bottom: 0.2rem; }}
+        .mt-sidebar-sub {{ font-size: 0.82rem; color: #94a3b8; margin-bottom: 1rem; }}
+        .mt-sidebar-title-row {{ display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; margin-bottom: 0.35rem; }}
+        .nav-link, .nav-link * {{ color: #e5e7eb !important; }}
+        .nav-link-selected, .nav-link-selected * {{ color: #ffffff !important; }}
+        .mt-page-header {{
           padding: 20px 24px; border: 1px solid var(--mt-border); background: rgba(255,255,255,0.92);
           border-radius: 20px; box-shadow: 0 12px 40px rgba(15,23,42,0.05); margin-bottom: 16px;
-        }
-        .mt-page-title { font-size: 1.8rem; font-weight: 800; color: #0f172a; }
-        .mt-page-sub { font-size: 0.95rem; color: var(--mt-text-soft); margin-top: 4px; }
-        .mt-card {
+        }}
+        .mt-page-title {{ font-size: 1.8rem; font-weight: 800; color: #0f172a; }}
+        .mt-page-sub {{ font-size: 0.95rem; color: var(--mt-text-soft); margin-top: 4px; }}
+        .mt-card {{
           padding: 16px 18px; border-radius: 18px; border: 1px solid var(--mt-border);
           background: rgba(255,255,255,0.95); box-shadow: 0 12px 30px rgba(15,23,42,0.04);
           height: 100%;
-        }
-        .mt-case-card {
+        }}
+        .mt-case-card {{
           padding: 14px 16px; border-radius: 18px; border: 1px solid var(--mt-border);
           background: rgba(255,255,255,0.98); box-shadow: 0 8px 22px rgba(15,23,42,0.04);
           margin-bottom: 12px;
-        }
-        .mt-clickable { cursor: pointer; }
-        .mt-case-title { font-size: 0.96rem; font-weight: 800; color: var(--mt-text-strong); }
-        .mt-case-sub { font-size: 0.84rem; color: var(--mt-text-soft); margin-top: 4px; }
-        .mt-kpi {
+        }}
+        .mt-clickable {{ cursor: pointer; }}
+        .mt-case-title {{ font-size: 0.96rem; font-weight: 800; color: var(--mt-text-strong); }}
+        .mt-case-sub {{ font-size: 0.84rem; color: var(--mt-text-soft); margin-top: 4px; }}
+        .mt-kpi {{
           padding: 16px 18px; border-radius: 20px; border: 1px solid var(--mt-border);
           background: rgba(255,255,255,0.96); box-shadow: 0 10px 24px rgba(15,23,42,0.04);
-        }
-        .mt-kpi-label { font-size: 0.82rem; color: var(--mt-text-soft); font-weight: 700; }
-        .mt-kpi-value { font-size: 2rem; font-weight: 800; color: #0f172a; line-height: 1.15; }
-        .mt-kpi-foot { font-size: 0.82rem; color: var(--mt-text-soft); }
-        .mt-section-title { font-size: 1.02rem; font-weight: 800; color: #0f172a; margin-bottom: 10px; }
-        .mt-case-btn { width: 100%; text-align: left; }
-        .mt-badge {
+        }}
+        .mt-kpi-label {{ font-size: 0.82rem; color: var(--mt-text-soft); font-weight: 700; }}
+        .mt-kpi-value {{ font-size: 2rem; font-weight: 800; color: #0f172a; line-height: 1.15; }}
+        .mt-kpi-foot {{ font-size: 0.82rem; color: var(--mt-text-soft); }}
+        .mt-section-title {{ font-size: 1.02rem; font-weight: 800; color: #0f172a; margin-bottom: 10px; }}
+        .mt-case-btn {{ width: 100%; text-align: left; }}
+        .mt-badge {{
           display:inline-block; padding:4px 10px; border-radius:999px; font-size:0.72rem; font-weight:700;
           border:1px solid var(--mt-border); background:#fff; color:#334155; margin-right:6px; margin-bottom:6px;
-        }
-        .mt-badge-blue { background:#eff6ff; color:#1d4ed8; border-color:#bfdbfe; }
-        .mt-badge-red { background:#fef2f2; color:#dc2626; border-color:#fecaca; }
-        .mt-badge-amber { background:#fffbeb; color:#d97706; border-color:#fde68a; }
-        .mt-badge-green { background:#ecfdf5; color:#059669; border-color:#a7f3d0; }
-        .mt-muted { color: var(--mt-text-soft); }
-        div[data-testid="stTabs"] button[role="tab"] { font-weight: 700; }
-        .mt-stream-card {
+        }}
+        .mt-badge-blue {{ background:#eff6ff; color:#1d4ed8; border-color:#bfdbfe; }}
+        .mt-badge-red {{ background:#fef2f2; color:#dc2626; border-color:#fecaca; }}
+        .mt-badge-amber {{ background:#fffbeb; color:#d97706; border-color:#fde68a; }}
+        .mt-badge-green {{ background:#ecfdf5; color:#059669; border-color:#a7f3d0; }}
+        .mt-muted {{ color: var(--mt-text-soft); }}
+        div[data-testid="stTabs"] button[role="tab"] {{ font-weight: 700; }}
+        .mt-stream-card {{
           padding: 14px 16px; border-radius: 16px; border: 1px solid var(--mt-border); background: #fff;
           margin-bottom: 10px;
-        }
-        .mt-scenario-card, .mt-seeded-card {
+        }}
+        .mt-scenario-card, .mt-seeded-card {{
           overflow: visible;
           word-break: break-word;
           width: 100%;
           box-sizing: border-box;
-        }
-        .mt-scenario-meta {
+        }}
+        .mt-scenario-meta {{
           display: flex;
           flex-wrap: wrap;
           gap: 8px;
           margin-top: 8px;
           margin-bottom: 10px;
-        }
-        .mt-meta-pill {
+        }}
+        .mt-meta-pill {{
           display: inline-flex;
           align-items: center;
           padding: 6px 10px;
@@ -193,44 +193,44 @@ def inject_css() -> None:
           font-size: 0.78rem;
           font-weight: 700;
           line-height: 1.1;
-        }
-        .mt-scenario-desc {
+        }}
+        .mt-scenario-desc {{
           min-height: 54px;
-        }
-        .mt-scenario-title {
+        }}
+        .mt-scenario-title {{
           min-height: 52px;
-        }
+        }}
         .mt-scenario-card p, .mt-scenario-card div, .mt-scenario-card span,
         .mt-seeded-card p, .mt-seeded-card div, .mt-seeded-card span,
         .mt-scenario-card [data-testid="stMarkdownContainer"],
-        .mt-seeded-card [data-testid="stMarkdownContainer"] {
+        .mt-seeded-card [data-testid="stMarkdownContainer"] {{
           overflow-wrap: anywhere;
           word-break: break-word;
-        }
+        }}
         .mt-scenario-card .stButton,
-        .mt-scenario-card div[data-testid="stButton"] {
+        .mt-scenario-card div[data-testid="stButton"] {{
           width: 100%;
           max-width: 100%;
           padding: 0;
           box-sizing: border-box;
           overflow: hidden;
-        }
-        .mt-scenario-card .stButton > button {
+        }}
+        .mt-scenario-card .stButton > button {{
           display: block !important;
           width: 100% !important;
           max-width: 100% !important;
           margin: 0 !important;
           box-sizing: border-box !important;
-        }
-        .mt-stream-card * {
+        }}
+        .mt-stream-card * {{
           color: var(--mt-text-strong) !important;
-        }
-        .mt-mini { font-size: 0.78rem; color: var(--mt-text-soft); }
+        }}
+        .mt-mini {{ font-size: 0.78rem; color: var(--mt-text-soft); }}
         div[data-baseweb="tab-list"] button,
         div[data-baseweb="tab-list"] button p,
-        div[data-baseweb="tab-list"] button span {
+        div[data-baseweb="tab-list"] button span {{
           color: var(--mt-text-strong) !important;
-        }
+        }}
         div[data-baseweb="button"] *,
         button[kind] *,
         button[data-testid="baseButton-secondary"] *,
@@ -238,42 +238,42 @@ def inject_css() -> None:
         .stButton button,
         .stButton button *,
         .stDownloadButton button,
-        .stDownloadButton button * {
+        .stDownloadButton button * {{
           color: var(--mt-text-strong) !important;
-        }
+        }}
         .stButton button[kind="primary"],
         .stButton button[kind="primary"] *,
         button[data-testid="baseButton-primary"],
-        button[data-testid="baseButton-primary"] * {
+        button[data-testid="baseButton-primary"] * {{
           color: #ffffff !important;
           background: #2563eb !important;
           border-color: #2563eb !important;
-        }
+        }}
         .stButton button[kind="secondary"],
         .stButton button[kind="secondary"] *,
         button[data-testid="baseButton-secondary"],
-        button[data-testid="baseButton-secondary"] * {
+        button[data-testid="baseButton-secondary"] * {{
           color: #0f172a !important;
           background: #ffffff !important;
           border-color: #cbd5e1 !important;
-        }
+        }}
         .stButton button,
-        .stDownloadButton button {
+        .stDownloadButton button {{
           border-radius: 12px !important;
           font-weight: 700 !important;
           box-shadow: none !important;
-        }
+        }}
         div[role="radiogroup"] label,
         div[role="radiogroup"] p,
-        div[role="radiogroup"] span {
+        div[role="radiogroup"] span {{
           color: var(--mt-text-strong) !important;
-        }
+        }}
         div[role="listbox"] *,
         div[data-baseweb="select"] *,
         div[data-baseweb="input"] *,
-        input, textarea {
+        input, textarea {{
           color: var(--mt-text-strong) !important;
-        }
+        }}
         [data-testid="stMetricLabel"],
         [data-testid="stMetricValue"],
         [data-testid="stMetricDelta"],
@@ -282,78 +282,102 @@ def inject_css() -> None:
         [data-testid="stCaptionContainer"],
         [data-testid="stHeading"],
         [data-testid="stVerticalBlock"],
-        [data-testid="stHorizontalBlock"] {
+        [data-testid="stHorizontalBlock"] {{
           color: var(--mt-text-strong) !important;
-        }
-        [data-testid="stTabs"] button[role="tab"] {
+        }}
+        [data-testid="stTabs"] button[role="tab"] {{
           color: var(--mt-text-strong) !important;
-        }
-        [data-testid="stTabs"] button[role="tab"][aria-selected="true"] {
+        }}
+        [data-testid="stTabs"] button[role="tab"][aria-selected="true"] {{
           color: var(--mt-primary) !important;
-        }
+        }}
         [data-testid="stExpander"] summary,
-        [data-testid="stExpander"] summary * {
+        [data-testid="stExpander"] summary * {{
           color: var(--mt-text-strong) !important;
-        }
+        }}
         [data-testid="stAlert"] *, 
         [data-testid="stInfo"] *,
-        [data-testid="stNotification"] * {
+        [data-testid="stNotification"] * {{
           color: var(--mt-text-strong) !important;
-        }
+        }}
         .stSelectbox label,
         .stTextInput label,
         .stNumberInput label,
         .stSlider label,
         .stRadio label,
         .stCheckbox label,
-        .stTextArea label {
+        .stTextArea label {{
           color: var(--mt-text-strong) !important;
-        }
+        }}
+        /* textarea 배경: 탭/본문과 동일한 밝은 배경 (프롬프트 탭 등) */
+        .stTextArea,
+        [data-testid="stTextArea"],
+        .stTextArea textarea,
+        [data-testid="stTextArea"] textarea,
+        div[data-baseweb="textarea"],
+        .stTextArea [data-baseweb="textarea"],
+        [data-testid="stTextArea"] [data-baseweb="textarea"] {{
+          background: #f8fafc !important;
+          background-color: #f8fafc !important;
+        }}
+        .stTextArea textarea,
+        [data-testid="stTextArea"] textarea,
+        div[data-baseweb="textarea"] textarea {{
+          color: #0f172a !important;
+          border: 1px solid #e2e8f0 !important;
+        }}
 
-        /* ── st.json (문서메타/품질 리포트): 밝은 배경 + 가독성 ──── */
         [data-testid="stJson"],
         div[data-testid="stJson"],
         .mt-card [data-testid="stJson"],
-        .mt-card div[data-testid="stJson"] {
+        .mt-card div[data-testid="stJson"] {{
           background: #f8fafc !important;
           border: 1px solid #e2e8f0 !important;
           border-radius: 10px !important;
           padding: 1rem !important;
-        }
+        }}
         [data-testid="stJson"] *,
         .mt-card [data-testid="stJson"] *,
         .mt-card [data-testid="stJson"] span,
         .mt-card [data-testid="stJson"] div,
-        .mt-card [data-testid="stJson"] pre {
+        .mt-card [data-testid="stJson"] pre {{
           color: #0f172a !important;
           background: transparent !important;
-        }
-        /* 탭 패널 내부 (문서메타/품질 리포트/청크 목록) */
+        }}
         .mt-card [data-testid="stTabs"] [role="tabpanel"],
-        .mt-card [data-testid="stTabs"] > div > div:last-child {
+        .mt-card [data-testid="stTabs"] > div > div:last-child {{
           background: #ffffff !important;
-        }
+        }}
+        /* AI 워크스페이스 케이스 큐: 목록이 많아도 브라우저 스크롤 없이 박스 내 스크롤 */
+        [data-testid="stHorizontalBlock"] > div:first-child [data-testid="stTabs"] [role="tabpanel"] {{
+          max-height: min(50vh, 420px);
+          overflow-y: auto;
+        }}
         .mt-card [data-testid="stTabs"] [role="tabpanel"] *,
         .mt-card [data-testid="stTabs"] [role="tabpanel"] span,
         .mt-card [data-testid="stTabs"] [role="tabpanel"] div,
-        .mt-card [data-testid="stTabs"] [role="tabpanel"] pre {
+        .mt-card [data-testid="stTabs"] [role="tabpanel"] pre {{
           color: #0f172a !important;
-        }
-        /* JSON 블록이 pre/div 등으로 렌더되는 경우 */
+        }}
         .mt-card [data-testid="stVerticalBlock"] pre,
-        .mt-card pre {
+        .mt-card pre {{
           background: #f8fafc !important;
           color: #0f172a !important;
           border: 1px solid #e2e8f0 !important;
           padding: 1rem !important;
           border-radius: 10px !important;
-        }
+        }}
         .mt-card pre *,
-        .mt-card [data-testid="stVerticalBlock"] pre * {
+        .mt-card [data-testid="stVerticalBlock"] pre * {{
           color: #0f172a !important;
-        }
+        }}
         </style>
-        """,
+    """
+    st.markdown(
+        css_template.format(
+            sidebar_width=sidebar_width,
+            sidebar_padding_top=sidebar_padding_top,
+        ),
         unsafe_allow_html=True,
     )
 
@@ -1156,7 +1180,6 @@ def render_ai_workspace_page() -> None:
     render_page_header(
         "AI 워크스페이스",
         "전표 기반 자율형 에이전트가 실제로 추론하고, 도구를 호출하고, 규정 근거를 바탕으로 판단하는 메인 시연 화면입니다.",
-        right_html='<div style="text-align:right"><span class="mt-badge mt-badge-blue">STREAM READY</span><span class="mt-badge">규정 관리</span><span class="mt-badge">정책 설정</span></div>',
     )
     all_data = _get("/api/v1/vouchers?queue=all&limit=50")
     items = all_data.get("items") or []
@@ -1175,7 +1198,10 @@ def render_ai_workspace_page() -> None:
               border: 1px solid #e5e7eb;
               background: rgba(255,255,255,0.95);
               box-shadow: 0 12px 30px rgba(15,23,42,0.04);
-              height: 100%;
+              max-height: min(70vh, 560px);
+              display: flex;
+              flex-direction: column;
+              overflow: hidden;
             }
             """,
         ):
@@ -1296,7 +1322,6 @@ def render_agent_studio_page() -> None:
             if st.button(label, key=f"agent_{agent['agent_id']}", use_container_width=True, type="primary" if int(agent['agent_id']) == int(selected_id) else "secondary"):
                 st.session_state["mt_selected_agent_id"] = agent["agent_id"]
                 st.rerun()
-            st.markdown(_status_badge("COMPLETED" if agent.get("is_active") else "FAILED"), unsafe_allow_html=True)
         st.markdown('</div>', unsafe_allow_html=True)
     with right:
         detail = _get(f"/api/v1/agents/{selected_id}")
@@ -1667,8 +1692,14 @@ def render_demo_control_page() -> None:
 
 def render_sidebar() -> str:
     with st.sidebar:
-        st.markdown('<div class="mt-sidebar-title">Arua Agent AI POC</div>', unsafe_allow_html=True)
-        st.markdown('<div class="mt-sidebar-sub">Agentic AI workspace, studio, policy library, and demo controls.</div>', unsafe_allow_html=True)
+        st.markdown(
+            '<div class="mt-sidebar-title-row"><div class="mt-sidebar-title">Arua Agent AI POC</div></div>',
+            unsafe_allow_html=True,
+        )
+        st.markdown(
+            '<div class="mt-sidebar-sub">Agentic AI workspace, studio, policy library, and demo controls.</div>',
+            unsafe_allow_html=True,
+        )
         options = [item[0] for item in MENU_OPTIONS]
         icons = ["grid", "cpu", "journal-text", "sliders"]
         default_index = options.index(st.session_state.get("mt_menu", options[0])) if st.session_state.get("mt_menu", options[0]) in options else 0
