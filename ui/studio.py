@@ -27,16 +27,31 @@ def render_agent_studio_page() -> None:
     selected_id = st.session_state.get("mt_selected_agent_id") or agents[0]["agent_id"]
     left, right = st.columns([0.28, 0.72])
     with left:
-        render_panel_header("활성 에이전트", "현재 PoC에서 사용 가능한 활성 에이전트 정의입니다.")
-        for agent in agents:
-            with stylable_container(
-                key=f"studio_agent_pick_{agent['agent_id']}",
-                css_styles=f"""{{padding: 10px 10px 8px 10px; border-radius: 14px; border: {'2px solid #2563eb' if int(agent['agent_id']) == int(selected_id) else '1px solid #e5e7eb'}; background: rgba(255,255,255,0.98); box-shadow: 0 6px 18px rgba(15,23,42,0.04); margin-bottom: 0.55rem;}}"""
-            ):
-                st.caption(agent.get("agent_key") or "-")
-                if st.button(agent.get('name') or '-', key=f"agent_{agent['agent_id']}", use_container_width=True, type="primary" if int(agent['agent_id']) == int(selected_id) else "secondary"):
-                    st.session_state["mt_selected_agent_id"] = agent["agent_id"]
-                    st.rerun()
+        # Streamlit ignores CSS padding for widget width — use inner columns for side spacing.
+        with stylable_container(
+            key="studio_active_agent_box",
+            css_styles="""{
+              padding: 1rem 0 1.25rem 0;
+              border-radius: 16px;
+              border: 1px solid #e5e7eb;
+              background: rgba(255,255,255,0.98);
+              box-shadow: 0 8px 22px rgba(15,23,42,0.05);
+              margin-bottom: 1rem;
+              box-sizing: border-box;
+            }"""
+        ):
+            _lpad, mid, _rpad = st.columns([0.05, 0.90, 0.05])
+            with mid:
+                render_panel_header("활성 에이전트", "현재 PoC에서 사용 가능한 활성 에이전트 정의입니다.")
+                for agent in agents:
+                    if st.button(
+                        agent.get("name") or "-",
+                        key=f"agent_{agent['agent_id']}",
+                        use_container_width=True,
+                        type="primary" if int(agent["agent_id"]) == int(selected_id) else "secondary",
+                    ):
+                        st.session_state["mt_selected_agent_id"] = agent["agent_id"]
+                        st.rerun()
     with right:
         detail = get(f"/api/v1/agents/{selected_id}")
         with stylable_container(key=f"studio_hero_{selected_id}", css_styles="""{padding: 18px 20px; border-radius: 18px; border: 1px solid #e5e7eb; background: rgba(255,255,255,0.98); box-shadow: 0 10px 24px rgba(15,23,42,0.05); margin-bottom: 12px;}"""):

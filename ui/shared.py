@@ -31,6 +31,11 @@ def inject_css() -> None:
         .stApp {{ background: linear-gradient(180deg, #f8fafc 0%, #eef2ff 100%); padding-top: 52px !important; }}
         [data-testid="stAppViewContainer"] > .main {{ background: transparent !important; }}
         [data-testid="block-container"] {{ padding-top: 0.75rem !important; padding-bottom: 1.25rem !important; max-width: 100% !important; }}
+        [data-testid="column"] {{ min-width: 0 !important; overflow: hidden !important; }}
+        [data-testid="column"] > div {{ min-width: 0 !important; max-width: 100% !important; overflow: hidden !important; }}
+        [data-testid="column"] [data-testid="stVerticalBlock"] {{ min-width: 0 !important; max-width: 100% !important; }}
+        [data-testid="column"] .stButton {{ min-width: 0 !important; width: 100% !important; max-width: 100% !important; overflow: hidden !important; }}
+        [data-testid="column"] .stButton > button {{ width: 100% !important; max-width: 100% !important; min-width: 0 !important; box-sizing: border-box !important; overflow: hidden !important; text-overflow: ellipsis !important; white-space: nowrap !important; }}
         .stApp, .stApp p, .stApp li, .stApp label, .stApp span, .stApp div, .stApp small, .stApp strong, .stApp em, .stApp code {{ color: var(--mt-text-strong); }}
         .stApp h1, .stApp h2, .stApp h3, .stApp h4, .stApp h5, .stApp h6 {{ color: var(--mt-text-strong); }}
         /* 헤더·사이드바 동일 색상 */
@@ -107,6 +112,17 @@ def inject_css() -> None:
         div[data-baseweb="popover"] li:hover {{ background: #eff6ff !important; }}
         .stChatMessage {{ background: transparent !important; }}
         .stMetric label, .stMetric div {{ color:#0f172a !important; }}
+        [data-testid="stExpanderDetails"] {{ background: #0f172a !important; color: #ffffff !important; }}
+        [data-testid="stExpanderDetails"] *, [data-testid="stExpanderDetails"] pre, [data-testid="stExpanderDetails"] code, [data-testid="stExpanderDetails"] pre span {{ color: #ffffff !important; }}
+        [data-testid="stExpanderDetails"] pre, [data-testid="stExpanderDetails"] code {{ background: #0f172a !important; }}
+        [data-testid="stExpanderDetails"] div[data-testid="stJson"] {{ color: #ffffff !important; background: #0f172a !important; }}
+        [data-testid="stExpanderDetails"] .token {{ color: #ffffff !important; }}
+        [data-testid="stExpanderDetails"] pre, [data-testid="stExpanderDetails"] pre * {{ background: #0f172a !important; color: #ffffff !important; }}
+        [data-testid="stExpanderDetails"] div {{ background: #0f172a !important; }}
+        div[data-baseweb="tab-panel"] [data-testid="stJson"], div[data-baseweb="tab-panel"] [data-testid="stJson"] * {{ background: #0f172a !important; color: #ffffff !important; }}
+        div[data-baseweb="tab-panel"] [data-testid="stCode"], div[data-baseweb="tab-panel"] .stCode {{ background: #0f172a !important; color: #ffffff !important; }}
+        div[data-baseweb="tab-panel"] [data-testid="stCode"] pre, div[data-baseweb="tab-panel"] [data-testid="stCode"] code, div[data-baseweb="tab-panel"] [data-testid="stCode"] pre * {{ background: #0f172a !important; color: #ffffff !important; }}
+        div[data-baseweb="tab-panel"] .stCode pre, div[data-baseweb="tab-panel"] .stCode code, div[data-baseweb="tab-panel"] .stCode pre * {{ background: #0f172a !important; color: #ffffff !important; }}
         .stTabs [data-baseweb="tab-panel"] {{ padding-top: 1rem !important; }}
         .mt-demo-section {{ margin-top: 1.5rem; padding-top: 1.25rem; border-top: 1px solid var(--mt-border); }}
         .mt-demo-section:first-of-type {{ margin-top: 0; padding-top: 0; border-top: none; }}

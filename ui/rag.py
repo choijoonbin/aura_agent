@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import json
 import streamlit as st
 from streamlit_extras.stylable_container import stylable_container
 
 from services.rag_chunk_lab_service import list_rulebook_files, load_rulebook_text, preview_chunks, save_uploaded_rulebook
 from ui.api_client import get
-from ui.shared import render_empty_state, render_kpi_card, render_page_header, render_panel_header, status_badge
+from ui.shared import render_empty_state, render_kpi_card, render_page_header, render_panel_header
 
 
 def render_rag_library_page() -> None:
@@ -34,7 +35,6 @@ def render_rag_library_page() -> None:
                 if st.button(label, key=f"doc_{item['doc_id']}", use_container_width=True, type="primary" if int(item['doc_id']) == int(selected_doc_id) else "secondary"):
                     st.session_state["mt_selected_doc_id"] = item["doc_id"]
                     st.rerun()
-                st.markdown(status_badge(item.get("status")), unsafe_allow_html=True)
         with right:
             if selected_doc_id is not None:
                 detail = get(f"/api/v1/rag/documents/{selected_doc_id}")
@@ -43,9 +43,11 @@ def render_rag_library_page() -> None:
                     st.caption(f"doc_id={detail.get('doc_id')} / type={detail.get('doc_type')} / source={detail.get('source_type')}")
                 tabs = st.tabs(["문서 메타", "품질 리포트", "청크 목록"])
                 with tabs[0]:
-                    st.json({k: detail.get(k) for k in ["status", "version", "effective_from", "effective_to", "lifecycle_status", "active_from", "active_to", "quality_gate_passed", "updated_at"]})
+                    meta = {k: detail.get(k) for k in ["status", "version", "effective_from", "effective_to", "lifecycle_status", "active_from", "active_to", "quality_gate_passed", "updated_at"]}
+                    st.code(json.dumps(meta, indent=2, ensure_ascii=False), language="json")
                 with tabs[1]:
-                    st.json({k: detail.get(k) for k in ["quality_report_passed", "quality_run_id", "input_chunks", "final_chunks", "article_coverage", "noise_rate", "duplicate_rate", "short_chunk_rate", "missing_required", "errors"]})
+                    report = {k: detail.get(k) for k in ["quality_report_passed", "quality_run_id", "input_chunks", "final_chunks", "article_coverage", "noise_rate", "duplicate_rate", "short_chunk_rate", "missing_required", "errors"]}
+                    st.code(json.dumps(report, indent=2, ensure_ascii=False), language="json")
                 with tabs[2]:
                     for chunk in (detail.get("chunks") or [])[:50]:
                         with st.expander(f"{chunk.get('regulation_article') or '-'} / {chunk.get('parent_title') or '-'} / chunk_id={chunk.get('chunk_id')}"):
