@@ -5,7 +5,7 @@ from typing import Any, Iterator
 
 import requests
 import streamlit as st
-from streamlit_extras.stylable_container import stylable_container
+from ui.shared import stylable_container
 
 from ui.api_client import API, get, post
 from ui.shared import (
@@ -219,10 +219,25 @@ def render_timeline_cards(events: list[dict[str, Any]], *, view_mode: str = "bus
                     st.json(payload)
 
 
+# 대표 메시지 선택 우선순위 (docs/langgraphPlan3.md 추가답변)
+_REPR_MSG_PRIORITY = ["NODE_END", "GATE_APPLIED", "TOOL_RESULT", "PLAN_READY", "NODE_START"]
+
+
+def _pick_representative_message(bucket: dict[str, Any]) -> str:
+    """우선순위에 따라 대표 메시지 1개 선택. NODE_END.message > GATE_APPLIED.message > TOOL_RESULT.observation > PLAN_READY.message > NODE_START.message"""
+    by_type = bucket.get("by_type") or {}
+    for ev in _REPR_MSG_PRIORITY:
+        v = by_type.get(ev)
+        if v and str(v).strip():
+            return str(v).strip()
+    msgs = bucket.get("messages") or []
+    return msgs[-1] if msgs else "-"
+
+
 def summarize_process_timeline(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
     node_order = ["screener", "intake", "planner", "execute", "critic", "verify", "hitl_pause", "reporter", "finalizer"]
     node_labels = {
-        "screener": "신호 분석 / 케이스 분류",
+        "screener": "전표 분석 / 케이스 분류",
         "intake": "입력 해석",
         "planner": "조사 계획 수립",
         "execute": "근거 수집 실행",
@@ -252,10 +267,12 @@ def summarize_process_timeline(events: list[dict[str, Any]]) -> list[dict[str, A
                 "observations": [],
                 "tool_count": 0,
                 "last_event_type": None,
+                "by_type": {},
+                "first_tool": None,
+                "last_tool": None,
             },
         )
-        # SCREENING_RESULT is a terminal event for the screener node
-        ev_type = payload.get("event_type")
+        ev_type = str(payload.get("event_type") or "").upper()
         if ev_type == "SCREENING_RESULT":
             bucket["last_event_type"] = "NODE_END"
         else:
@@ -272,8 +289,23 @@ def summarize_process_timeline(events: list[dict[str, Any]]) -> list[dict[str, A
             bucket["actions"].append(str(action))
         if observation:
             bucket["observations"].append(str(observation))
-        if str(payload.get("event_type") or "").upper() in {"TOOL_CALL", "TOOL_RESULT", "TOOL_SKIPPED"}:
+        if ev_type in {"TOOL_CALL", "TOOL_RESULT", "TOOL_SKIPPED"}:
             bucket["tool_count"] += 1
+            tool_name = payload.get("tool") or ""
+            if tool_name:
+                if bucket["first_tool"] is None:
+                    bucket["first_tool"] = tool_name
+                bucket["last_tool"] = tool_name
+        if ev_type == "NODE_END" and message:
+            bucket.setdefault("by_type", {})["NODE_END"] = message
+        elif ev_type == "GATE_APPLIED" and message:
+            bucket.setdefault("by_type", {})["GATE_APPLIED"] = message
+        elif ev_type == "TOOL_RESULT" and observation:
+            bucket.setdefault("by_type", {})["TOOL_RESULT"] = observation
+        elif ev_type == "PLAN_READY" and message:
+            bucket.setdefault("by_type", {})["PLAN_READY"] = message
+        elif ev_type == "NODE_START" and message:
+            bucket.setdefault("by_type", {})["NODE_START"] = message
 
     result = []
     for node in node_order:
@@ -285,11 +317,13 @@ def summarize_process_timeline(events: list[dict[str, Any]]) -> list[dict[str, A
                 "node": node,
                 "label": bucket["label"],
                 "started_at": bucket["started_at"],
-                "summary": (bucket["messages"][-1] if bucket["messages"] else "-"),
+                "summary": _pick_representative_message(bucket),
                 "thought": (bucket["thoughts"][-1] if bucket["thoughts"] else ""),
                 "action": (bucket["actions"][-1] if bucket["actions"] else ""),
                 "observation": (bucket["observations"][-1] if bucket["observations"] else ""),
                 "tool_count": bucket["tool_count"],
+                "first_tool": bucket.get("first_tool"),
+                "last_tool": bucket.get("last_tool"),
                 "last_event_type": bucket["last_event_type"] or "-",
             }
         )
@@ -317,10 +351,16 @@ def render_process_story(events: list[dict[str, Any]], *, debug_mode: bool = Fal
                 )
             st.write(row["summary"])
             meta = []
-            if row["tool_count"]:
-                meta.append(f"도구 이벤트 {row['tool_count']}건")
-            if row["observation"]:
-                meta.append(f"관찰: {row['observation']}")
+            if row.get("tool_count"):
+                meta.append(f"도구 호출 {row['tool_count']}건")
+            if row.get("first_tool") or row.get("last_tool"):
+                ft, lt = row.get("first_tool"), row.get("last_tool")
+                if ft and lt and ft != lt:
+                    meta.append(f"첫 도구: {ft} → 마지막: {lt}")
+                elif ft:
+                    meta.append(f"도구: {ft}")
+            if row.get("observation"):
+                meta.append(f"관찰: {(row['observation'] or '')[:80]}{'…' if len(str(row.get('observation') or '')) > 80 else ''}")
             if meta:
                 st.caption(" · ".join(meta))
             detail_cols = st.columns(2)
@@ -388,13 +428,13 @@ def build_workspace_plan_steps(latest_bundle: dict[str, Any]) -> list[dict[str, 
     timeline = latest_bundle.get("timeline") or []
     node_order = ["screener", "intake", "planner", "execute", "critic", "verify", "hitl_pause", "reporter", "finalizer"]
     meta = {
-        "screener": ("신호 분석 / 케이스 분류", "원시 전표 신호를 분석해 위반 유형을 식별합니다 (BE 힌트 없음)."),
-        "intake": ("입력 해석", "전표 입력값과 위험 신호를 정규화합니다."),
+        "screener": ("전표 분석 / 케이스 분류", "전표 데이터(발생 시각·근태·MCC·예산 등)를 분석해 위반 유형을 식별합니다."),
+        "intake": ("입력 해석", "전표 입력값과 위험 지표를 정규화합니다."),
         "planner": ("조사 계획 수립", "검증할 사실과 사용할 skill 순서를 계획합니다."),
         "execute": ("근거 수집 실행", "휴일/예산/업종/전표/규정 근거를 실제로 조회합니다."),
         "critic": ("비판적 검토", "과잉 주장과 반례 가능성을 다시 점검합니다."),
         "verify": ("검증 및 HITL 판단", "자동 판정 가능 여부와 사람 검토 필요 여부를 결정합니다."),
-        "hitl_pause": ("HITL 대기", "사람 검토 필요로 run 조기 종료. HITL 응답 후 새 run으로 재개됩니다."),
+        "hitl_pause": ("HITL 대기", "사람 검토 필요로 일시정지. HITL 응답 후 같은 run(thread)으로 재개됩니다."),
         "reporter": ("보고 문장 생성", "근거 중심 설명 문장과 최종 요약을 만듭니다."),
         "finalizer": ("결과 확정", "상태, 점수, 이력, 저장 payload를 최종 확정합니다."),
     }
@@ -546,7 +586,7 @@ def render_workspace_case_queue(items: list[dict[str, Any]], selected_key: str |
 def render_workspace_chat_panel(selected: dict[str, Any], latest_bundle: dict[str, Any]) -> None:
     result = ((latest_bundle.get("result") or {}).get("result") or {})
     timeline = latest_bundle.get("timeline") or []
-    render_panel_header("에이전트 대화 (라이브 스트림)", "실행 중인 에이전트의 reasoning note·도구 호출을 실시간으로 표시합니다.")
+    render_panel_header("에이전트 대화", "실제 LangGraph 실행 중 공개 가능한 작업 메모 스트림(reasoning note·도구 호출)을 실시간으로 표시합니다.")
     st.markdown(
         status_badge(result.get("status") if result else selected.get("case_status"))
         + severity_badge(result.get("severity") if result else selected.get("severity"))
@@ -645,7 +685,7 @@ def render_workspace_results(latest_bundle: dict[str, Any], debug_mode: bool) ->
     result = ((latest_bundle.get("result") or {}).get("result") or {})
     critique = result.get("critique") or {}
     policy_refs = result.get("policy_refs") or []
-    render_panel_header("결과 (verdict + score + citation)", "상태, 점수, 규정 근거, 품질 신호를 하나의 결과 화면으로 보여줍니다.")
+    render_panel_header("결과", "최종 판단 + 규정 근거 + 검증 메모 + run diagnostics를 하나의 결과 화면으로 보여줍니다.")
     st.markdown(
         f"""
         <div class="mt-card-quiet">
@@ -662,6 +702,23 @@ def render_workspace_results(latest_bundle: dict[str, Any], debug_mode: bool) ->
     if result.get("score_breakdown"):
         sb = result["score_breakdown"]
         st.caption(f"정책점수 {sb.get('policy_score', '-')} · 근거점수 {sb.get('evidence_score', '-')} · 최종점수 {sb.get('final_score', '-')}")
+    verification_summary = result.get("verification_summary") or {}
+    if verification_summary:
+        st.markdown("#### Evidence verification")
+        v1, v2, v3 = st.columns(3)
+        with v1:
+            ratio = verification_summary.get("coverage_ratio")
+            st.metric("근거 연결률", f"{(ratio or 0) * 100:.0f}%" if ratio is not None else "-", f"{verification_summary.get('covered', 0)}/{verification_summary.get('total', 0)}")
+        with v2:
+            missing = verification_summary.get("missing_citations") or []
+            st.metric("누락 citation 수", str(len(missing)), "검증 대상 대비")
+        with v3:
+            gate = verification_summary.get("gate_policy") or "-"
+            st.metric("게이트 판정", str(gate), "")
+        if verification_summary.get("missing_citations"):
+            with st.expander("누락된 검증 대상 문장", expanded=False):
+                for i, s in enumerate(verification_summary["missing_citations"], 1):
+                    st.caption(f"{i}. {(s or '')[:120]}{'…' if len(str(s or '')) > 120 else ''}")
     st.markdown('<div class="mt-divider"></div>', unsafe_allow_html=True)
     st.markdown("#### 규정 근거")
     if policy_refs:
@@ -728,7 +785,7 @@ def render_ai_workspace_page() -> None:
                 exec_logs = build_workspace_execution_logs(latest_bundle)
                 tabs = st.tabs(["사고 과정", "작업 계획", "실행 로그", "결과"])
                 with tabs[0]:
-                    render_panel_header("사고 과정 (실행 후 구조화 리뷰)", "분석 완료 후 노드별 판단·행동 요약입니다.")
+                    render_panel_header("사고 과정", "실행 후 같은 이벤트를 노드 기준으로 구조화한 리뷰 화면입니다.")
                     render_process_story(timeline, debug_mode=debug_mode)
                 with tabs[1]:
                     render_panel_header("작업 계획", "Planner가 생성한 실행 단계와 현재 진행 상태입니다.")
@@ -792,6 +849,28 @@ def render_ai_workspace_page() -> None:
                                     c4.metric("Fallback 비율", f"{(diag.get('fallback_usage_rate') or 0) * 100:.1f}%" if diag.get("fallback_usage_rate") is not None else "-", f"이벤트 {diag.get('event_count', 0)}건")
                             except Exception:
                                 st.caption("진단 API를 불러올 수 없습니다.")
+                    result_result = (latest_bundle.get("result") or {}).get("result") or {}
+                    retrieval_snapshot = result_result.get("retrieval_snapshot")
+                    if retrieval_snapshot:
+                        with st.expander("Retrieval 인용 현황", expanded=False):
+                            candidates = retrieval_snapshot.get("candidates_after_rerank") or []
+                            adopted = retrieval_snapshot.get("adopted_citations") or []
+                            st.caption("표시 기준: after rerank 후보 · 최종 채택 citation · 채택 이유(adoption_reason)")
+                            st.caption(f"후보 청크 {len(candidates)}건 · 채택 인용 {len(adopted)}건")
+                            if adopted:
+                                st.markdown("**최종 채택 citation**")
+                                for i, c in enumerate(adopted[:10], 1):
+                                    art = c.get("article") or c.get("title") or "-"
+                                    reason = c.get("adoption_reason") or "규정 근거로 채택"
+                                    st.markdown(f"**{i}. {art}**  \n채택 이유: {reason}")
+                            if candidates:
+                                st.markdown("**후보 목록 (after rerank)**")
+                                for i, g in enumerate(candidates[:5], 1):
+                                    reason = g.get("adoption_reason")
+                                    line = f"{i}. {g.get('article') or '-'} · {g.get('parent_title') or '-'} (score={g.get('retrieval_score') or '-'})"
+                                    if reason:
+                                        line += f" — {reason}"
+                                    st.caption(line)
                     render_hitl_panel(latest_bundle)
                     st.markdown("#### 분석 이력")
                     render_hitl_history(latest_bundle.get("history") or [])

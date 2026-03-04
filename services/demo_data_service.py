@@ -7,7 +7,7 @@ from typing import Any
 from sqlalchemy import and_, func, select
 from sqlalchemy.orm import Session
 
-from db.models import FiDocHeader, FiDocItem
+from db.models import AgentCase, FiDocHeader, FiDocItem
 from utils.config import settings
 
 
@@ -16,7 +16,7 @@ from utils.config import settings
 #     preferredMccCodes(HOLIDAY)=5813,5812,5814 / LIMIT=7011,4722,5812 / PRIVATE=7992,5813,7011 / UNUSUAL=4722,7011,7992,5813 / DEFAULT=5812,5814
 #     resolveBudgetExceededFlag: SPLIT_PAYMENT,LIMIT_EXCEED,OVER_LIMIT→Y / UNUSUAL→random / else N
 #     HOLIDAY_USAGE는 budget N (휴일 사용 의심은 한도초과와 별개).
-# BE screen-batch 요청에는 intended_risk_type 미포함 → Aura가 원시 신호만으로 스크리닝.
+# BE screen-batch 요청에는 intended_risk_type 미포함 → Aura가 전표 원시 데이터만으로 스크리닝.
 SCENARIO_PROFILES: dict[str, dict[str, Any]] = {
     "HOLIDAY_USAGE": {
         "label": "휴일 사용 의심",
@@ -224,7 +224,8 @@ def list_seeded_demo_cases(db: Session) -> list[dict[str, Any]]:
         .subquery()
     )
     stmt = (
-        select(FiDocHeader, amount_sub.c.amount)
+        select(FiDocHeader, amount_sub.c.amount, AgentCase.case_type, AgentCase.status)
+        .select_from(FiDocHeader)
         .outerjoin(
             amount_sub,
             and_(
@@ -232,6 +233,15 @@ def list_seeded_demo_cases(db: Session) -> list[dict[str, Any]]:
                 amount_sub.c.bukrs == FiDocHeader.bukrs,
                 amount_sub.c.belnr == FiDocHeader.belnr,
                 amount_sub.c.gjahr == FiDocHeader.gjahr,
+            ),
+        )
+        .outerjoin(
+            AgentCase,
+            and_(
+                AgentCase.tenant_id == FiDocHeader.tenant_id,
+                AgentCase.bukrs == FiDocHeader.bukrs,
+                AgentCase.belnr == FiDocHeader.belnr,
+                AgentCase.gjahr == FiDocHeader.gjahr,
             ),
         )
         .where(
@@ -242,7 +252,10 @@ def list_seeded_demo_cases(db: Session) -> list[dict[str, Any]]:
     )
     rows = db.execute(stmt).all()
     out: list[dict[str, Any]] = []
-    for header, amount in rows:
+    for header, amount, ac_case_type, ac_status in rows:
+        # 스크리닝/분석 후 갱신된 case_type·case_status 반영 (없으면 시나리오 risk_type·신규)
+        case_type = ac_case_type if ac_case_type else (header.intended_risk_type or "UNSCREENED")
+        case_status = ac_status if ac_status else "NEW"
         out.append(
             {
                 "voucher_key": f"{header.bukrs}-{header.belnr}-{header.gjahr}",
@@ -251,6 +264,8 @@ def list_seeded_demo_cases(db: Session) -> list[dict[str, Any]]:
                 "amount": float(amount) if amount is not None else None,
                 "currency": header.waers,
                 "risk_type": header.intended_risk_type,
+                "case_type": case_type,
+                "case_status": case_status,
                 "hr_status": header.hr_status,
                 "mcc_code": header.mcc_code,
                 "budget_exceeded": (header.budget_exceeded_flag or "").upper() == "Y",

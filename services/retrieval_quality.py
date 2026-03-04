@@ -1,10 +1,25 @@
 """
 Phase F: retrieval 고도화 — rerank 확장점, evidence verification 계층, 품질 비교 모드.
-현재는 스텁/훅으로 두고, cross-encoder·LLM rerank·독립 검증 계층은 후속 구현.
+1차: cross-encoder rerank (sentence-transformers 선택). 2차: LLM rerank 옵션.
 """
 from __future__ import annotations
 
 from typing import Any
+
+# 1차 구현: cross-encoder. 미설치 시 입력 그대로 반환
+_CROSS_ENCODER_MODEL: Any = None
+
+
+def _get_cross_encoder(model_name: str = "cross-encoder/ms-marco-MiniLM-L6-v2"):
+    global _CROSS_ENCODER_MODEL
+    if _CROSS_ENCODER_MODEL is not None:
+        return _CROSS_ENCODER_MODEL
+    try:
+        from sentence_transformers import CrossEncoder
+        _CROSS_ENCODER_MODEL = CrossEncoder(model_name)
+        return _CROSS_ENCODER_MODEL
+    except Exception:
+        return None
 
 
 def rerank_with_cross_encoder(
@@ -14,10 +29,24 @@ def rerank_with_cross_encoder(
     model_name: str | None = None,
 ) -> list[dict[str, Any]]:
     """
-    (스텁) cross-encoder 또는 LLM rerank 적용.
-    현재는 입력 그대로 반환. 실제 모델 연동 시 여기서 재정렬.
+    cross-encoder rerank 적용. sentence-transformers 미설치 시 입력 그대로 반환.
     """
-    return groups
+    if not groups or not query or not query.strip():
+        return groups
+    model = _get_cross_encoder(model_name or "cross-encoder/ms-marco-MiniLM-L6-v2")
+    if model is None:
+        return groups
+    try:
+        passages = [g.get("chunk_text") or " ".join(g.get("snippets") or []) or "" for g in groups]
+        if not any(passages):
+            return groups
+        pairs = [(query.strip(), p) for p in passages]
+        scores = model.predict(pairs)
+        for i, g in enumerate(groups):
+            g["cross_encoder_score"] = float(scores[i]) if i < len(scores) else 0.0
+        return sorted(groups, key=lambda x: x.get("cross_encoder_score", 0), reverse=True)
+    except Exception:
+        return groups
 
 
 def verify_evidence_coverage(
@@ -25,12 +54,10 @@ def verify_evidence_coverage(
     retrieved_chunks: list[dict[str, Any]],
 ) -> dict[str, Any]:
     """
-    (스텁) 문장이 검색된 청크에 근거하는지 검증.
-    반환: {"covered": int, "total": int, "details": [...]}
+    evidence_verification 모듈 위임. 문장–청크 coverage 검증 및 gate_policy 반환.
     """
-    total = len(sentences) if sentences else 0
-    covered = sum(1 for s in (sentences or []) if (s.get("citations") or []))
-    return {"covered": covered, "total": total, "details": []}
+    from services.evidence_verification import verify_evidence_coverage as _verify
+    return _verify(sentences, retrieved_chunks)
 
 
 def retrieval_quality_comparison(

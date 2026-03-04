@@ -14,3 +14,7 @@ langchain>=0.3.0
 
 # Langfuse (observability, optional)
 langfuse>=2.0.0
+
+# Phase F cross-encoder rerank (optional). 미설치 시 rerank 단계는 스킵되고 기존 lexical 순위 유지.
+# 설치: pip install torch sentence-transformers  (Python/torch 호환 환경에서만)
+# sentence-transformers>=3.0.0

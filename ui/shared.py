@@ -1,12 +1,34 @@
 from __future__ import annotations
 
+import io
 from datetime import datetime, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
+import re
+
+import matplotlib
+import matplotlib.patches as mpatches
+import matplotlib.pyplot as plt
 import streamlit as st
-from graphviz import Digraph
-from streamlit_extras.stylable_container import stylable_container
+
+matplotlib.use("Agg")  # GUI 백엔드 없이 PNG 생성 (서버 환경)
+
+
+def stylable_container(key: str, css_styles: str | list[str]):
+    """streamlit_extras.stylable_container의 iframe-free 대체 구현.
+    
+    streamlit-extras 0.7.8은 내부적으로 container.html()을 사용해 iframe을 생성하고,
+    브라우저가 'allow-scripts + allow-same-origin' iframe 경고를 초기 로드 시 1회 출력함.
+    본 구현은 st.markdown()으로 CSS를 직접 주입해 iframe을 완전히 제거한다.
+    """
+    class_name = re.sub(r"[^a-zA-Z0-9_-]", "-", key.strip())
+    class_name = f"st-key-{class_name}"
+    if isinstance(css_styles, str):
+        css_styles = [css_styles]
+    style_parts = "".join(f"\n.{class_name} {s}" for s in css_styles)
+    st.markdown(f"<style>{style_parts}\n</style>", unsafe_allow_html=True)
+    return st.container(key=class_name)
 
 
 def inject_css() -> None:
@@ -216,6 +238,30 @@ HR_STATUS_DISPLAY_NAMES: dict[str, str] = {
     "BUSINESS_TRIP": "출장",
 }
 
+# 스킬 스키마 필드명 → 한글 라벨 (에이전트 스튜디오 발표용)
+FIELD_LABELS_KO: dict[str, str] = {
+    "case_id": "케이스 ID",
+    "body_evidence": "전표·증거",
+    "intended_risk_type": "의도된 위험 유형",
+    "occurred_at": "발생 시각",
+    "amount": "금액",
+    "budget_exceeded": "예산 초과",
+    "mcc_code": "MCC 코드",
+    "hr_status": "근태 상태",
+    "document": "전표 문서",
+}
+
+
+def get_tool_display_summary_ko(
+    tool: Any,
+    skill_display_summary_ko: str | None,
+) -> str:
+    """발표용 한글 요약: 고정 문구 우선, 없으면 description 기반 자동 생성."""
+    if skill_display_summary_ko and str(skill_display_summary_ko).strip():
+        return str(skill_display_summary_ko).strip()
+    desc = getattr(tool, "description", None) or ""
+    return f"입력/출력: {desc[:120]}{'…' if len(str(desc)) > 120 else ''}" if desc else "—"
+
 
 def mcc_display_name(mcc_code: str | None) -> str:
     if not mcc_code:
@@ -337,50 +383,143 @@ def render_legend(items: list[tuple[str, str]]) -> None:
     st.markdown("".join(html), unsafe_allow_html=True)
 
 
-def draw_agent_graph() -> Digraph:
-    g = Digraph("finance_aura_agentic")
-    g.attr(rankdir="LR")
-    g.attr("graph", bgcolor="transparent", pad="0.25", nodesep="0.34", ranksep="0.42")
-    g.attr("node", shape="box", style="rounded,filled", color="#a78bfa", fillcolor="#f5f3ff", fontname="Helvetica", fontsize="12")
-    g.attr("edge", color="#94a3b8", penwidth="1.2")
-    for key, label in [("start", "START"), ("intake", "Intake Agent"), ("planner", "Planner Agent"), ("executor", "Execute Agent"), ("critic", "Critic Agent"), ("verifier", "Verifier Agent"), ("reporter", "Reporter Agent"), ("finalizer", "Finalizer"), ("end", "END")]:
-        g.node(key, label)
-    g.node("hitl", "HITL Review", shape="box", style="rounded,dashed", color="#f59e0b", fillcolor="#fffbeb")
-    g.edge("start", "intake")
-    g.edge("intake", "planner")
-    g.edge("planner", "executor")
-    g.edge("executor", "critic")
-    g.edge("critic", "verifier")
-    g.edge("verifier", "hitl", label="if needed")
-    g.edge("verifier", "reporter", label="or continue")
-    g.edge("hitl", "reporter", label="resume with human input")
-    g.edge("reporter", "finalizer")
-    g.edge("finalizer", "end")
-    return g
+def _draw_graph_png(
+    nodes: list[tuple[str, str, str]],
+    edges: list[tuple[str, str, str]],
+    pos: dict[str, tuple[float, float]],
+    figsize: tuple[float, float] = (9, 3.5),
+    hitl_nodes: set[str] | None = None,
+    skill_nodes: set[str] | None = None,
+) -> bytes:
+    """matplotlib로 노드/엣지를 그려 PNG 바이트로 반환. graphviz dot 바이너리 불필요."""
+    hitl_nodes = hitl_nodes or set()
+    skill_nodes = skill_nodes or set()
+    fig, ax = plt.subplots(figsize=figsize)
+    ax.set_aspect("equal")
+    ax.axis("off")
+    fig.patch.set_facecolor("#f8fafc")
+
+    node_w, node_h = 1.8, 0.46
+
+    def _node_color(key: str) -> tuple[str, str]:
+        if key in hitl_nodes:
+            return "#fffbeb", "#f59e0b"
+        if key in skill_nodes:
+            return "#eff6ff", "#93c5fd"
+        return "#f5f3ff", "#a78bfa"
+
+    label_map = {k: lbl for k, lbl, _ in nodes}
+
+    for key, label, _ in nodes:
+        x, y = pos[key]
+        fc, ec = _node_color(key)
+        ls = "--" if key in hitl_nodes else "-"
+        rect = mpatches.FancyBboxPatch(
+            (x - node_w / 2, y - node_h / 2), node_w, node_h,
+            boxstyle="round,pad=0.06", facecolor=fc, edgecolor=ec, linewidth=1.4, linestyle=ls,
+        )
+        ax.add_patch(rect)
+        ax.text(x, y, label, ha="center", va="center", fontsize=7.5, color="#1e293b", fontweight="500")
+
+    for src, dst, elabel in edges:
+        if src not in pos or dst not in pos:
+            continue
+        sx, sy = pos[src]
+        dx, dy = pos[dst]
+        dx_off = dx - node_w / 2 - 0.06 if dx > sx else dx + node_w / 2 + 0.06
+        sx_off = sx + node_w / 2 + 0.06 if dx > sx else sx - node_w / 2 - 0.06
+        mid_x = (sx_off + dx_off) / 2
+        mid_y = (sy + dy) / 2
+        ax.annotate(
+            "", xy=(dx_off, dy), xytext=(sx_off, sy),
+            arrowprops=dict(arrowstyle="-|>", color="#94a3b8", lw=1.1),
+        )
+        if elabel:
+            ax.text(mid_x, mid_y + 0.1, elabel, ha="center", va="bottom", fontsize=6, color="#64748b")
+
+    xs = [p[0] for p in pos.values()]
+    ys = [p[1] for p in pos.values()]
+    margin = 1.2
+    ax.set_xlim(min(xs) - margin, max(xs) + margin)
+    ax.set_ylim(min(ys) - 0.8, max(ys) + 0.8)
+    plt.tight_layout(pad=0.1)
+
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=130, bbox_inches="tight", facecolor=fig.get_facecolor())
+    plt.close(fig)
+    return buf.getvalue()
 
 
-def draw_skill_execution_graph() -> Digraph:
-    g = Digraph("finance_aura_skill_flow")
-    g.attr(rankdir="TB")
-    g.attr("graph", bgcolor="transparent", pad="0.25", nodesep="0.28", ranksep="0.38")
-    g.attr("node", shape="box", style="rounded,filled", color="#93c5fd", fillcolor="#eff6ff", fontname="Helvetica", fontsize="12")
-    g.attr("edge", color="#94a3b8", penwidth="1.2")
-    for node in [("execute", "execute"), ("holiday", "holiday_compliance_probe"), ("budget", "budget_risk_probe"), ("merchant", "merchant_risk_probe"), ("document", "document_evidence_probe"), ("policy", "policy_rulebook_probe"), ("legacy", "legacy_aura_deep_audit"), ("score", "score_breakdown")]:
-        g.node(*node)
-    for target in ["holiday", "budget", "merchant", "document", "policy"]:
-        g.edge("execute", target)
-    g.edge("execute", "legacy", label="conditional")
-    for source in ["holiday", "budget", "merchant", "document", "policy", "legacy"]:
-        g.edge(source, "score")
-    return g
+@st.cache_data(show_spinner=False)
+def draw_agent_graph() -> bytes:
+    """상위 오케스트레이션 그래프를 PNG 바이트로 반환. 첫 렌더 후 캐싱."""
+    nodes = [
+        ("start", "START", ""),
+        ("intake", "Intake Agent", ""),
+        ("planner", "Planner Agent", ""),
+        ("executor", "Execute Agent", ""),
+        ("critic", "Critic Agent", ""),
+        ("verifier", "Verifier Agent", ""),
+        ("hitl", "HITL Review", ""),
+        ("reporter", "Reporter Agent", ""),
+        ("finalizer", "Finalizer", ""),
+        ("end", "END", ""),
+    ]
+    # 노드 좌→우 일렬 + HITL은 위쪽 분기
+    x_main = [0, 1.9, 3.8, 5.7, 7.6, 9.5, 11.4, 13.3, 15.2]
+    keys_main = ["start", "intake", "planner", "executor", "critic", "verifier", "reporter", "finalizer", "end"]
+    pos = {k: (x_main[i], 0.0) for i, k in enumerate(keys_main)}
+    pos["hitl"] = (9.5, 1.2)
+
+    edges = [
+        ("start", "intake", ""), ("intake", "planner", ""), ("planner", "executor", ""),
+        ("executor", "critic", ""), ("critic", "verifier", ""),
+        ("verifier", "hitl", "if needed"), ("verifier", "reporter", "or continue"),
+        ("hitl", "reporter", "resume"), ("reporter", "finalizer", ""), ("finalizer", "end", ""),
+    ]
+    return _draw_graph_png(nodes, edges, pos, figsize=(16, 3.6), hitl_nodes={"hitl"})
 
 
-def render_graph_image(title: str, image_bytes: bytes | None, fallback_graph: Digraph, caption: str) -> None:
+@st.cache_data(show_spinner=False)
+def draw_skill_execution_graph() -> bytes:
+    """하위 실행 스킬 그래프를 PNG 바이트로 반환. 첫 렌더 후 캐싱."""
+    skill_keys = ["holiday", "budget", "merchant", "document", "policy"]
+    nodes = [
+        ("execute", "execute", ""),
+        ("holiday", "holiday_compliance_probe", ""),
+        ("budget", "budget_risk_probe", ""),
+        ("merchant", "merchant_risk_probe", ""),
+        ("document", "document_evidence_probe", ""),
+        ("policy", "policy_rulebook_probe", ""),
+        ("legacy", "legacy_aura_deep_audit", ""),
+        ("score", "score_breakdown", ""),
+    ]
+    # execute 중앙 상단, skills 가로 일렬, legacy 오른쪽 끝, score 하단 중앙
+    xs = [-4.5, -2.25, 0, 2.25, 4.5]
+    pos: dict[str, tuple[float, float]] = {"execute": (0.0, 2.2), "score": (0.0, -2.2), "legacy": (6.5, 0.0)}
+    for i, k in enumerate(skill_keys):
+        pos[k] = (xs[i], 0.0)
+
+    edges = [(("execute", k, "") for k in skill_keys)] + [("execute", "legacy", "conditional")]
+    edges_flat: list[tuple[str, str, str]] = [("execute", k, "") for k in skill_keys]
+    edges_flat.append(("execute", "legacy", "cond."))
+    for k in skill_keys + ["legacy"]:
+        edges_flat.append((k, "score", ""))
+
+    return _draw_graph_png(
+        nodes, edges_flat, pos, figsize=(14, 5.5),
+        skill_nodes=set(skill_keys) | {"execute", "legacy", "score"},
+    )
+
+
+def render_graph_image(title: str, image_bytes: bytes | None, fallback_graph: bytes | None, caption: str) -> None:
+    """그래프를 PNG(st.image)로 표시. st.graphviz_chart를 사용하지 않아 콘솔 에러 없음."""
     st.markdown(f"**{title}**")
     _, center, _ = st.columns([0.08, 0.84, 0.08])
     with center:
-        if image_bytes:
-            st.image(image_bytes, use_container_width=False, width=520)
+        png = image_bytes or fallback_graph
+        if png:
+            st.image(png, use_container_width=True)
         else:
-            st.graphviz_chart(fallback_graph, use_container_width=True)
+            st.caption("그래프를 표시할 수 없습니다.")
         st.caption(caption)

@@ -60,3 +60,19 @@ def get_run_diagnostics(
         "lineage_mode": (lineage or {}).get("mode"),
         "parent_run_id": (lineage or {}).get("parent_run_id"),
     }
+
+
+def compare_runs_diagnostics(
+    run_diagnostics_list: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """
+    여러 run의 diagnostics를 한 번에 비교용으로 반환.
+    run_diagnostics_list: get_run_diagnostics() 결과 리스트 (순서는 run_id 순).
+    """
+    if not run_diagnostics_list:
+        return {"run_ids": [], "diagnostics": [], "comparison_ready": False}
+    return {
+        "run_ids": [d.get("run_id") for d in run_diagnostics_list],
+        "diagnostics": run_diagnostics_list,
+        "comparison_ready": True,
+    }

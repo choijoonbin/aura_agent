@@ -1,105 +1,488 @@
-# 운영 차원 점검 (잔여작업 1~10 반영 후)
+# 운영 점검 및 테스트 체크리스트
 
-> 검수 중 참고용. 누락 여부·파일 크기·모듈화·구조화 관점 정리.
-
----
-
-## 1. 누락 여부
-
-| 항목 | 반영 여부 | 비고 |
-|------|-----------|------|
-| §2 현재 상태 요약 현행화 | ✅ | `langgraphPlan.md` 수정 완료 |
-| Phase C/D 점검 결론 반영 | ✅ | 완료 확정·Transitional HITL 명시 |
-| Phase D 결정 기준 문서화 | ✅ | `langgraphPlan2.md`에 정의됨 |
-| 테스트 전략 4종 스켈레톤 | ✅ | `tests/test_*.py` 4개, pytest 11 passed |
-| Phase F rerank/evidence 스텁 | ✅ | `services/retrieval_quality.py` |
-| Phase H diagnostics UI | ✅ | workspace 결과 탭 Run 진단 expander |
-| UX 마감(워크스페이스·스튜디오·RAG) | ✅ | 캡션·설명 보강 |
-| 선택 과제(9번) | 문서만 정의, 코드 미구현 | 의도된 범위 |
-
-**추가 권장(선택)**  
-- `README.md`에 테스트 실행 방법 한 줄 추가: `pytest tests/ -v`
+## 1. 목적
+- 이 문서는 `AuraAgent` PoC의 발표 전 기능 점검, 동선 점검, 데이터 정합성 점검을 위한 운영 체크리스트입니다.
+- 점검 대상은 현재 구현 기준의 `LangGraph + LangChain 기반 에이전트 구조`, `AI 워크스페이스`, `에이전트 스튜디오`, `규정문서 라이브러리`, `시연 데이터 제어`입니다.
+- 각 항목의 `점검 결과`는 사용자가 직접 기록합니다.
 
 ---
 
-## 2. 파일 라인 수 (기준: 단일 파일 수백 라인 초과 시 분리 검토)
-
-| 파일 | 라인 수 | 판단 |
-|------|---------|------|
-| **agent/langgraph_agent.py** | **924** | ⚠️ 분리 권장 (목표: 노드·헬퍼·그래프 빌드 분리) |
-| **ui/workspace.py** | **774** | ⚠️ 분리 권장 (목표: 헬퍼·컴포넌트·페이지 오케스트레이션 분리) |
-| main.py | 503 | △ 500선, 당장 분리 필수는 아님 |
-| services/case_service.py | 400 | 양호 |
-| ui/shared.py | 386 | 양호 |
-| services/policy_service.py | 304 | 양호 |
-| 기타 agent/ui/services | 200 이하 | 양호 |
+## 2. 현재 기준선 요약
+- 에이전트 실행 구조: `same-run interrupt/resume + MemorySaver`
+- 실행 흐름: `intake -> planner -> execute -> critic -> verify -> reporter -> finalizer`
+- 실행 스킬: runtime skill / LangChain tool 기준
+- Retrieval 표시 기준: `after rerank 후보 + adopted citation + adoption_reason`
+- Verification 표시 기준: `verification_summary` (`coverage_ratio`, `missing_citations`, `gate_decision`)
+- Run diagnostics 표시 기준: `citation_coverage`, `hitl_requested`, `resume_success`, `fallback_usage_rate`
+- 데이터 영속성: 새로고침/재실행 후에도 DB 기준 조회 가능해야 함
 
 ---
 
-## 3. 모듈화 제안
+## 3. 사전 준비 체크리스트
 
-### 3.1 `agent/langgraph_agent.py` (924줄)
+### 3.1 실행 환경
+- [ ] 프로젝트 경로가 `/Users/joonbinchoi/Work/AuraAgent` 기준으로 열려 있다.
+- [ ] Python 가상환경이 정상 활성화되어 있다.
+- [ ] 의존성 설치가 완료되어 있다.
+- [ ] PostgreSQL 연결 정보가 `.env` 기준으로 올바르다.
+- [ ] OpenAI API Key 등 필수 환경변수가 설정되어 있다.
 
-**현재:** 상태 정의·헬퍼·노드 10개·그래프 빌드·실행 진입점이 한 파일에 있음.
+### 3.2 프로세스 기동
+- [ ] FastAPI 서버가 정상 기동된다.
+- [ ] Streamlit 앱이 정상 기동된다.
+- [ ] 브라우저에서 `http://localhost:8502` 접속이 가능하다.
+- [ ] 브라우저 콘솔에 앱 기능을 막는 치명적 오류가 없다.
 
-**제안:**
+### 3.3 기본 데이터 상태
+- [ ] `agent_master`, `rag_document`, `rag_chunk`, `case_analysis_result`, `agent_activity_log` 등 핵심 테이블 조회가 가능하다.
+- [ ] 테스트용 규정 문서가 조회 가능하다.
+- [ ] 기존 시연 데이터 또는 기본 전표 데이터가 최소 1건 이상 보인다.
 
-| 분리 후 파일 | 담당 내용 | 예상 라인 |
-|--------------|-----------|-----------|
-| `agent/state.py` | `AgentState` TypedDict, `_get_tools_by_name` | ~40 |
-| `agent/graph_helpers.py` | `_format_occurred_at`, `_find_tool_result`, `_top_policy_refs`, `_should_skip_skill`, `_build_grounded_reason`, `_derive_flags`, `_plan_from_flags`, `_score` | ~150 |
-| `agent/nodes.py` | `screener_node` ~ `finalizer_node`, `_route_after_verify` | ~650 |
-| `agent/langgraph_agent.py` | `build_agent_graph`, `run_langgraph_agentic_analysis`, 위 모듈 import·재노출 | ~120 |
-
-**주의:** `nodes.py`는 `AgentState`, `graph_helpers`, `output_models` 등에 의존하므로 import 순서·순환 참조만 정리하면 됨.
-
-### 3.2 `ui/workspace.py` (774줄)
-
-**현재:** 스트림/이벤트 포맷·API 호출·타임라인 요약·각종 render_*·페이지 진입점이 한 파일에 있음.
-
-**제안:**
-
-| 분리 후 파일 | 담당 내용 | 예상 라인 |
-|--------------|-----------|-----------|
-| `ui/workspace_helpers.py` | `_format_agent_event_line`, `_tool_caption_fragment`, `_stream_card_chunks`, `sse_text_stream`, `fetch_case_bundle`, `summarize_tool_results`, `summarize_process_timeline`, `build_workspace_plan_steps`, `build_workspace_execution_logs` | ~280 |
-| `ui/workspace_components.py` | `render_tool_trace_summary`, `render_timeline_cards`, `render_process_story`, `render_hitl_*`, `render_case_preview_dialog`, `render_workspace_case_queue`, `render_workspace_chat_panel`, `render_workspace_results` | ~420 |
-| `ui/workspace.py` | `render_ai_workspace_page` (레이아웃·탭·조건부 호출만) | ~100 |
-
-**주의:** `workspace.py`가 `workspace_helpers`·`workspace_components`를 import하고, 기존 `from ui.workspace import ...` 사용처는 `render_ai_workspace_page`만 쓰는지 확인 후 필요 시 `workspace_components`에서 세부 함수 재노출.
-
-### 3.3 `main.py` (503줄)
-
-- 현재는 한 파일에 라우트·비즈니스 로직·runtime 연동이 함께 있음.
-- 우선순위는 낮게 두고, 라우트가 더 늘어나면 `main.py`는 앱 생성·라우터 등록만 두고 `routers/` 또는 `api/` 하위로 엔드포인트 그룹 분리 검토.
+### 점검 결과
+- 결과:
+- 비고:
 
 ---
 
-## 4. 구조화 관점 정리
+## 4. 공통 기동 점검
 
-- **agent/**  
-  - 이미 `event_schema`, `hitl`, `output_models`, `reasoning_notes`, `screener`, `skills`, `tool_schemas`, `aura_bridge`, `native_agent` 등으로 역할이 나뉘어 있음.  
-  - 유일하게 **`langgraph_agent.py`만 900줄대로 비대**하므로, 위 3.1 분리만 적용해도 운영·리뷰에 유리함.
+### 점검 방법
+1. FastAPI 서버 실행
+2. Streamlit 앱 실행
+3. 브라우저에서 초기 로딩 확인
+4. 모든 메뉴 진입 가능 여부 확인
 
-- **ui/**  
-  - `workspace.py`가 “AI 워크스페이스” 한 페이지 전담이지만 774줄이므로, **헬퍼 / 컴포넌트 / 페이지** 3단 분리(3.2) 권장.
+### 예상 결과
+- 앱이 멈추지 않고 로딩된다.
+- 좌측 메뉴 4개가 모두 노출된다.
+- 헤더/사이드바 레이아웃이 겹치지 않는다.
+- 치명적 스택트레이스 없이 초기 화면이 렌더링된다.
 
-- **services/**  
-  - `citation_metrics`, `run_diagnostics`, `retrieval_quality` 등 이미 기능별로 잘 쪼개져 있음.  
-  - `policy_service` 304줄은 아직 단일 파일 유지 가능한 수준.
+### 체크리스트
+- [ ] 초기 화면 로딩 성공
+- [ ] 좌측 사이드바 메뉴 정상 렌더
+- [ ] 메뉴 전환 시 오류 없음
+- [ ] 스타일/CSS 깨짐 없음
+- [ ] 브라우저 새로고침 후에도 앱 재로딩 성공
 
-- **tests/**  
-  - `test_graph`, `test_tool_schema`, `test_interrupt_resume`, `test_citation_binding`로 전략별 분리된 상태.  
-  - 추후 시나리오 테스트가 늘어나면 `tests/e2e/` 등 서브 디렉터리로 묶어도 됨.
+### 점검 결과
+- 결과:
+- 비고:
 
 ---
 
-## 5. 요약
+## 5. 시연 데이터 제어 점검
 
-| 구분 | 내용 |
-|------|------|
-| **누락** | 잔여작업 1~10 범위 내에서는 누락 없음. 선택적으로 README에 `pytest tests/ -v` 안내 추가 권장. |
-| **수백 라인 초과** | `agent/langgraph_agent.py`(924), `ui/workspace.py`(774) 두 파일이 해당. |
-| **모듈화** | `langgraph_agent` → state / graph_helpers / nodes / langgraph_agent 4개로, `workspace` → workspace_helpers / workspace_components / workspace 3개로 분리 시 단일 파일당 수백 라인 미만으로 유지 가능. |
-| **구조화** | agent·services는 이미 역할 분리가 잘 되어 있음. UI만 workspace 한 파일에 집중되어 있어 위 분리 적용 시 운영·유지보수에 유리함. |
+### 5.1 대표 시나리오 카드 노출
+### 점검 방법
+- `시연 데이터 제어` 메뉴 진입 후 대표 시나리오 카드 확인
 
-이 문서는 검수 시 참고용이며, 실제 분리 작업은 리스크·일정을 고려해 단계적으로 진행하는 것을 권장합니다.
+### 예상 결과
+- 대표 시나리오 카드가 카드형으로 노출된다.
+- 카드 설명, 메타 배지, 생성 버튼이 카드 내부에서 잘리지 않는다.
+
+### 체크리스트
+- [ ] 휴일 사용 의심
+- [ ] 한도 초과 의심
+- [ ] 사적 사용 위험
+- [ ] 비정상 패턴
+- [ ] 기타 정의된 시나리오
+
+### 점검 결과
+- 결과:
+- 비고:
+
+### 5.2 시연 데이터 생성
+### 점검 방법
+1. 대표 시나리오 카드에서 생성 버튼 클릭
+2. API 성공 여부 확인
+3. 생성된 전표 목록에 반영되는지 확인
+
+### 예상 결과
+- 오류 없이 데이터가 생성된다.
+- 생성 직후 하단 목록 또는 관련 화면에서 바로 조회된다.
+- 동일 전표키 중복 생성 시 중복 방지 또는 적절한 메시지가 동작한다.
+
+### 체크리스트
+- [ ] 1건 생성 성공
+- [ ] 연속 생성 성공
+- [ ] 목록 재조회 반영 성공
+- [ ] 생성 실패 시 오류 메시지 확인 가능
+
+### 점검 결과
+- 결과:
+- 비고:
+
+### 5.3 AI 워크스페이스 연동
+### 점검 방법
+- 생성된 시연 전표에서 `AI 워크스페이스로 이동` 또는 동등한 진입 흐름 확인
+
+### 예상 결과
+- 생성된 케이스를 바로 메인 화면에서 이어서 분석할 수 있다.
+
+### 체크리스트
+- [ ] 생성 후 즉시 진입 가능
+- [ ] 선택된 케이스가 AI 워크스페이스에 반영됨
+
+### 점검 결과
+- 결과:
+- 비고:
+
+---
+
+## 6. AI 워크스페이스 점검
+
+### 6.1 케이스 목록
+### 점검 방법
+- 좌측 `케이스` 영역 확인
+
+### 예상 결과
+- 목록은 자체 스크롤 영역 안에서 동작한다.
+- 카드 선택 상태가 명확하다.
+- 배지는 코드값이 아닌 사용자 표시명으로 보인다.
+
+### 체크리스트
+- [ ] 케이스 목록 스크롤 정상
+- [ ] 카드 hover/선택 동작 정상
+- [ ] 선택 카드 강조 정상
+- [ ] 상태/심각도/유형 배지 정상 표시
+- [ ] 새로고침 후 기존 데이터 재조회됨
+
+### 점검 결과
+- 결과:
+- 비고:
+
+### 6.2 에이전트 대화 (라이브 스트림)
+### 점검 방법
+1. 케이스 선택
+2. `분석 시작` 클릭
+3. 에이전트 대화 영역의 실시간 출력 확인
+
+### 예상 결과
+- 단순 고정 문구가 아니라 현재 케이스 컨텍스트를 반영한 작업 메모가 출력된다.
+- `thought / action / observation`이 구분되어 보인다.
+- LangGraph 노드 진행에 따라 메시지가 추가된다.
+
+### 체크리스트
+- [ ] 분석 시작 버튼 동작 정상
+- [ ] 스트림이 순차적으로 누적됨
+- [ ] 케이스 맥락 반영 메시지 출력
+- [ ] 라이브 스트림 중 화면 붕괴 없음
+- [ ] 동일 케이스 재실행 시 최신 run으로 교체됨
+
+### 점검 결과
+- 결과:
+- 비고:
+
+### 6.3 사고 과정 탭
+### 점검 방법
+- 분석 완료 후 `사고 과정` 탭 확인
+
+### 예상 결과
+- 라이브 스트림 복붙이 아니라 노드 단위 요약으로 정리되어 보인다.
+- `intake / planner / execute / critic / verify / reporter / finalizer` 흐름이 드러난다.
+
+### 체크리스트
+- [ ] 노드 단위 요약 표시
+- [ ] 요약 밀도 적절
+- [ ] 실행 단계 순서 정상
+- [ ] 불필요한 중복 로그 없음
+
+### 점검 결과
+- 결과:
+- 비고:
+
+### 6.4 작업 계획 탭
+### 점검 방법
+- `작업 계획` 탭 확인
+
+### 예상 결과
+- planner가 세운 조사 순서와 의도가 읽힌다.
+- 어떤 스킬/도구를 왜 사용할지 설명된다.
+
+### 체크리스트
+- [ ] 계획 단계 노출
+- [ ] 계획 설명 가독성 양호
+- [ ] 실제 실행 흐름과 모순 없음
+
+### 점검 결과
+- 결과:
+- 비고:
+
+### 6.5 실행 로그 탭
+### 점검 방법
+- `실행 로그` 탭 확인
+
+### 예상 결과
+- tool call / tool result / skipped / gate 적용 여부가 상세히 보인다.
+- 사고 과정과 역할이 겹치지 않는다.
+
+### 체크리스트
+- [ ] tool 호출 로그 노출
+- [ ] tool 결과 로그 노출
+- [ ] skip/gate 이벤트 표시
+- [ ] 과도한 중복 없음
+
+### 점검 결과
+- 결과:
+- 비고:
+
+### 6.6 결과 탭
+### 점검 방법
+- `결과` 탭 확인
+
+### 예상 결과
+- 최종 판단 hero
+- 규정 근거
+- 검증 메모
+- run diagnostics
+구조가 분리되어 보인다.
+
+### 체크리스트
+- [ ] 최종 판단 문구 정상
+- [ ] 규정 근거 표시 정상
+- [ ] verification summary 표시 정상
+- [ ] diagnostics 카드 표시 정상
+- [ ] citation/근거 목록이 결과와 정합
+
+### 점검 결과
+- 결과:
+- 비고:
+
+---
+
+## 7. Retrieval / Verification 점검
+
+### 7.1 Retrieval 시각화
+### 점검 방법
+- 결과 탭 및 RAG 관련 화면에서 retrieval snapshot 확인
+
+### 예상 결과
+- `after rerank 후보`
+- `최종 채택 citation`
+- `adoption_reason`
+이 일관되게 보인다.
+
+### 체크리스트
+- [ ] after rerank 후보 표시
+- [ ] adopted citation 표시
+- [ ] adoption_reason 표시
+- [ ] 결과 문장과 citation 정합성 확인 가능
+
+### 점검 결과
+- 결과:
+- 비고:
+
+### 7.2 Evidence verification
+### 점검 방법
+- verification summary 및 누락 citation 확인
+
+### 예상 결과
+- coverage ratio가 표시된다.
+- missing citation 수 또는 목록이 표시된다.
+- gate decision이 결과와 일치한다.
+
+### 체크리스트
+- [ ] coverage ratio 표시
+- [ ] missing citation 표시
+- [ ] gate decision 표시
+- [ ] hold/regenerate 시 HITL 분기 정합성 확인
+
+### 점검 결과
+- 결과:
+- 비고:
+
+---
+
+## 8. HITL 점검
+
+### 점검 방법
+1. 보류/재검토 유도 케이스 선택
+2. 분석 실행
+3. HITL 요청 발생 여부 확인
+4. HITL 응답 제출 후 same-run resume 확인
+
+### 예상 결과
+- 사람이 개입해야 하는 상황에서 `hitl_pause` 흐름이 보인다.
+- 응답 제출 후 같은 run 기준으로 재개된다.
+- 결과/이력/진단에 resume 정보가 남는다.
+
+### 체크리스트
+- [ ] HITL 요청 발생
+- [ ] HITL 입력 UI 동작
+- [ ] same-run resume 성공
+- [ ] resume 이후 결과 갱신
+- [ ] diagnostics에 resume_success 반영
+
+### 점검 결과
+- 결과:
+- 비고:
+
+---
+
+## 9. 에이전트 스튜디오 점검
+
+### 9.1 에이전트 목록
+### 점검 방법
+- `에이전트 스튜디오` 메뉴 진입
+
+### 예상 결과
+- 활성 에이전트만 목록에 보인다.
+- 목록과 실제 실행 에이전트가 정합하다.
+
+### 체크리스트
+- [ ] 활성 에이전트만 표시
+- [ ] 선택/상세 진입 정상
+
+### 점검 결과
+- 결과:
+- 비고:
+
+### 9.2 그래프 탭
+### 점검 방법
+- 그래프 탭에서 상위/하위 그래프 확인
+
+### 예상 결과
+- 메인 오케스트레이션 그래프와 실행 스킬 그래프가 구분되어 보인다.
+- 설명 문구로 발표 가능 수준이어야 한다.
+
+### 체크리스트
+- [ ] 메인 그래프 렌더 정상
+- [ ] 실행 스킬 그래프 렌더 정상
+- [ ] 그래프 설명 문구 충분
+- [ ] 그래프와 실제 코드 흐름 정합
+
+### 점검 결과
+- 결과:
+- 비고:
+
+### 9.3 스킬 탭
+### 점검 방법
+- runtime skill 카드 확인
+
+### 예상 결과
+- 실제 사용하는 skill 기준으로 설명 카드가 보인다.
+- 입력/출력/호출 시점 설명이 읽힌다.
+
+### 체크리스트
+- [ ] runtime skill 목록 정확
+- [ ] 설명 카드 가독성 양호
+- [ ] 실제 execute 흐름과 정합
+
+### 점검 결과
+- 결과:
+- 비고:
+
+---
+
+## 10. 규정문서 라이브러리 점검
+
+### 10.1 문서 목록/상세
+### 점검 방법
+- `규정문서 라이브러리` 메뉴 진입
+
+### 예상 결과
+- 문서 목록/상세/품질 정보가 조회된다.
+- 규정 문서, 청크 정보, 품질 정보가 깨지지 않는다.
+
+### 체크리스트
+- [ ] 문서 목록 조회
+- [ ] 문서 상세 조회
+- [ ] 품질 정보 표시
+- [ ] 청크 정보 표시
+
+### 점검 결과
+- 결과:
+- 비고:
+
+### 10.2 청킹 실험실
+### 점검 방법
+- 청킹 전략 비교 UI 점검
+
+### 예상 결과
+- 전략별 설명이 노출된다.
+- 미리보기/비교/설명 구조가 보인다.
+
+### 체크리스트
+- [ ] 전략 카드 렌더
+- [ ] 미리보기 렌더
+- [ ] 비교 설명 가독성 양호
+
+### 점검 결과
+- 결과:
+- 비고:
+
+---
+
+## 11. 데이터 영속성 점검
+
+### 점검 방법
+1. 시연 데이터 생성
+2. 분석 실행
+3. 브라우저 새로고침
+4. 앱 재기동
+5. 동일 데이터 재조회
+
+### 예상 결과
+- 생성된 전표, 분석 결과, 실행 이벤트가 DB 기준으로 다시 보인다.
+- 휘발성 데이터처럼 사라지지 않는다.
+
+### 체크리스트
+- [ ] 전표 데이터 유지
+- [ ] 분석 결과 유지
+- [ ] run history 유지
+- [ ] agent activity log 유지
+- [ ] 새로고침 후 재조회 성공
+
+### 점검 결과
+- 결과:
+- 비고:
+
+---
+
+## 12. 문서/설명 정합성 점검
+
+### 점검 대상 문서
+- `README.md`
+- `docs/langgraph.md`
+- `docs/langgraph-langchain-comparison.md`
+- `docs/langgraphPlan.md`
+- `docs/langgraphPlan2.md`
+- `docs/langgraphPlan3.md`
+
+### 예상 결과
+- 현재 구현과 문서 설명이 충돌하지 않는다.
+- `same-run interrupt/resume`
+- `after rerank + adopted + adoption_reason`
+- `verification_summary`
+- `run diagnostics`
+설명이 일관된다.
+
+### 체크리스트
+- [ ] README 정합성
+- [ ] langgraph.md 정합성
+- [ ] 계획 문서 정합성
+- [ ] 발표용 용어 일관성
+
+### 점검 결과
+- 결과:
+- 비고:
+
+---
+
+## 13. 최종 판정
+
+### 발표 전 테스트 완료 기준
+- [ ] 치명적 실행 오류 없음
+- [ ] 시연 데이터 생성 정상
+- [ ] AI 워크스페이스 분석 흐름 정상
+- [ ] Retrieval / Verification 표시 정상
+- [ ] HITL same-run resume 정상
+- [ ] 에이전트 스튜디오 발표 가능 수준
+- [ ] 규정문서 라이브러리 발표 가능 수준
+- [ ] 새로고침/재기동 후 데이터 유지
+- [ ] 문서/설명 정합성 확보
+
+### 최종 결과
+- 결과:
+- 비고:

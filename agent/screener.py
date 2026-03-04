@@ -152,7 +152,7 @@ def _build_reason_text(case_type: str, signals: dict[str, Any], reasons: list[st
     }
     label = label_map.get(case_type, case_type)
     if not reasons:
-        return f"스크리닝 결과: {label} — 이상 신호 없음"
+        return f"스크리닝 결과: {label} — 특이사항 없음"
     detail = " / ".join(reasons)
     return f"스크리닝 결과: {label} — {detail}"
 

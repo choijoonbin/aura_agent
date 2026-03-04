@@ -22,6 +22,7 @@ class AgentSkill:
     name: str
     description: str
     handler: SkillFn
+    display_summary_ko: str | None = None  # 발표용 한글 요약 (입력/출력 1~2문장). 없으면 자동 생성 fallback
 
 
 async def holiday_compliance_probe(context: dict[str, Any]) -> dict[str, Any]:
@@ -90,16 +91,41 @@ async def document_evidence_probe(context: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _adoption_reason_for_ref(ref: dict[str, Any], body_evidence: dict[str, Any]) -> str:
+    """규칙 + retrieval context 기반 채택 이유 한 줄 (발표용)."""
+    case_type = str(body_evidence.get("case_type") or body_evidence.get("intended_risk_type") or "")
+    article = ref.get("article") or ""
+    parent_title = str(ref.get("parent_title") or "")[:40]
+    if case_type and article:
+        return f"{case_type} 조건과 직접 일치하는 조항({article})이어서 채택"
+    if parent_title:
+        return f"규정 '{parent_title}'과 관련되어 채택"
+    return "규정 근거로 채택"
+
+
 async def policy_rulebook_probe(context: dict[str, Any]) -> dict[str, Any]:
     engine = create_engine(settings.database_url, future=True)
     with Session(engine) as db:
-        refs = search_policy_chunks(db, context["body_evidence"], limit=5)
+        # Phase F/8: top-20 후보 확보 후 상위 5건만 채택. candidates는 별도 payload 저장용
+        candidates = search_policy_chunks(db, context["body_evidence"], limit=20)
+        refs = []
+        for r in candidates[:5]:
+            ref = dict(r)
+            ref["adoption_reason"] = _adoption_reason_for_ref(ref, context["body_evidence"])
+            refs.append(ref)
+        # 나머지 candidates도 adoption_reason 붙여서 저장 (후보 표시용)
+        candidates_with_reason = []
+        for r in candidates:
+            ref = dict(r)
+            ref.setdefault("adoption_reason", _adoption_reason_for_ref(ref, context["body_evidence"]))
+            candidates_with_reason.append(ref)
     return {
         "skill": "policy_rulebook_probe",
         "ok": True,
         "facts": {
             "policy_refs": refs,
             "ref_count": len(refs),
+            "retrieval_candidates": candidates_with_reason,
         },
         "summary": f"규정집에서 관련 조항 {len(refs)}건을 조회했습니다.",
     }
@@ -146,31 +172,37 @@ SKILL_REGISTRY: dict[str, AgentSkill] = {
         name="holiday_compliance_probe",
         description="휴일/휴무/연차 사용 정황을 검증한다.",
         handler=holiday_compliance_probe,
+        display_summary_ko="입력: 전표 발생시각, 금액, 근태 상태. 출력: 휴일 여부, 판정 사유, 적용 규정 후보.",
     ),
     "budget_risk_probe": AgentSkill(
         name="budget_risk_probe",
-        description="예산 초과 여부와 금액 신호를 검증한다.",
+        description="예산 초과 여부와 금액 지표를 검증한다.",
         handler=budget_risk_probe,
+        display_summary_ko="입력: 전표 금액·예산 초과 플래그. 출력: 예산 초과 여부, 금액 지표.",
     ),
     "merchant_risk_probe": AgentSkill(
         name="merchant_risk_probe",
         description="거래처와 MCC 기반 위험도를 검증한다.",
         handler=merchant_risk_probe,
+        display_summary_ko="입력: MCC 코드, 거래처 정보. 출력: 업종 위험도, 판정 근거.",
     ),
     "document_evidence_probe": AgentSkill(
         name="document_evidence_probe",
         description="전표 라인아이템과 문서 증거를 수집한다.",
         handler=document_evidence_probe,
+        display_summary_ko="입력: 전표·문서. 출력: 라인 수, 라인아이템 요약.",
     ),
     "policy_rulebook_probe": AgentSkill(
         name="policy_rulebook_probe",
         description="내부 규정집에서 관련 조항을 조회한다.",
         handler=policy_rulebook_probe,
+        display_summary_ko="입력: 케이스·키워드. 출력: 규정 후보, 채택 조항, adoption_reason.",
     ),
     "legacy_aura_deep_audit": AgentSkill(
         name="legacy_aura_deep_audit",
         description="기존 Aura 심층 분석을 전문 감사 툴로 호출한다.",
         handler=legacy_aura_deep_audit,
+        display_summary_ko="입력: 케이스·body_evidence. 출력: legacy 심층 분석 결과(조건부 호출).",
     ),
 }
 

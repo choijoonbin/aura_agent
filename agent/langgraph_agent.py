@@ -4,6 +4,7 @@ from datetime import datetime
 from typing import Any, TypedDict
 
 from langgraph.graph import END, START, StateGraph
+from langgraph.types import interrupt
 
 from agent.event_schema import AgentEvent
 from agent.hitl import build_hitl_request
@@ -252,10 +253,10 @@ async def screener_node(state: AgentState) -> AgentState:
                 event_type="NODE_START",
                 node="screener",
                 phase="screen",
-                message=f"전표 신호 분석을 시작합니다.",
+                message="전표 데이터를 분석해 케이스(위반 유형)를 분류합니다.",
                 thought="원시 전표 데이터에서 위반 유형을 식별합니다.",
-                action="결정론적 신호 추출 및 스코어링",
-                observation="hr_status, mcc_code, budat, cputm 등 신호를 분석합니다.",
+                action="전표 데이터 추출 및 점수 산정",
+                observation="hr_status, mcc_code, budat, cputm 등 필드를 분석합니다.",
                 metadata={"role": "screener"},
             ).to_payload(),
             AgentEvent(
@@ -263,7 +264,7 @@ async def screener_node(state: AgentState) -> AgentState:
                 node="screener",
                 phase="screen",
                 message=f"스크리닝 완료: [{label}] — 중요도 {severity} / 점수 {score}",
-                thought=f"데이터 신호 기반으로 '{screening['case_type']}' 유형으로 분류되었습니다.",
+                thought=f"전표 데이터를 바탕으로 '{screening['case_type']}' 유형으로 분류되었습니다.",
                 action="케이스 유형 분류 완료",
                 observation=reason_text,
                 metadata={
@@ -290,8 +291,8 @@ async def intake_node(state: AgentState) -> AgentState:
             "raw_body_keys": sorted(state["body_evidence"].keys()),
         },
         fallback_message="입력 데이터를 정규화합니다.",
-        fallback_thought="전표 입력값에서 핵심 위험 신호를 추출해야 합니다.",
-        fallback_action="입력 필드와 파생 신호를 정규화합니다.",
+        fallback_thought="전표 입력값에서 핵심 위험 지표를 추출해야 합니다.",
+        fallback_action="입력 필드와 파생 데이터를 정규화합니다.",
         fallback_observation="정규화 전 입력 점검을 시작했습니다.",
     )
     end_note = await generate_working_note(
@@ -302,9 +303,9 @@ async def intake_node(state: AgentState) -> AgentState:
             "flags": flags,
         },
         fallback_message="입력 정규화가 완료되었습니다.",
-        fallback_thought="추출된 신호를 다음 계획 단계로 넘길 수 있습니다.",
-        fallback_action="핵심 위험 신호를 구조화했습니다.",
-        fallback_observation="핵심 위험 신호를 추출했습니다.",
+        fallback_thought="추출된 데이터를 다음 계획 단계로 넘길 수 있습니다.",
+        fallback_action="핵심 위험 지표를 구조화했습니다.",
+        fallback_observation="핵심 위험 지표를 추출했습니다.",
     )
     return {
         "flags": flags,
@@ -346,7 +347,7 @@ async def planner_node(state: AgentState) -> AgentState:
         for step in plan
     ]
     planner_output = PlannerOutput(
-        objective="위험 신호별 조사 순서에 따라 증거를 수집하고 규정 근거를 확보한다.",
+        objective="위험 유형별 조사 순서에 따라 증거를 수집하고 규정 근거를 확보한다.",
         steps=steps,
         stop_after_sufficient_evidence=True,
         tool_budget=len(plan),
@@ -360,9 +361,9 @@ async def planner_node(state: AgentState) -> AgentState:
             "flags": state["flags"],
         },
         fallback_message="조사 계획을 수립합니다.",
-        fallback_thought="위험 신호별로 어떤 조사 순서가 효율적인지 정해야 합니다.",
-        fallback_action="위험 신호별 조사 순서를 계산합니다.",
-        fallback_observation="계획 수립에 필요한 신호를 검토합니다.",
+        fallback_thought="위험 유형별로 어떤 조사 순서가 효율적인지 정해야 합니다.",
+        fallback_action="위험 유형별 조사 순서를 계산합니다.",
+        fallback_observation="계획 수립에 필요한 정보를 검토합니다.",
     )
     plan_ready_note = await generate_working_note(
         node="planner",
@@ -545,6 +546,27 @@ async def execute_node(state: AgentState) -> AgentState:
     return {"tool_results": tool_results, "score_breakdown": score, "pending_events": pending_events}
 
 
+def _build_verification_targets(state: AgentState) -> list[str]:
+    """검증할 주장 문장 1~3개. policy_refs 또는 planner steps에서 파생 (발표 전: LLM 없이 규칙 기반)."""
+    probe = _find_tool_result(state.get("tool_results", []), "policy_rulebook_probe")
+    refs = (probe or {}).get("facts", {}).get("policy_refs") or []
+    targets: list[str] = []
+    for ref in refs[:3]:
+        art = ref.get("article") or ""
+        title = (ref.get("parent_title") or "")[:50]
+        if art or title:
+            targets.append(f"{art} {title} 조항이 해당 사례에 적용될 수 있음.".strip())
+    if targets:
+        return targets
+    plan = state.get("planner_output") or {}
+    steps = plan.get("steps") or []
+    for step in steps[:3]:
+        purpose = (step.get("purpose") or "").strip()
+        if purpose:
+            targets.append(purpose)
+    return targets[:3]
+
+
 async def critic_node(state: AgentState) -> AgentState:
     legacy = next((r for r in state.get("tool_results", []) if r.get("skill") == "legacy_aura_deep_audit"), None)
     missing = ((state["body_evidence"].get("dataQuality") or {}).get("missingFields") or [])
@@ -554,6 +576,7 @@ async def critic_node(state: AgentState) -> AgentState:
         "risk_of_overclaim": bool(missing),
         "recommend_hold": bool(missing and not state["flags"].get("hasHitlResponse")),
     }
+    verification_targets = _build_verification_targets(state)
     critic_output = CriticOutput(
         overclaim_risk=critique["risk_of_overclaim"],
         contradictions=[],
@@ -561,6 +584,7 @@ async def critic_node(state: AgentState) -> AgentState:
         recommend_hold=critique["recommend_hold"],
         rationale="입력 누락 필드가 있으면 과잉 주장 위험이 있어 보류를 권고한다." if missing else "추가 보류 조건 없이 진행 가능하다.",
         has_legacy_result=critique["has_legacy_result"],
+        verification_targets=verification_targets,
     )
     start_note = await generate_working_note(
         node="critic",
@@ -616,6 +640,8 @@ async def critic_node(state: AgentState) -> AgentState:
 
 
 async def verify_node(state: AgentState) -> AgentState:
+    from services.evidence_verification import EVIDENCE_GATE_HOLD, EVIDENCE_GATE_REGENERATE, verify_evidence_coverage_claims
+
     hitl_request = build_hitl_request(state["body_evidence"], state["tool_results"])
     if state["flags"].get("hasHitlResponse"):
         hitl_request = None
@@ -624,6 +650,21 @@ async def verify_node(state: AgentState) -> AgentState:
         "needs_hitl": needs_hitl,
         "quality_signals": ["HITL_REQUIRED"] if needs_hitl else ["OK"],
     }
+    verification_targets = (state.get("critic_output") or {}).get("verification_targets") or []
+    probe_facts = (_find_tool_result(state["tool_results"], "policy_rulebook_probe") or {}).get("facts", {}) or {}
+    retrieved_chunks = probe_facts.get("retrieval_candidates") or probe_facts.get("policy_refs") or []
+    verification_summary: dict[str, Any] = {}
+    if verification_targets and retrieved_chunks:
+        verification_summary = verify_evidence_coverage_claims(verification_targets, retrieved_chunks)
+    elif verification_targets:
+        verification_summary = {"covered": 0, "total": len(verification_targets), "coverage_ratio": 0.0, "details": [], "gate_policy": EVIDENCE_GATE_HOLD, "missing_citations": verification_targets}
+    verification["verification_summary"] = verification_summary
+    if verification_summary.get("gate_policy") in (EVIDENCE_GATE_HOLD, EVIDENCE_GATE_REGENERATE) and not needs_hitl:
+        needs_hitl = True
+        verification["needs_hitl"] = True
+        verification["quality_signals"] = ["HITL_REQUIRED"]
+        if not hitl_request:
+            hitl_request = {"reasons": ["evidence coverage 부족"], "questions": [], "handoff": "verification"}
     gate = VerifierGate.HITL_REQUIRED if needs_hitl else VerifierGate.READY
     verifier_output = VerifierOutput(
         grounded=not needs_hitl,
@@ -719,35 +760,13 @@ def _route_after_verify(state: AgentState) -> str:
 
 
 async def hitl_pause_node(state: AgentState) -> AgentState:
-    """Phase D: HITL 필요 시 실행. reporter/finalizer 없이 부분 결과로 run을 종료한다."""
-    score = state.get("score_breakdown") or {}
+    """Phase D: HITL 필요 시 interrupt()로 중단. resume 시 hitl_response를 body_evidence에 반영하고 reporter로 이어짐."""
     hitl_request = state.get("hitl_request") or {}
-    partial = {
-        "caseId": state["case_id"],
-        "status": "HITL_REQUIRED",
-        "reasonText": "사람 검토 입력을 기다립니다.",
-        "score": (score.get("final_score") or 0) / 100,
-        "severity": "HIGH" if (score.get("final_score") or 0) >= 70 else ("MEDIUM" if (score.get("final_score") or 0) >= 40 else "LOW"),
-        "analysis_mode": "langgraph_agentic",
-        "score_breakdown": score,
-        "quality_gate_codes": state.get("verification", {}).get("quality_signals", []),
-        "hitl_request": hitl_request,
-        "tool_results": state.get("tool_results", []),
-        "policy_refs": (_find_tool_result(state.get("tool_results", []), "policy_rulebook_probe") or {}).get("facts", {}).get("policy_refs", []) or [],
-        "critique": state.get("critique"),
-        "planner_output": state.get("planner_output"),
-        "critic_output": state.get("critic_output"),
-        "verifier_output": state.get("verifier_output"),
-    }
-    ev = AgentEvent(
-        event_type="HITL_PAUSE",
-        node="hitl_pause",
-        phase="verify",
-        message="사람 검토가 필요하여 이번 run을 여기서 종료합니다. HITL 응답 후 새 run으로 재개됩니다.",
-        observation="interrupt",
-        metadata={"hitl_request": hitl_request},
-    ).to_payload()
-    return {"final_result": partial, "pending_events": [ev]}
+    # interrupt()로 일시정지; 재개 시 호출자가 Command(resume=payload)로 넘긴 값이 여기로 반환됨
+    hitl_response = interrupt(hitl_request)
+    body = dict(state.get("body_evidence") or {})
+    body["hitlResponse"] = hitl_response
+    return {"body_evidence": body}
 
 
 async def reporter_node(state: AgentState) -> AgentState:
@@ -831,6 +850,36 @@ async def finalizer_node(state: AgentState) -> AgentState:
     score = state["score_breakdown"]
     hitl_request = state.get("hitl_request")
     reason, status = _build_grounded_reason(state)
+    probe_facts = (_find_tool_result(state["tool_results"], "policy_rulebook_probe") or {}).get("facts", {}) or {}
+    policy_refs = probe_facts.get("policy_refs") or []
+    reporter_out = state.get("reporter_output") or {}
+    sentences = reporter_out.get("sentences") or []
+    adopted_citations: list[dict[str, Any]] = []
+    for s in sentences:
+        for c in (s.get("citations") or []):
+            if isinstance(c, dict):
+                cit = dict(c)
+            else:
+                cit = {"chunk_id": str(c)} if c is not None else {}
+            # adoption_reason: policy_refs에서 chunk_id/article 매칭하여 보강
+            if "adoption_reason" not in cit:
+                cid = str(cit.get("chunk_id") or "")
+                art = cit.get("article")
+                for ref in policy_refs:
+                    ref_cids = [str(x) for x in (ref.get("chunk_ids") or [])]
+                    if cid and cid in ref_cids:
+                        cit["adoption_reason"] = ref.get("adoption_reason", "규정 근거로 채택")
+                        break
+                    if art and str(ref.get("article") or "") == str(art):
+                        cit["adoption_reason"] = ref.get("adoption_reason", "규정 근거로 채택")
+                        break
+                else:
+                    cit.setdefault("adoption_reason", "규정 근거로 채택")
+            adopted_citations.append(cit)
+    retrieval_snapshot = {
+        "candidates_after_rerank": probe_facts.get("retrieval_candidates") or policy_refs,
+        "adopted_citations": adopted_citations,
+    }
     final = {
         "caseId": state["case_id"],
         "status": status,
@@ -842,13 +891,15 @@ async def finalizer_node(state: AgentState) -> AgentState:
         "quality_gate_codes": state["verification"]["quality_signals"],
         "hitl_request": hitl_request,
         "tool_results": state["tool_results"],
-        "policy_refs": (_find_tool_result(state["tool_results"], "policy_rulebook_probe") or {}).get("facts", {}).get("policy_refs", []) or [],
+        "policy_refs": probe_facts.get("policy_refs") or [],
         "critique": state.get("critique"),
         "hitl_response": (state["body_evidence"].get("hitlResponse") or None),
         "planner_output": state.get("planner_output"),
         "critic_output": state.get("critic_output"),
         "verifier_output": state.get("verifier_output"),
         "reporter_output": state.get("reporter_output"),
+        "retrieval_snapshot": retrieval_snapshot,
+        "verification_summary": (state.get("verification") or {}).get("verification_summary"),
     }
     return {
         "final_result": final,
@@ -856,6 +907,12 @@ async def finalizer_node(state: AgentState) -> AgentState:
             AgentEvent(event_type="NODE_END", node="finalizer", phase="finalize", message="최종 분석 결과가 생성되었습니다.", observation=f"최종 상태={status}", metadata={"status": status}).to_payload(),
         ],
     }
+
+
+def _get_checkpointer():
+    """PoC: MemorySaver. 운영 확장 시 SqliteSaver 등 영속 체크포인터로 교체."""
+    from langgraph.checkpoint.memory import MemorySaver
+    return MemorySaver()
 
 
 def build_agent_graph():
@@ -878,10 +935,10 @@ def build_agent_graph():
     workflow.add_edge("execute", "critic")
     workflow.add_edge("critic", "verify")
     workflow.add_conditional_edges("verify", _route_after_verify, {"hitl_pause": "hitl_pause", "reporter": "reporter"})
-    workflow.add_edge("hitl_pause", END)
+    workflow.add_edge("hitl_pause", "reporter")  # resume 후 reporter로 이어짐
     workflow.add_edge("reporter", "finalizer")
     workflow.add_edge("finalizer", END)
-    return workflow.compile()
+    return workflow.compile(checkpointer=_get_checkpointer())
 
 
 async def run_langgraph_agentic_analysis(
@@ -890,27 +947,54 @@ async def run_langgraph_agentic_analysis(
     body_evidence: dict[str, Any],
     intended_risk_type: str | None = None,
     run_id: str | None = None,
+    resume_value: dict[str, Any] | None = None,
 ):
+    from langgraph.types import Command
     from utils.config import get_langfuse_handler
 
-    graph = build_agent_graph()
-    initial_state: AgentState = {
-        "case_id": case_id,
-        "body_evidence": body_evidence,
-        "intended_risk_type": intended_risk_type,
+    if not run_id:
+        run_id = "default-thread"
+    config: dict[str, Any] = {
+        "configurable": {"thread_id": run_id},
+        "tags": ["matertask", "analysis", f"case:{case_id}"],
     }
-    config: dict[str, Any] = {}
-    if run_id:
-        handler = get_langfuse_handler(session_id=run_id)
-        if handler:
-            config = {
-                "callbacks": [handler],
-                "configurable": {"thread_id": run_id},
-                "tags": ["matertask", "analysis", f"case:{case_id}"],
+    handler = get_langfuse_handler(session_id=run_id)
+    if handler:
+        config["callbacks"] = [handler]
+
+    graph = build_agent_graph()
+    if resume_value is not None:
+        inputs: Any = Command(resume=resume_value)
+    else:
+        inputs = {
+            "case_id": case_id,
+            "body_evidence": body_evidence,
+            "intended_risk_type": intended_risk_type,
+        }
+
+    async for chunk in graph.astream(inputs, stream_mode="updates", config=config):
+        if chunk.get("__interrupt__"):
+            # HITL: interrupt()로 일시정지. 호출자에게 HITL_REQUIRED 전달 후 같은 run_id로 재개 대기
+            interrupt_list = chunk["__interrupt__"]
+            hitl_payload = interrupt_list[0].value if interrupt_list else {}
+            yield "AGENT_EVENT", AgentEvent(
+                event_type="HITL_PAUSE",
+                node="hitl_pause",
+                phase="verify",
+                message="사람 검토가 필요합니다. HITL 응답 후 같은 run으로 재개됩니다.",
+                observation="interrupt",
+                metadata={"hitl_request": hitl_payload},
+            ).to_payload()
+            yield "completed", {
+                "status": "HITL_REQUIRED",
+                "hitl_request": hitl_payload,
+                "reasonText": "사람 검토 입력을 기다립니다.",
             }
-    async for chunk in graph.astream(initial_state, stream_mode="updates", config=config):
+            return
         for _node, update in chunk.items():
-            for ev in update.get("pending_events", []) or []:
+            if _node == "__interrupt__":
+                continue
+            for ev in (update.get("pending_events") or []) or []:
                 if ev.get("event_type") == "SCORE_BREAKDOWN":
                     yield "confidence", {
                         "label": "RISK_SCORE_BREAKDOWN",

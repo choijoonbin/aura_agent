@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import streamlit as st
-from streamlit_extras.stylable_container import stylable_container
+from ui.shared import stylable_container
 
 from ui.api_client import delete, get, post
 from ui.shared import case_type_badge, fmt_num, render_empty_state, render_page_header, status_badge
@@ -117,7 +117,8 @@ def render_demo_control_page() -> None:
             )
             with stylable_container(key=f"seeded_{item['voucher_key']}", css_styles=row_css):
                 st.markdown(
-                    case_type_badge(item.get("risk_type")) + status_badge("READY"),
+                    case_type_badge(item.get("case_type") or item.get("risk_type"))
+                    + status_badge(item.get("case_status")),
                     unsafe_allow_html=True,
                 )
                 st.markdown(f"**{item.get('title') or '-'}**")
@@ -137,8 +138,8 @@ def render_demo_control_page() -> None:
                         use_container_width=True,
                         type="secondary",
                     ):
-                        st.session_state["mt_menu"] = "AI 워크스페이스"
-                        st.session_state["mt_menu_option"] = "AI 워크스페이스"
+                        # mt_menu_option은 사이드바 위젯 키라 직접 수정 불가 → 리다이렉트 키로 넘기고 rerun
+                        st.session_state["mt_redirect_to_menu"] = "AI 워크스페이스"
                         st.session_state["mt_selected_voucher"] = item["voucher_key"]
                         st.rerun()
     else:

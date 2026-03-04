@@ -36,21 +36,25 @@
 2단계 프로세스 (원본 aura-platform 흐름 충실히 구현):
 
 **Phase 0 — 스크리닝 (Screening)**
-- **screener**: 원시 전표 신호에서 케이스 유형을 자율 분류 (BE 힌트 없음)
-  - `hr_status`, `mcc_code`, `budat`, `cputm`, `budget_exceeded_flag` 등 원시 신호 기반 결정론적 스코어링
+- **screener**: 전표 원시 데이터에서 케이스 유형을 자율 분류 (BE 힌트 없음)
+  - `hr_status`, `mcc_code`, `budat`, `cputm`, `budget_exceeded_flag` 등 전표 필드 기반 결정론적 스코어링
   - `HOLIDAY_USAGE` / `LIMIT_EXCEED` / `PRIVATE_USE_RISK` / `UNUSUAL_PATTERN` / `NORMAL_BASELINE` 분류
   - 결과를 `AgentCase` 테이블에 저장 후 분석 Phase에 전달
   - 독립 호출 가능: `POST /api/v1/cases/{voucher_key}/screen`
 
 **Phase 1 — 심층 분석 (Analysis)**
-- **intake**: 전표 입력 정규화, 스크리닝 결과 기반 신호 확정
+- **intake**: 전표 입력 정규화, 스크리닝 결과 기반 데이터 확정
 - **planner**: 케이스 유형별 조사 계획 수립 및 도구 선택
 - **execute**: skill/tool 순차 실행 (policy_rulebook_probe, document_evidence_probe 등)
+- **critic**: tool 결과 기반 과잉 주장·반례 검토
 - **verify**: 점수 산정, HITL 필요 여부 판단
+- **hitl_pause** (HITL 시): 사람 검토 대기(interrupt), 응답 후 같은 run으로 resume
+- **reporter**: 최종 설명 문장·요약 생성
 - **finalize**: 최종 결과 생성 및 근거 기반 설명
 
 > 참고: [`agent/screener.py`](agent/screener.py) — 결정론적 스크리닝 엔진  
-> 참고: [`agent/langgraph_agent.py`](agent/langgraph_agent.py) — screener→intake→planner→execute→verify→finalizer 노드 구현
+> 참고: [`agent/langgraph_agent.py`](agent/langgraph_agent.py) — 메인 그래프 노드 구현  
+> 참고: [docs/langgraph.md](docs/langgraph.md) — 오케스트레이션 흐름·노드별 역할 (에이전트 스튜디오 그래프와 동일)
 
 ### 2. Skill 기반 도구 확장
 - **policy_rulebook_probe**: 내부 규정집 조항 조회, 키워드 후보 수집 → 조항 단위 그룹화 → 문맥 확장
@@ -65,7 +69,7 @@
 ### 3. HITL (Human-in-the-Loop)
 - **구조화된 HITL 요청**: `hitl_request`, `reasons`, `questions`, `handoff` 필드
 - **HITL 필수 조건**: 핵심 필드 누락, 증거 부족, 규정 해석 모호, specialist 결과 충돌 시
-- **재분석 흐름**: 사람 검토 응답 제출 후 재평가 및 최종 확정
+- **재분석 흐름**: 사람 검토 응답 제출 후 **같은 run**에서 재평가 및 최종 확정. API 응답의 `resumed_run_id`는 **새 run이 아니라 동일 run_id**를 그대로 반환한다.
 
 > 참고: [`agent/hitl.py`](agent/hitl.py#L6) — HITL 승격 판단, [`main.py`](main.py#L223-L290) — HITL 응답 제출 API
 
@@ -80,7 +84,12 @@
 
 ### 5. Streamlit 통합 UI
 - **AI 워크스페이스**: 전표 선택, 분석 실행, 실시간 사고 흐름 탭, HITL 응답
-- **에이전트 스튜디오**: 에이전트 모델/프롬프트/도구/지식 설정
+- **에이전트 스튜디오**: 에이전트 모델/프롬프트/도구/지식 설정. 그래프는 **상위 오케스트레이션 그래프**(메인 노드 흐름)와 **하위 실행 스킬 그래프**(execute 노드 내부 도구 순서)로 구분되어 [docs/langgraph.md](docs/langgraph.md)와 동일합니다.
+
+**발표용 화면 정의 (문서·화면 동기화)**  
+- **에이전트 대화**: 실제 LangGraph 실행 중 공개 가능한 작업 메모 스트림  
+- **사고 과정**: 실행 후 같은 이벤트를 노드 기준으로 구조화한 리뷰 화면  
+- **결과**: 최종 판단 + 규정 근거 + 검증 메모 + run diagnostics
 - **규정문서 라이브러리**: RAG 문서 인덱싱, 품질 리포트, 청크 목록
 - **시연 데이터 제어**: 대표 시나리오 생성/삭제, 시연 전표 관리
 
@@ -104,7 +113,7 @@
 ### 7. BE(dwp-backend)·Aura 정합성
 - **케이스 목록 데이터**: 전표(fi_doc_header, fi_doc_item)를 기준으로 조회하고, 배지용 값(상태·심각도·유형)은 agent_case와 LEFT OUTER JOIN으로 가져옵니다. 스크리닝 전에는 case_type/severity가 없어 "미분류/낮음"으로 표시됩니다.
 - **테스트 데이터 생성**: `services/demo_data_service.py`의 시나리오별 필드(hr_status, mcc_code, budget_flag, day_mode, hour)는 BE `DemoViolationService`의 `setContextForScenario`·`preferredMccCodes`·`resolveBudgetExceededFlag` 규칙과 동일하게 적용됨. (HOLIDAY_USAGE는 budget N, LIMIT_EXCEED는 budget Y 등.)
-- **스크리닝 입력**: `case_service._build_screening_body()`는 BE `DetectBatchService.buildFlattenedBatchItem()`와 동일한 핵심 필드(occurredAt, hrStatus, hrStatusRaw, mccCode, budgetExceeded, isHoliday)로 구성하며, **intended_risk_type은 포함하지 않음** — Aura가 원시 전표 신호만으로 케이스 유형 분류.
+- **스크리닝 입력**: `case_service._build_screening_body()`는 BE `DetectBatchService.buildFlattenedBatchItem()`와 동일한 핵심 필드(occurredAt, hrStatus, hrStatusRaw, mccCode, budgetExceeded, isHoliday)로 구성하며, **intended_risk_type은 포함하지 않음** — Aura가 전표 원시 데이터만으로 케이스 유형 분류.
 - **스크리닝 → 분석 흐름**: (1) 에이전트가 스크리닝으로 유형을 판단한 뒤 결과를 `agent_case`에 저장(업데이트). (2) 이후 **분석 버튼**을 누르면 BE와 동일하게, 스크리닝 결과(`case_type`, `screening_reason_text`)와 전표/evidence 필드를 담은 `body_evidence`를 에이전트에 넘기고, 에이전트는 그 값을 기준으로 심층 분석을 수행.
 
 ## 📁 프로젝트 구조
@@ -213,7 +222,7 @@ graph TD
 | 노드 | 역할 | 출력 |
 |------|------|------|
 | **intake** | 전표 입력 정규화, flags 추출 | `flags`, `pending_events` |
-| **planner** | 위험 신호별 조사 계획 수립 | `plan`, `pending_events` |
+| **planner** | 위험 유형별 조사 계획 수립 | `plan`, `pending_events` |
 | **execute** | skill 순차 호출, 점수 산정 | `tool_results`, `score_breakdown`, `pending_events` |
 | **verify** | HITL 필요 여부 판단 | `hitl_request` 또는 null, `verification` |
 | **finalize** | 근거 기반 최종 설명 생성 | `final_result` |
@@ -248,6 +257,17 @@ python3 -m venv .venv
 source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 ```
+
+#### (선택) Phase F cross-encoder rerank
+
+규정 검색 결과를 cross-encoder로 재정렬하려면 `sentence-transformers`(및 `torch`)를 설치합니다. **미설치 시에도 동작하며**, 이때는 기존 lexical 순위가 그대로 사용됩니다.
+
+```bash
+# Python/torch 호환 환경에서만 (예: Python 3.10~3.12 권장)
+pip install torch sentence-transformers
+```
+
+> 참고: [`services/retrieval_quality.py`](services/retrieval_quality.py) — `rerank_with_cross_encoder()`, [`services/policy_service.py`](services/policy_service.py) — `search_policy_chunks()` 내 rerank 호출
 
 ### 2. 환경 변수 설정
 
@@ -371,7 +391,7 @@ ENABLE_LANGGRAPH_IF_AVAILABLE=true
 - **GET** `/api/v1/cases/{voucher_key}/analysis/latest` — 최신 분석 결과
 - **GET** `/api/v1/cases/{voucher_key}/analysis/history` — 케이스별 분석 이력
 - **GET** `/api/v1/analysis-runs/{run_id}/events` — 런 이벤트(raw) 조회
-- **POST** `/api/v1/analysis-runs/{run_id}/hitl` — HITL 응답 제출
+- **POST** `/api/v1/analysis-runs/{run_id}/hitl` — HITL 응답 제출 (재개 시 새 run 생성 없이 동일 `run_id`로 이어짐. 응답 `resumed_run_id` = 동일 run_id)
 
 ### RAG / 에이전트
 - **GET** `/api/v1/rag/documents` — RAG 문서 목록
@@ -424,6 +444,7 @@ with requests.get(
 - **PoC 목적**: 이 프로젝트는 운영용이 아니라 시연/검증용입니다.
 - **인증 미적용**: 인증/권한 검증은 의도적으로 제거되어 있으며, `tenant_id=1`, `user_id=1` 고정 사용
 - **메모리 기반 런타임**: 분석 결과 일부는 메모리 기반으로 저장되며, 서버 재시작 시 초기화됩니다.
+- **HITL resume**: `MemorySaver` 기반이므로 **같은 프로세스/세션**에서만 유효합니다. 서버 재기동 후에는 이전 run의 interrupt 상태가 사라져 해당 run으로의 resume는 불가합니다.
 - **Aura 연동**: `AURA_PLATFORM_PATH`가 설정된 경우에만 legacy Aura 심층 분석 도구 사용 가능
 
 > 참고: [`db/models.py`](db/models.py) — DB 스키마, [`services/stream_runtime.py`](services/stream_runtime.py) — 메모리 기반 런타임, [`agent/aura_bridge.py`](agent/aura_bridge.py) — Aura 연동

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import streamlit as st
-from streamlit_extras.stylable_container import stylable_container
+from ui.shared import stylable_container
 
 from services.rag_chunk_lab_service import list_rulebook_files, load_rulebook_text, preview_chunks, save_uploaded_rulebook
 from ui.api_client import get
@@ -24,7 +24,7 @@ def render_rag_library_page() -> None:
     with cols[1]: render_kpi_card("인덱싱됨", str(indexed), "인용 준비 완료")
     with cols[2]: render_kpi_card("주의 필요", str(attention), "인덱싱/오류")
     with cols[3]: render_kpi_card("청킹 합격률", f"{pass_rate:.1f}%", "quality_report 기준")
-    top_tabs = st.tabs(["DB 라이브러리", "청킹 실험실"])
+    top_tabs = st.tabs(["DB 라이브러리", "청킹 실험실", "Run 인용 조회"])
     with top_tabs[0]:
         left, right = st.columns([0.48, 0.52])
         selected_doc_id = st.session_state.get("mt_selected_doc_id") or (items[0]["doc_id"] if items else None)
@@ -99,3 +99,35 @@ def render_rag_library_page() -> None:
             for idx, chunk in enumerate(chunks[:12], start=1):
                 with st.expander(f"{idx}. {chunk['title']} · {chunk['length']} chars", expanded=(idx == 1)):
                     st.write(chunk["content"])
+    with top_tabs[2]:
+        render_panel_header("Run 인용 조회", "분석 run_id로 해당 run에서 사용된 retrieval 후보·채택 인용을 확인합니다.")
+        run_id_input = st.text_input("run_id", placeholder="UUID (AI 워크스페이스 결과 탭에서 확인)", key="rag_run_id_input")
+        if run_id_input and st.button("인용 현황 조회", key="rag_fetch_run_citations"):
+            try:
+                ev = get(f"/api/v1/analysis-runs/{run_id_input.strip()}/events")
+                result = ev.get("result") or {}
+                res_body = result.get("result") if isinstance(result.get("result"), dict) else result
+                snapshot = (res_body or {}).get("retrieval_snapshot")
+                if not snapshot:
+                    st.caption("이 run에는 retrieval_snapshot이 없습니다. (이전 버전 run이거나 policy_rulebook_probe 미호출)")
+                else:
+                    candidates = snapshot.get("candidates_after_rerank") or []
+                    adopted = snapshot.get("adopted_citations") or []
+                    st.metric("후보 청크 수", len(candidates))
+                    st.metric("채택 인용 수", len(adopted))
+                    if adopted:
+                        st.markdown("#### 채택 인용")
+                        for i, c in enumerate(adopted[:20], 1):
+                            reason = c.get("adoption_reason") or "규정 근거로 채택"
+                            st.text(f"{i}. {c.get('article') or '-'} / {c.get('title') or '-'} (chunk_id={c.get('chunk_id') or '-'})")
+                            st.caption(f"채택 이유: {reason}")
+                    if candidates:
+                        st.markdown("#### 후보 목록 (after rerank)")
+                        for i, g in enumerate(candidates[:15], 1):
+                            reason = g.get("adoption_reason")
+                            line = f"{i}. {g.get('article') or '-'} · {g.get('parent_title') or '-'}"
+                            if reason:
+                                line += f" — {reason}"
+                            st.caption(line)
+            except Exception as e:
+                st.error(f"조회 실패: {e}")

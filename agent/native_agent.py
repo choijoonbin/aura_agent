@@ -104,7 +104,7 @@ def _compose_final_reason(flags: dict[str, Any], verification: dict[str, Any], l
     if flags.get("is_night_time"):
         parts.append("심야 시간대 사용이 함께 확인되었습니다")
     if flags.get("budget_exceeded"):
-        parts.append("예산 초과 신호가 존재합니다")
+        parts.append("예산 초과 여부가 확인됩니다")
     if verification.get("needs_review"):
         parts.append("근거가 충분하지 않아 최종 확정은 보류합니다")
     else:
@@ -145,7 +145,7 @@ async def run_native_agentic_analysis(
         event_type="NODE_START",
         node="planner",
         phase="plan",
-        message="위험 신호를 바탕으로 조사 계획을 수립합니다.",
+        message="위험 지표를 바탕으로 조사 계획을 수립합니다.",
         input_hash=ctx.evidence_hash,
     ).to_payload()
 

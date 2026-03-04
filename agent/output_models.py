@@ -37,15 +37,18 @@ class PlannerOutput(BaseModel):
 
 
 class CriticOutput(BaseModel):
-    """비판 노드 출력. 과잉 주장·모순·누락·보류 권고."""
+    """비판 노드 출력. 과잉 주장·모순·누락·보류 권고·검증 대상 주장."""
 
     overclaim_risk: bool = Field(description="과잉 주장 위험 여부")
     contradictions: list[str] = Field(default_factory=list, description="발견된 모순 목록")
     missing_counter_evidence: list[str] = Field(default_factory=list, description="부족한 반증/누락 필드")
     recommend_hold: bool = Field(description="사람 검토 보류 권고 여부")
     rationale: str = Field(default="", description="비판 근거")
-    # 기존 critique 호환용 추가 필드
     has_legacy_result: bool = Field(default=False, description="legacy 전문가 결과 존재 여부")
+    verification_targets: list[str] = Field(
+        default_factory=list,
+        description="검증할 주장 문장 1~3개. evidence로 뒷받침 가능한 핵심 주장만.",
+    )
 
 
 # ----- Verifier -----
@@ -65,7 +68,7 @@ class VerifierOutput(BaseModel):
     missing_evidence: list[str] = Field(default_factory=list, description="부족한 증거 목록")
     gate: VerifierGate = Field(description="진행 게이트: READY | HITL_REQUIRED | REJECTED")
     rationale: str = Field(default="", description="검증 근거")
-    quality_signals: list[str] = Field(default_factory=list, description="품질 신호(호환용)")
+    quality_signals: list[str] = Field(default_factory=list, description="품질 지표 코드 목록(호환용)")
 
 
 # ----- Reporter -----

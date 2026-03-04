@@ -33,7 +33,7 @@
 - LangGraph 기반 메인 그래프가 존재하며, screener → intake → planner → execute → critic → verify → hitl_pause/reporter → finalizer 흐름으로 동작한다.
 - **execute** 단계는 **LangChain tool 호출 루프**로 동작한다. `get_langchain_tools()`로 취득한 tool맵과 plan 기반으로 `SkillContextInput` → `tool.ainvoke()`만 사용하며, registry direct dispatch는 제거된 상태이다.
 - **planner / critic / verifier / reporter**는 **structured output 스키마**(`agent/output_models.py`)를 사용하며, 각 노드가 해당 모델을 생성·`model_dump()`로 state에 저장한다. 다만 LLM이 스키마에 직접 바인딩되어 생성하는 구조는 아니고, 코드에서 모델 객체를 조립하는 transitional 구현이다.
-- **HITL**은 **verify → hitl_pause/reporter 조건 분기**로 동작하며, HITL 필요 시 run을 조기 종료하고 `resumed_run_id` 기반 **새 run 생성 후 재개**하는 방식이다. LangGraph 정식 `interrupt_before` + checkpointer + 같은 run 재개는 적용하지 않았으며, 이는 `docs/langgraphPlan2.md`의 Phase D 결정 기준에 따라 **Transitional HITL 유지**로 문서화되어 있다.
+- **HITL**은 **verify → hitl_pause/reporter 조건 분기**로 동작하며, HITL 필요 시 `hitl_pause` 노드에서 `interrupt()`로 일시정지한다. 재개 시 **같은 run_id(thread_id)**로 `Command(resume=...)` 호출하여 reporter로 이어지며, `checkpointer=MemorySaver()`를 사용한다. API 응답의 `resumed_run_id`는 동일 run_id를 그대로 반환한다. (`docs/langgraphPlan2.md` Phase D 결정 기준: 정식 HITL 적용.)
 - UI는 에이전트 대화(라이브 스트림) / 사고 과정 / 실행 로그 / 결과 / 스튜디오 / RAG 라이브러리 / 시연 데이터 제어를 갖추고 있으며, run 단위 diagnostics API(`GET .../diagnostics`)로 관찰 지표를 확인할 수 있다.
 - 잔여 작업은 문서 현행화, 테스트 전략 구현, Phase F/H 고도화, 발표용 UX 마감 등으로 `docs/langgraphPlan2.md` merge 목록에 정리되어 있다.
 
@@ -236,12 +236,7 @@ planner / critic / verifier / reporter를 schema 기반 노드로 전환한다.
 - **재검토 반영:** 현재 코드 기준 registry direct dispatch 제거됨. execute_node는 get_langchain_tools() 기반 tool.ainvoke() 루프만 사용. **결론: Phase C 완료로 확정.** (docs/langgraphPlan2.md 잔여작업 merge 반영.)
 
 ### 점검 내용 답변
-- **재검토 요청.** 점검 당시 코드와 현재 코드가 다를 수 있음.
-- 현재 `agent/langgraph_agent.py` 기준:
-  - `SKILL_REGISTRY` import 및 사용은 **제거**되어 있음.
-  - `execute_node()`는 `_get_tools_by_name()`(내부에서 `get_langchain_tools()` 호출)으로 tool 맵을 구성하고, plan의 각 step에 대해 `SkillContextInput`을 만든 뒤 **`tool.ainvoke(inp.model_dump())`만 호출**함. 즉 **registry direct dispatch는 제거된 상태**임.
-  - 로드맵의 “ToolNode 또는 **동등한 정식 tool-calling loop**”에는 **동등한 tool-calling loop**로 구현된 상태임(LangGraph `ToolNode` 클래스 미사용이지만 plan 기반 LangChain tool 호출 루프로 정리됨).
-- 따라서 **Phase C는 “registry 제거 + LangChain tool 기반 실행 루프” 기준으로 완료에 해당**한다고 보며, 점검 내용이 과거 구현 기준일 가능성이 있어 **재검토를 요청**함.
+- 현재 구현: execute_node는 get_langchain_tools() 기반 tool.ainvoke() 루프만 사용. registry direct dispatch 제거됨. Phase C 완료.
 
 ---
 
@@ -276,24 +271,16 @@ verify 단계에서 사람 개입을 LangGraph 패턴으로 정식 반영한다.
 - verifier가 interrupt / resume 기반으로 동작한다.
 - HITL 후 재개 성공률을 측정 가능하다 (목표: 95% 이상, 공식 4.2 Phase C 참고).
 
-**Phase D 결정 기준:** 정식 HITL vs Transitional 유지 판정은 `docs/langgraphPlan2.md`의 "Phase D 결정 기준"을 따른다. 현재는 **Transitional HITL 유지**로 확정.
+**Phase D 결정 기준:** 정식 HITL vs Transitional 유지 판정은 `docs/langgraphPlan2.md`의 "Phase D 결정 기준"을 따른다. 현재는 **정식 HITL(same-run interrupt/resume + checkpointer)** 적용 상태이다.
 
 ### 점검 내용
-- (과거) 특이사항 있음. **재검토 반영:** Phase D 결정 기준에 따라 Transitional HITL 유지로 확정.
-- `build_agent_graph()`에는 `verify -> hitl_pause / reporter` 조건 분기가 추가되어 있음
-- `main.py`에는 `POST /api/v1/analysis-runs/{run_id}/hitl` 경로와 `resumed_run_id` 생성 로직이 존재함
-- 그러나 현재 구현은 LangGraph의 정식 `interrupt / resume` 메커니즘이라기보다
-  - `hitl_pause` 노드에서 종료
-  - 사용자 응답 후 **새 run을 생성하여 재실행**
-  하는 우회 방식임
-- 즉, HITL은 기능적으로 존재하지만 문서 기준의 “정식 LangGraph interrupt / resume” 완료 상태는 아님
-- **Phase D 결정 기준 반영:** docs/langgraphPlan2.md에 따라 **Transitional HITL 유지**로 확정. 정식 LangGraph interrupt/resume(같은 run 재개 + checkpointer)은 아님. **결론: Phase D는 Transitional 기준으로 완료.**
+- `build_agent_graph()`에 `workflow.compile(checkpointer=_get_checkpointer())` 적용. PoC는 `MemorySaver`.
+- `hitl_pause_node`에서 `interrupt(hitl_request)` 호출로 일시정지. 재개 시 `Command(resume=hitl_payload)`로 같은 thread에서 reporter로 이어짐.
+- `main.py`의 `POST .../hitl`은 **새 run을 생성하지 않고** 동일 `run_id`로 `_run_analysis_task(..., resume_value=...)`를 호출하여 같은 run에서 재개. API 응답의 `resumed_run_id`는 동일 run_id를 그대로 반환.
+- **결론: Phase D는 정식 LangGraph interrupt/resume + checkpointer 기준으로 완료.**
 
 ### 점검 내용 답변
-- **재검토 요청.** “정식”의 정의에 따라 완료 여부가 갈릴 수 있음.
-- 현재 구현: verify → `hitl_pause` / reporter 조건 분기, hitl_pause 시 run 조기 종료 및 `HITL_REQUIRED` 반환. HITL 요청/응답 payload, `POST .../hitl` 후 `resumed_run_id`로 **새 run 생성** 후 `body_evidence`에 hitlResponse를 넣어 재실행. UI에 HITL 상태 반영, diagnostics에서 hitl_requested / resume_success 측정 가능.
-- **정식의 의미:** (A) LangGraph의 `interrupt_before` + checkpointer + **같은 thread/run 재개**만 “정식”으로 본다면 → 현재는 해당하지 않으므로 점검 결론(부분 완료)이 맞을 수 있음. (B) 로드맵/phase0-prep에서 “resume = 새 run 생성 + parent_run_id + body_evidence 보강”을 허용한 전제라면 → 현재 구현은 그 전제 안에서는 **완료**에 해당함.
-- **재검토 요청:** “정식 LangGraph interrupt/resume”을 (A)로 한정할지, (B)처럼 “조건 분기 + HITL payload + 재개 경로(새 run 허용) + 측정 가능”까지를 완료로 볼지 문서/기준을 명시한 뒤 Phase D 완료 여부를 다시 판단해 주시기 바람.
+- 현재 구현: verify → `hitl_pause`(interrupt) → 사용자 응답 → **같은 run_id(thread_id)**로 `graph.astream(Command(resume=...), config)` 재호출 → hitl_pause 노드에서 hitl_response 반영 후 reporter → finalizer. UI·diagnostics에서 hitl_requested / resume_success 측정 가능.
 
 ---
 
@@ -350,7 +337,7 @@ verify 단계에서 사람 개입을 LangGraph 패턴으로 정식 반영한다.
 - [x] rerank 검토/적용
 - [x] citation binding 강화
 - [x] evidence verification 적용
-- [x] Phase F 완료
+- [x] Phase F 완료 (baseline 완료, 고급화 잔여)
 
 
 ### 목표
@@ -388,7 +375,7 @@ verify 단계에서 사람 개입을 LangGraph 패턴으로 정식 반영한다.
 - 특이사항:
   - 현재 rerank는 규칙 기반 hierarchical rerank 중심이며, cross-encoder/LLM rerank는 아직 아님
   - evidence verification은 일부 반영됐으나 별도 독립 검증 계층으로 완전히 분리되지는 않음
-- 결론: **Phase F는 기본 구현 완료, 다만 retrieval/rerank 고도화 여지는 남아 있음**
+- 결론: **Phase F는 baseline 완료. cross-encoder/LLM rerank, evidence verification 독립 계층 등 고급화는 잔여.**
 
 ---
 
@@ -443,7 +430,7 @@ verify 단계에서 사람 개입을 LangGraph 패턴으로 정식 반영한다.
 - [x] interrupt/resume success 측정
 - [x] citation coverage 측정
 - [x] fallback usage rate 측정
-- [x] Phase H 완료
+- [x] Phase H 완료 (run diagnostics 기반 최소 구현 완료. 운영형 observability 아님)
 
 
 ### 목표
@@ -467,7 +454,7 @@ verify 단계에서 사람 개입을 LangGraph 패턴으로 정식 반영한다.
 - 진단 결과를 API 또는 UI에서 재확인 가능해야 한다.
 
 ### 점검 내용
-- PASS (기초 구현 기준)
+- PASS (run diagnostics 기반 최소 구현 완료. **운영형 observability 완성이 아님.**)
 - `main.py`
   - `/api/v1/analysis-runs/{run_id}/diagnostics` 엔드포인트 존재
 - `services/run_diagnostics.py`
@@ -480,19 +467,10 @@ verify 단계에서 사람 개입을 LangGraph 패턴으로 정식 반영한다.
   - citation coverage
   - fallback usage
 - 특이사항:
-  - 현재는 run 단위 내부 진단/검증 수준이며, 운영 대시보드/장기 시계열 관찰 지표까지는 아님
-  - 즉, 문서 기준의 최소 완료 기준은 충족하나 운영 관측성 고도화는 후속 과제임
-
-### 점검 내용 답변
-- **점검 내용과 현재 구현이 일치함.** 재검토 시에도 동일 판단 가능.
-- 현재 코드 기준 확인:
-  - `GET /api/v1/analysis-runs/{run_id}/diagnostics`가 `main.py`에 존재하며, runtime 또는 DB에서 해당 run의 result/timeline/lineage/hitl을 조회한 뒤 `get_run_diagnostics()`를 호출해 JSON으로 반환함.
-  - `services/run_diagnostics.py`의 `get_run_diagnostics()`는 tool_call_success_rate, tool_call_total, tool_call_ok, hitl_requested, resume_success, citation_coverage, fallback_usage_rate, event_count, lineage_mode, parent_run_id를 반환함.
-  - `services/citation_metrics.py`의 `citation_coverage(reporter_output)`가 reporter_output.sentences 기준으로 인용 붙은 문장 비율을 계산하며, run_diagnostics에서 사용됨.
-- 완료 기준(“run 단위에서 tool success, HITL, citation coverage, fallback usage 확인 가능” 및 “API에서 재확인 가능”)은 충족함. overclaim rejection rate·전체 interrupt rate(다수 run 집계)는 run 단위 API에는 없으며, 점검 내용의 “운영 대시보드/장기 시계열은 후속”이라는 특이사항과 맞음.
+  - run 단위 진단/검증까지가 현재 완료 범위. 운영 대시보드·장기 시계열·run 간 비교 차트 등은 미구현(후속 과제).
 
 ### 완료 기준
-- 위 핵심 지표를 최소 내부적으로 확인 가능해야 한다.
+- 위 핵심 지표를 run 단위로 확인 가능하면 최소 완료. (운영형 observability는 별도 과제.)
 
 테스트 전략( graph unit test, tool schema contract test, interrupt/resume replay test, citation binding regression test )은 공식 문서 Section 8.13을 따른다.
 

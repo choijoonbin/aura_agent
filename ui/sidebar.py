@@ -6,11 +6,20 @@ from streamlit_option_menu import option_menu
 from utils.config import settings
 
 MENU_OPTIONS = [
-    ("AI 워크스페이스", ""),
-    ("에이전트 스튜디오", "Agent model, prompt, tool, knowledge"),
-    ("규정문서 라이브러리", "RAG document governance and quality"),
-    ("시연 데이터 제어", "Scenario data generator"),
+    ("AI 워크스페이스", "grid", ""),
+    ("에이전트 스튜디오", "cpu", "Agent model, prompt, tool, knowledge"),
+    ("규정문서 라이브러리", "journal-text", "RAG document governance and quality"),
+    ("운영 대시보드", "graph-up", "Run diagnostics, compare, observability"),
+    ("시연 데이터 제어", "sliders", "Scenario data generator"),
 ]
+
+# _ICON_MAP = {
+#     "grid": "▦",
+#     "cpu": "◫",
+#     "journal-text": "≣",
+#     "graph-up": "↗",
+#     "sliders": "☷",
+# }
 
 
 def render_sidebar() -> str:

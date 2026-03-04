@@ -1697,7 +1697,7 @@ CREATE TABLE dwp_aura.case_analysis_result (
 	grounding_coverage_ratio numeric(5, 4) NULL, -- 결론 문장 근거 연결률 (0~1)
 	ungrounded_claim_sentences int4 NULL, -- 근거 미연결 주장 문장 수
 	created_at timestamptz DEFAULT now() NOT NULL, -- 분석 결과 생성 시각
-	analysis_quality_signals jsonb NULL, -- 사용자 노출용 분석 신뢰 신호 목록(quality_gate_codes 코드명 매핑)
+	analysis_quality_signals jsonb NULL, -- 사용자 노출용 품질 지표 목록(quality_gate_codes 코드명 매핑)
 	CONSTRAINT case_analysis_result_new_pkey PRIMARY KEY (run_id),
 	CONSTRAINT case_analysis_result_new_run_id_fkey FOREIGN KEY (run_id) REFERENCES dwp_aura.case_analysis_run(run_id) ON DELETE CASCADE
 );
@@ -1729,7 +1729,7 @@ COMMENT ON COLUMN dwp_aura.case_analysis_result.quality_gate_codes IS '품질게
 COMMENT ON COLUMN dwp_aura.case_analysis_result.grounding_coverage_ratio IS '결론 문장 근거 연결률 (0~1)';
 COMMENT ON COLUMN dwp_aura.case_analysis_result.ungrounded_claim_sentences IS '근거 미연결 주장 문장 수';
 COMMENT ON COLUMN dwp_aura.case_analysis_result.created_at IS '분석 결과 생성 시각';
-COMMENT ON COLUMN dwp_aura.case_analysis_result.analysis_quality_signals IS '사용자 노출용 분석 신뢰 신호 목록(quality_gate_codes 코드명 매핑)';
+COMMENT ON COLUMN dwp_aura.case_analysis_result.analysis_quality_signals IS '사용자 노출용 품질 지표 목록(quality_gate_codes 코드명 매핑)';
 
 -- Permissions
 

@@ -63,6 +63,7 @@ async def run_agent_analysis(
     body_evidence: dict[str, Any],
     intended_risk_type: str | None = None,
     run_id: str | None = None,
+    resume_value: dict[str, Any] | None = None,
 ) -> AsyncGenerator[tuple[str, dict[str, Any]], None]:
     if settings.enable_langgraph_if_available:
         from agent.langgraph_agent import run_langgraph_agentic_analysis
@@ -72,6 +73,7 @@ async def run_agent_analysis(
             body_evidence=body_evidence,
             intended_risk_type=intended_risk_type,
             run_id=run_id,
+            resume_value=resume_value,
         ):
             yield ev_type, payload
         return

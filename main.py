@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import uuid
 from datetime import datetime, timezone
 from typing import Any
@@ -22,7 +23,7 @@ from services.case_service import (
 from services.demo_data_service import clear_demo_data, list_demo_scenarios, list_seeded_demo_cases, seed_demo_scenarios
 from services.persistence_service import persist_analysis_result
 from services.rag_library_service import get_rag_document_detail, list_rag_documents
-from services.run_diagnostics import get_run_diagnostics
+from services.run_diagnostics import compare_runs_diagnostics, get_run_diagnostics
 from services.runtime_persistence_service import (
     get_latest_run_id_by_case,
     get_persisted_timeline,
@@ -34,6 +35,8 @@ from services.schemas import AnalysisStartResponse, HitlSubmitRequest, HitlSubmi
 from services.stream_runtime import runtime
 from utils.config import ensure_source_paths, settings
 
+
+logger = logging.getLogger(__name__)
 
 app = FastAPI(title="AuraAgent PoC API", version="0.3.0")
 
@@ -101,6 +104,7 @@ async def _run_analysis_task(
     case_id: str,
     body_evidence: dict[str, Any],
     intended_risk_type: str | None,
+    resume_value: dict[str, Any] | None = None,
 ) -> None:
     last_payload: dict[str, Any] | None = None
     voucher_key = case_id.replace("POC-", "")
@@ -110,6 +114,7 @@ async def _run_analysis_task(
             body_evidence=body_evidence,
             intended_risk_type=intended_risk_type,
             run_id=run_id,
+            resume_value=resume_value,
         ):
             data = ev_payload if isinstance(ev_payload, dict) else {"value": ev_payload}
             await runtime.publish(run_id, ev_type, data)
@@ -163,7 +168,17 @@ async def _run_analysis_task(
                 )
             except Exception:
                 pass
-            if ev_type in {"completed", "failed"}:
+            if ev_type == "completed":
+                last_payload = {
+                    "run_id": run_id,
+                    "case_id": case_id,
+                    "event_type": ev_type,
+                    "result": data,
+                    "completed_at": datetime.now(timezone.utc).isoformat(),
+                }
+                if data.get("status") == "HITL_REQUIRED":
+                    runtime.set_hitl_request(run_id, data.get("hitl_request") or data)
+            elif ev_type == "failed":
                 last_payload = {
                     "run_id": run_id,
                     "case_id": case_id,
@@ -202,9 +217,39 @@ async def _run_analysis_task(
                 from db.session import SessionLocal
                 with SessionLocal() as persist_db:
                     persist_analysis_result(persist_db, run_id=run_id, result_payload=last_payload)
-            except Exception:
-                pass
-        await runtime.close(run_id)
+            except Exception as e:
+                logger.warning("persist_analysis_result failed run_id=%s case_id=%s error=%s", run_id, case_id, e)
+
+            try:
+                if last_payload.get("result", {}).get("status") != "HITL_REQUIRED":
+                    from db.session import SessionLocal
+                    with SessionLocal() as persist_db:
+                        events = runtime.get_timeline(run_id)
+                        result = runtime.get_result(run_id)
+                        lineage = runtime.get_lineage(run_id)
+                        hitl_req = runtime.get_hitl_request(run_id)
+                        hitl_res = runtime.get_hitl_response(run_id)
+                        diag = get_run_diagnostics(
+                            result=result or {},
+                            timeline=events or [],
+                            lineage=lineage,
+                            hitl_request=hitl_req,
+                            hitl_response=hitl_res,
+                        )
+                        log_run_event(
+                            persist_db,
+                            run_id=run_id,
+                            case_id=case_id,
+                            voucher_key=voucher_key,
+                            stage="diagnostics",
+                            event_type="RUN_DIAGNOSTICS_SNAPSHOT",
+                            metadata={"stored_event_type": "RUN_DIAGNOSTICS_SNAPSHOT", "diagnostics": diag},
+                        )
+            except Exception as e:
+                logger.warning("diagnostics snapshot persist failed run_id=%s case_id=%s error=%s", run_id, case_id, e)
+        # HITL_REQUIRED면 같은 run으로 재개 가능하므로 close 하지 않음
+        if last_payload is None or last_payload.get("result", {}).get("status") != "HITL_REQUIRED":
+            await runtime.close(run_id)
 
 
 @app.post("/api/v1/cases/{voucher_key}/screen")
@@ -266,9 +311,8 @@ async def start_analysis(voucher_key: str, db: Session = Depends(get_db)) -> Ana
 
 @app.post("/api/v1/analysis-runs/{run_id}/hitl", response_model=HitlSubmitResponse)
 async def submit_hitl(run_id: str, request: HitlSubmitRequest, db: Session = Depends(get_db)) -> HitlSubmitResponse:
-    source_result = runtime.get_result(run_id)
     lineage = runtime.get_lineage(run_id)
-    if not source_result or not lineage:
+    if not lineage:
         raise HTTPException(status_code=404, detail="source run not found")
 
     hitl_request = runtime.get_hitl_request(run_id)
@@ -282,9 +326,6 @@ async def submit_hitl(run_id: str, request: HitlSubmitRequest, db: Session = Dep
     except Exception as e:
         raise HTTPException(status_code=404, detail=str(e)) from e
 
-    resumed_run_id = str(uuid.uuid4())
-    runtime.create_run(case_id=case_id, run_id=resumed_run_id, parent_run_id=run_id, mode="hitl_resume")
-
     hitl_payload = request.model_dump()
     runtime.set_hitl_response(run_id, hitl_payload)
     try:
@@ -297,39 +338,25 @@ async def submit_hitl(run_id: str, request: HitlSubmitRequest, db: Session = Dep
             event_type="HITL_RESPONSE",
             metadata={"stored_event_type": "HITL_RESPONSE", "hitl_response": hitl_payload},
         )
-        log_run_event(
-            db,
-            run_id=resumed_run_id,
-            case_id=case_id,
-            voucher_key=voucher_key,
-            stage="start",
-            event_type="RUN_CREATED",
-            metadata={
-                "stored_event_type": "RUN_CREATED",
-                "lineage": runtime.get_lineage(resumed_run_id),
-                "parent_run_id": run_id,
-                "body_evidence": payload["body_evidence"],
-            },
-        )
     except Exception:
         pass
-    payload["body_evidence"]["hitlResponse"] = hitl_payload
-    payload["body_evidence"]["hitlSourceRunId"] = run_id
 
+    # 정식 HITL: 같은 run_id(thread_id)로 재개. 새 run 생성 없음.
     asyncio.create_task(
         _run_analysis_task(
-            run_id=resumed_run_id,
+            run_id=run_id,
             case_id=case_id,
             body_evidence=payload["body_evidence"],
             intended_risk_type=payload.get("intended_risk_type"),
+            resume_value=hitl_payload,
         )
     )
 
     return HitlSubmitResponse(
         accepted=True,
         source_run_id=run_id,
-        resumed_run_id=resumed_run_id,
-        stream_path=f"/api/v1/analysis-runs/{resumed_run_id}/stream",
+        resumed_run_id=run_id,
+        stream_path=f"/api/v1/analysis-runs/{run_id}/stream",
     )
 
 
@@ -419,6 +446,48 @@ def get_run_events(run_id: str) -> dict[str, Any]:
         "hitl_response": hitl_response,
         "lineage": lineage,
     }
+
+
+@app.get("/api/v1/cases/{voucher_key}/runs/compare")
+def compare_case_runs(
+    voucher_key: str,
+    run_ids: str = Query(..., description="comma-separated run_ids"),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """Phase H: 케이스 내 여러 run의 진단 지표 비교."""
+    try:
+        payload = build_analysis_payload(db, voucher_key)
+    except Exception as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    case_id = payload["case_id"]
+    allowed = set(runtime.list_runs_of_case(case_id) or list_run_ids_by_case(db, case_id=case_id))
+    ids = [r.strip() for r in run_ids.split(",") if r.strip()][:10]
+    ids = [r for r in ids if r in allowed]
+    diagnostics_list = []
+    for run_id in ids:
+        events = runtime.get_timeline(run_id)
+        result = runtime.get_result(run_id)
+        lineage = runtime.get_lineage(run_id)
+        hitl_request = runtime.get_hitl_request(run_id)
+        hitl_response = runtime.get_hitl_response(run_id)
+        if not events:
+            events = get_persisted_timeline(db, run_id=run_id)
+        aux = get_run_aux_state(db, run_id=run_id)
+        if result is None and aux.get("result_payload"):
+            result = {"run_id": run_id, "event_type": "completed", "result": aux.get("result_payload")}
+        lineage = lineage or aux.get("lineage")
+        hitl_request = hitl_request or aux.get("hitl_request")
+        hitl_response = hitl_response or aux.get("hitl_response")
+        diagnostics_list.append(
+            get_run_diagnostics(
+                result=result or {"run_id": run_id},
+                timeline=events,
+                lineage=lineage,
+                hitl_request=hitl_request,
+                hitl_response=hitl_response,
+            )
+        )
+    return compare_runs_diagnostics(diagnostics_list)
 
 
 @app.get("/api/v1/analysis-runs/{run_id}/diagnostics")

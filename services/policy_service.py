@@ -283,6 +283,12 @@ def search_policy_chunks(db: Session, body_evidence: dict[str, Any], limit: int 
         group["source_strategy"] = "hierarchical_keyword_rerank"
 
     ranked = _rerank_groups(groups, body_evidence, keywords)
+    try:
+        from services.retrieval_quality import rerank_with_cross_encoder
+        query_str = " ".join(keywords[:12])
+        ranked = rerank_with_cross_encoder(ranked, query_str)
+    except Exception:
+        pass
     results: list[dict[str, Any]] = []
     for group in ranked[:limit]:
         results.append(
