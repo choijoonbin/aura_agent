@@ -29,6 +29,7 @@ class StreamRuntime:
         self._timeline_by_run: dict[str, list[dict[str, Any]]] = {}
         self._hitl_requests_by_run: dict[str, dict[str, Any]] = {}
         self._hitl_responses_by_run: dict[str, dict[str, Any]] = {}
+        self._hitl_drafts_by_run: dict[str, dict[str, Any]] = {}
         self._run_lineage: dict[str, dict[str, Any]] = {}
 
     def create_run(self, case_id: str, run_id: str, *, parent_run_id: str | None = None, mode: str = "primary") -> RunContext:
@@ -71,6 +72,12 @@ class StreamRuntime:
 
     def get_hitl_response(self, run_id: str) -> dict[str, Any] | None:
         return self._hitl_responses_by_run.get(run_id)
+
+    def set_hitl_draft(self, run_id: str, payload: dict[str, Any]) -> None:
+        self._hitl_drafts_by_run[run_id] = payload
+
+    def get_hitl_draft(self, run_id: str) -> dict[str, Any] | None:
+        return self._hitl_drafts_by_run.get(run_id)
 
     def get_lineage(self, run_id: str) -> dict[str, Any] | None:
         return self._run_lineage.get(run_id)

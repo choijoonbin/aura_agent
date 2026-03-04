@@ -31,7 +31,7 @@ from services.runtime_persistence_service import (
     list_run_ids_by_case,
     log_run_event,
 )
-from services.schemas import AnalysisStartResponse, HitlSubmitRequest, HitlSubmitResponse
+from services.schemas import AnalysisStartResponse, HitlDraftRequest, HitlSubmitRequest, HitlSubmitResponse
 from services.stream_runtime import runtime
 from utils.config import ensure_source_paths, settings
 
@@ -360,6 +360,33 @@ async def submit_hitl(run_id: str, request: HitlSubmitRequest, db: Session = Dep
     )
 
 
+@app.post("/api/v1/analysis-runs/{run_id}/hitl-draft")
+async def save_hitl_draft(run_id: str, request: HitlDraftRequest, db: Session = Depends(get_db)) -> dict[str, Any]:
+    lineage = runtime.get_lineage(run_id)
+    aux = get_run_aux_state(db, run_id=run_id)
+    if not lineage and not aux.get("lineage"):
+        raise HTTPException(status_code=404, detail="source run not found")
+
+    lineage = lineage or aux.get("lineage") or {}
+    case_id = lineage.get("case_id")
+    voucher_key = case_id.replace("POC-", "") if case_id else None
+    hitl_draft = request.model_dump()
+    runtime.set_hitl_draft(run_id, hitl_draft)
+    try:
+        log_run_event(
+            db,
+            run_id=run_id,
+            case_id=case_id or "-",
+            voucher_key=voucher_key,
+            stage="hitl",
+            event_type="HITL_DRAFT",
+            metadata={"stored_event_type": "HITL_DRAFT", "hitl_draft": hitl_draft},
+        )
+    except Exception:
+        pass
+    return {"accepted": True, "run_id": run_id, "hitl_draft": hitl_draft}
+
+
 @app.get("/api/v1/cases/{voucher_key}/analysis/latest")
 def get_latest_analysis(voucher_key: str, db: Session = Depends(get_db)) -> dict[str, Any]:
     try:
@@ -387,6 +414,7 @@ def get_latest_analysis(voucher_key: str, db: Session = Depends(get_db)) -> dict
         "result": result,
         "timeline_count": len(runtime.get_timeline(run_id)) or len(get_persisted_timeline(db, run_id=run_id)),
         "hitl_request": runtime.get_hitl_request(run_id) or aux.get("hitl_request"),
+        "hitl_draft": runtime.get_hitl_draft(run_id) or aux.get("hitl_draft"),
         "hitl_response": runtime.get_hitl_response(run_id) or aux.get("hitl_response"),
         "lineage": runtime.get_lineage(run_id) or aux.get("lineage"),
     }
@@ -414,6 +442,7 @@ def get_analysis_history(voucher_key: str, db: Session = Depends(get_db)) -> dic
             "reasonText": final.get("reasonText"),
             "lineage": runtime.get_lineage(run_id) or aux.get("lineage"),
             "hitl_request": runtime.get_hitl_request(run_id) or aux.get("hitl_request"),
+            "hitl_draft": runtime.get_hitl_draft(run_id) or aux.get("hitl_draft"),
             "hitl_response": runtime.get_hitl_response(run_id) or aux.get("hitl_response"),
         })
     return {"case_id": case_id, "items": items}
@@ -425,6 +454,7 @@ def get_run_events(run_id: str) -> dict[str, Any]:
     events = runtime.get_timeline(run_id)
     result = runtime.get_result(run_id)
     hitl_request = runtime.get_hitl_request(run_id)
+    hitl_draft = runtime.get_hitl_draft(run_id)
     hitl_response = runtime.get_hitl_response(run_id)
     lineage = runtime.get_lineage(run_id)
     if not events or result is None or lineage is None:
@@ -435,6 +465,7 @@ def get_run_events(run_id: str) -> dict[str, Any]:
             if result is None and aux.get("result_payload") is not None:
                 result = {"run_id": run_id, "event_type": "completed", "result": aux.get("result_payload")}
             hitl_request = hitl_request or aux.get("hitl_request")
+            hitl_draft = hitl_draft or aux.get("hitl_draft")
             hitl_response = hitl_response or aux.get("hitl_response")
             lineage = lineage or aux.get("lineage")
     return {
@@ -443,6 +474,7 @@ def get_run_events(run_id: str) -> dict[str, Any]:
         "event_count": len(events),
         "result": result,
         "hitl_request": hitl_request,
+        "hitl_draft": hitl_draft,
         "hitl_response": hitl_response,
         "lineage": lineage,
     }

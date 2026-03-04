@@ -37,6 +37,15 @@ class HitlSubmitRequest(BaseModel):
     extra_facts: dict[str, str] = Field(default_factory=dict)
 
 
+class HitlDraftRequest(BaseModel):
+    reviewer: str | None = None
+    comment: str | None = None
+    business_purpose: str | None = None
+    attendees: list[str] = Field(default_factory=list)
+    approved: bool | None = None
+    extra_facts: dict[str, str] = Field(default_factory=dict)
+
+
 class HitlSubmitResponse(BaseModel):
     accepted: bool = True
     source_run_id: str

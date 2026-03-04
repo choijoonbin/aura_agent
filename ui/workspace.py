@@ -349,7 +349,7 @@ def summarize_process_timeline(events: list[dict[str, Any]]) -> list[dict[str, A
 def render_process_story(events: list[dict[str, Any]], *, debug_mode: bool = False) -> None:
     rows = summarize_process_timeline(events)
     if not rows:
-        render_empty_state("분석 완료 후 노드별 사고 과정을 여기에 요약해 보여줍니다.")
+        render_empty_state("분석 완료 후 핵심 판단 흐름을 이 영역에서 단계별로 요약합니다.")
         return
     for idx, row in enumerate(rows, start=1):
         with stylable_container(
@@ -456,6 +456,28 @@ def _hitl_state_key(kind: str, run_id: str | None) -> str:
     return f"mt_hitl_{kind}_{run_id or 'unknown'}"
 
 
+def _prime_hitl_form_state(run_id: str, latest_bundle: dict[str, Any]) -> dict[str, str]:
+    draft = latest_bundle.get("hitl_draft") or latest_bundle.get("hitl_response") or {}
+    defaults = {
+        "reviewer": draft.get("reviewer") or "FINANCE_REVIEWER",
+        "business_purpose": draft.get("business_purpose") or "",
+        "attendees": ", ".join(draft.get("attendees") or []),
+        "comment": draft.get("comment") or "",
+        "decision": "승인 가능" if draft.get("approved") is True else "보류/추가 검토",
+    }
+    state_keys = {
+        "reviewer": _hitl_state_key("reviewer", run_id),
+        "business_purpose": _hitl_state_key("business_purpose", run_id),
+        "attendees": _hitl_state_key("attendees", run_id),
+        "comment": _hitl_state_key("comment", run_id),
+        "decision": _hitl_state_key("decision", run_id),
+    }
+    for field, key in state_keys.items():
+        if key not in st.session_state:
+            st.session_state[key] = defaults[field]
+    return state_keys
+
+
 def _fallback_hitl_request(latest_bundle: dict[str, Any]) -> dict[str, Any]:
     result, screening_meta, _policy_refs = _extract_workspace_result_context(latest_bundle)
     verification_summary = result.get("verification_summary") or {}
@@ -464,21 +486,25 @@ def _fallback_hitl_request(latest_bundle: dict[str, Any]) -> dict[str, Any]:
         reasons.append(str(screening_meta.get("reasonText")))
     gate_policy = verification_summary.get("gate_policy")
     if gate_policy:
-        reasons.append(f"검증 게이트 판정이 {gate_policy} 상태입니다.")
+        reasons.append(f"검증 게이트 판정: {gate_policy}")
     quality_codes = result.get("quality_gate_codes") or []
     if quality_codes:
         reasons.append(f"품질 신호: {', '.join(str(x) for x in quality_codes)}")
     if not reasons:
-        reasons.append("심층 감사 결과 미확보 또는 근거 검증 미통과로 사람 검토가 필요합니다.")
-    questions = [
-        "업무 목적과 사전 승인 여부를 확인해 주세요.",
-        "참석자와 증빙이 규정 기준을 충족하는지 확인해 주세요.",
-    ]
+        reasons.append("HITL payload가 생성되지 않았지만 현재 run 상태상 사람 검토가 필요한 것으로 표시되었습니다.")
     return {
         "required": True,
         "handoff": "FINANCE_REVIEWER",
+        "why_hitl": reasons[0],
+        "blocking_gate": str(gate_policy or "HITL_REQUIRED"),
+        "blocking_reason": reasons[0],
         "reasons": reasons,
-        "questions": questions,
+        "auto_finalize_blockers": reasons,
+        "review_questions": [],
+        "questions": [],
+        "required_inputs": [],
+        "evidence_snapshot": [],
+        "fallback_generated": True,
     }
 
 
@@ -487,58 +513,63 @@ def _build_hitl_summary_sections(latest_bundle: dict[str, Any]) -> dict[str, lis
     hitl_request = latest_bundle.get("hitl_request") or {}
     verification_summary = result.get("verification_summary") or {}
 
-    review_reasons = [str(x) for x in (hitl_request.get("reasons") or []) if x]
+    review_reasons = [str(x) for x in (hitl_request.get("unresolved_claims") or hitl_request.get("reasons") or []) if x]
     if not review_reasons:
-        review_reasons = ["자동 판정을 진행하기에 근거 또는 검증 정보가 부족합니다."]
+        if hitl_request.get("why_hitl"):
+            review_reasons = [str(hitl_request.get("why_hitl"))]
+        elif screening_meta.get("reasonText"):
+            review_reasons = [str(screening_meta.get("reasonText"))]
+        else:
+            review_reasons = ["검토 필요 사유 데이터가 비어 있습니다."]
 
-    stop_reasons: list[str] = []
-    gate_policy = verification_summary.get("gate_policy")
-    if gate_policy:
-        stop_reasons.append(f"검증 게이트 판정: {gate_policy}")
-    if verification_summary:
-        covered = verification_summary.get("covered", 0)
-        total = verification_summary.get("total", 0)
-        ratio = verification_summary.get("coverage_ratio")
-        if total:
-            ratio_text = f" ({(ratio or 0) * 100:.0f}%)" if ratio is not None else ""
-            stop_reasons.append(f"근거 연결률 {covered}/{total}{ratio_text}로 자동 확정 기준을 충족하지 못했습니다.")
-        missing = verification_summary.get("missing_citations") or []
-        if missing:
-            stop_reasons.append(f"누락된 citation 문장이 {len(missing)}건 있습니다.")
-    quality_codes = result.get("quality_gate_codes") or []
-    if quality_codes:
-        stop_reasons.append(f"검증 신호: {', '.join(str(x) for x in quality_codes)}")
+    stop_reasons: list[str] = [str(x) for x in (hitl_request.get("auto_finalize_blockers") or []) if x]
     if not stop_reasons:
-        stop_reasons = ["사람 검토 없이 최종 상태·심각도·점수·규정 근거를 확정하기 어려워 자동 확정을 중단했습니다."]
+        gate_policy = verification_summary.get("gate_policy")
+        if gate_policy:
+            stop_reasons.append(f"검증 게이트 판정: {gate_policy}")
+        quality_codes = result.get("quality_gate_codes") or []
+        if quality_codes:
+            stop_reasons.append(f"검증 신호: {', '.join(str(x) for x in quality_codes)}")
+        if not stop_reasons and hitl_request.get("blocking_reason"):
+            stop_reasons.append(str(hitl_request.get("blocking_reason")))
+    if not stop_reasons:
+        stop_reasons = ["자동 확정 중단 사유 데이터가 비어 있습니다."]
 
-    questions = [str(x) for x in (hitl_request.get("questions") or []) if x]
+    questions = [str(x) for x in (hitl_request.get("review_questions") or hitl_request.get("questions") or []) if x]
     if not questions:
-        questions = [
-            "이 거래를 정상으로 볼 수 있는 업무 목적과 사전 승인 여부를 확인해 주세요.",
-            "참석자, 증빙, 전표 입력 정보가 규정 기준을 충족하는지 확인해 주세요.",
-        ]
+        required_inputs = hitl_request.get("required_inputs") or []
+        questions = [f"{item.get('field')}: {item.get('reason')}" for item in required_inputs if item.get("field") and item.get("reason")]
+    if not questions:
+        questions = ["검토자가 답해야 할 질문 데이터가 비어 있습니다."]
 
     evidence_lines: list[str] = []
-    case_type = screening_meta.get("caseType") or screening_meta.get("case_type") or result.get("case_type")
-    if case_type:
-        evidence_lines.append(f"위험 유형: {case_type_display_name(case_type)}")
-    if result.get("severity"):
-        evidence_lines.append(f"심각도: {severity_display_name(result.get('severity'))}")
-    if result.get("score") is not None:
-        evidence_lines.append(f"점수: {result.get('score')}")
-    if screening_meta.get("reasonText"):
-        evidence_lines.append(f"스크리닝 요약: {screening_meta.get('reasonText')}")
-    if verification_summary:
-        covered = verification_summary.get("covered", 0)
-        total = verification_summary.get("total", 0)
-        evidence_lines.append(f"검증 대상 문장: {covered}/{total}건 근거 연결")
-    if policy_refs:
-        ref_preview = [f"{ref.get('article') or '-'} / {ref.get('parent_title') or '-'}" for ref in policy_refs[:3]]
-        evidence_lines.append("연결 규정: " + " | ".join(ref_preview))
+    snapshot = hitl_request.get("evidence_snapshot") or []
+    for item in snapshot:
+        label = item.get("label")
+        value = item.get("value")
+        if label and value:
+            evidence_lines.append(f"{label}: {value}")
+    if not evidence_lines:
+        case_type = screening_meta.get("caseType") or screening_meta.get("case_type") or result.get("case_type")
+        if case_type:
+            evidence_lines.append(f"위험 유형: {case_type_display_name(case_type)}")
+        if result.get("severity"):
+            evidence_lines.append(f"심각도: {severity_display_name(result.get('severity'))}")
+        if result.get("score") is not None:
+            evidence_lines.append(f"점수: {result.get('score')}")
+        if screening_meta.get("reasonText"):
+            evidence_lines.append(f"스크리닝 요약: {screening_meta.get('reasonText')}")
+        if verification_summary:
+            covered = verification_summary.get("covered", 0)
+            total = verification_summary.get("total", 0)
+            evidence_lines.append(f"검증 대상 문장: {covered}/{total}건 근거 연결")
+        if policy_refs:
+            ref_preview = [f"{ref.get('article') or '-'} / {ref.get('parent_title') or '-'}" for ref in policy_refs[:3]]
+            evidence_lines.append("연결 규정: " + " | ".join(ref_preview))
     if hitl_request.get("handoff"):
         evidence_lines.append(f"검토 담당: {hitl_request.get('handoff')}")
     if not evidence_lines:
-        evidence_lines = ["현재 화면에서 표시 가능한 근거 요약이 아직 충분하지 않습니다. run diagnostics와 실행 로그를 함께 확인해 주세요."]
+        evidence_lines = ["현재 확보된 근거 요약 데이터가 비어 있습니다."]
 
     return {
         "review_reasons": review_reasons,
@@ -548,7 +579,7 @@ def _build_hitl_summary_sections(latest_bundle: dict[str, Any]) -> dict[str, lis
         "debug": {
             "hitl_request": hitl_request,
             "verification_summary": verification_summary,
-            "quality_gate_codes": quality_codes,
+            "quality_gate_codes": result.get("quality_gate_codes") or [],
         },
     }
 
@@ -558,6 +589,7 @@ def render_hitl_panel(latest_bundle: dict[str, Any]) -> None:
     hitl_request = latest_bundle.get("hitl_request") or _fallback_hitl_request(latest_bundle)
     if not run_id or not _has_pending_hitl(latest_bundle):
         return
+    form_keys = _prime_hitl_form_state(run_id, latest_bundle)
     st.markdown(
         """
         <style>
@@ -891,27 +923,22 @@ def render_hitl_panel(latest_bundle: dict[str, Any]) -> None:
         """,
     ):
         summary = _build_hitl_summary_sections(latest_bundle)
+        lead_message = (
+            hitl_request.get("why_hitl")
+            or hitl_request.get("blocking_reason")
+            or "사람 검토가 필요한 상태입니다."
+        )
         st.markdown(
-            '<div class="mt-hitl-note"><strong>사람 검토가 필요한 상태입니다.</strong> 아래 4개 영역에서 검토 사유, 자동 확정 중단 이유, 필요한 답변, 현재 확보된 근거를 먼저 확인한 뒤 입력을 제출해 주세요.</div>',
+            f'<div class="mt-hitl-note"><strong>사람 검토가 필요한 상태입니다.</strong> {lead_message}</div>',
             unsafe_allow_html=True,
         )
 
-        def _render_box(title: str, lines: list[str], tone: str, icon: str, checklist: list[str] | None = None) -> str:
+        def _render_box(title: str, lines: list[str], tone: str, icon: str) -> str:
             items = "".join(f"<li>{line}</li>" for line in lines)
-            checklist_html = ""
-            if checklist:
-                checks = "".join(f"<li>{item}</li>" for item in checklist)
-                checklist_html = (
-                    '<div class="mt-hitl-checklist">'
-                    '<div class="mt-hitl-checklist-title">검토 포인트</div>'
-                    f"<ul>{checks}</ul>"
-                    "</div>"
-                )
             return (
                 f'<div class="mt-hitl-box mt-hitl-box--{tone}">'
                 f'<div class="mt-hitl-box-title"><span class="mt-hitl-icon mt-hitl-icon--{tone}">{icon}</span>{title}</div>'
                 f'<ul class="mt-hitl-list">{items}</ul>'
-                f"{checklist_html}"
                 "</div>"
             )
 
@@ -922,28 +949,24 @@ def render_hitl_panel(latest_bundle: dict[str, Any]) -> None:
                 summary["review_reasons"],
                 "reason",
                 "!",
-                ["추가 소명 또는 증빙이 없으면 자동 확정 않습니다"],
             )
             + _render_box(
                 "자동 확정 중단 이유",
                 summary["stop_reasons"],
                 "stop",
                 "■",
-                ["근거 연결률과 게이트 판정이 자동 확정 가능 수준인지 확인합니다."],
             )
             + _render_box(
                 "검토자가 답해야 할 질문",
                 summary["questions"],
                 "question",
                 "?",
-                ["업무 목적", "사전 승인 여부", "참석자 및 증빙 확인"],
             )
             + _render_box(
                 "현재 확보된 근거 요약",
                 summary["evidence_lines"],
                 "evidence",
                 "i",
-                ["위험 유형과 연결 규정을 먼저 읽고 의견 작성."],
             )
             + '</div>',
             unsafe_allow_html=True,
@@ -954,17 +977,19 @@ def render_hitl_panel(latest_bundle: dict[str, Any]) -> None:
                 options=["보류/추가 검토", "승인 가능"],
                 horizontal=True,
                 label_visibility="collapsed",
+                key=form_keys["decision"],
             )
             info_cols = st.columns(3)
             with info_cols[0]:
-                reviewer = st.text_input("검토자", value="FINANCE_REVIEWER")
+                reviewer = st.text_input("검토자", key=form_keys["reviewer"])
             with info_cols[1]:
-                business_purpose = st.text_input("업무 목적", placeholder="예: 주말 장애 대응 회의")
+                business_purpose = st.text_input("업무 목적", key=form_keys["business_purpose"], placeholder="예: 주말 장애 대응 회의")
             with info_cols[2]:
-                attendees_raw = st.text_input("참석자(쉼표 구분)", placeholder="예: 홍길동, 김민수, 외부 파트너 1명")
+                attendees_raw = st.text_input("참석자(쉼표 구분)", key=form_keys["attendees"], placeholder="예: 홍길동, 김민수, 외부 파트너 1명")
             comment = st.text_area(
                 "검토 의견",
                 height=96,
+                key=form_keys["comment"],
                 placeholder="왜 승인 또는 보류로 판단했는지 핵심 근거를 적습니다.\n예: 주말 대응 프로젝트로 야간 회의 후 식대 사용. 사전 승인 메일 확인됨.",
             )
             approved = decision == "승인 가능"
@@ -989,6 +1014,11 @@ def render_hitl_panel(latest_bundle: dict[str, Any]) -> None:
         st.session_state.pop(_hitl_state_key("dismissed", run_id), None)
         st.session_state.pop(_hitl_state_key("open", run_id), None)
         st.session_state.pop(_hitl_state_key("shown", run_id), None)
+        st.session_state["mt_resume_stream"] = {
+            "run_id": resumed_id,
+            "stream_path": response.get("stream_path"),
+            "voucher_key": latest_bundle.get("voucher_key"),
+        }
         st.success(f"HITL 응답 저장 완료: run_id={resumed_id}")
         st.rerun()
 
@@ -1056,45 +1086,39 @@ def build_workspace_execution_logs(latest_bundle: dict[str, Any]) -> list[dict[s
         )
     return rows
 
-
-@st.dialog("케이스 정보")
-def render_case_preview_dialog(case_item: dict[str, Any]) -> None:
-    kv = [
-        ("전표키", case_item.get("voucher_key") or "-"),
-        ("가맹점", case_item.get("merchant_name") or "-"),
-        ("금액", f"{fmt_num(case_item.get('amount'))} {case_item.get('currency') or ''}"),
-        ("발생일시", fmt_dt(case_item.get("occurred_at")) or "-"),
-        ("상태", status_display_name(case_item.get("case_status"))),
-        ("심각도", severity_display_name(case_item.get("severity"))),
-        ("유형", case_type_display_name(case_item.get("case_type"))),
-        ("근태", hr_status_display_name(case_item.get("hr_status"))),
-        ("업종", mcc_display_name(case_item.get("mcc_code"))),
-        ("예산", budget_exceeded_display(case_item.get("budget_exceeded"))),
-    ]
-    kv_html = "".join(
-        f'<span class="mt-kv-key">{k}</span><span class="mt-kv-value">{v}</span>' for k, v in kv
-    )
-    st.markdown(f'<div class="mt-kv-grid">{kv_html}</div>', unsafe_allow_html=True)
-    if st.button("이 케이스 열기", use_container_width=True, type="primary"):
-        st.session_state["mt_selected_voucher"] = case_item.get("voucher_key")
-        st.session_state["mt_case_preview"] = None
-        st.rerun()
-    if st.button("닫기", use_container_width=True):
-        st.session_state["mt_case_preview"] = None
-        st.rerun()
-
-
 def render_workspace_case_queue(items: list[dict[str, Any]], selected_key: str | None) -> None:
-    render_panel_header("케이스", "시연용 전표 목록에서 한 건을 선택하면 AI가 실제 추론과 검증을 수행합니다.")
-    tabs = st.tabs(["전체", "검토 필요"])
+    render_panel_header("케이스", "분석할 전표를 선택합니다. 좌측은 선택, 우측은 실시간 실행과 판단 리뷰에 집중합니다.")
+    review_count = len(
+        [item for item in items if str(item.get("case_status") or "").upper() in {"NEW", "IN_REVIEW", "REVIEW_REQUIRED", "HITL_REQUIRED"}]
+    )
+    completed_count = len(
+        [item for item in items if str(item.get("case_status") or "").upper() in {"COMPLETED", "COMPLETED_AFTER_HITL", "RESOLVED", "OK"}]
+    )
+    hitl_count = len(
+        [item for item in items if str(item.get("case_status") or "").upper() in {"HITL_REQUIRED", "REVIEW_AFTER_HITL", "HOLD_AFTER_HITL"}]
+    )
+    st.markdown(
+        f"""
+        <div class="mt-workspace-case-stats">
+          <div class="mt-workspace-case-stat"><div class="mt-workspace-case-stat-value">{len(items)}</div><div class="mt-workspace-case-stat-label">전체 케이스</div></div>
+          <div class="mt-workspace-case-stat"><div class="mt-workspace-case-stat-value">{review_count}</div><div class="mt-workspace-case-stat-label">검토 필요</div></div>
+          <div class="mt-workspace-case-stat"><div class="mt-workspace-case-stat-value">{completed_count}</div><div class="mt-workspace-case-stat-label">완료</div></div>
+          <div class="mt-workspace-case-stat"><div class="mt-workspace-case-stat-value">{hitl_count}</div><div class="mt-workspace-case-stat-label">HITL 대기</div></div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    tabs = st.tabs(["전체", "검토 필요", "완료", "HITL 대기"])
     grouped = {
         "전체": items,
         "검토 필요": [item for item in items if str(item.get("case_status") or "").upper() in {"NEW", "IN_REVIEW", "REVIEW_REQUIRED", "HITL_REQUIRED"}],
+        "완료": [item for item in items if str(item.get("case_status") or "").upper() in {"COMPLETED", "COMPLETED_AFTER_HITL", "RESOLVED", "OK"}],
+        "HITL 대기": [item for item in items if str(item.get("case_status") or "").upper() in {"HITL_REQUIRED", "REVIEW_AFTER_HITL", "HOLD_AFTER_HITL"}],
     }
-    for tab, label in zip(tabs, ["전체", "검토 필요"]):
+    for idx, (tab, label) in enumerate(zip(tabs, ["전체", "검토 필요", "완료", "HITL 대기"])):
         with tab:
             with stylable_container(
-                key=f"workspace_case_scroll_{label}",
+                key=f"workspace_case_scroll_{idx}",
                 css_styles="""
                 {
                   max-height: 66vh;
@@ -1103,110 +1127,133 @@ def render_workspace_case_queue(items: list[dict[str, Any]], selected_key: str |
                 }
                 """,
             ):
+                if not grouped[label]:
+                    render_empty_state("표시할 케이스가 없습니다.")
+                    continue
                 for item in grouped[label]:
                     case_key = item["voucher_key"]
-                    selected_css = (
-                        "border: 2px solid #2563eb; box-shadow: 0 0 0 3px rgba(37,99,235,0.08), 0 12px 26px rgba(15,23,42,0.08);"
-                        if case_key == selected_key
-                        else "border: 1px solid #e5e7eb; box-shadow: 0 8px 22px rgba(15,23,42,0.04);"
-                    )
+                    selected_css = "mt-case-card-selected" if case_key == selected_key else ""
                     with stylable_container(
-                        key=f"workspace_case_{label}_{case_key}",
-                        css_styles=f"""
-                        {{
-                          background: rgba(255,255,255,0.98);
-                          {selected_css}
-                          border-radius: 18px;
-                          padding: 0.85rem 1rem 1rem 1rem;
-                          margin-bottom: 0.8rem;
-                        }}
-                        """,
+                        key=f"workspace_case_{idx}_{case_key}",
+                        css_styles=[
+                            """{
+                              margin-bottom: 0.8rem;
+                              position: relative;
+                            }""",
+                            """
+                            .mt-case-card {
+                              cursor: pointer !important;
+                            }
+                            .mt-case-card * {
+                              cursor: pointer !important;
+                              pointer-events: none !important;
+                            }
+                            [data-testid="stButton"] {
+                              position: absolute !important;
+                              inset: 0 !important;
+                              margin: 0 !important;
+                              z-index: 5 !important;
+                              cursor: pointer !important;
+                            }
+                            [data-testid="stButton"] > button {
+                              position: absolute !important;
+                              inset: 0 !important;
+                              width: 100% !important;
+                              height: 100% !important;
+                              min-height: 100% !important;
+                              margin: 0 !important;
+                              padding: 0 !important;
+                              opacity: 0 !important;
+                              border: none !important;
+                              background: transparent !important;
+                              cursor: pointer !important;
+                              pointer-events: auto !important;
+                              box-shadow: none !important;
+                              font-size: 0 !important;
+                              line-height: 0 !important;
+                            }
+                            """,
+                        ],
                     ):
+                        status = status_display_name(item.get("case_status"))
+                        severity = severity_display_name(item.get("severity"))
+                        case_type = case_type_display_name(item.get("case_type"))
+                        occurred_at = fmt_dt(item.get("occurred_at")) or "-"
+                        amount = f"{fmt_num(item.get('amount'))} {item.get('currency') or ''}".strip()
+                        merchant = item.get("merchant_name") or "-"
+                        title = item.get("demo_name") or merchant
                         st.markdown(
-                            status_badge(item.get("case_status")) + severity_badge(item.get("severity")) + case_type_badge(item.get("case_type")),
+                            f"""
+                            <div class="mt-case-card {selected_css}">
+                              <div>{status_badge(item.get("case_status"))}{severity_badge(item.get("severity"))}{case_type_badge(item.get("case_type"))}</div>
+                              <div class="mt-case-name">{title}</div>
+                              <div class="mt-case-meta-line">{amount} · {occurred_at}</div>
+                              <div class="mt-case-submeta">
+                                <div class="mt-case-submeta-item"><span class="mt-case-submeta-label">전표키</span>{case_key}</div>
+                                <div class="mt-case-submeta-item"><span class="mt-case-submeta-label">가맹점</span>{merchant}</div>
+                                <div class="mt-case-submeta-item"><span class="mt-case-submeta-label">상태</span>{status}</div>
+                                <div class="mt-case-submeta-item"><span class="mt-case-submeta-label">심각도</span>{severity}</div>
+                              </div>
+                            </div>
+                            """,
                             unsafe_allow_html=True,
                         )
-                        kv_pairs = [
-                            ("전표키", case_key),
-                            ("가맹점", item.get("merchant_name") or "-"),
-                            ("금액", f"{fmt_num(item.get('amount'))} {item.get('currency') or ''}"),
-                            ("발생일시", fmt_dt(item.get("occurred_at")) or "-"),
-                            ("상태", status_display_name(item.get("case_status"))),
-                            ("심각도", severity_display_name(item.get("severity"))),
-                            ("유형", case_type_display_name(item.get("case_type"))),
-                            ("근태", hr_status_display_name(item.get("hr_status"))),
-                            ("업종", mcc_display_name(item.get("mcc_code"))),
-                            ("예산", budget_exceeded_display(item.get("budget_exceeded"))),
-                        ]
-                        kv_html = "".join(
-                            f'<span class="mt-kv-key">{k}</span><span class="mt-kv-value">{v}</span>' for k, v in kv_pairs
-                        )
-                        st.markdown(f'<div class="mt-kv-grid">{kv_html}</div>', unsafe_allow_html=True)
-                        action = st.columns([0.45, 0.55])
-                        if action[0].button("상세", key=f"preview_{label}_{case_key}", use_container_width=True):
-                            st.session_state["mt_case_preview"] = item
-                            st.rerun()
-                        if action[1].button(
-                            "선택",
-                            key=f"select_{label}_{case_key}",
+                        if st.button(
+                            f"카드 선택 {case_key}",
+                            key=f"select_{idx}_{case_key}",
                             use_container_width=True,
-                            type="primary" if case_key == selected_key else "secondary",
                         ):
                             st.session_state["mt_selected_voucher"] = case_key
-                            st.session_state["mt_case_preview"] = None
                             st.rerun()
 
 
 def render_workspace_chat_panel(selected: dict[str, Any], latest_bundle: dict[str, Any]) -> None:
     result = ((latest_bundle.get("result") or {}).get("result") or {})
     timeline = latest_bundle.get("timeline") or []
-    render_panel_header("에이전트 대화", "실제 LangGraph 실행 중 공개 가능한 작업 메모 스트림(reasoning note·도구 호출)을 실시간으로 표시합니다.")
-    st.markdown(
-        status_badge(result.get("status") if result else selected.get("case_status"))
-        + severity_badge(result.get("severity") if result else selected.get("severity"))
-        + case_type_badge(selected.get("case_type")),
-        unsafe_allow_html=True,
-    )
-    kv_pairs = [
-        ("전표키", selected.get("voucher_key") or "-"),
-        ("가맹점", selected.get("merchant_name") or "-"),
-        ("금액", f"{fmt_num(selected.get('amount'))} {selected.get('currency') or ''}"),
-        ("발생일시", fmt_dt(selected.get("occurred_at")) or "-"),
-        ("상태", status_display_name(result.get("status") if result else selected.get("case_status"))),
-        ("심각도", severity_display_name(result.get("severity") if result else selected.get("severity"))),
-        ("유형", case_type_display_name(selected.get("case_type"))),
-        ("근태", hr_status_display_name(selected.get("hr_status"))),
-        ("업종", mcc_display_name(selected.get("mcc_code"))),
-        ("예산", budget_exceeded_display(selected.get("budget_exceeded"))),
-    ]
-    kv_html = "".join(
-        f'<span class="mt-kv-key">{k}</span><span class="mt-kv-value">{v}</span>' for k, v in kv_pairs
-    )
-    st.markdown(f'<div class="mt-kv-grid">{kv_html}</div>', unsafe_allow_html=True)
+    selected_vkey = selected.get("voucher_key") or ""
+    render_panel_header("에이전트 대화", "선택한 전표에 대해 LangGraph가 현재 무엇을 하고 있는지 실시간으로 보여줍니다.")
 
-    # --- Screening status banner (inner columns so info/success do not overflow right) ---
-    vkey = selected.get("voucher_key") or ""
+    vkey = selected_vkey
     is_unscreened = str(selected.get("case_type") or "").upper() == "UNSCREENED"
-    _sb_l, sb_mid, _sb_r = st.columns([0.02, 0.96, 0.02])
-    with sb_mid:
-        if is_unscreened:
-            st.info("이 전표는 아직 스크리닝되지 않았습니다. 분석 시작 시 자동으로 케이스 유형을 분류합니다.", icon="🔍")
-        else:
-            screened_label_map = {
-                "HOLIDAY_USAGE": "휴일/휴무 중 사용 의심",
-                "LIMIT_EXCEED": "한도 초과 의심",
-                "PRIVATE_USE_RISK": "사적 사용 위험",
-                "UNUSUAL_PATTERN": "비정상 패턴",
-                "NORMAL_BASELINE": "정상 범위",
-            }
-            ct = selected.get("case_type") or "-"
-            ct_label = screened_label_map.get(ct, ct)
-            st.success(f"스크리닝 완료 — {ct_label} / 심각도 {selected.get('severity') or '-'}")
-
-    # Button is inside inner columns to prevent it from overflowing the panel's CSS padding.
-    # chat panel is inside 'right' (level 1 column), so these are level 2 - allowed.
-    _lb, btn_c, _rb = st.columns([0.01, 0.98, 0.01])
-    with btn_c:
+    current_status = result.get("status") or selected.get("case_status") or "-"
+    current_severity = result.get("severity") or selected.get("severity")
+    live_run_id = latest_bundle.get("run_id") or "-"
+    strip_text = (
+        "분석 시작 시 자동으로 케이스 유형을 분류합니다."
+        if is_unscreened
+        else f"스크리닝 완료 · {case_type_display_name(selected.get('case_type'))} · 심각도 {severity_display_name(selected.get('severity'))}"
+    )
+    summary_html = f"""
+    <div class="mt-workspace-summary">
+      <div class="mt-workspace-hero">
+        <div>{status_badge(result.get("status") if result else selected.get("case_status"))}{severity_badge(result.get("severity") if result else selected.get("severity"))}{case_type_badge(selected.get("case_type"))}</div>
+        <div class="mt-workspace-hero-title">{selected.get("demo_name") or selected.get("merchant_name") or "선택 전표"}</div>
+        <div class="mt-workspace-hero-sub">실시간 스트림은 planning, tool 실행, 검증 게이트, HITL 요청, 최종 결론까지 공개 가능한 이벤트만 표시합니다.</div>
+        <div class="mt-workspace-inline-meta">
+          <div class="mt-workspace-inline-item"><span class="mt-workspace-inline-label">전표키</span>{selected.get("voucher_key") or "-"}</div>
+          <div class="mt-workspace-inline-item"><span class="mt-workspace-inline-label">가맹점</span>{selected.get("merchant_name") or "-"}</div>
+          <div class="mt-workspace-inline-item"><span class="mt-workspace-inline-label">금액</span>{fmt_num(selected.get('amount'))} {selected.get('currency') or ''}</div>
+          <div class="mt-workspace-inline-item"><span class="mt-workspace-inline-label">발생일시</span>{fmt_dt(selected.get("occurred_at")) or "-"}</div>
+        </div>
+        <div class="mt-workspace-strip">{strip_text}</div>
+      </div>
+      <div class="mt-workspace-action">
+        <div>
+          <div class="mt-workspace-action-title">실행 상태</div>
+          <div class="mt-workspace-action-top">이 영역은 현재 선택한 전표의 최신 run 상태와 다음 액션을 한 번에 제시합니다.</div>
+          <div class="mt-workspace-action-meta">
+            <div class="mt-workspace-action-key">현재 상태</div><div class="mt-workspace-action-value">{status_display_name(current_status)}</div>
+            <div class="mt-workspace-action-key">심각도</div><div class="mt-workspace-action-value">{severity_display_name(current_severity)}</div>
+            <div class="mt-workspace-action-key">실행 run</div><div class="mt-workspace-action-value">{str(live_run_id)[:12] + "…" if isinstance(live_run_id, str) and len(live_run_id) > 12 else live_run_id}</div>
+            <div class="mt-workspace-action-key">다음 액션</div><div class="mt-workspace-action-value">분석 시작 또는 검토 재개</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    """
+    st.markdown(summary_html, unsafe_allow_html=True)
+    _cta_l, cta_button_col = st.columns([0.78, 0.22])
+    with cta_button_col:
         run_clicked = st.button("분석 시작", key=f"workspace_run_{vkey}", use_container_width=True, type="primary")
     if run_clicked:
         response = post(f"/api/v1/cases/{vkey}/analysis-runs")
@@ -1217,12 +1264,26 @@ def render_workspace_chat_panel(selected: dict[str, Any], latest_bundle: dict[st
         st.success(f"분석 시작: run_id={response['run_id']}")
         st.write_stream(sse_text_stream(f"{API}{response['stream_path']}", run_id=run_id))
         st.rerun()
+
+    resume_stream = st.session_state.get("mt_resume_stream")
+    if (
+        resume_stream
+        and resume_stream.get("voucher_key") == selected_vkey
+        and resume_stream.get("stream_path")
+        and resume_stream.get("run_id")
+    ):
+        run_id = str(resume_stream["run_id"])
+        stream_path = str(resume_stream["stream_path"])
+        st.session_state.pop("mt_resume_stream", None)
+        st.success(f"HITL 응답 반영 후 재개: run_id={run_id}")
+        st.write_stream(sse_text_stream(f"{API}{stream_path}", run_id=run_id))
+        st.rerun()
+
     if _has_pending_hitl(latest_bundle):
         st.warning("이 분석은 사람 검토가 필요합니다. 검토 의견을 입력하면 같은 run으로 재개됩니다.")
         _hl, hitl_btn_col, _hr = st.columns([0.01, 0.98, 0.01])
         run_id = latest_bundle.get("run_id")
         open_key = _hitl_state_key("open", run_id)
-        shown_key = _hitl_state_key("shown", run_id)
         dismissed_key = _hitl_state_key("dismissed", run_id)
         with hitl_btn_col:
             if st.button("HITL 검토 입력 열기", key=f"workspace_hitl_open_{vkey}", use_container_width=True):
@@ -1231,53 +1292,87 @@ def render_workspace_chat_panel(selected: dict[str, Any], latest_bundle: dict[st
                 st.rerun()
         if run_id:
             st.session_state.setdefault(dismissed_key, False)
-            st.session_state.setdefault(shown_key, False)
-            if not st.session_state[dismissed_key] and not st.session_state[shown_key]:
-                st.session_state[open_key] = True
-                st.session_state[shown_key] = True
             if st.session_state.get(open_key):
                 st.session_state[open_key] = False
                 render_hitl_dialog(latest_bundle)
+
+    st.markdown('<div class="mt-stream-note">실시간 패널은 최신 이벤트 중심으로 유지합니다. 완료 후 상세 검토는 바로 아래 리뷰 탭에서 확인합니다.</div>', unsafe_allow_html=True)
     if not timeline:
-        _es_l, es_mid, _es_r = st.columns([0.02, 0.96, 0.02])
-        with es_mid:
-            st.caption("에이전트 대화: 실행 중 reasoning note·도구 호출이 실시간으로 표시됩니다.")
-            render_empty_state("분석을 시작하면 LangGraph 실행 로그와 보고 문장이 여기에 실시간으로 표시됩니다.")
+        render_empty_state("분석을 시작하면 이 영역에 실시간 스트림이 표시됩니다.")
         return
-    # role: PoC에서 도구 호출/결과는 "user"(사람 아이콘), 노드 진행은 "assistant"(로봇 아이콘)로 구분해 표시합니다.
-    for idx, event in enumerate(timeline[-14:]):
+    latest_events = [event for event in timeline if event.get("event_type") == "AGENT_EVENT"][-8:]
+    latest_nodes = []
+    for event in latest_events:
         payload = event.get("payload") or {}
-        if event.get("event_type") != "AGENT_EVENT":
-            continue
-        ev_type = str(payload.get("event_type") or "").upper()
-        role = "user" if ev_type in {"TOOL_CALL", "TOOL_RESULT", "TOOL_SKIPPED"} else "assistant"
-        tool_name = payload.get("tool")
-        meta = payload.get("metadata") or {}
-        tool_desc = meta.get("tool_description")
-        caption_first = f"{fmt_dt_korea(event.get('at') or payload.get('timestamp')) or '-'}"
-        part2 = f"{payload.get('node') or '-'} / {ev_type}"
-        tool_frag = _tool_caption_fragment(ev_type, tool_name, tool_desc, html_tooltip=True)
-        if tool_frag:
-            part2 = f"{payload.get('node') or '-'} / {tool_frag}"
-        note_source = meta.get("note_source", "")
-        note_model = meta.get("note_model") or ""
-        source_label = note_model if note_source == "llm" and note_model else ("LLM" if note_source == "llm" else "정의문구" if note_source == "fallback" else "")
-        with st.chat_message(role):
-            st.caption(f"{caption_first} · {part2}", unsafe_allow_html=True)
-            if source_label:
-                st.caption(f"*{source_label}*")
-            if payload.get("message"):
-                st.write(payload["message"])
-            cols = st.columns(3)
-            if payload.get("thought"):
-                cols[0].caption("생각")
-                cols[0].write(payload["thought"])
-            if payload.get("action"):
-                cols[1].caption("행동")
-                cols[1].write(payload["action"])
-            if payload.get("observation"):
-                cols[2].caption("관찰")
-                cols[2].write(payload["observation"])
+        node = payload.get("node")
+        if node and node not in latest_nodes:
+            latest_nodes.append(str(node))
+    if latest_nodes:
+        st.markdown(
+            '<div class="mt-stream-stage-row">'
+            + "".join(f'<span class="mt-stream-stage-pill">{node}</span>' for node in latest_nodes[:6])
+            + "</div>",
+            unsafe_allow_html=True,
+        )
+    if len(timeline) > 8:
+        st.caption(f"최신 {min(8, len(timeline))}개 이벤트만 표시합니다. 전체 실행 검토는 아래 리뷰 탭에서 확인합니다.")
+    with stylable_container(
+        key=f"workspace_stream_shell_{selected_vkey}",
+        css_styles=[
+            """
+            {
+              background: radial-gradient(circle at 1px 1px, rgba(15,23,42,0.10) 1px, transparent 0);
+              background-size: 14px 14px;
+              background-color: #f8fafc;
+              border: 1px dashed #dbe2ea;
+              border-radius: 18px;
+              padding: 14px;
+              max-height: 46vh;
+              overflow-y: auto;
+              overflow-x: hidden;
+            }
+            """,
+            """
+            [data-testid="stVerticalBlock"] {
+              max-height: 42vh;
+              overflow-y: auto;
+              overflow-x: hidden;
+            }
+            """,
+        ],
+    ):
+        # role: PoC에서 도구 호출/결과는 "user"(사람 아이콘), 노드 진행은 "assistant"(로봇 아이콘)로 구분해 표시합니다.
+        for idx, event in enumerate(latest_events):
+            payload = event.get("payload") or {}
+            ev_type = str(payload.get("event_type") or "").upper()
+            role = "user" if ev_type in {"TOOL_CALL", "TOOL_RESULT", "TOOL_SKIPPED"} else "assistant"
+            tool_name = payload.get("tool")
+            meta = payload.get("metadata") or {}
+            tool_desc = meta.get("tool_description")
+            caption_first = f"{fmt_dt_korea(event.get('at') or payload.get('timestamp')) or '-'}"
+            part2 = f"{payload.get('node') or '-'} / {ev_type}"
+            tool_frag = _tool_caption_fragment(ev_type, tool_name, tool_desc, html_tooltip=True)
+            if tool_frag:
+                part2 = f"{payload.get('node') or '-'} / {tool_frag}"
+            note_source = meta.get("note_source", "")
+            note_model = meta.get("note_model") or ""
+            source_label = note_model if note_source == "llm" and note_model else ("LLM" if note_source == "llm" else "정의문구" if note_source == "fallback" else "")
+            with st.chat_message(role):
+                st.caption(f"{caption_first} · {part2}", unsafe_allow_html=True)
+                if source_label:
+                    st.caption(f"*{source_label}*")
+                if payload.get("message"):
+                    st.write(payload["message"])
+                cols = st.columns(3)
+                if payload.get("thought"):
+                    cols[0].caption("생각")
+                    cols[0].write(payload["thought"])
+                if payload.get("action"):
+                    cols[1].caption("행동")
+                    cols[1].write(payload["action"])
+                if payload.get("observation"):
+                    cols[2].caption("관찰")
+                    cols[2].write(payload["observation"])
 
 
 def render_workspace_results(latest_bundle: dict[str, Any], debug_mode: bool) -> None:
@@ -1308,15 +1403,13 @@ def render_workspace_results(latest_bundle: dict[str, Any], debug_mode: bool) ->
             result["status"] = "HITL_REQUIRED"
 
     failed = bool(result.get("error"))
-    critique = result.get("critique") or {}
-    policy_refs = result.get("policy_refs") or derived_policy_refs or []
     hero_title = "분석 실패" if failed else (result.get("status") or "결과 없음")
     hero_sub = (
         f"{result.get('stage') or 'runner'} 단계에서 오류가 발생했습니다: {result.get('error')}"
         if failed
         else (result.get("reasonText") or "최종 판단이 아직 생성되지 않았습니다.")
     )
-    render_panel_header("결과", "최종 판단 + 규정 근거 + 검증 메모 + run diagnostics를 하나의 결과 화면으로 보여줍니다.")
+    render_panel_header("판단 요약", "최종 상태, 점수, 검증 요약을 먼저 보여주고 세부 근거와 진단은 아래에서 이어집니다.")
     st.markdown(
         f"""
         <div class="mt-card-quiet">
@@ -1326,58 +1419,176 @@ def render_workspace_results(latest_bundle: dict[str, Any], debug_mode: bool) ->
         """,
         unsafe_allow_html=True,
     )
-    c1, c2, c3 = st.columns(3)
-    c1.metric("상태", "FAILED" if failed else str(result.get("status") or "-"))
-    c2.metric("심각도", severity_display_name(result.get("severity")) if result.get("severity") else "-")
+    score_display = "-"
     score_val = result.get("score")
     if isinstance(score_val, float) and 0 <= score_val <= 1:
-        score_text = f"{score_val:.2f}"
+        score_display = f"{score_val:.2f}"
     else:
-        score_text = str(score_val or "-")
-    c3.metric("점수", score_text)
+        score_display = str(score_val or "-")
+    st.markdown(
+        f"""
+        <div class="mt-result-grid">
+          <div class="mt-result-metric">
+            <div class="mt-result-metric-label">상태</div>
+            <div class="mt-result-metric-value">{"FAILED" if failed else str(result.get("status") or "-")}</div>
+            <div class="mt-result-metric-foot">현재 run의 최종 상태</div>
+          </div>
+          <div class="mt-result-metric">
+            <div class="mt-result-metric-label">심각도</div>
+            <div class="mt-result-metric-value">{severity_display_name(result.get("severity")) if result.get("severity") else "-"}</div>
+            <div class="mt-result-metric-foot">정책 및 증거를 합친 위험 수준</div>
+          </div>
+          <div class="mt-result-metric">
+            <div class="mt-result-metric-label">점수</div>
+            <div class="mt-result-metric-value">{score_display}</div>
+            <div class="mt-result-metric-foot">최종 판단에 사용된 점수</div>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
     if failed and debug_mode:
         st.json(result)
     if result.get("score_breakdown"):
         sb = result["score_breakdown"]
         st.caption(f"정책점수 {sb.get('policy_score', '-')} · 근거점수 {sb.get('evidence_score', '-')} · 최종점수 {sb.get('final_score', '-')}")
+    quality_codes = result.get("quality_gate_codes") or []
+    if quality_codes:
+        st.markdown("#### 품질 신호")
+        st.markdown("".join(f'<span class="mt-badge mt-badge-amber">{code}</span>' for code in quality_codes), unsafe_allow_html=True)
+    if result.get("hitl_request"):
+        st.markdown("#### 사람 검토 상태")
+        st.caption("이 run은 자동 확정이 아니라 사람 검토 이후 재개를 전제로 진행되었습니다.")
+    if result.get("verification_summary"):
+        verification_summary = result.get("verification_summary") or {}
+        st.markdown("#### 검증 요약")
+        st.caption(
+            f"게이트 판정 {verification_summary.get('gate_policy') or '-'} · "
+            f"근거 연결 {verification_summary.get('covered', 0)}/{verification_summary.get('total', 0)}"
+        )
+    if result.get("critique") and debug_mode:
+        st.markdown("#### 검증 메모 (debug)")
+        st.json(result.get("critique"))
+
+
+def render_workspace_evidence_map(latest_bundle: dict[str, Any], debug_mode: bool) -> None:
+    result = dict(((latest_bundle.get("result") or {}).get("result") or {}))
+    timeline = latest_bundle.get("timeline") or []
+    policy_refs = result.get("policy_refs") or []
+    retrieval_snapshot = result.get("retrieval_snapshot") or {}
+    if not policy_refs:
+        for event in timeline:
+            payload = event.get("payload") or {}
+            if event.get("event_type") != "AGENT_EVENT":
+                continue
+            if payload.get("event_type") == "TOOL_RESULT":
+                meta = payload.get("metadata") or {}
+                if meta.get("skill") == "policy_rulebook_probe":
+                    policy_refs = ((meta.get("facts") or {}).get("policy_refs") or [])
+                    break
+
+    render_panel_header("근거 맵", "최종 판단에 사용된 규정 근거와 citation 연결 상태를 검토합니다.")
+    if not policy_refs:
+        render_empty_state("연결된 규정 근거가 없습니다.")
+        return
+
+    st.markdown("#### 채택된 규정 근거")
+    for idx, ref in enumerate(policy_refs, start=1):
+        title = f"C{idx}. {ref.get('article') or '-'} / {ref.get('parent_title') or '-'}"
+        with st.expander(title, expanded=(idx == 1)):
+            meta = []
+            if ref.get("retrieval_score") is not None:
+                meta.append(f"score={ref.get('retrieval_score')}")
+            if ref.get("source_strategy"):
+                meta.append(str(ref.get("source_strategy")))
+            if ref.get("adoption_reason"):
+                meta.append(str(ref.get("adoption_reason")))
+            if meta:
+                st.caption(" · ".join(meta))
+            st.write(ref.get("chunk_text") or "")
+            if debug_mode:
+                st.json(ref)
+
     verification_summary = result.get("verification_summary") or {}
     if verification_summary:
-        st.markdown("#### Evidence verification")
+        st.markdown("#### 검증 현황")
         v1, v2, v3 = st.columns(3)
         with v1:
             ratio = verification_summary.get("coverage_ratio")
             st.metric("근거 연결률", f"{(ratio or 0) * 100:.0f}%" if ratio is not None else "-", f"{verification_summary.get('covered', 0)}/{verification_summary.get('total', 0)}")
         with v2:
             missing = verification_summary.get("missing_citations") or []
-            st.metric("누락 citation 수", str(len(missing)), "검증 대상 대비")
+            st.metric("누락 citation", str(len(missing)))
         with v3:
-            gate = verification_summary.get("gate_policy") or "-"
-            st.metric("게이트 판정", str(gate), "")
+            st.metric("게이트 판정", str(verification_summary.get("gate_policy") or "-"))
         if verification_summary.get("missing_citations"):
             with st.expander("누락된 검증 대상 문장", expanded=False):
                 for i, s in enumerate(verification_summary["missing_citations"], 1):
-                    st.caption(f"{i}. {(s or '')[:120]}{'…' if len(str(s or '')) > 120 else ''}")
-    st.markdown('<div class="mt-divider"></div>', unsafe_allow_html=True)
-    st.markdown("#### 규정 근거")
-    if policy_refs:
-        for idx, ref in enumerate(policy_refs, start=1):
-            title = f"C{idx}. {ref.get('article') or '-'} / {ref.get('parent_title') or '-'}"
-            with st.expander(title, expanded=(idx == 1)):
-                meta = []
-                if ref.get("retrieval_score") is not None:
-                    meta.append(f"score={ref.get('retrieval_score')}")
-                if ref.get("source_strategy"):
-                    meta.append(str(ref.get("source_strategy")))
-                if meta:
-                    st.caption(" · ".join(meta))
-                st.write(ref.get("chunk_text") or "")
-                if debug_mode:
-                    st.json(ref)
+                    st.caption(f"{i}. {(s or '')[:160]}{'…' if len(str(s or '')) > 160 else ''}")
+
+    if retrieval_snapshot:
+        with st.expander("Retrieval 인용 현황", expanded=False):
+            candidates = retrieval_snapshot.get("candidates_after_rerank") or []
+            adopted = retrieval_snapshot.get("adopted_citations") or []
+            st.caption("after rerank 후보, 최종 채택 citation, 채택 이유를 함께 표시합니다.")
+            st.caption(f"후보 청크 {len(candidates)}건 · 채택 인용 {len(adopted)}건")
+            if adopted:
+                st.markdown("**최종 채택 citation**")
+                for i, c in enumerate(adopted[:10], 1):
+                    art = c.get("article") or c.get("title") or "-"
+                    reason = c.get("adoption_reason") or "규정 근거로 채택"
+                    st.markdown(f"**{i}. {art}**  \n채택 이유: {reason}")
+            if candidates:
+                st.markdown("**후보 목록 (after rerank)**")
+                for i, g in enumerate(candidates[:5], 1):
+                    reason = g.get("adoption_reason")
+                    line = f"{i}. {g.get('article') or '-'} · {g.get('parent_title') or '-'} (score={g.get('retrieval_score') or '-'})"
+                    if reason:
+                        line += f" — {reason}"
+                    st.caption(line)
+
+
+def render_workspace_execution_review(latest_bundle: dict[str, Any], debug_mode: bool) -> None:
+    timeline = latest_bundle.get("timeline") or []
+    tool_results = ((latest_bundle.get("result") or {}).get("result") or {}).get("tool_results") or []
+    plan_steps = build_workspace_plan_steps(latest_bundle)
+    exec_logs = build_workspace_execution_logs(latest_bundle)
+    render_panel_header("실행 내역", "계획 수립, 도구 실행, 게이트 판정 등 실제 오케스트레이션 흔적을 요약해 보여줍니다.")
+
+    if plan_steps:
+        st.markdown("#### 작업 계획")
+        for step in plan_steps:
+            with stylable_container(key=f"plan_review_{latest_bundle.get('run_id')}_{step['order']}", css_styles="""{background:#fff; border:1px solid #e5e7eb; border-radius:16px; padding:0.9rem 1rem; margin-bottom:0.6rem;}"""):
+                left_step, right_step = st.columns([0.78, 0.22])
+                with left_step:
+                    st.markdown(f"**{step['order']}. {step['title']}**")
+                    st.caption(step["description"])
+                with right_step:
+                    st.markdown(status_badge(step["status"] if step["status"] != "진행중" else "IN_REVIEW"), unsafe_allow_html=True)
+
+    st.markdown("#### 도구 실행 요약")
+    render_tool_trace_summary(tool_results)
+
+    if exec_logs:
+        st.markdown("#### 주요 실행 이벤트")
+        for idx, log in enumerate(exec_logs):
+            with stylable_container(key=f"log_review_{idx}_{latest_bundle.get('run_id')}", css_styles="""{background:#f8fafc; border:1px solid #e5e7eb; border-radius:14px; padding:0.85rem 0.95rem; margin-bottom:0.55rem;}"""):
+                st.caption(f"{fmt_dt_korea(log.get('at')) or '-'} · {log['node']} / {log['event_type']}")
+                st.markdown(f"**{log['tool']}**")
+                st.write(log["message"])
+                if log["observation"]:
+                    st.caption(log["observation"])
     else:
-        render_empty_state("연결된 규정 근거가 없습니다.")
-    if critique:
-        st.markdown("#### 검증 메모")
-        st.json(critique if debug_mode else {"quality_gate_codes": critique.get("quality_gate_codes") or result.get("quality_gate_codes")})
+        render_empty_state("표시할 실행 이벤트가 없습니다.")
+
+    if debug_mode and timeline:
+        with st.expander("원본 타임라인 보기", expanded=False):
+            render_process_story(timeline, debug_mode=True)
+
+
+def render_workspace_review_history(latest_bundle: dict[str, Any]) -> None:
+    render_panel_header("검토 이력", "HITL 요청, 사람 검토 응답, 재개 이력을 run 단위로 확인합니다.")
+    render_hitl_history(latest_bundle.get("history") or [])
 
 
 def render_ai_workspace_page() -> None:
@@ -1400,13 +1611,10 @@ def render_ai_workspace_page() -> None:
     # with k4:
     #     render_kpi_card("분석 완료", str(analyzed_count), "완료/해결 상태")
 
-    left, right = st.columns([0.95, 1.45], gap="large")
+    left, right = st.columns([0.9, 1.55], gap="large")
     with left:
         with stylable_container(key="workspace_case_queue_card", css_styles="""{padding: 18px 20px; border-radius: 20px; border: 1px solid #e5e7eb; background: rgba(255,255,255,0.96); box-shadow: 0 12px 30px rgba(15,23,42,0.05); min-height: 540px;}"""):
             render_workspace_case_queue(items, selected_key)
-        preview = st.session_state.get("mt_case_preview")
-        if preview:
-            render_case_preview_dialog(preview)
     with right:
         with stylable_container(key="workspace_chat_card", css_styles="""{padding: 18px 20px; border-radius: 20px; border: 1px solid #e5e7eb; background: rgba(255,255,255,0.96); box-shadow: 0 12px 30px rgba(15,23,42,0.05); margin-bottom: 12px;}"""):
             if not selected_key:
@@ -1414,44 +1622,23 @@ def render_ai_workspace_page() -> None:
             else:
                 selected = next((item for item in items if item["voucher_key"] == selected_key), None) or {}
                 render_workspace_chat_panel(selected, latest_bundle)
-        with stylable_container(key="workspace_result_card", css_styles="""{padding: 18px 20px; border-radius: 20px; border: 1px solid #e5e7eb; background: rgba(255,255,255,0.96); box-shadow: 0 12px 30px rgba(15,23,42,0.05); min-height: 880px;}"""):
+        with stylable_container(key="workspace_result_card", css_styles="""{padding: 18px 20px; border-radius: 20px; border: 1px solid #e5e7eb; background: rgba(255,255,255,0.96); box-shadow: 0 12px 30px rgba(15,23,42,0.05); min-height: 520px;}"""):
             if not selected_key:
                 render_empty_state("케이스를 선택하면 AI 워크스페이스가 표시됩니다.")
             else:
-                timeline = latest_bundle.get("timeline") or []
-                plan_steps = build_workspace_plan_steps(latest_bundle)
-                exec_logs = build_workspace_execution_logs(latest_bundle)
-                tabs = st.tabs(["사고 과정", "작업 계획", "실행 로그", "결과"])
+                tabs = st.tabs(["판단 요약", "근거 맵", "실행 내역", "검토 이력"])
                 with tabs[0]:
-                    render_panel_header("사고 과정", "실행 후 같은 이벤트를 노드 기준으로 구조화한 리뷰 화면입니다.")
-                    render_process_story(timeline, debug_mode=debug_mode)
-                with tabs[1]:
-                    render_panel_header("작업 계획", "Planner가 생성한 실행 단계와 현재 진행 상태입니다.")
-                    for step in plan_steps:
-                        with stylable_container(key=f"plan_{selected_key}_{step['order']}", css_styles="""{background: rgba(255,255,255,0.98); border: 1px solid #e5e7eb; border-radius: 16px; padding: 0.95rem 1rem; margin-bottom: 0.7rem; box-shadow: 0 8px 22px rgba(15,23,42,0.04);}"""):
-                            left_step, right_step = st.columns([0.8, 0.2])
-                            with left_step:
-                                st.markdown(f"**{step['order']}. {step['title']}**")
-                                st.caption(step["description"])
-                            with right_step:
-                                st.markdown(status_badge(step["status"] if step["status"] != "진행중" else "IN_REVIEW"), unsafe_allow_html=True)
-                with tabs[2]:
-                    tool_results = ((latest_bundle.get("result") or {}).get("result") or {}).get("tool_results") or []
-                    render_panel_header("실행 로그 (orchestration)", "TOOL_CALL / TOOL_RESULT / HITL 등 오케스트레이션 이벤트와 도구 실행 요약입니다.")
-                    render_tool_trace_summary(tool_results)
-                    if exec_logs:
-                        st.markdown("#### 실행 이벤트")
-                        for idx, log in enumerate(exec_logs):
-                            with stylable_container(key=f"log_{idx}_{selected_key}", css_styles="""{background: #f8fafc; border: 1px solid #e5e7eb; border-radius: 14px; padding: 0.85rem 0.95rem; margin-bottom: 0.55rem;}"""):
-                                st.caption(f"{fmt_dt_korea(log.get('at')) or '-'} · {log['node']} / {log['event_type']}")
-                                st.markdown(f"**{log['tool']}**")
-                                st.write(log["message"])
-                                if log["observation"]:
-                                    st.caption(log["observation"])
-                    else:
-                        render_empty_state("표시할 실행 로그가 없습니다.")
-                with tabs[3]:
                     render_workspace_results(latest_bundle, debug_mode)
+                    timeline = latest_bundle.get("timeline") or []
+                    if timeline:
+                        with st.expander("판단 흐름 요약", expanded=False):
+                            render_process_story(timeline, debug_mode=debug_mode)
+                with tabs[1]:
+                    render_workspace_evidence_map(latest_bundle, debug_mode)
+                with tabs[2]:
+                    render_workspace_execution_review(latest_bundle, debug_mode)
+                with tabs[3]:
+                    render_workspace_review_history(latest_bundle)
                     run_id = latest_bundle.get("run_id")
                     if run_id:
                         with st.expander("Run 진단 (관찰 지표)", expanded=False):
@@ -1487,27 +1674,3 @@ def render_ai_workspace_page() -> None:
                                     c4.metric("Fallback 비율", f"{(diag.get('fallback_usage_rate') or 0) * 100:.1f}%" if diag.get("fallback_usage_rate") is not None else "-", f"이벤트 {diag.get('event_count', 0)}건")
                             except Exception:
                                 st.caption("진단 API를 불러올 수 없습니다.")
-                    result_result = (latest_bundle.get("result") or {}).get("result") or {}
-                    retrieval_snapshot = result_result.get("retrieval_snapshot")
-                    if retrieval_snapshot:
-                        with st.expander("Retrieval 인용 현황", expanded=False):
-                            candidates = retrieval_snapshot.get("candidates_after_rerank") or []
-                            adopted = retrieval_snapshot.get("adopted_citations") or []
-                            st.caption("표시 기준: after rerank 후보 · 최종 채택 citation · 채택 이유(adoption_reason)")
-                            st.caption(f"후보 청크 {len(candidates)}건 · 채택 인용 {len(adopted)}건")
-                            if adopted:
-                                st.markdown("**최종 채택 citation**")
-                                for i, c in enumerate(adopted[:10], 1):
-                                    art = c.get("article") or c.get("title") or "-"
-                                    reason = c.get("adoption_reason") or "규정 근거로 채택"
-                                    st.markdown(f"**{i}. {art}**  \n채택 이유: {reason}")
-                            if candidates:
-                                st.markdown("**후보 목록 (after rerank)**")
-                                for i, g in enumerate(candidates[:5], 1):
-                                    reason = g.get("adoption_reason")
-                                    line = f"{i}. {g.get('article') or '-'} · {g.get('parent_title') or '-'} (score={g.get('retrieval_score') or '-'})"
-                                    if reason:
-                                        line += f" — {reason}"
-                                    st.caption(line)
-                    st.markdown("#### 분석 이력")
-                    render_hitl_history(latest_bundle.get("history") or [])

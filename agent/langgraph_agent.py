@@ -26,6 +26,8 @@ from utils.config import settings
 
 # Phase C: plan 기반 도구 실행은 LangChain tool 호출로만 수행 (registry direct dispatch 제거)
 _TOOLS_BY_NAME: dict[str, Any] = {}
+_CHECKPOINTER: Any | None = None
+_COMPILED_GRAPH: Any | None = None
 
 
 def _get_tools_by_name() -> dict[str, Any]:
@@ -680,14 +682,7 @@ async def critic_node(state: AgentState) -> AgentState:
 async def verify_node(state: AgentState) -> AgentState:
     from services.evidence_verification import EVIDENCE_GATE_HOLD, EVIDENCE_GATE_REGENERATE, verify_evidence_coverage_claims
 
-    hitl_request = build_hitl_request(state["body_evidence"], state["tool_results"])
-    if state["flags"].get("hasHitlResponse"):
-        hitl_request = None
-    needs_hitl = bool(hitl_request) or bool(state.get("critique", {}).get("recommend_hold") and not state["flags"].get("hasHitlResponse"))
-    verification = {
-        "needs_hitl": needs_hitl,
-        "quality_signals": ["HITL_REQUIRED"] if needs_hitl else ["OK"],
-    }
+    verification = {"needs_hitl": False, "quality_signals": ["OK"]}
     verification_targets = (state.get("critic_output") or {}).get("verification_targets") or []
     probe_facts = (_find_tool_result(state["tool_results"], "policy_rulebook_probe") or {}).get("facts", {}) or {}
     retrieved_chunks = probe_facts.get("retrieval_candidates") or probe_facts.get("policy_refs") or []
@@ -697,19 +692,26 @@ async def verify_node(state: AgentState) -> AgentState:
     elif verification_targets:
         verification_summary = {"covered": 0, "total": len(verification_targets), "coverage_ratio": 0.0, "details": [], "gate_policy": EVIDENCE_GATE_HOLD, "missing_citations": verification_targets}
     verification["verification_summary"] = verification_summary
-    if verification_summary.get("gate_policy") in (EVIDENCE_GATE_HOLD, EVIDENCE_GATE_REGENERATE) and not needs_hitl:
-        needs_hitl = True
-        verification["needs_hitl"] = True
-        verification["quality_signals"] = ["HITL_REQUIRED"]
-        if not hitl_request:
-            hitl_request = {"reasons": ["evidence coverage 부족"], "questions": [], "handoff": "verification"}
+    hitl_request = build_hitl_request(
+        state["body_evidence"],
+        state["tool_results"],
+        critique=state.get("critique"),
+        verification_summary=verification_summary,
+        screening_result=state.get("screening_result"),
+        score_breakdown=state.get("score_breakdown"),
+    )
+    if state["flags"].get("hasHitlResponse"):
+        hitl_request = None
+    needs_hitl = bool(hitl_request)
+    verification["needs_hitl"] = needs_hitl
+    verification["quality_signals"] = ["HITL_REQUIRED"] if needs_hitl else ["OK"]
     gate = VerifierGate.HITL_REQUIRED if needs_hitl else VerifierGate.READY
     verifier_output = VerifierOutput(
         grounded=not needs_hitl,
         needs_hitl=needs_hitl,
-        missing_evidence=hitl_request.get("reasons", []) if hitl_request else [],
+        missing_evidence=(hitl_request.get("missing_evidence") or hitl_request.get("reasons") or []) if hitl_request else [],
         gate=gate,
-        rationale="사람 검토가 필요하면 HITL_REQUIRED, 아니면 READY로 진행한다.",
+        rationale=(hitl_request.get("why_hitl") if hitl_request else "자동 확정 가능한 상태로 검증이 완료되었습니다."),
         quality_signals=verification["quality_signals"],
     )
     start_note = await generate_working_note(
@@ -957,12 +959,20 @@ async def finalizer_node(state: AgentState) -> AgentState:
 
 
 def _get_checkpointer():
-    """PoC: MemorySaver. 운영 확장 시 SqliteSaver 등 영속 체크포인터로 교체."""
-    from langgraph.checkpoint.memory import MemorySaver
-    return MemorySaver()
+    """동일 프로세스 내 run resume를 위해 checkpointer는 싱글톤으로 유지한다."""
+    global _CHECKPOINTER
+    if _CHECKPOINTER is None:
+        from langgraph.checkpoint.memory import MemorySaver
+
+        _CHECKPOINTER = MemorySaver()
+    return _CHECKPOINTER
 
 
 def build_agent_graph():
+    global _COMPILED_GRAPH
+    if _COMPILED_GRAPH is not None:
+        return _COMPILED_GRAPH
+
     workflow = StateGraph(AgentState)
     # Phase 0: Screening (case type classification from raw signals)
     workflow.add_node("screener", screener_node)
@@ -985,7 +995,8 @@ def build_agent_graph():
     workflow.add_edge("hitl_pause", "reporter")  # resume 후 reporter로 이어짐
     workflow.add_edge("reporter", "finalizer")
     workflow.add_edge("finalizer", END)
-    return workflow.compile(checkpointer=_get_checkpointer())
+    _COMPILED_GRAPH = workflow.compile(checkpointer=_get_checkpointer())
+    return _COMPILED_GRAPH
 
 
 async def run_langgraph_agentic_analysis(

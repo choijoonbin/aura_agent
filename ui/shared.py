@@ -106,7 +106,7 @@ def inject_css() -> None:
         .mt-badge-green {{ background:#ecfdf5; color:#059669; border-color:#a7f3d0; }}
         .mt-meta-pill {{ display:inline-flex; align-items:center; gap:6px; padding:6px 10px; border-radius:999px; background:#f8fafc; border:1px solid #e2e8f0; color:#334155; font-size:0.76rem; font-weight:700; margin-right:8px; margin-bottom:8px; }}
         .mt-divider {{ height:1px; background:linear-gradient(90deg, rgba(203,213,225,0.15), rgba(203,213,225,0.9), rgba(203,213,225,0.15)); margin:14px 0 16px 0; }}
-        .mt-stream-shell {{ background: radial-gradient(circle at 1px 1px, rgba(15,23,42,0.10) 1px, transparent 0); background-size: 14px 14px; background-color:#f8fafc; border:1px dashed #dbe2ea; border-radius:18px; padding:14px; }}
+        .mt-stream-shell {{ background: radial-gradient(circle at 1px 1px, rgba(15,23,42,0.10) 1px, transparent 0); background-size: 14px 14px; background-color:#f8fafc; border:1px dashed #dbe2ea; border-radius:18px; padding:14px; max-height: 54vh; overflow-y:auto; overflow-x:hidden; }}
         .mt-stream-card {{ padding: 14px 16px; border-radius: 16px; border: 1px solid var(--mt-border); background: #fff; margin-bottom: 10px; }}
         .mt-legend {{ display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin: 8px 0 14px 0; }}
         .mt-legend-item {{ display:inline-flex; align-items:center; gap:8px; padding:8px 10px; border-radius:12px; background:#fff; border:1px solid #e2e8f0; font-size:0.78rem; color:#334155; }}
@@ -154,6 +154,45 @@ def inject_css() -> None:
         .mt-demo-scenario-title {{ font-size: 0.9rem; font-weight: 700; color: #0f172a; line-height: 1.3; margin-bottom: 4px; }}
         .mt-demo-scenario-desc {{ font-size: 0.75rem; color: #64748b; line-height: 1.4; margin-bottom: 8px; }}
         .mt-demo-panel {{ background: rgba(255,255,255,0.98); border: 1px solid var(--mt-border); border-radius: 16px; padding: 1rem 1.1rem; box-shadow: 0 8px 22px rgba(15,23,42,0.05); }}
+        .mt-workspace-summary {{ display:grid; grid-template-columns: minmax(0,1.55fr) minmax(280px,0.82fr); gap:16px; align-items:stretch; }}
+        .mt-workspace-hero {{ padding:18px 20px; border-radius:18px; background: linear-gradient(135deg, #eff6ff 0%, #ffffff 65%); border:1px solid #dbeafe; min-height: 100%; }}
+        .mt-workspace-hero-title {{ font-size:1.05rem; font-weight:800; color:#0f172a; letter-spacing:-0.02em; }}
+        .mt-workspace-hero-sub {{ font-size:0.85rem; color:#475569; line-height:1.55; margin-top:6px; }}
+        .mt-workspace-inline-meta {{ display:flex; flex-wrap:wrap; gap:10px 14px; margin-top:14px; }}
+        .mt-workspace-inline-item {{ display:flex; align-items:center; gap:6px; font-size:0.82rem; color:#334155; }}
+        .mt-workspace-inline-label {{ color:#64748b; font-weight:700; }}
+        .mt-workspace-action {{ padding:18px 18px; border-radius:18px; background:#ffffff; border:1px solid #e5e7eb; display:flex; flex-direction:column; justify-content:space-between; min-height:100%; }}
+        .mt-workspace-action-top {{ font-size:0.82rem; color:#64748b; line-height:1.5; }}
+        .mt-workspace-action-title {{ font-size:0.95rem; font-weight:800; color:#0f172a; margin-bottom:8px; }}
+        .mt-workspace-action-meta {{ display:grid; grid-template-columns:auto 1fr; gap:6px 10px; margin-top:10px; font-size:0.8rem; }}
+        .mt-workspace-action-key {{ color:#64748b; font-weight:700; }}
+        .mt-workspace-action-value {{ color:#0f172a; font-weight:600; }}
+        .mt-workspace-strip {{ margin-top:12px; padding:10px 12px; border-radius:14px; border:1px solid #bfdbfe; background:#eff6ff; font-size:0.82rem; color:#1e3a8a; font-weight:700; }}
+        .mt-workspace-case-stats {{ display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:10px; margin:8px 0 14px 0; }}
+        .mt-workspace-case-stat {{ padding:10px 12px; border-radius:14px; border:1px solid #e5e7eb; background:#f8fafc; }}
+        .mt-workspace-case-stat-value {{ font-size:1rem; font-weight:800; color:#0f172a; }}
+        .mt-workspace-case-stat-label {{ font-size:0.76rem; font-weight:700; color:#64748b; margin-top:2px; }}
+        .mt-case-card {{ padding:14px 14px 16px 14px; border-radius:18px; background:rgba(255,255,255,0.98); border:1px solid #e5e7eb; box-shadow:0 8px 22px rgba(15,23,42,0.04); transition: all 0.18s ease; }}
+        .mt-case-card-selected {{ border:2px solid #2563eb; box-shadow:0 0 0 3px rgba(37,99,235,0.08), 0 12px 26px rgba(15,23,42,0.08); }}
+        .mt-case-name {{ font-size:1rem; font-weight:800; color:#0f172a; line-height:1.35; margin-top:4px; }}
+        .mt-case-meta-line {{ font-size:0.84rem; color:#64748b; line-height:1.55; margin-top:8px; }}
+        .mt-case-submeta {{ display:grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap:6px 12px; margin-top:12px; }}
+        .mt-case-submeta-item {{ font-size:0.8rem; color:#334155; }}
+        .mt-case-submeta-label {{ color:#64748b; font-weight:700; margin-right:6px; }}
+        .mt-stream-note {{ margin-top:8px; font-size:0.78rem; color:#64748b; }}
+        .mt-section-note {{ font-size:0.82rem; color:#64748b; line-height:1.55; margin-bottom:12px; }}
+        .mt-stream-stage-row {{ display:flex; flex-wrap:wrap; gap:8px; margin:10px 0 12px 0; }}
+        .mt-stream-stage-pill {{ display:inline-flex; align-items:center; gap:6px; padding:6px 10px; border-radius:999px; background:#fff; border:1px solid #dbeafe; font-size:0.76rem; font-weight:700; color:#1d4ed8; }}
+        .mt-result-grid {{ display:grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap:12px; margin-top:14px; margin-bottom:16px; }}
+        .mt-result-metric {{ padding:14px 16px; border-radius:16px; border:1px solid #e5e7eb; background:#fff; }}
+        .mt-result-metric-label {{ font-size:0.8rem; color:#64748b; font-weight:700; }}
+        .mt-result-metric-value {{ font-size:1.65rem; font-weight:800; color:#0f172a; margin-top:8px; }}
+        .mt-result-metric-foot {{ font-size:0.78rem; color:#64748b; margin-top:6px; line-height:1.45; }}
+        @media (max-width: 1280px) {{
+          .mt-workspace-summary {{ grid-template-columns: 1fr; }}
+          .mt-workspace-case-stats {{ grid-template-columns: repeat(2,minmax(0,1fr)); }}
+          .mt-result-grid {{ grid-template-columns: 1fr; }}
+        }}
         </style>
     """
     st.markdown(css_template.format(sidebar_width=sidebar_width, sidebar_padding_top=sidebar_padding_top), unsafe_allow_html=True)

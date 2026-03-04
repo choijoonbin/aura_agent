@@ -182,7 +182,7 @@ def get_run_aux_state(db: Session, *, run_id: str) -> dict[str, Any]:
         where tenant_id = :tenant_id
           and resource_type = :resource_type
           and resource_id = :run_id
-          and event_type in ('RUN_CREATED', 'HITL_REQUESTED', 'HITL_RESPONSE', 'RUN_COMPLETED', 'RUN_FAILED')
+          and event_type in ('RUN_CREATED', 'HITL_REQUESTED', 'HITL_DRAFT', 'HITL_RESPONSE', 'RUN_COMPLETED', 'RUN_FAILED')
         order by occurred_at asc, activity_id asc
         """
     )
@@ -196,6 +196,7 @@ def get_run_aux_state(db: Session, *, run_id: str) -> dict[str, Any]:
     ).mappings().all()
     lineage = None
     hitl_request = None
+    hitl_draft = None
     hitl_response = None
     result = None
     for row in rows:
@@ -206,6 +207,8 @@ def get_run_aux_state(db: Session, *, run_id: str) -> dict[str, Any]:
             lineage = metadata.get("lineage") or payload.get("lineage")
         elif event_type == "HITL_REQUESTED":
             hitl_request = metadata.get("hitl_request") or payload.get("metadata") or payload
+        elif event_type == "HITL_DRAFT":
+            hitl_draft = metadata.get("hitl_draft") or payload
         elif event_type == "HITL_RESPONSE":
             hitl_response = metadata.get("hitl_response") or payload
         elif event_type in {"RUN_COMPLETED", "RUN_FAILED"}:
@@ -213,6 +216,7 @@ def get_run_aux_state(db: Session, *, run_id: str) -> dict[str, Any]:
     return {
         "lineage": lineage,
         "hitl_request": hitl_request,
+        "hitl_draft": hitl_draft,
         "hitl_response": hitl_response,
         "result_payload": result,
     }
