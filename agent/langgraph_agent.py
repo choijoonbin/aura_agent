@@ -70,6 +70,15 @@ def _format_occurred_at(value: Any) -> str:
         return raw
 
 
+def _voucher_summary_for_context(body_evidence: dict[str, Any]) -> str:
+    """사용자 안내용 한 줄 요약. AI 작업 메모에서 내부 ID 대신 이 문구를 사용하도록 전달."""
+    merchant = (body_evidence.get("merchantName") or "").strip() or "거래처 미상"
+    amount = body_evidence.get("amount")
+    amount_str = f"{int(amount):,}원" if amount is not None else "금액 미상"
+    occurred = _format_occurred_at(body_evidence.get("occurredAt"))
+    return f"거래처 {merchant}, {amount_str}, {occurred}"
+
+
 def _find_tool_result(tool_results: list[dict[str, Any]], skill_name: str) -> dict[str, Any] | None:
     return next((result for result in tool_results if result.get("skill") == skill_name), None)
 
@@ -313,7 +322,7 @@ async def intake_node(state: AgentState) -> AgentState:
         node="intake",
         role="intake_agent",
         context={
-            "case_id": state["case_id"],
+            "voucher_summary": _voucher_summary_for_context(state["body_evidence"]),
             "occurredAt": state["body_evidence"].get("occurredAt"),
             "merchantName": state["body_evidence"].get("merchantName"),
             "amount": state["body_evidence"].get("amount"),
@@ -328,7 +337,7 @@ async def intake_node(state: AgentState) -> AgentState:
         node="intake",
         role="intake_agent",
         context={
-            "case_id": state["case_id"],
+            "voucher_summary": _voucher_summary_for_context(state["body_evidence"]),
             "flags": flags,
         },
         fallback_message="입력 정규화가 완료되었습니다.",
@@ -386,7 +395,7 @@ async def planner_node(state: AgentState) -> AgentState:
         node="planner",
         role="planner_agent",
         context={
-            "case_id": state["case_id"],
+            "voucher_summary": _voucher_summary_for_context(state["body_evidence"]),
             "flags": state["flags"],
         },
         fallback_message="조사 계획을 수립합니다.",
@@ -398,7 +407,7 @@ async def planner_node(state: AgentState) -> AgentState:
         node="planner",
         role="planner_agent",
         context={
-            "case_id": state["case_id"],
+            "voucher_summary": _voucher_summary_for_context(state["body_evidence"]),
             "flags": state["flags"],
             "plan": plan,
         },
@@ -450,7 +459,7 @@ async def execute_node(state: AgentState) -> AgentState:
                 node="execute",
                 role="specialist_agent",
                 context={
-                    "case_id": state["case_id"],
+                    "voucher_summary": _voucher_summary_for_context(state["body_evidence"]),
                     "tool": tool_name,
                     "reason": step.get("reason"),
                     "existing_tool_results": tool_results,
@@ -491,7 +500,7 @@ async def execute_node(state: AgentState) -> AgentState:
             node="execute",
             role="specialist_agent",
             context={
-                "case_id": state["case_id"],
+                "voucher_summary": _voucher_summary_for_context(state["body_evidence"]),
                 "tool": tool_name,
                 "reason": step.get("reason"),
                 "flags": state.get("flags"),
@@ -535,7 +544,7 @@ async def execute_node(state: AgentState) -> AgentState:
             node="execute",
             role="specialist_agent",
             context={
-                "case_id": state["case_id"],
+                "voucher_summary": _voucher_summary_for_context(state["body_evidence"]),
                 "tool": tool_name,
                 "reason": step.get("reason"),
                 "tool_result": result,
@@ -619,7 +628,7 @@ async def critic_node(state: AgentState) -> AgentState:
         node="critic",
         role="critic_agent",
         context={
-            "case_id": state["case_id"],
+            "voucher_summary": _voucher_summary_for_context(state["body_evidence"]),
             "tool_results": state.get("tool_results", []),
             "missing_fields": missing,
         },
@@ -632,7 +641,7 @@ async def critic_node(state: AgentState) -> AgentState:
         node="critic",
         role="critic_agent",
         context={
-            "case_id": state["case_id"],
+            "voucher_summary": _voucher_summary_for_context(state["body_evidence"]),
             "critique": critique,
         },
         fallback_message="비판적 재검토가 완료되었습니다.",
@@ -707,7 +716,7 @@ async def verify_node(state: AgentState) -> AgentState:
         node="verify",
         role="verifier_agent",
         context={
-            "case_id": state["case_id"],
+            "voucher_summary": _voucher_summary_for_context(state["body_evidence"]),
             "critique": state.get("critique"),
             "tool_results": state.get("tool_results", []),
         },
@@ -720,7 +729,7 @@ async def verify_node(state: AgentState) -> AgentState:
         node="verify",
         role="verifier_agent",
         context={
-            "case_id": state["case_id"],
+            "voucher_summary": _voucher_summary_for_context(state["body_evidence"]),
             "verification": verification,
             "hitl_request": hitl_request,
         },
@@ -757,7 +766,7 @@ async def verify_node(state: AgentState) -> AgentState:
             node="verify",
             role="verifier_agent",
             context={
-                "case_id": state["case_id"],
+                "voucher_summary": _voucher_summary_for_context(state["body_evidence"]),
                 "hitl_request": hitl_request,
             },
             fallback_message="사람 검토가 필요한 케이스로 분류되었습니다.",
@@ -836,7 +845,7 @@ async def reporter_node(state: AgentState) -> AgentState:
         node="report",
         role="reporter_agent",
         context={
-            "case_id": state["case_id"],
+            "voucher_summary": _voucher_summary_for_context(state["body_evidence"]),
             "score_breakdown": score,
             "policy_refs": _top_policy_refs(state.get("tool_results", []), limit=2),
         },
@@ -849,7 +858,7 @@ async def reporter_node(state: AgentState) -> AgentState:
         node="report",
         role="reporter_agent",
         context={
-            "case_id": state["case_id"],
+            "voucher_summary": _voucher_summary_for_context(state["body_evidence"]),
             "summary": summary,
         },
         fallback_message=summary,

@@ -91,7 +91,7 @@ def _stream_card_chunks(obj: dict[str, Any]) -> Iterator[str]:
     yield "---  \n\n"
 
 
-def sse_text_stream(stream_url: str) -> Iterator[str]:
+def sse_text_stream(stream_url: str, *, run_id: str | None = None) -> Iterator[str]:
     with requests.get(stream_url, stream=True, timeout=300) as response:
         response.raise_for_status()
         event = None
@@ -117,8 +117,24 @@ def sse_text_stream(stream_url: str) -> Iterator[str]:
                     for chunk in _stream_card_chunks(obj):
                         yield chunk
                     first_event = False
+                    if str(obj.get("event_type") or "").upper() == "HITL_PAUSE":
+                        if run_id:
+                            st.session_state[_hitl_state_key("dismissed", run_id)] = False
+                            st.session_state[_hitl_state_key("shown", run_id)] = True
+                            st.session_state[_hitl_state_key("open", run_id)] = True
+                        yield "\n\n**[최종]** 사람 검토 입력을 기다립니다.\n"
+                        break
                 elif event == "completed":
-                    yield f"\n\n**[최종]** {obj.get('reasonText') or obj.get('summary') or '완료'}\n"
+                    final_text = obj.get("reasonText") or obj.get("summary") or "완료"
+                    result = obj.get("result") or {}
+                    status = str(result.get("status") or obj.get("status") or "").upper()
+                    if status == "HITL_REQUIRED" and run_id:
+                        st.session_state[_hitl_state_key("dismissed", run_id)] = False
+                        st.session_state[_hitl_state_key("shown", run_id)] = True
+                        st.session_state[_hitl_state_key("open", run_id)] = True
+                        yield f"\n\n**[최종]** {final_text}\n"
+                        break
+                    yield f"\n\n**[최종]** {final_text}\n"
                 elif event == "failed":
                     yield f"\n\n**[실패]** {obj.get('error', 'unknown error')}\n"
                 else:
@@ -434,6 +450,10 @@ def _has_pending_hitl(latest_bundle: dict[str, Any]) -> bool:
         if str(payload.get("event_type") or "").upper() in {"HITL_REQUESTED", "HITL_PAUSE"}:
             return True
     return False
+
+
+def _hitl_state_key(kind: str, run_id: str | None) -> str:
+    return f"mt_hitl_{kind}_{run_id or 'unknown'}"
 
 
 def _fallback_hitl_request(latest_bundle: dict[str, Any]) -> dict[str, Any]:
@@ -966,7 +986,9 @@ def render_hitl_panel(latest_bundle: dict[str, Any]) -> None:
             },
         )
         resumed_id = response.get("resumed_run_id") or response.get("run_id") or run_id
-        st.session_state.pop(f"mt_hitl_dismissed_{run_id}", None)
+        st.session_state.pop(_hitl_state_key("dismissed", run_id), None)
+        st.session_state.pop(_hitl_state_key("open", run_id), None)
+        st.session_state.pop(_hitl_state_key("shown", run_id), None)
         st.success(f"HITL 응답 저장 완료: run_id={resumed_id}")
         st.rerun()
 
@@ -1188,23 +1210,34 @@ def render_workspace_chat_panel(selected: dict[str, Any], latest_bundle: dict[st
         run_clicked = st.button("분석 시작", key=f"workspace_run_{vkey}", use_container_width=True, type="primary")
     if run_clicked:
         response = post(f"/api/v1/cases/{vkey}/analysis-runs")
-        st.session_state.pop(f"mt_hitl_dismissed_{response['run_id']}", None)
+        run_id = response["run_id"]
+        st.session_state.pop(_hitl_state_key("dismissed", run_id), None)
+        st.session_state.pop(_hitl_state_key("open", run_id), None)
+        st.session_state.pop(_hitl_state_key("shown", run_id), None)
         st.success(f"분석 시작: run_id={response['run_id']}")
-        st.write_stream(sse_text_stream(f"{API}{response['stream_path']}"))
+        st.write_stream(sse_text_stream(f"{API}{response['stream_path']}", run_id=run_id))
         st.rerun()
     if _has_pending_hitl(latest_bundle):
         st.warning("이 분석은 사람 검토가 필요합니다. 검토 의견을 입력하면 같은 run으로 재개됩니다.")
         _hl, hitl_btn_col, _hr = st.columns([0.01, 0.98, 0.01])
+        run_id = latest_bundle.get("run_id")
+        open_key = _hitl_state_key("open", run_id)
+        shown_key = _hitl_state_key("shown", run_id)
+        dismissed_key = _hitl_state_key("dismissed", run_id)
         with hitl_btn_col:
             if st.button("HITL 검토 입력 열기", key=f"workspace_hitl_open_{vkey}", use_container_width=True):
-                render_hitl_dialog(latest_bundle)
-        run_id = latest_bundle.get("run_id")
+                st.session_state[dismissed_key] = False
+                st.session_state[open_key] = True
+                st.rerun()
         if run_id:
-            key = f"mt_hitl_dismissed_{run_id}"
-            st.session_state.setdefault(key, False)
-            if not st.session_state.get(key, False):
+            st.session_state.setdefault(dismissed_key, False)
+            st.session_state.setdefault(shown_key, False)
+            if not st.session_state[dismissed_key] and not st.session_state[shown_key]:
+                st.session_state[open_key] = True
+                st.session_state[shown_key] = True
+            if st.session_state.get(open_key):
+                st.session_state[open_key] = False
                 render_hitl_dialog(latest_bundle)
-            render_hitl_dialog(latest_bundle)
     if not timeline:
         _es_l, es_mid, _es_r = st.columns([0.02, 0.96, 0.02])
         with es_mid:

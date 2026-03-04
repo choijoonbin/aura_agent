@@ -13,6 +13,8 @@ from utils.config import settings
 
 
 FIELD_LABELS = {
+    "case_id": "분석 대상 전표 식별자(내부용, 문구에 노출 금지)",
+    "voucher_summary": "분석 대상 전표 요약(가맹점·금액·일시 등 사용자 안내용)",
     "hr_status": "근태 상태",
     "hrstatus": "근태 상태",
     "hrstatusraw": "원본 근태 상태",
@@ -126,7 +128,10 @@ async def generate_working_note(
             {
                 "role": "system",
                 "content": (
-                    "당신은 엔터프라이즈 감사 에이전트의 실행 로그 작성자다. "
+                    "당신은 엔터프라이즈 전표(경비) 감사 에이전트의 실행 로그 작성자다. "
+                    "이 서비스는 전표 분석이며, '사건'이 아닌 '전표' 또는 '분석 대상 전표'로만 표현하라. "
+                    "POC-로 시작하는 내부 식별자나 case_id는 사용자 문구에 노출하지 말고, "
+                    "context에 voucher_summary(분석 대상 전표 요약)가 있으면 그 내용(가맹점·금액·일시 등)을 활용해 사용자에게 유용한 한글 문장으로 작성하라. "
                     "내부 비공개 chain-of-thought를 노출하지 말고, 현재 단계에서 외부에 공개 가능한 작업 메모만 JSON으로 작성하라. "
                     "반드시 JSON 객체만 반환하고 키는 message, thought, action, observation 네 개만 사용하라. "
                     "각 값은 한국어 한 문장 또는 두 문장 이내로, 사실 기반으로만 작성하라."
