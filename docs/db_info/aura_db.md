@@ -2918,6 +2918,6 @@ ALTER TABLE dwp_aura.case_action_execution OWNER TO dwp_user;
 GRANT ALL ON TABLE dwp_aura.case_action_execution TO dwp_user;
 
 
-여긴 aura 테이블 스키마 정보가 있습니다. @docs/aura_db.md
+여긴 aura 테이블 스키마 정보가 있습니다. @docs/db_info/aura_db.md
 그리고 /Users/joonbinchoi/Work/dwp/FE,BE,AURA  경로 밑에는 이 프로젝트를 POC 로 만들기 위해 가져온 원본 소스 폴더가 각각 있습니다.
 따라서 모듈별로 참고할만한 소스가 필요시 참고하면 됩니다.

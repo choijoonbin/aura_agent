@@ -165,7 +165,7 @@ def render_agent_studio_page() -> None:
 1. **execute**: 조사 계획의 실제 실행 허브
 2. **holiday_compliance_probe**: 휴일/휴무/시간대 검증
 3. **budget_risk_probe**: 예산 초과 및 금액 리스크 확인
-4. **merchant_risk_probe**: MCC/거래처 기반 업종 리스크 판별
+4. **merchant_risk_probe**: 가맹점 업종 코드(MCC)/거래처 기반 업종 리스크 판별
 5. **document_evidence_probe**: 전표 라인/문서 증거 수집
 6. **policy_rulebook_probe**: 규정 조항 검색 및 연결
 7. **legacy_aura_deep_audit**: 필요 시 specialist 심층 감사 호출

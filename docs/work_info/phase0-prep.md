@@ -1,6 +1,6 @@
 # Phase 0. 준비 및 안전장치
 
-> 기준: `docs/langgraphPlan.md` Phase 0  
+> 기준: `docs/work_info/langgraphPlan.md` Phase 0  
 > 목적: PoC를 깨지 않도록 리팩토링 전 연결 지점·transitional 경로·smoke test·회귀 체크리스트를 고정한다.
 
 ---

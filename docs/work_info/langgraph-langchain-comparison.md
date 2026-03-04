@@ -408,7 +408,7 @@ Phase A～E 및 본 문서 Must/Should가 모두 완료된 **이후**에, 모범
 
 | 구분 | 경로·문서 | 용도 |
 |------|-----------|------|
-| **Aura DB 스키마** | [docs/aura_db.md](aura_db.md) | Aura 관련 테이블 스키마 정보. persistence·연동 시 참고. |
+| **Aura DB 스키마** | [docs/db_info/aura_db.md](../db_info/aura_db.md) | Aura 관련 테이블 스키마 정보. persistence·연동 시 참고. |
 | **원본 소스 (PoC 출처)** | `/Users/joonbinchoi/Work/dwp/dwp-front` | 프론트엔드 원본. UI·플로우 참고 시 참고. |
 | | `/Users/joonbinchoi/Work/dwp/dwp-backend` | 백엔드 원본. API·서비스 로직 참고 시 참고. |
 | | `/Users/joonbinchoi/Work/dwp/aura-platform` | Aura 플랫폼 원본. LLM·감사 파이프라인 등 참고 시 참고. |

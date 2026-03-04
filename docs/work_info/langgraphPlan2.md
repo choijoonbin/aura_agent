@@ -85,7 +85,7 @@ AI 워크스페이스 최종 마감
 F/H 고도화
 스튜디오/라이브러리 발표용 미세조정
 
-@docs/langgraphPlan2.md 
+@docs/work_info/langgraphPlan2.md 
 
 
 ### 커서&코덱스 잔여작업 merge
@@ -192,11 +192,11 @@ F/H 고도화
 ### 잔여작업 1~10 점검 결과 (Codex)
 1. 문서 현행화  
    - 결과: PASS  
-   - 점검: `docs/langgraphPlan.md` §2 현재 상태 요약이 현재 구현 기준으로 수정되어 있음. execute=LangChain tool loop, structured output 적용 상태, HITL=same-run interrupt/resume + checkpointer 반영됨.
+   - 점검: `docs/work_info/langgraphPlan.md` §2 현재 상태 요약이 현재 구현 기준으로 수정되어 있음. execute=LangChain tool loop, structured output 적용 상태, HITL=same-run interrupt/resume + checkpointer 반영됨.
 
 2. Phase D 현재 구현 상태 반영  
    - 결과: PASS (정식 기준)  
-   - 점검: `docs/langgraphPlan.md`, `docs/langgraphPlan2.md`에 정식 HITL(same-run interrupt/resume + checkpointer) 적용 완료로 문서화됨. `main.py`는 동일 `run_id`로 `_run_analysis_task(..., resume_value=...)` 호출하여 같은 run에서 재개.  
+   - 점검: `docs/work_info/langgraphPlan.md`, `docs/work_info/langgraphPlan2.md`에 정식 HITL(same-run interrupt/resume + checkpointer) 적용 완료로 문서화됨. `main.py`는 동일 `run_id`로 `_run_analysis_task(..., resume_value=...)` 호출하여 같은 run에서 재개.  
    - 특이사항: 없음. 정식 LangGraph interrupt/resume + checkpointer 적용 상태.
 
 3. 테스트 전략 구현  

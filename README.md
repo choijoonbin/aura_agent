@@ -54,14 +54,14 @@
 
 > 참고: [`agent/screener.py`](agent/screener.py) — 결정론적 스크리닝 엔진  
 > 참고: [`agent/langgraph_agent.py`](agent/langgraph_agent.py) — 메인 그래프 노드 구현  
-> 참고: [docs/langgraph.md](docs/langgraph.md) — 오케스트레이션 흐름·노드별 역할 (에이전트 스튜디오 그래프와 동일)
+> 참고: [docs/work_info/langgraph.md](docs/work_info/langgraph.md) — 오케스트레이션 흐름·노드별 역할 (에이전트 스튜디오 그래프와 동일)
 
 ### 2. Skill 기반 도구 확장
 - **policy_rulebook_probe**: 내부 규정집 조항 조회, 키워드 후보 수집 → 조항 단위 그룹화 → 문맥 확장
 - **document_evidence_probe**: 전표 증거 수집
 - **holiday_compliance_probe**: 휴일/휴무 리스크 확인
 - **budget_risk_probe**: 예산 초과 확인
-- **merchant_risk_probe**: 업종/MCC 위험 확인
+- **merchant_risk_probe**: 업종/가맹점 업종 코드(MCC) 위험 확인
 - **legacy_aura_deep_audit**: 기존 Aura 심층 분석 파이프라인 호출 (선택적)
 
 > 참고: [`agent/skills.py`](agent/skills.py#L130) — SKILL_REGISTRY 및 각 skill 구현
@@ -84,7 +84,7 @@
 
 ### 5. Streamlit 통합 UI
 - **AI 워크스페이스**: 전표 선택, 분석 실행, 실시간 사고 흐름 탭, HITL 응답
-- **에이전트 스튜디오**: 에이전트 모델/프롬프트/도구/지식 설정. 그래프는 **상위 오케스트레이션 그래프**(메인 노드 흐름)와 **하위 실행 스킬 그래프**(execute 노드 내부 도구 순서)로 구분되어 [docs/langgraph.md](docs/langgraph.md)와 동일합니다.
+- **에이전트 스튜디오**: 에이전트 모델/프롬프트/도구/지식 설정. 그래프는 **상위 오케스트레이션 그래프**(메인 노드 흐름)와 **하위 실행 스킬 그래프**(execute 노드 내부 도구 순서)로 구분되어 [docs/work_info/langgraph.md](docs/work_info/langgraph.md)와 동일합니다.
 
 **발표용 화면 정의 (문서·화면 동기화)**  
 - **에이전트 대화**: 실제 LangGraph 실행 중 공개 가능한 작업 메모 스트림  
@@ -231,7 +231,7 @@ graph TD
 
 - **휴일/휴무**: `holiday_compliance_probe`
 - **예산 초과**: `budget_risk_probe`
-- **MCC/업종**: `merchant_risk_probe`
+- **가맹점 업종 코드(MCC)/업종**: `merchant_risk_probe`
 - **공통**: `document_evidence_probe` → `policy_rulebook_probe` → `legacy_aura_deep_audit` (조건부 생략 가능)
 
 > 참고: [`agent/langgraph_agent.py`](agent/langgraph_agent.py#L126-L137) — `_plan_from_flags` 도구 선택 로직
@@ -312,7 +312,7 @@ Streamlit 앱은 `http://localhost:8502`에서 실행됩니다.
 pytest tests/ -v
 ```
 
-> 참고: [`docs/langgraph-langchain-comparison.md`](docs/langgraph-langchain-comparison.md) Section 8.13 테스트 전략, [`tests/`](tests/) — test_graph, test_tool_schema, test_interrupt_resume, test_citation_binding
+> 참고: [`docs/work_info/langgraph-langchain-comparison.md`](docs/work_info/langgraph-langchain-comparison.md) Section 8.13 테스트 전략, [`tests/`](tests/) — test_graph, test_tool_schema, test_interrupt_resume, test_citation_binding
 
 ## ⚙️ 환경 변수 설정
 

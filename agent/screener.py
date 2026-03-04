@@ -90,13 +90,13 @@ def _score_signals(signals: dict[str, Any]) -> tuple[int, list[str]]:
         reasons.append("예산 한도 초과 플래그")
     if signals["mcc_high_risk"]:
         score += 30
-        reasons.append(f"고위험 업종 MCC {signals['mcc_code']}")
+        reasons.append(f"고위험 업종 가맹점 업종 코드(MCC) {signals['mcc_code']}")
     elif signals["mcc_leisure"]:
         score += 25
-        reasons.append(f"레저/오락 업종 MCC {signals['mcc_code']}")
+        reasons.append(f"레저/오락 업종 가맹점 업종 코드(MCC) {signals['mcc_code']}")
     elif signals["mcc_medium_risk"]:
         score += 15
-        reasons.append(f"일반 식음료 업종 MCC {signals['mcc_code']}")
+        reasons.append(f"일반 식음료 업종 가맹점 업종 코드(MCC) {signals['mcc_code']}")
 
     return min(score, 100), reasons
 

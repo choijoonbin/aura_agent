@@ -198,9 +198,11 @@ def status_badge(status: str | None) -> str:
         return '<span class="mt-badge mt-badge-blue">신규</span>'
     if value in {"IN_REVIEW", "REVIEW_REQUIRED", "REVIEW_AFTER_HITL"}:
         return '<span class="mt-badge mt-badge-amber">검토중</span>'
+    if value in {"HOLD_AFTER_HITL"}:
+        return '<span class="mt-badge mt-badge-amber">보류</span>'
     if value in {"HITL_REQUIRED", "FAILED"}:
         return '<span class="mt-badge mt-badge-red">주의</span>'
-    if value in {"RESOLVED", "COMPLETED", "OK"}:
+    if value in {"RESOLVED", "COMPLETED", "OK", "COMPLETED_AFTER_HITL"}:
         return '<span class="mt-badge mt-badge-green">완료</span>'
     return f'<span class="mt-badge">{value}</span>'
 
@@ -246,7 +248,7 @@ FIELD_LABELS_KO: dict[str, str] = {
     "occurred_at": "발생 시각",
     "amount": "금액",
     "budget_exceeded": "예산 초과",
-    "mcc_code": "MCC 코드",
+    "mcc_code": "가맹점 업종 코드(MCC)",
     "hr_status": "근태 상태",
     "document": "전표 문서",
 }
@@ -266,7 +268,7 @@ def get_tool_display_summary_ko(
 def mcc_display_name(mcc_code: str | None) -> str:
     if not mcc_code:
         return "-"
-    return MCC_DISPLAY_NAMES.get(str(mcc_code).strip(), f"MCC {mcc_code}")
+    return MCC_DISPLAY_NAMES.get(str(mcc_code).strip(), f"가맹점 업종 코드(MCC) {mcc_code}")
 
 
 def hr_status_display_name(hr_status: str | None) -> str:
@@ -284,7 +286,18 @@ def budget_exceeded_display(exceeded: bool | None) -> str:
 def status_display_name(status: str | None) -> str:
     if not status:
         return "-"
-    labels = {"NEW": "신규", "PENDING_EXPLANATION": "소명 대기", "IN_REVIEW": "검토 중", "COMPLETED": "완료", "RESOLVED": "해결"}
+    labels = {
+        "NEW": "신규",
+        "PENDING_EXPLANATION": "소명 대기",
+        "IN_REVIEW": "검토 중",
+        "REVIEW_REQUIRED": "검토 필요",
+        "REVIEW_AFTER_HITL": "검토 재개",
+        "HITL_REQUIRED": "사람 검토 필요",
+        "HOLD_AFTER_HITL": "보류",
+        "COMPLETED": "완료",
+        "COMPLETED_AFTER_HITL": "검토 후 완료",
+        "RESOLVED": "해결",
+    }
     return labels.get(str(status).upper(), status)
 
 

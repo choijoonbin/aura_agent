@@ -33,14 +33,14 @@
 ## 즉시 수정해야 할 것
 
 - [x] 1. `Phase D` 문서 현행화
-- `docs/langgraphPlan.md`
-- `docs/langgraphPlan2.md`
+- `docs/work_info/langgraphPlan.md`
+- `docs/work_info/langgraphPlan2.md`
 - 관련 점검 문구
 - 현재 코드 기준으로 `same-run interrupt/resume + checkpointer` 상태를 반영해야 합니다.
 - 문서가 뒤처져 있어 발표/검수 시 혼선을 유발합니다.
 - 점검결과: PASS
 - [보완]
-  - 없음. `docs/langgraphPlan.md`, `docs/langgraphPlan2.md` 모두 현재 코드 기준인 `same-run interrupt/resume + MemorySaver + resumed_run_id는 동일 run_id 의미`로 정리되어 있습니다.
+  - 없음. `docs/work_info/langgraphPlan.md`, `docs/work_info/langgraphPlan2.md` 모두 현재 코드 기준인 `same-run interrupt/resume + MemorySaver + resumed_run_id는 동일 run_id 의미`로 정리되어 있습니다.
   - 발표 전 문구도 `Transitional HITL`이 아니라 `정식 same-run interrupt/resume 적용, 단 persistent checkpointer는 후속 과제`로 통일된 상태입니다.
 
 - [x] 2. `Phase F` 완료 문구 보수화
@@ -66,7 +66,7 @@
 - 문서/화면/실제 코드가 서로 같은 이야기를 하도록 맞춰야 합니다.
 - 점검결과: PASS
 - [보완]
-  - 없음. `README.md`, `docs/langgraph.md`, `docs/langgraphPlan2.md`가 모두 같은 용어 체계를 사용합니다.
+  - 없음. `README.md`, `docs/work_info/langgraph.md`, `docs/work_info/langgraphPlan2.md`가 모두 같은 용어 체계를 사용합니다.
   - 현재 설명 기준은 다음으로 정리되어 있습니다.
     - `에이전트 대화` = 실제 LangGraph 실행 중 공개 가능한 작업 메모 스트림
     - `사고 과정` = 실행 후 같은 이벤트를 노드 기준으로 구조화한 리뷰 화면
@@ -422,7 +422,7 @@ verify_evidence_coverage()를 언제 호출할지 정해주실 수 있을까요?
 ### A. 문서 정합성
 - [x] `langgraphPlan.md`의 Phase D 설명이 현재 코드와 일치한다.
 - [x] `langgraphPlan2.md`의 점검 결과가 현재 구현 상태와 일치한다.
-- [x] `README.md`, `langgraph.md`, 화면 설명 문구가 같은 구조를 설명한다.
+- [x] `README.md`, `docs/work_info/langgraph.md`, 화면 설명 문구가 같은 구조를 설명한다.
 - [x] `resumed_run_id`가 현재는 **새 run 생성**이 아니라 **동일 run_id 반환 의미**임을 문서/API 설명에 명시한다. (`README.md` HITL·API 섹션 반영)
 
 ### B. 에이전트 실행 구조

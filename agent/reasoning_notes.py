@@ -12,6 +12,44 @@ from dotenv import load_dotenv
 from utils.config import settings
 
 
+FIELD_LABELS = {
+    "hr_status": "근태 상태",
+    "hrstatus": "근태 상태",
+    "hrstatusraw": "원본 근태 상태",
+    "mcc_code": "업종 코드",
+    "mcccode": "업종 코드",
+    "mcctype": "업종 유형",
+    "budat": "전표 기준일",
+    "cputm": "입력 시각",
+    "occurredat": "발생 일시",
+    "merchantname": "가맹점명",
+    "amount": "금액",
+    "expenseType": "경비 유형",
+    "expensetype": "경비 유형",
+    "budgetExceeded": "예산 초과 여부",
+    "budgetexceeded": "예산 초과 여부",
+    "document": "전표 문서",
+    "items": "라인아이템",
+    "isHoliday": "휴일 여부",
+    "isholiday": "휴일 여부",
+}
+
+
+def _display_label(key: str) -> str:
+    normalized = re.sub(r"[^a-zA-Z0-9_]", "", str(key or "")).replace("_", "").lower()
+    return FIELD_LABELS.get(str(key), FIELD_LABELS.get(normalized, str(key)))
+
+
+def _humanize_context(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {_display_label(k): _humanize_context(v) for k, v in value.items()}
+    if isinstance(value, list):
+        if all(isinstance(v, str) for v in value):
+            return [_display_label(v) for v in value]
+        return [_humanize_context(v) for v in value]
+    return value
+
+
 def _setup_aura_import_path() -> None:
     p = Path(settings.aura_platform_path)
     if not p.exists():
@@ -100,7 +138,7 @@ async def generate_working_note(
                     {
                         "node": node,
                         "role": role,
-                        "context": context,
+                        "context": _humanize_context(context),
                         "rules": {
                             "grounded_only": True,
                             "no_hidden_reasoning": True,

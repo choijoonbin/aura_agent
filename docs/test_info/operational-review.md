@@ -444,11 +444,11 @@
 
 ### 점검 대상 문서
 - `README.md`
-- `docs/langgraph.md`
-- `docs/langgraph-langchain-comparison.md`
-- `docs/langgraphPlan.md`
-- `docs/langgraphPlan2.md`
-- `docs/langgraphPlan3.md`
+- `docs/work_info/langgraph.md`
+- `docs/work_info/langgraph-langchain-comparison.md`
+- `docs/work_info/langgraphPlan.md`
+- `docs/work_info/langgraphPlan2.md`
+- `docs/work_info/langgraphPlan3.md`
 
 ### 예상 결과
 - 현재 구현과 문서 설명이 충돌하지 않는다.

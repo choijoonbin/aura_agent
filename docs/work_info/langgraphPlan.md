@@ -1,6 +1,6 @@
 # AuraAgent LangGraph / LangChain 구현 로드맵
 
-> 기준 문서: `docs/langgraph-langchain-comparison.md`
+> 기준 문서: `docs/work_info/langgraph-langchain-comparison.md`
 > 목적: 기준 문서를 실제 구현 순서로 번역한 작업계획서
 > 원칙: 한 번에 전면 교체하지 않고, PoC 안정성을 유지하면서 단계적으로 리팩토링한다.
 
@@ -15,7 +15,7 @@
 ## 1. 작업 원칙
 
 - 이 문서는 구현 순서와 범위를 고정하는 실행 로드맵이다.
-- 세부 기술 기준은 `docs/langgraph-langchain-comparison.md`를 따른다.
+- 세부 기술 기준은 `docs/work_info/langgraph-langchain-comparison.md`를 따른다.
 - 구현 중 판단 충돌 시:
   1. `langgraph-langchain-comparison.md`
   2. `langgraphPlan.md`
@@ -33,9 +33,9 @@
 - LangGraph 기반 메인 그래프가 존재하며, screener → intake → planner → execute → critic → verify → hitl_pause/reporter → finalizer 흐름으로 동작한다.
 - **execute** 단계는 **LangChain tool 호출 루프**로 동작한다. `get_langchain_tools()`로 취득한 tool맵과 plan 기반으로 `SkillContextInput` → `tool.ainvoke()`만 사용하며, registry direct dispatch는 제거된 상태이다.
 - **planner / critic / verifier / reporter**는 **structured output 스키마**(`agent/output_models.py`)를 사용하며, 각 노드가 해당 모델을 생성·`model_dump()`로 state에 저장한다. 다만 LLM이 스키마에 직접 바인딩되어 생성하는 구조는 아니고, 코드에서 모델 객체를 조립하는 transitional 구현이다.
-- **HITL**은 **verify → hitl_pause/reporter 조건 분기**로 동작하며, HITL 필요 시 `hitl_pause` 노드에서 `interrupt()`로 일시정지한다. 재개 시 **같은 run_id(thread_id)**로 `Command(resume=...)` 호출하여 reporter로 이어지며, `checkpointer=MemorySaver()`를 사용한다. API 응답의 `resumed_run_id`는 동일 run_id를 그대로 반환한다. (`docs/langgraphPlan2.md` Phase D 결정 기준: 정식 HITL 적용.)
+- **HITL**은 **verify → hitl_pause/reporter 조건 분기**로 동작하며, HITL 필요 시 `hitl_pause` 노드에서 `interrupt()`로 일시정지한다. 재개 시 **같은 run_id(thread_id)**로 `Command(resume=...)` 호출하여 reporter로 이어지며, `checkpointer=MemorySaver()`를 사용한다. API 응답의 `resumed_run_id`는 동일 run_id를 그대로 반환한다. (`docs/work_info/langgraphPlan2.md` Phase D 결정 기준: 정식 HITL 적용.)
 - UI는 에이전트 대화(라이브 스트림) / 사고 과정 / 실행 로그 / 결과 / 스튜디오 / RAG 라이브러리 / 시연 데이터 제어를 갖추고 있으며, run 단위 diagnostics API(`GET .../diagnostics`)로 관찰 지표를 확인할 수 있다.
-- 잔여 작업은 문서 현행화, 테스트 전략 구현, Phase F/H 고도화, 발표용 UX 마감 등으로 `docs/langgraphPlan2.md` merge 목록에 정리되어 있다.
+- 잔여 작업은 문서 현행화, 테스트 전략 구현, Phase F/H 고도화, 발표용 UX 마감 등으로 `docs/work_info/langgraphPlan2.md` merge 목록에 정리되어 있다.
 
 ---
 
@@ -86,7 +86,7 @@
 - [x] 최소 회귀 체크리스트 작성
 - [x] Phase 0 완료
 
-**산출물**: [`docs/phase0-prep.md`](phase0-prep.md) — 연결 지점·transitional 경로·smoke 시나리오·회귀 체크리스트. 대상 파일에 transitional 주석 추가됨.
+**산출물**: [`docs/work_info/phase0-prep.md`](phase0-prep.md) — 연결 지점·transitional 경로·smoke 시나리오·회귀 체크리스트. 대상 파일에 transitional 주석 추가됨.
 
 ### 목표
 현재 PoC를 깨지 않도록 리팩토링 안전장치를 먼저 만든다.
@@ -110,7 +110,7 @@
 
 ### 점검 내용
 - PASS
-- `docs/phase0-prep.md` 존재 확인
+- `docs/work_info/phase0-prep.md` 존재 확인
 - LangGraph ↔ UI 연결 지점, transitional path, smoke test, 회귀 체크리스트가 모두 문서화되어 있음
 - 특이사항: 실제 smoke test 실행 결과를 이 문서 자체에는 남기지 않았으므로, 구현 진행 중 1회 수동 검증 로그 확보 권장
 
@@ -192,7 +192,7 @@ planner / critic / verifier / reporter를 schema 기반 노드로 전환한다.
 - 특이사항:
   - 현재는 “structured output 스키마 정의 및 state 저장”은 완료되었음
   - 다만 planner / critic / verifier / reporter가 **LLM structured output binding**으로 직접 생성되는 구조는 아니고, 현재는 코드에서 모델 객체를 조립하는 transitional 구현임
-  - 따라서 Phase B는 완료로 볼 수 있으나, `docs/langgraph-langchain-comparison.md` 기준의 정석 적용은 Phase C 이후 추가 리팩토링이 필요함
+  - 따라서 Phase B는 완료로 볼 수 있으나, `docs/work_info/langgraph-langchain-comparison.md` 기준의 정석 적용은 Phase C 이후 추가 리팩토링이 필요함
 
 ---
 
@@ -233,7 +233,7 @@ planner / critic / verifier / reporter를 schema 기반 노드로 전환한다.
   - 코드 주석에도 `Phase C 완료 시 ToolNode 전환으로 제거`라고 명시되어 있음
   - `SKILL_REGISTRY.get(...)`, `skill.handler(...)` 방식의 직접 호출 흐름이 유지됨
 - `get_langchain_tools()`는 추가되었으나, 실제 LangGraph 실행 그래프에 ToolNode 바인딩으로 연결되지는 않음
-- **재검토 반영:** 현재 코드 기준 registry direct dispatch 제거됨. execute_node는 get_langchain_tools() 기반 tool.ainvoke() 루프만 사용. **결론: Phase C 완료로 확정.** (docs/langgraphPlan2.md 잔여작업 merge 반영.)
+- **재검토 반영:** 현재 코드 기준 registry direct dispatch 제거됨. execute_node는 get_langchain_tools() 기반 tool.ainvoke() 루프만 사용. **결론: Phase C 완료로 확정.** (docs/work_info/langgraphPlan2.md 잔여작업 merge 반영.)
 
 ### 점검 내용 답변
 - 현재 구현: execute_node는 get_langchain_tools() 기반 tool.ainvoke() 루프만 사용. registry direct dispatch 제거됨. Phase C 완료.
@@ -271,7 +271,7 @@ verify 단계에서 사람 개입을 LangGraph 패턴으로 정식 반영한다.
 - verifier가 interrupt / resume 기반으로 동작한다.
 - HITL 후 재개 성공률을 측정 가능하다 (목표: 95% 이상, 공식 4.2 Phase C 참고).
 
-**Phase D 결정 기준:** 정식 HITL vs Transitional 유지 판정은 `docs/langgraphPlan2.md`의 "Phase D 결정 기준"을 따른다. 현재는 **정식 HITL(same-run interrupt/resume + checkpointer)** 적용 상태이다.
+**Phase D 결정 기준:** 정식 HITL vs Transitional 유지 판정은 `docs/work_info/langgraphPlan2.md`의 "Phase D 결정 기준"을 따른다. 현재는 **정식 HITL(same-run interrupt/resume + checkpointer)** 적용 상태이다.
 
 ### 점검 내용
 - `build_agent_graph()`에 `workflow.compile(checkpointer=_get_checkpointer())` 적용. PoC는 `MemorySaver`.
@@ -306,7 +306,7 @@ verify 단계에서 사람 개입을 LangGraph 패턴으로 정식 반영한다.
 - `services/runtime_persistence_service.py`
 - `services/persistence_service.py`
 - `main.py`
-- `docs/aura_db.md` 참조하여 DB 매핑 점검
+- `docs/db_info/aura_db.md` 참조하여 DB 매핑 점검
 
 ### 완료 기준
 - latest 결과와 history가 명확히 구분된다.
@@ -479,9 +479,9 @@ verify 단계에서 사람 개입을 LangGraph 패턴으로 정식 반영한다.
 ## 6. 구현 시 참고 소스
 
 ### 내부 기준 문서
-- `docs/langgraph-langchain-comparison.md`
-- `docs/langgraph.md`
-- `docs/aura_db.md`
+- `docs/work_info/langgraph-langchain-comparison.md`
+- `docs/work_info/langgraph.md`
+- `docs/db_info/aura_db.md`
 
 ### 참고 원본 소스 (공식 문서 Section 11과 동일)
 
@@ -521,11 +521,11 @@ verify 단계에서 사람 개입을 LangGraph 패턴으로 정식 반영한다.
 - tool / state / persistence 책임 혼합
 - 기준 문서 없이 임의 구조로 LangGraph / LangChain 패턴을 바꾸는 것
 
-전체 10개: `docs/langgraph-langchain-comparison.md` Section 8.9 참고.
+전체 10개: `docs/work_info/langgraph-langchain-comparison.md` Section 8.9 참고.
 
 ---
 
 ## 9. 최종 한 줄 결론
 
-이 로드맵은 `docs/langgraph-langchain-comparison.md`를 실제 구현 순서로 번역한 문서이며,
+이 로드맵은 `docs/work_info/langgraph-langchain-comparison.md`를 실제 구현 순서로 번역한 문서이며,
 AuraAgent를 **“LangGraph / LangChain을 정석적으로 적용한 엔터프라이즈급 agentic AI PoC”**로 완성하기 위한 실행 계획이다.

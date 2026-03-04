@@ -219,7 +219,7 @@ def render_timeline_cards(events: list[dict[str, Any]], *, view_mode: str = "bus
                     st.json(payload)
 
 
-# 대표 메시지 선택 우선순위 (docs/langgraphPlan3.md 추가답변)
+# 대표 메시지 선택 우선순위 (docs/work_info/langgraphPlan3.md 추가답변)
 _REPR_MSG_PRIORITY = ["NODE_END", "GATE_APPLIED", "TOOL_RESULT", "PLAN_READY", "NODE_START"]
 
 
@@ -394,21 +394,566 @@ def render_hitl_history(history: list[dict[str, Any]]) -> None:
                 st.json(item["hitl_response"])
 
 
+def _extract_workspace_result_context(latest_bundle: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
+    result = dict(((latest_bundle.get("result") or {}).get("result") or {}))
+    timeline = latest_bundle.get("timeline") or []
+    screening_meta: dict[str, Any] = {}
+    derived_policy_refs: list[dict[str, Any]] = []
+    for event in timeline:
+        payload = event.get("payload") or {}
+        if event.get("event_type") != "AGENT_EVENT":
+            continue
+        if payload.get("event_type") == "SCREENING_RESULT":
+            screening_meta = payload.get("metadata") or {}
+        if payload.get("event_type") == "TOOL_RESULT":
+            meta = payload.get("metadata") or {}
+            if meta.get("skill") == "policy_rulebook_probe":
+                derived_policy_refs = ((meta.get("facts") or {}).get("policy_refs") or [])
+    if not result.get("severity") and screening_meta.get("severity"):
+        result["severity"] = screening_meta.get("severity")
+    if not result.get("score") and screening_meta.get("score") is not None:
+        result["score"] = screening_meta.get("score")
+    if not result.get("status") and latest_bundle.get("hitl_request"):
+        result["status"] = "HITL_REQUIRED"
+    return result, screening_meta, result.get("policy_refs") or derived_policy_refs or []
+
+
+def _has_pending_hitl(latest_bundle: dict[str, Any]) -> bool:
+    result = ((latest_bundle.get("result") or {}).get("result") or {})
+    timeline = latest_bundle.get("timeline") or []
+    if latest_bundle.get("hitl_response"):
+        return False
+    if latest_bundle.get("hitl_request"):
+        return True
+    if str(result.get("status") or "").upper() == "HITL_REQUIRED":
+        return True
+    for event in timeline:
+        payload = event.get("payload") or {}
+        if event.get("event_type") != "AGENT_EVENT":
+            continue
+        if str(payload.get("event_type") or "").upper() in {"HITL_REQUESTED", "HITL_PAUSE"}:
+            return True
+    return False
+
+
+def _fallback_hitl_request(latest_bundle: dict[str, Any]) -> dict[str, Any]:
+    result, screening_meta, _policy_refs = _extract_workspace_result_context(latest_bundle)
+    verification_summary = result.get("verification_summary") or {}
+    reasons = []
+    if screening_meta.get("reasonText"):
+        reasons.append(str(screening_meta.get("reasonText")))
+    gate_policy = verification_summary.get("gate_policy")
+    if gate_policy:
+        reasons.append(f"검증 게이트 판정이 {gate_policy} 상태입니다.")
+    quality_codes = result.get("quality_gate_codes") or []
+    if quality_codes:
+        reasons.append(f"품질 신호: {', '.join(str(x) for x in quality_codes)}")
+    if not reasons:
+        reasons.append("심층 감사 결과 미확보 또는 근거 검증 미통과로 사람 검토가 필요합니다.")
+    questions = [
+        "업무 목적과 사전 승인 여부를 확인해 주세요.",
+        "참석자와 증빙이 규정 기준을 충족하는지 확인해 주세요.",
+    ]
+    return {
+        "required": True,
+        "handoff": "FINANCE_REVIEWER",
+        "reasons": reasons,
+        "questions": questions,
+    }
+
+
+def _build_hitl_summary_sections(latest_bundle: dict[str, Any]) -> dict[str, list[str]]:
+    result, screening_meta, policy_refs = _extract_workspace_result_context(latest_bundle)
+    hitl_request = latest_bundle.get("hitl_request") or {}
+    verification_summary = result.get("verification_summary") or {}
+
+    review_reasons = [str(x) for x in (hitl_request.get("reasons") or []) if x]
+    if not review_reasons:
+        review_reasons = ["자동 판정을 진행하기에 근거 또는 검증 정보가 부족합니다."]
+
+    stop_reasons: list[str] = []
+    gate_policy = verification_summary.get("gate_policy")
+    if gate_policy:
+        stop_reasons.append(f"검증 게이트 판정: {gate_policy}")
+    if verification_summary:
+        covered = verification_summary.get("covered", 0)
+        total = verification_summary.get("total", 0)
+        ratio = verification_summary.get("coverage_ratio")
+        if total:
+            ratio_text = f" ({(ratio or 0) * 100:.0f}%)" if ratio is not None else ""
+            stop_reasons.append(f"근거 연결률 {covered}/{total}{ratio_text}로 자동 확정 기준을 충족하지 못했습니다.")
+        missing = verification_summary.get("missing_citations") or []
+        if missing:
+            stop_reasons.append(f"누락된 citation 문장이 {len(missing)}건 있습니다.")
+    quality_codes = result.get("quality_gate_codes") or []
+    if quality_codes:
+        stop_reasons.append(f"검증 신호: {', '.join(str(x) for x in quality_codes)}")
+    if not stop_reasons:
+        stop_reasons = ["사람 검토 없이 최종 상태·심각도·점수·규정 근거를 확정하기 어려워 자동 확정을 중단했습니다."]
+
+    questions = [str(x) for x in (hitl_request.get("questions") or []) if x]
+    if not questions:
+        questions = [
+            "이 거래를 정상으로 볼 수 있는 업무 목적과 사전 승인 여부를 확인해 주세요.",
+            "참석자, 증빙, 전표 입력 정보가 규정 기준을 충족하는지 확인해 주세요.",
+        ]
+
+    evidence_lines: list[str] = []
+    case_type = screening_meta.get("caseType") or screening_meta.get("case_type") or result.get("case_type")
+    if case_type:
+        evidence_lines.append(f"위험 유형: {case_type_display_name(case_type)}")
+    if result.get("severity"):
+        evidence_lines.append(f"심각도: {severity_display_name(result.get('severity'))}")
+    if result.get("score") is not None:
+        evidence_lines.append(f"점수: {result.get('score')}")
+    if screening_meta.get("reasonText"):
+        evidence_lines.append(f"스크리닝 요약: {screening_meta.get('reasonText')}")
+    if verification_summary:
+        covered = verification_summary.get("covered", 0)
+        total = verification_summary.get("total", 0)
+        evidence_lines.append(f"검증 대상 문장: {covered}/{total}건 근거 연결")
+    if policy_refs:
+        ref_preview = [f"{ref.get('article') or '-'} / {ref.get('parent_title') or '-'}" for ref in policy_refs[:3]]
+        evidence_lines.append("연결 규정: " + " | ".join(ref_preview))
+    if hitl_request.get("handoff"):
+        evidence_lines.append(f"검토 담당: {hitl_request.get('handoff')}")
+    if not evidence_lines:
+        evidence_lines = ["현재 화면에서 표시 가능한 근거 요약이 아직 충분하지 않습니다. run diagnostics와 실행 로그를 함께 확인해 주세요."]
+
+    return {
+        "review_reasons": review_reasons,
+        "stop_reasons": stop_reasons,
+        "questions": questions,
+        "evidence_lines": evidence_lines,
+        "debug": {
+            "hitl_request": hitl_request,
+            "verification_summary": verification_summary,
+            "quality_gate_codes": quality_codes,
+        },
+    }
+
+
 def render_hitl_panel(latest_bundle: dict[str, Any]) -> None:
     run_id = latest_bundle.get("run_id")
-    hitl_request = latest_bundle.get("hitl_request")
-    if not run_id or not hitl_request:
+    hitl_request = latest_bundle.get("hitl_request") or _fallback_hitl_request(latest_bundle)
+    if not run_id or not _has_pending_hitl(latest_bundle):
         return
-    render_panel_header("HITL 검토 요청", "자동 확정이 어려운 경우 사람의 판단을 받아 분석을 재개합니다.")
-    st.warning("이 케이스는 사람 검토가 필요합니다.")
-    st.json(hitl_request)
-    with st.form(key=f"hitl_form_{run_id}"):
-        reviewer = st.text_input("검토자", value="FINANCE_REVIEWER")
-        comment = st.text_area("검토 의견")
-        business_purpose = st.text_input("업무 목적")
-        attendees_raw = st.text_input("참석자(쉼표 구분)")
-        approved = st.checkbox("승인/정상 가능성 있음")
-        submitted = st.form_submit_button("검토 응답 제출 후 재분석")
+    st.markdown(
+        """
+        <style>
+        /* 팝업 전체 기본 텍스트 색상: 하얀 배경에서 검정 계열로 가독성 확보 */
+        div[data-testid="stDialog"],
+        div[data-testid="stDialog"] * {
+          color: #0f172a !important;
+        }
+        div[data-testid="stDialog"] div[role="dialog"] {
+          width: min(94vw, 1520px) !important;
+          max-width: 1520px !important;
+          max-height: 90vh !important;
+          overflow: hidden !important;
+          background: #ffffff !important;
+        }
+        div[data-testid="stDialog"] div[role="dialog"] > div {
+          width: 100% !important;
+          max-width: 1520px !important;
+          max-height: 90vh !important;
+          overflow-y: auto !important;
+          background: #ffffff !important;
+        }
+        div[data-testid="stDialog"] [data-testid="stVerticalBlock"] {
+          max-width: 100% !important;
+        }
+        div[data-testid="stDialog"] [data-testid="stVerticalBlock"] > div:first-child {
+          margin-top: 0 !important;
+          padding-top: 0 !important;
+        }
+        /* 제목과 본문 사이 간격 축소 */
+        div[data-testid="stDialog"] [data-testid="stDialogHeader"],
+        div[data-testid="stDialog"] div[role="dialog"] > div:first-child {
+          margin-bottom: 0 !important;
+          padding-bottom: 0 !important;
+        }
+        div[data-testid="stDialog"] div[role="dialog"] > div:last-child {
+          margin-top: 0 !important;
+          padding-top: 0.125rem !important;
+        }
+        div[data-testid="stDialog"] button[aria-label="Close"] {
+          color: #0f172a !important;
+          background: #ffffff !important;
+          border: 1px solid #cbd5e1 !important;
+          border-radius: 999px !important;
+          width: 32px !important;
+          height: 32px !important;
+        }
+        div[data-testid="stDialog"] button[aria-label="Close"]:hover {
+          background: #f8fafc !important;
+          border-color: #94a3b8 !important;
+        }
+        /* 제목·본문·라벨 등 모든 텍스트 노드 검정 계열 (#0f172a) */
+        div[data-testid="stDialog"] h1,
+        div[data-testid="stDialog"] h2,
+        div[data-testid="stDialog"] h3,
+        div[data-testid="stDialog"] [data-testid="stDialogHeader"],
+        div[data-testid="stDialog"] [data-testid="stDialogHeader"] *,
+        div[data-testid="stDialog"] [data-testid="stHeading"],
+        div[data-testid="stDialog"] [data-testid="stHeading"] *,
+        div[data-testid="stDialog"] [data-testid="stMarkdown"],
+        div[data-testid="stDialog"] [data-testid="stMarkdown"] *,
+        div[data-testid="stDialog"] p,
+        div[data-testid="stDialog"] label,
+        div[data-testid="stDialog"] span,
+        div[data-testid="stDialog"] small {
+          color: #0f172a !important;
+        }
+        /* 검토 요청 원본 보기: 배경 흰색, 텍스트 검정 */
+        div[data-testid="stDialog"] details,
+        div[data-testid="stDialog"] details summary,
+        div[data-testid="stDialog"] [data-testid="stExpanderDetails"],
+        div[data-testid="stDialog"] [data-testid="stExpanderDetails"] * {
+          background: #ffffff !important;
+          color: #0f172a !important;
+        }
+        div[data-testid="stDialog"] [data-testid="stJson"],
+        div[data-testid="stDialog"] [data-testid="stJson"] *,
+        div[data-testid="stDialog"] [data-testid="stJson"] pre,
+        div[data-testid="stDialog"] [data-testid="stJson"] code {
+          background: #ffffff !important;
+          color: #0f172a !important;
+        }
+        /* 검토 요청 원본 보기 행: expander 오른쪽 끝을 위 컴포넌트(검토 의견) 오른쪽 끝과 맞춤 */
+        div[data-testid="stDialog"] [data-testid="stForm"] [data-testid="stVerticalBlock"] > [data-testid="stHorizontalBlock"]:last-child {
+          display: flex !important;
+          align-items: stretch !important;
+          gap: 0 !important;
+        }
+        div[data-testid="stDialog"] [data-testid="stForm"] [data-testid="stVerticalBlock"] > [data-testid="stHorizontalBlock"]:last-child > div:first-child {
+          flex: 1 1 0% !important;
+          min-width: 0 !important;
+          max-width: none !important;
+        }
+        div[data-testid="stDialog"] [data-testid="stForm"] [data-testid="stVerticalBlock"] > [data-testid="stHorizontalBlock"]:last-child > div:last-child {
+          flex: 0 0 auto !important;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+    with stylable_container(
+        key=f"workspace_hitl_skin_{run_id}",
+        css_styles="""
+        {
+          border: 1px solid #e5e7eb;
+          border-radius: 18px;
+          background: rgba(255,255,255,0.98);
+          padding: 6px 16px 10px 16px;
+          box-shadow: 0 8px 22px rgba(15,23,42,0.05);
+        }
+        .mt-hitl-note {
+          margin: 0 0 4px 0;
+          padding: 8px 12px;
+          border-radius: 14px;
+          border: 1px solid #bfdbfe;
+          background: #eff6ff;
+          color: #1e3a8a;
+          font-size: 0.89rem;
+          line-height: 1.35;
+        }
+        .mt-hitl-grid {
+          display: grid;
+          grid-template-columns: repeat(4, minmax(0, 1fr));
+          gap: 10px;
+          margin: 4px 0 10px 0;
+        }
+        .mt-hitl-box {
+          border: 1px solid #e5e7eb;
+          border-radius: 16px;
+          background: #ffffff;
+          padding: 12px 13px;
+          min-height: 0;
+        }
+        .mt-hitl-box--reason {
+          border-color: #fecaca;
+          background: #fff7f7;
+        }
+        .mt-hitl-box--stop {
+          border-color: #fde68a;
+          background: #fffbeb;
+        }
+        .mt-hitl-box--question {
+          border-color: #bfdbfe;
+          background: #eff6ff;
+        }
+        .mt-hitl-box--evidence {
+          border-color: #c7d2fe;
+          background: #f5f3ff;
+        }
+        .mt-hitl-box-title {
+          color: #0f172a;
+          font-size: 0.92rem;
+          font-weight: 700;
+          margin-bottom: 6px;
+          display: flex;
+          align-items: center;
+          gap: 6px;
+        }
+        .mt-hitl-icon {
+          width: 22px;
+          height: 22px;
+          border-radius: 999px;
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          font-size: 0.8rem;
+          font-weight: 700;
+          flex-shrink: 0;
+        }
+        .mt-hitl-icon--reason {
+          background: #fee2e2;
+          color: #b91c1c;
+        }
+        .mt-hitl-icon--stop {
+          background: #fef3c7;
+          color: #92400e;
+        }
+        .mt-hitl-icon--question {
+          background: #dbeafe;
+          color: #1d4ed8;
+        }
+        .mt-hitl-icon--evidence {
+          background: #ede9fe;
+          color: #6d28d9;
+        }
+        .mt-hitl-list {
+          margin: 0;
+          padding-left: 16px;
+          color: #334155;
+          line-height: 1.45;
+          font-size: 0.88rem;
+        }
+        .mt-hitl-list li + li {
+          margin-top: 4px;
+        }
+        .mt-hitl-checklist {
+          margin-top: 8px;
+          padding: 8px 10px;
+          border-radius: 12px;
+          background: rgba(255,255,255,0.82);
+          border: 1px dashed #cbd5e1;
+        }
+        .mt-hitl-checklist-title {
+          color: #0f172a;
+          font-size: 0.84rem;
+          font-weight: 700;
+          margin-bottom: 4px;
+        }
+        .mt-hitl-checklist ul {
+          margin: 0;
+          padding-left: 18px;
+          color: #475569;
+          font-size: 0.84rem;
+          line-height: 1.4;
+        }
+        .mt-hitl-form-grid {
+          display: grid;
+          grid-template-columns: repeat(3, minmax(0, 1fr));
+          gap: 10px;
+          margin: 4px 0 8px 0;
+        }
+        .mt-hitl-actions {
+          display: grid;
+          grid-template-columns: 1fr auto 1fr;
+          align-items: center;
+          gap: 12px;
+          margin-top: 10px;
+        }
+        .mt-hitl-actions-left {
+          justify-self: start;
+          min-width: 0;
+        }
+        .mt-hitl-actions-center {
+          justify-self: center;
+          width: 280px;
+        }
+        div[data-baseweb="radio"] label,
+        div[role="radiogroup"] label,
+        div[role="radiogroup"] * {
+          color: #0f172a !important;
+        }
+        [data-testid="stTextInput"] label,
+        [data-testid="stTextArea"] label,
+        [data-testid="stCheckbox"] label,
+        [data-testid="stCheckbox"] span {
+          color: #0f172a !important;
+        }
+        [data-testid="stTextInput"] input,
+        [data-testid="stTextArea"] textarea {
+          background: #ffffff !important;
+          color: #0f172a !important;
+          -webkit-text-fill-color: #0f172a !important;
+          caret-color: #0f172a !important;
+          border: 1px solid #cbd5e1 !important;
+          border-radius: 12px !important;
+        }
+        [data-testid="stTextInput"] input::placeholder,
+        [data-testid="stTextArea"] textarea::placeholder {
+          color: #64748b !important;
+          opacity: 1 !important;
+        }
+        [data-testid="stTextInput"] > div,
+        [data-testid="stTextArea"] > div {
+          background: transparent !important;
+        }
+        [data-testid="stCheckbox"] > div {
+          background: transparent !important;
+        }
+        [data-testid="stJson"],
+        [data-testid="stJson"] *,
+        [data-testid="stJson"] pre,
+        [data-testid="stJson"] code,
+        [data-testid="stJson"] pre * {
+          background: #ffffff !important;
+          color: #0f172a !important;
+        }
+        [data-testid="stAlert"] {
+          background: #fffbeb !important;
+          border: 1px solid #fde68a !important;
+          color: #92400e !important;
+        }
+        [data-testid="stAlert"] * {
+          color: #92400e !important;
+        }
+        div[data-testid="stDialog"] [data-testid="stFormSubmitButton"] button,
+        div[data-testid="stDialog"] button[kind="primary"],
+        div[data-testid="stDialog"] button[data-testid="baseButton-primary"] {
+          background: #2563eb !important;
+          color: #ffffff !important;
+          border: 1px solid #2563eb !important;
+        }
+        div[data-testid="stDialog"] [data-testid="stFormSubmitButton"] button:hover,
+        div[data-testid="stDialog"] button[kind="primary"]:hover,
+        div[data-testid="stDialog"] button[data-testid="baseButton-primary"]:hover {
+          background: #1d4ed8 !important;
+          border-color: #1d4ed8 !important;
+        }
+        div[data-testid="stDialog"] button[kind="secondary"],
+        div[data-testid="stDialog"] button[data-testid="baseButton-secondary"] {
+          background: #ffffff !important;
+          color: #0f172a !important;
+          border: 1px solid #cbd5e1 !important;
+        }
+        div[data-testid="stDialog"] details,
+        div[data-testid="stDialog"] details * {
+          color: #0f172a !important;
+        }
+        div[data-testid="stDialog"] details summary {
+          color: #0f172a !important;
+        }
+        div[data-testid="stDialog"] details > div,
+        div[data-testid="stDialog"] details [data-testid="stExpanderDetails"] {
+          background: #ffffff !important;
+        }
+        @media (max-width: 1200px) {
+          .mt-hitl-grid {
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+          }
+        }
+        @media (max-width: 900px) {
+          .mt-hitl-form-grid {
+            grid-template-columns: 1fr;
+          }
+          .mt-hitl-actions {
+            grid-template-columns: 1fr;
+          }
+          .mt-hitl-actions-center {
+            width: 100%;
+          }
+        }
+        """,
+    ):
+        summary = _build_hitl_summary_sections(latest_bundle)
+        st.markdown(
+            '<div class="mt-hitl-note"><strong>사람 검토가 필요한 상태입니다.</strong> 아래 4개 영역에서 검토 사유, 자동 확정 중단 이유, 필요한 답변, 현재 확보된 근거를 먼저 확인한 뒤 입력을 제출해 주세요.</div>',
+            unsafe_allow_html=True,
+        )
+
+        def _render_box(title: str, lines: list[str], tone: str, icon: str, checklist: list[str] | None = None) -> str:
+            items = "".join(f"<li>{line}</li>" for line in lines)
+            checklist_html = ""
+            if checklist:
+                checks = "".join(f"<li>{item}</li>" for item in checklist)
+                checklist_html = (
+                    '<div class="mt-hitl-checklist">'
+                    '<div class="mt-hitl-checklist-title">검토 포인트</div>'
+                    f"<ul>{checks}</ul>"
+                    "</div>"
+                )
+            return (
+                f'<div class="mt-hitl-box mt-hitl-box--{tone}">'
+                f'<div class="mt-hitl-box-title"><span class="mt-hitl-icon mt-hitl-icon--{tone}">{icon}</span>{title}</div>'
+                f'<ul class="mt-hitl-list">{items}</ul>'
+                f"{checklist_html}"
+                "</div>"
+            )
+
+        st.markdown(
+            '<div class="mt-hitl-grid">'
+            + _render_box(
+                "검토 필요 사유",
+                summary["review_reasons"],
+                "reason",
+                "!",
+                ["추가 소명 또는 증빙이 없으면 자동 확정 않습니다"],
+            )
+            + _render_box(
+                "자동 확정 중단 이유",
+                summary["stop_reasons"],
+                "stop",
+                "■",
+                ["근거 연결률과 게이트 판정이 자동 확정 가능 수준인지 확인합니다."],
+            )
+            + _render_box(
+                "검토자가 답해야 할 질문",
+                summary["questions"],
+                "question",
+                "?",
+                ["업무 목적", "사전 승인 여부", "참석자 및 증빙 확인"],
+            )
+            + _render_box(
+                "현재 확보된 근거 요약",
+                summary["evidence_lines"],
+                "evidence",
+                "i",
+                ["위험 유형과 연결 규정을 먼저 읽고 의견 작성."],
+            )
+            + '</div>',
+            unsafe_allow_html=True,
+        )
+        with st.form(key=f"hitl_form_{run_id}"):
+            decision = st.radio(
+                "판단 선택",
+                options=["보류/추가 검토", "승인 가능"],
+                horizontal=True,
+                label_visibility="collapsed",
+            )
+            info_cols = st.columns(3)
+            with info_cols[0]:
+                reviewer = st.text_input("검토자", value="FINANCE_REVIEWER")
+            with info_cols[1]:
+                business_purpose = st.text_input("업무 목적", placeholder="예: 주말 장애 대응 회의")
+            with info_cols[2]:
+                attendees_raw = st.text_input("참석자(쉼표 구분)", placeholder="예: 홍길동, 김민수, 외부 파트너 1명")
+            comment = st.text_area(
+                "검토 의견",
+                height=96,
+                placeholder="왜 승인 또는 보류로 판단했는지 핵심 근거를 적습니다.\n예: 주말 대응 프로젝트로 야간 회의 후 식대 사용. 사전 승인 메일 확인됨.",
+            )
+            approved = decision == "승인 가능"
+            row_cols = st.columns([1, 0.22])
+            with row_cols[0]:
+                with st.expander("검토 요청 원본 보기", expanded=False):
+                    st.json(summary["debug"])
+            with row_cols[1]:
+                submitted = st.form_submit_button("검토 응답 제출 후 재분석")
     if submitted:
         response = post(
             f"/api/v1/analysis-runs/{run_id}/hitl",
@@ -420,15 +965,22 @@ def render_hitl_panel(latest_bundle: dict[str, Any]) -> None:
                 "attendees": [p.strip() for p in attendees_raw.split(",") if p.strip()],
             },
         )
-        st.success(f"HITL 응답 저장 완료: run_id={response.get('run_id')}")
+        resumed_id = response.get("resumed_run_id") or response.get("run_id") or run_id
+        st.session_state.pop(f"mt_hitl_dismissed_{run_id}", None)
+        st.success(f"HITL 응답 저장 완료: run_id={resumed_id}")
         st.rerun()
+
+
+@st.dialog("HITL 검토 요청", width="large")
+def render_hitl_dialog(latest_bundle: dict[str, Any]) -> None:
+    render_hitl_panel(latest_bundle)
 
 
 def build_workspace_plan_steps(latest_bundle: dict[str, Any]) -> list[dict[str, Any]]:
     timeline = latest_bundle.get("timeline") or []
     node_order = ["screener", "intake", "planner", "execute", "critic", "verify", "hitl_pause", "reporter", "finalizer"]
     meta = {
-        "screener": ("전표 분석 / 케이스 분류", "전표 데이터(발생 시각·근태·MCC·예산 등)를 분석해 위반 유형을 식별합니다."),
+        "screener": ("전표 분석 / 케이스 분류", "전표 데이터(발생 시각·근태·가맹점 업종 코드(MCC)·예산 등)를 분석해 위반 유형을 식별합니다."),
         "intake": ("입력 해석", "전표 입력값과 위험 지표를 정규화합니다."),
         "planner": ("조사 계획 수립", "검증할 사실과 사용할 skill 순서를 계획합니다."),
         "execute": ("근거 수집 실행", "휴일/예산/업종/전표/규정 근거를 실제로 조회합니다."),
@@ -636,9 +1188,23 @@ def render_workspace_chat_panel(selected: dict[str, Any], latest_bundle: dict[st
         run_clicked = st.button("분석 시작", key=f"workspace_run_{vkey}", use_container_width=True, type="primary")
     if run_clicked:
         response = post(f"/api/v1/cases/{vkey}/analysis-runs")
+        st.session_state.pop(f"mt_hitl_dismissed_{response['run_id']}", None)
         st.success(f"분석 시작: run_id={response['run_id']}")
         st.write_stream(sse_text_stream(f"{API}{response['stream_path']}"))
         st.rerun()
+    if _has_pending_hitl(latest_bundle):
+        st.warning("이 분석은 사람 검토가 필요합니다. 검토 의견을 입력하면 같은 run으로 재개됩니다.")
+        _hl, hitl_btn_col, _hr = st.columns([0.01, 0.98, 0.01])
+        with hitl_btn_col:
+            if st.button("HITL 검토 입력 열기", key=f"workspace_hitl_open_{vkey}", use_container_width=True):
+                render_hitl_dialog(latest_bundle)
+        run_id = latest_bundle.get("run_id")
+        if run_id:
+            key = f"mt_hitl_dismissed_{run_id}"
+            st.session_state.setdefault(key, False)
+            if not st.session_state.get(key, False):
+                render_hitl_dialog(latest_bundle)
+            render_hitl_dialog(latest_bundle)
     if not timeline:
         _es_l, es_mid, _es_r = st.columns([0.02, 0.96, 0.02])
         with es_mid:
@@ -682,23 +1248,62 @@ def render_workspace_chat_panel(selected: dict[str, Any], latest_bundle: dict[st
 
 
 def render_workspace_results(latest_bundle: dict[str, Any], debug_mode: bool) -> None:
-    result = ((latest_bundle.get("result") or {}).get("result") or {})
+    result = dict(((latest_bundle.get("result") or {}).get("result") or {}))
+    timeline = latest_bundle.get("timeline") or []
+
+    screening_meta = {}
+    derived_policy_refs: list[dict[str, Any]] = []
+    for event in timeline:
+        payload = event.get("payload") or {}
+        if event.get("event_type") != "AGENT_EVENT":
+            continue
+        if payload.get("event_type") == "SCREENING_RESULT":
+            screening_meta = payload.get("metadata") or {}
+        if payload.get("event_type") == "TOOL_RESULT":
+            meta = payload.get("metadata") or {}
+            if meta.get("skill") == "policy_rulebook_probe":
+                derived_policy_refs = ((meta.get("facts") or {}).get("policy_refs") or [])
+
+    if not result.get("severity") and screening_meta.get("severity"):
+        result["severity"] = screening_meta.get("severity")
+    if not result.get("score") and screening_meta.get("score") is not None:
+        result["score"] = screening_meta.get("score")
+    if not result.get("status"):
+        if result.get("error"):
+            result["status"] = "FAILED"
+        elif latest_bundle.get("hitl_request"):
+            result["status"] = "HITL_REQUIRED"
+
+    failed = bool(result.get("error"))
     critique = result.get("critique") or {}
-    policy_refs = result.get("policy_refs") or []
+    policy_refs = result.get("policy_refs") or derived_policy_refs or []
+    hero_title = "분석 실패" if failed else (result.get("status") or "결과 없음")
+    hero_sub = (
+        f"{result.get('stage') or 'runner'} 단계에서 오류가 발생했습니다: {result.get('error')}"
+        if failed
+        else (result.get("reasonText") or "최종 판단이 아직 생성되지 않았습니다.")
+    )
     render_panel_header("결과", "최종 판단 + 규정 근거 + 검증 메모 + run diagnostics를 하나의 결과 화면으로 보여줍니다.")
     st.markdown(
         f"""
         <div class="mt-card-quiet">
-          <div class="mt-hero-title">{result.get('status') or '결과 없음'}</div>
-          <div class="mt-hero-sub">{result.get('reasonText') or '최종 판단이 아직 생성되지 않았습니다.'}</div>
+          <div class="mt-hero-title">{hero_title}</div>
+          <div class="mt-hero-sub">{hero_sub}</div>
         </div>
         """,
         unsafe_allow_html=True,
     )
     c1, c2, c3 = st.columns(3)
-    c1.metric("상태", str(result.get("status") or "-"))
-    c2.metric("심각도", str(result.get("severity") or "-"))
-    c3.metric("점수", str(result.get("score") or "-"))
+    c1.metric("상태", "FAILED" if failed else str(result.get("status") or "-"))
+    c2.metric("심각도", severity_display_name(result.get("severity")) if result.get("severity") else "-")
+    score_val = result.get("score")
+    if isinstance(score_val, float) and 0 <= score_val <= 1:
+        score_text = f"{score_val:.2f}"
+    else:
+        score_text = str(score_val or "-")
+    c3.metric("점수", score_text)
+    if failed and debug_mode:
+        st.json(result)
     if result.get("score_breakdown"):
         sb = result["score_breakdown"]
         st.caption(f"정책점수 {sb.get('policy_score', '-')} · 근거점수 {sb.get('evidence_score', '-')} · 최종점수 {sb.get('final_score', '-')}")
@@ -871,6 +1476,5 @@ def render_ai_workspace_page() -> None:
                                     if reason:
                                         line += f" — {reason}"
                                     st.caption(line)
-                    render_hitl_panel(latest_bundle)
                     st.markdown("#### 분석 이력")
                     render_hitl_history(latest_bundle.get("history") or [])

@@ -10,7 +10,7 @@ from ui.sidebar import render_sidebar
 from ui.studio import render_agent_studio_page
 from ui.workspace import render_ai_workspace_page
 
-st.set_page_config(page_title="Aura Agent AI", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(page_title="Aura Agentic AI", layout="wide", initial_sidebar_state="expanded")
 inject_css()
 
 # 시연 데이터 제어 등에서 "워크스페이스 열기" 클릭 시: 위젯 키(mt_menu_option)는 위젯 생성 전에만 설정 가능
@@ -19,7 +19,7 @@ if "mt_redirect_to_menu" in st.session_state:
     st.session_state["mt_menu_option"] = target
     st.session_state["mt_menu"] = target
 
-st.markdown('<div class="mt-app-header">Aura Agent AI</div>', unsafe_allow_html=True)
+st.markdown('<div class="mt-app-header">Aura Agentic AI</div>', unsafe_allow_html=True)
 
 selected_menu = render_sidebar()
 

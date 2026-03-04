@@ -73,7 +73,7 @@ async def merchant_risk_probe(context: dict[str, Any]) -> dict[str, Any]:
             "merchantName": merchant,
             "merchantRisk": risk,
         },
-        "summary": "거래처/MCC 기반 위험도를 평가했습니다.",
+        "summary": "거래처/가맹점 업종 코드(MCC) 기반 위험도를 평가했습니다.",
     }
 
 
@@ -166,7 +166,7 @@ async def legacy_aura_deep_audit(context: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-# Transitional: Phase A에서 LangChain tool schema로 승격. Phase C까지 registry direct dispatch 사용 후 ToolNode로 전환. (docs/phase0-prep.md)
+# Transitional: Phase A에서 LangChain tool schema로 승격. Phase C까지 registry direct dispatch 사용 후 ToolNode로 전환. (docs/work_info/phase0-prep.md)
 SKILL_REGISTRY: dict[str, AgentSkill] = {
     "holiday_compliance_probe": AgentSkill(
         name="holiday_compliance_probe",
@@ -182,9 +182,9 @@ SKILL_REGISTRY: dict[str, AgentSkill] = {
     ),
     "merchant_risk_probe": AgentSkill(
         name="merchant_risk_probe",
-        description="거래처와 MCC 기반 위험도를 검증한다.",
+        description="거래처와 가맹점 업종 코드(MCC) 기반 위험도를 검증한다.",
         handler=merchant_risk_probe,
-        display_summary_ko="입력: MCC 코드, 거래처 정보. 출력: 업종 위험도, 판정 근거.",
+        display_summary_ko="입력: 가맹점 업종 코드(MCC), 거래처 정보. 출력: 업종 위험도, 판정 근거.",
     ),
     "document_evidence_probe": AgentSkill(
         name="document_evidence_probe",
@@ -211,7 +211,8 @@ def _make_langchain_tool(skill_name: str) -> StructuredTool:
     """Phase A: LangChain StructuredTool로 스킬을 감싼다. 입력/출력 스키마 부여."""
     skill = SKILL_REGISTRY[skill_name]
 
-    async def _invoke(inp: SkillContextInput) -> dict[str, Any]:
+    async def _invoke(**kwargs: Any) -> dict[str, Any]:
+        inp = SkillContextInput.model_validate(kwargs)
         ctx: dict[str, Any] = {
             "case_id": inp.case_id,
             "body_evidence": inp.body_evidence,

@@ -80,7 +80,7 @@ execute
   ├──▶ budget_risk_probe            예산 초과 여부 및 금액 지표 검증
   │                                 (amount vs threshold 비교)
   │
-  ├──▶ merchant_risk_probe          거래처·MCC 기반 업종 위험도 검증
+  ├──▶ merchant_risk_probe          거래처·가맹점 업종 코드(MCC) 기반 업종 위험도 검증
   │                                 (mccCode 기반 고위험 업종 분류)
   │
   ├──▶ document_evidence_probe      전표 라인아이템·문서 증거 수집
@@ -106,7 +106,7 @@ score_breakdown                     전체 결과 집계
 |---|---|---|---|
 | `holiday_compliance_probe` | 휴일/휴무/연차 사용 정황 검증 | 아니오 | [L25](../agent/skills.py#L25) |
 | `budget_risk_probe` | 예산 초과 여부 및 금액 지표 검증 | 아니오 | [L43](../agent/skills.py#L43) |
-| `merchant_risk_probe` | 거래처·MCC 기반 업종 위험도 검증 | 아니오 | [L58](../agent/skills.py#L58) |
+| `merchant_risk_probe` | 거래처·가맹점 업종 코드(MCC) 기반 업종 위험도 검증 | 아니오 | [L58](../agent/skills.py#L58) |
 | `document_evidence_probe` | 전표 라인아이템·문서 증거 수집 | 아니오 | [L77](../agent/skills.py#L77) |
 | `policy_rulebook_probe` | 내부 규정집 관련 조항 RAG 조회 | 아니오 | [L91](../agent/skills.py#L91) |
 | `legacy_aura_deep_audit` | 기존 Aura 심층 분석 (specialist) | **조건부** ([`_should_skip_skill`](../agent/langgraph_agent.py#L55)) | [L106](../agent/skills.py#L106) |

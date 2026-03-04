@@ -95,8 +95,33 @@ def _should_skip_skill(step: dict[str, Any], *, state: AgentState, tool_results:
     return False, None
 
 
+def _score_with_hitl_adjustment(score: dict[str, Any], flags: dict[str, Any]) -> dict[str, Any]:
+    adjusted = {
+        "policy_score": int(score.get("policy_score", 0)),
+        "evidence_score": int(score.get("evidence_score", 0)),
+        "final_score": int(score.get("final_score", 0)),
+        "reasons": list(score.get("reasons") or []),
+    }
+    if not flags.get("hasHitlResponse"):
+        return adjusted
+
+    approved = flags.get("hitlApproved")
+    if approved is True:
+        adjusted["evidence_score"] = min(100, adjusted["evidence_score"] + 10)
+        adjusted["reasons"].append("사람 검토 승인 의견 반영")
+    elif approved is False:
+        adjusted["final_score"] = min(adjusted["final_score"], 59)
+        adjusted["reasons"].append("사람 검토 보류 의견 반영")
+
+    adjusted["final_score"] = min(
+        100,
+        int(adjusted["policy_score"] * 0.6 + adjusted["evidence_score"] * 0.4),
+    ) if approved is not False else adjusted["final_score"]
+    return adjusted
+
+
 def _build_grounded_reason(state: AgentState) -> tuple[str, str]:
-    score = state["score_breakdown"]
+    score = _score_with_hitl_adjustment(state["score_breakdown"], state["flags"])
     hitl_request = state.get("hitl_request")
     body = state["body_evidence"]
     occurred_at = _format_occurred_at(body.get("occurredAt"))
@@ -123,8 +148,12 @@ def _build_grounded_reason(state: AgentState) -> tuple[str, str]:
         tail = "현재는 사람 검토가 필요한 상태로 분류되었으며, 추가 소명 확인 후 최종 확정이 필요합니다."
     else:
         if state["flags"].get("hasHitlResponse"):
-            status = "REVIEW_AFTER_HITL"
-            tail = "사람 검토 응답이 반영되었으며, 재평가 결과 검토 대상으로 유지됩니다."
+            if state["flags"].get("hitlApproved") is True:
+                status = "COMPLETED_AFTER_HITL"
+                tail = "사람 검토 결과 승인 가능으로 확인되어 최종 판단을 확정했습니다."
+            else:
+                status = "HOLD_AFTER_HITL"
+                tail = "사람 검토 결과 보류/추가 검토가 필요해 자동 확정을 중단합니다."
         else:
             status = "REVIEW_REQUIRED"
             tail = "현재 수집된 증거 기준으로 우선 검토 대상입니다."
@@ -161,7 +190,7 @@ def _plan_from_flags(flags: dict[str, Any]) -> list[dict[str, Any]]:
     if flags.get("budgetExceeded"):
         plan.append({"tool": "budget_risk_probe", "reason": "예산 초과 확인", "owner": "planner"})
     if flags.get("mccCode"):
-        plan.append({"tool": "merchant_risk_probe", "reason": "업종/MCC 위험 확인", "owner": "planner"})
+        plan.append({"tool": "merchant_risk_probe", "reason": "업종/가맹점 업종 코드(MCC) 위험 확인", "owner": "planner"})
     plan.append({"tool": "document_evidence_probe", "reason": "전표 증거 수집", "owner": "specialist"})
     plan.append({"tool": "policy_rulebook_probe", "reason": "내부 규정 조항 조회", "owner": "specialist"})
     if settings.enable_legacy_aura_specialist:
@@ -256,7 +285,7 @@ async def screener_node(state: AgentState) -> AgentState:
                 message="전표 데이터를 분석해 케이스(위반 유형)를 분류합니다.",
                 thought="원시 전표 데이터에서 위반 유형을 식별합니다.",
                 action="전표 데이터 추출 및 점수 산정",
-                observation="hr_status, mcc_code, budat, cputm 등 필드를 분석합니다.",
+                observation="근태 상태, 업종 코드, 전표 기준일, 입력 시각 등 핵심 필드를 분석합니다.",
                 metadata={"role": "screener"},
             ).to_payload(),
             AgentEvent(
@@ -351,7 +380,7 @@ async def planner_node(state: AgentState) -> AgentState:
         steps=steps,
         stop_after_sufficient_evidence=True,
         tool_budget=len(plan),
-        rationale="플래그(휴일/예산/MCC 등)와 기본 조사 경로로 도구 순서를 결정했다.",
+        rationale="플래그(휴일/예산/가맹점 업종 코드(MCC) 등)와 기본 조사 경로로 도구 순서를 결정했다.",
     )
     start_note = await generate_working_note(
         node="planner",
@@ -770,9 +799,11 @@ async def hitl_pause_node(state: AgentState) -> AgentState:
 
 
 async def reporter_node(state: AgentState) -> AgentState:
-    score = state["score_breakdown"]
+    score = _score_with_hitl_adjustment(state["score_breakdown"], state["flags"])
     hitl_request = state.get("hitl_request")
     body = state["body_evidence"]
+    hitl_response = body.get("hitlResponse") or {}
+    hitl_approved = hitl_response.get("approved")
     occurred_at = _format_occurred_at(body.get("occurredAt"))
     merchant = body.get("merchantName") or "거래처 미상"
     summary = (
@@ -781,9 +812,16 @@ async def reporter_node(state: AgentState) -> AgentState:
     )
     if hitl_request:
         summary += " 사람 검토가 필요한 상태입니다."
+        verdict = "HITL_REQUIRED"
+    elif state["flags"].get("hasHitlResponse") and hitl_approved is True:
+        summary += " 사람 검토 결과 승인 가능으로 판단되어 최종 확정 후보로 전환되었습니다."
+        verdict = "COMPLETED_AFTER_HITL"
+    elif state["flags"].get("hasHitlResponse") and hitl_approved is False:
+        summary += " 사람 검토 결과 보류/추가 검토 의견이 있어 자동 확정을 중단합니다."
+        verdict = "HOLD_AFTER_HITL"
     else:
         summary += " 현재 수집된 증거 기준으로 추가 검토 우선순위가 높습니다."
-    verdict = "HITL_REQUIRED" if hitl_request else "READY"
+        verdict = "READY"
     refs = _top_policy_refs(state.get("tool_results", []), limit=5)
     citations_list = []
     for ref in refs:
@@ -847,7 +885,7 @@ async def reporter_node(state: AgentState) -> AgentState:
 
 
 async def finalizer_node(state: AgentState) -> AgentState:
-    score = state["score_breakdown"]
+    score = _score_with_hitl_adjustment(state["score_breakdown"], state["flags"])
     hitl_request = state.get("hitl_request")
     reason, status = _build_grounded_reason(state)
     probe_facts = (_find_tool_result(state["tool_results"], "policy_rulebook_probe") or {}).get("facts", {}) or {}
