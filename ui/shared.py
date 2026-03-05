@@ -51,8 +51,16 @@ def inject_css() -> None:
           --mt-warning-soft: #fffbeb;
         }}
         .stApp {{ background: linear-gradient(180deg, #f8fafc 0%, #eef2ff 100%); padding-top: 52px !important; }}
-        [data-testid="stAppViewContainer"] > .main {{ background: transparent !important; }}
-        [data-testid="block-container"] {{ padding-top: 0.75rem !important; padding-bottom: 1.25rem !important; max-width: 100% !important; }}
+        [data-testid="stAppViewContainer"] > .main {{ background: transparent !important; padding-top: 0 !important; }}
+        section.main {{ padding-top: 0 !important; }}
+        .main .block-container {{ padding-top: 0 !important; }}
+        [data-testid="block-container"] {{ padding-top: 0 !important; padding-bottom: 1.25rem !important; max-width: 100% !important; }}
+        [data-testid="block-container"] > div {{ padding-top: 0 !important; margin-top: 0 !important; }}
+        [data-testid="block-container"] > div:first-child {{ margin-top: 0 !important; padding-top: 0 !important; }}
+        [data-testid="block-container"] > [data-testid="stVerticalBlock"],
+        [data-testid="block-container"] > div > [data-testid="stVerticalBlock"] {{ padding-top: 0 !important; margin-top: 0 !important; }}
+        [data-testid="block-container"] > [data-testid="stVerticalBlock"] > [data-testid="element-container"]:first-child,
+        [data-testid="block-container"] > div > [data-testid="stVerticalBlock"] > [data-testid="element-container"]:first-child {{ padding-top: 0 !important; margin-top: 0 !important; }}
         [data-testid="column"] {{ min-width: 0 !important; overflow: hidden !important; }}
         [data-testid="column"] > div {{ min-width: 0 !important; max-width: 100% !important; overflow: hidden !important; }}
         [data-testid="column"] [data-testid="stVerticalBlock"] {{ min-width: 0 !important; max-width: 100% !important; }}
@@ -68,7 +76,7 @@ def inject_css() -> None:
         header[data-testid="stHeader"] button {{ background: transparent !important; border-color: rgba(255,255,255,0.25) !important; }}
         header[data-testid="stHeader"] button:hover {{ background: rgba(255,255,255,0.1) !important; color: #fff !important; }}
         header[data-testid="stHeader"] svg {{ fill: #e5e7eb !important; }}
-        .mt-app-header {{ position: fixed !important; top: 0 !important; left: 0 !important; right: 140px !important; height: 52px !important; display: flex !important; align-items: center !important; padding: 0 24px !important; background: var(--mt-header-bg) !important; color: #fff !important; font-weight: 800 !important; font-size: 1.15rem !important; letter-spacing: -0.02em !important; z-index: 1000001 !important; box-shadow: 0 1px 0 rgba(255,255,255,0.08) !important; pointer-events: auto !important; }}
+        body::before {{ content: "Aura Agentic AI"; position: fixed; top: 0; left: 0; right: 140px; height: 52px; display: flex; align-items: center; padding: 0 24px; background: linear-gradient(180deg, #0f172a 0%, #111827 100%); color: #fff; font-weight: 800; font-size: 1.15rem; letter-spacing: -0.02em; z-index: 1000001; box-shadow: 0 1px 0 rgba(255,255,255,0.08); pointer-events: none; }}
         section[data-testid="stSidebar"] {{
           background: linear-gradient(180deg, #0f172a 0%, #111827 100%) !important;
           border-right: 1px solid rgba(255,255,255,0.08) !important;
@@ -174,6 +182,10 @@ def inject_css() -> None:
         .mt-workspace-case-stat-label {{ font-size:0.76rem; font-weight:700; color:#64748b; margin-top:2px; }}
         .mt-case-card {{ padding:14px 14px 16px 14px; border-radius:18px; background:rgba(255,255,255,0.98); border:1px solid #e5e7eb; box-shadow:0 8px 22px rgba(15,23,42,0.04); transition: all 0.18s ease; }}
         .mt-case-card-selected {{ border:2px solid #2563eb; box-shadow:0 0 0 3px rgba(37,99,235,0.08), 0 12px 26px rgba(15,23,42,0.08); }}
+        .mt-case-click-wrap {{ cursor:pointer !important; }}
+        .mt-case-click-wrap:hover .mt-case-card {{ border-color:#93c5fd; box-shadow:0 10px 24px rgba(37,99,235,0.10); }}
+        .mt-case-link {{ display:block; text-decoration:none !important; color:inherit !important; cursor:pointer !important; }}
+        .mt-case-link:hover, .mt-case-link:focus, .mt-case-link:visited {{ text-decoration:none !important; color:inherit !important; }}
         .mt-case-name {{ font-size:1rem; font-weight:800; color:#0f172a; line-height:1.35; margin-top:4px; }}
         .mt-case-meta-line {{ font-size:0.84rem; color:#64748b; line-height:1.55; margin-top:8px; }}
         .mt-case-submeta {{ display:grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap:6px 12px; margin-top:12px; }}
@@ -390,7 +402,7 @@ def render_page_header(title: str, subtitle: str, right_html: str | None = None)
         key=f"page_header_{title}",
         css_styles="""
         {
-          padding: 14px 20px;
+          padding: 4px 20px 14px 20px;
           border: 1px solid #e5e7eb;
           background: rgba(255,255,255,0.94);
           border-radius: 18px;

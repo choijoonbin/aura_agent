@@ -19,8 +19,6 @@ if "mt_redirect_to_menu" in st.session_state:
     st.session_state["mt_menu_option"] = target
     st.session_state["mt_menu"] = target
 
-st.markdown('<div class="mt-app-header">Aura Agentic AI</div>', unsafe_allow_html=True)
-
 selected_menu = render_sidebar()
 
 if selected_menu == "AI 워크스페이스":

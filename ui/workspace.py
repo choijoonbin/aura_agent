@@ -1115,91 +1115,107 @@ def render_workspace_case_queue(items: list[dict[str, Any]], selected_key: str |
         "완료": [item for item in items if str(item.get("case_status") or "").upper() in {"COMPLETED", "COMPLETED_AFTER_HITL", "RESOLVED", "OK"}],
         "HITL 대기": [item for item in items if str(item.get("case_status") or "").upper() in {"HITL_REQUIRED", "REVIEW_AFTER_HITL", "HOLD_AFTER_HITL"}],
     }
+    # 배지는 st.markdown(HTML) → 시각 레이어 (pointer-events: none)
+    # 버튼은 margin-top:-55px 으로 배지 영역까지 올려 클릭 영역이 카드 전체를 커버
+    st.markdown("""
+    <style>
+    [class*="st-key-workspace_case_scroll_"] {
+      max-height: 66vh !important; overflow-y: auto !important; padding-right: 6px !important;
+    }
+    /* 카드 컨테이너 — 시각적 카드 외형 제공, 좌우 패딩 최소화 */
+    [class*="st-key-case_btn_"] {
+      border: 1px solid #e5e7eb !important;
+      border-radius: 18px !important;
+      background: rgba(255,255,255,0.98) !important;
+      box-shadow: 0 8px 22px rgba(15,23,42,0.04) !important;
+      margin-bottom: 0.8rem !important;
+      padding: 10px 10px 0 10px !important;
+      transition: box-shadow 0.15s ease !important;
+    }
+    [class*="st-key-case_btn_sel_"] {
+      border: 2px solid #2563eb !important;
+      box-shadow: 0 0 0 3px rgba(37,99,235,0.08), 0 12px 26px rgba(15,23,42,0.08) !important;
+    }
+    /* stVerticalBlock flex gap 제거 — 배지↔버튼 사이 공백 최소화 */
+    [class*="st-key-case_btn_"] [data-testid="stVerticalBlock"] {
+      gap: 0 !important;
+    }
+    /* 배지 행 — 위에 보이지만 클릭 비활성, 하단 마진 제거 */
+    [class*="st-key-case_btn_"] [data-testid="stMarkdown"] {
+      position: relative !important;
+      z-index: 2 !important;
+      pointer-events: none !important;
+      margin-bottom: 0 !important;
+    }
+    /* 버튼 element-container — 배지 바로 아래까지 끌어올려 공백 최소화 */
+    [class*="st-key-case_btn_"] [data-testid="element-container"]:last-child {
+      margin-top: -42px !important;
+      position: relative !important;
+      z-index: 1 !important;
+    }
+    /* 실제 button — 투명, 카드 컨텐츠 텍스트 스타일, 배지 높이만큼만 위 패딩 */
+    [class*="st-key-case_btn_"] [data-testid="stButton"] > button {
+      width: 100% !important;
+      height: auto !important;
+      min-height: unset !important;
+      text-align: left !important;
+      padding: 42px 0 12px 0 !important;
+      padding-left: 0 !important;
+      border: none !important;
+      background: transparent !important;
+      box-shadow: none !important;
+      color: #0f172a !important;
+      font-size: 0.9rem !important;
+      white-space: pre-wrap !important;
+      line-height: 1.6 !important;
+      cursor: pointer !important;
+      margin: 0 !important;
+    }
+    /* 버튼 내부 마크다운/문단 왼쪽 여백 완전 제거 */
+    [class*="st-key-case_btn_"] [data-testid="stButton"] [data-testid="stMarkdownContainer"],
+    [class*="st-key-case_btn_"] [data-testid="stButton"] [data-testid="stMarkdownContainer"] p,
+    [class*="st-key-case_btn_"] [data-testid="stButton"] > button > div {
+      padding-left: 0 !important;
+      margin-left: 0 !important;
+    }
+    [class*="st-key-case_btn_"] [data-testid="stMarkdownContainer"] p { margin: 0 !important; }
+    </style>
+    """, unsafe_allow_html=True)
     for idx, (tab, label) in enumerate(zip(tabs, ["전체", "검토 필요", "완료", "HITL 대기"])):
         with tab:
-            with stylable_container(
-                key=f"workspace_case_scroll_{idx}",
-                css_styles="""
-                {
-                  max-height: 66vh;
-                  overflow-y: auto;
-                  padding-right: 6px;
-                }
-                """,
-            ):
+            with st.container(key=f"workspace_case_scroll_{idx}"):
                 if not grouped[label]:
                     render_empty_state("표시할 케이스가 없습니다.")
                     continue
                 for item in grouped[label]:
                     case_key = item["voucher_key"]
-                    selected_css = "mt-case-card-selected" if case_key == selected_key else ""
-                    with stylable_container(
-                        key=f"workspace_case_{idx}_{case_key}",
-                        css_styles=[
-                            """{
-                              margin-bottom: 0.8rem;
-                              position: relative;
-                            }""",
-                            """
-                            .mt-case-card {
-                              cursor: pointer !important;
-                            }
-                            .mt-case-card * {
-                              cursor: pointer !important;
-                              pointer-events: none !important;
-                            }
-                            [data-testid="stButton"] {
-                              position: absolute !important;
-                              inset: 0 !important;
-                              margin: 0 !important;
-                              z-index: 5 !important;
-                              cursor: pointer !important;
-                            }
-                            [data-testid="stButton"] > button {
-                              position: absolute !important;
-                              inset: 0 !important;
-                              width: 100% !important;
-                              height: 100% !important;
-                              min-height: 100% !important;
-                              margin: 0 !important;
-                              padding: 0 !important;
-                              opacity: 0 !important;
-                              border: none !important;
-                              background: transparent !important;
-                              cursor: pointer !important;
-                              pointer-events: auto !important;
-                              box-shadow: none !important;
-                              font-size: 0 !important;
-                              line-height: 0 !important;
-                            }
-                            """,
-                        ],
-                    ):
-                        status = status_display_name(item.get("case_status"))
-                        severity = severity_display_name(item.get("severity"))
-                        case_type = case_type_display_name(item.get("case_type"))
-                        occurred_at = fmt_dt(item.get("occurred_at")) or "-"
-                        amount = f"{fmt_num(item.get('amount'))} {item.get('currency') or ''}".strip()
-                        merchant = item.get("merchant_name") or "-"
-                        title = item.get("demo_name") or merchant
+                    is_selected = case_key == selected_key
+                    status = status_display_name(item.get("case_status"))
+                    severity = severity_display_name(item.get("severity"))
+                    case_type = case_type_display_name(item.get("case_type"))
+                    occurred_at = fmt_dt(item.get("occurred_at")) or "-"
+                    amount = f"{fmt_num(item.get('amount'))} {item.get('currency') or ''}".strip()
+                    merchant = item.get("merchant_name") or "-"
+                    title = item.get("demo_name") or merchant
+                    wrap_key = f"case_btn_sel_{idx}_{case_key}" if is_selected else f"case_btn_{idx}_{case_key}"
+                    with st.container(key=wrap_key):
+                        # 배지 행 — HTML 유지, pointer-events:none 으로 클릭 투과
                         st.markdown(
-                            f"""
-                            <div class="mt-case-card {selected_css}">
-                              <div>{status_badge(item.get("case_status"))}{severity_badge(item.get("severity"))}{case_type_badge(item.get("case_type"))}</div>
-                              <div class="mt-case-name">{title}</div>
-                              <div class="mt-case-meta-line">{amount} · {occurred_at}</div>
-                              <div class="mt-case-submeta">
-                                <div class="mt-case-submeta-item"><span class="mt-case-submeta-label">전표키</span>{case_key}</div>
-                                <div class="mt-case-submeta-item"><span class="mt-case-submeta-label">가맹점</span>{merchant}</div>
-                                <div class="mt-case-submeta-item"><span class="mt-case-submeta-label">상태</span>{status}</div>
-                                <div class="mt-case-submeta-item"><span class="mt-case-submeta-label">심각도</span>{severity}</div>
-                              </div>
-                            </div>
-                            """,
+                            f'<div style="display:flex;gap:6px;flex-wrap:wrap;">'
+                            f'{status_badge(item.get("case_status"))}'
+                            f'{severity_badge(item.get("severity"))}'
+                            f'{case_type_badge(item.get("case_type"))}'
+                            f'</div>',
                             unsafe_allow_html=True,
                         )
+                        # 버튼 — margin-top:-55px 으로 배지 위까지 클릭 영역 확장
+                        btn_label = (
+                            f"**{title}**\n\n"
+                            f"{amount} · {occurred_at}\n\n"
+                            f"전표키　{case_key}　　가맹점　{merchant}"
+                        )
                         if st.button(
-                            f"카드 선택 {case_key}",
+                            btn_label,
                             key=f"select_{idx}_{case_key}",
                             use_container_width=True,
                         ):
