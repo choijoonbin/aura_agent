@@ -357,13 +357,20 @@ async def start_analysis(voucher_key: str, db: Session = Depends(get_db)) -> Ana
 
 @app.post("/api/v1/analysis-runs/{run_id}/hitl", response_model=HitlSubmitResponse)
 async def submit_hitl(run_id: str, request: HitlSubmitRequest, db: Session = Depends(get_db)) -> HitlSubmitResponse:
+    # 재시작 후에도 HITL 응답을 받을 수 있도록, runtime 메모리와 DB(aux_state)를 모두 확인한다.
     lineage = runtime.get_lineage(run_id)
-    if not lineage:
+    aux = get_run_aux_state(db, run_id=run_id)
+    if not lineage and not aux.get("lineage"):
         raise HTTPException(status_code=404, detail="source run not found")
 
-    hitl_request = runtime.get_hitl_request(run_id)
+    lineage = lineage or aux.get("lineage") or {}
+
+    hitl_request = runtime.get_hitl_request(run_id) or aux.get("hitl_request")
     if not hitl_request:
         raise HTTPException(status_code=400, detail="no pending HITL request for this run")
+    # runtime 메모리에 없던 경우 aux에서 복원
+    if not runtime.get_hitl_request(run_id):
+        runtime.set_hitl_request(run_id, hitl_request)
 
     case_id = lineage["case_id"]
     voucher_key = case_id.replace("POC-", "")

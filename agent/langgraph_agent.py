@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime
 import re
 from typing import Any, TypedDict
@@ -20,7 +21,7 @@ from agent.output_models import (
     VerifierGate,
     VerifierOutput,
 )
-from agent.reasoning_notes import generate_working_note
+from agent.reasoning_notes import extract_reasoning
 from agent.screener import run_screening
 from agent.skills import get_langchain_tools
 from agent.tool_schemas import SkillContextInput
@@ -40,6 +41,108 @@ _CLAIM_PRIORITY: dict[str, int] = {
     "amount_approval_tier": 6,
     "policy_ref_direct": 5,
 }
+
+
+@dataclass
+class ConsistencyCheckResult:
+    is_consistent: bool
+    conflict_description: str
+
+
+def _get_attr(output: Any, key: str) -> Any:
+    if hasattr(output, key):
+        return getattr(output, key)
+    if isinstance(output, dict):
+        return output.get(key)
+    return None
+
+
+def check_reasoning_consistency(node_name: str, output: Any) -> ConsistencyCheckResult:
+    """
+    workspace.md v3: reasoning 텍스트와 결과 필드 간 모순을 감지한다.
+    모순이 감지되면 conflict_description을 반환해 재검토(재생성/수정)에 활용한다.
+    """
+    reasoning = str(_get_attr(output, "reasoning") or "").lower()
+    if not reasoning.strip():
+        return ConsistencyCheckResult(is_consistent=True, conflict_description="")
+
+    hold_signals = ["보류", "hold", "위반", "문제", "검토 필요", "부적합", "중단", "실패", "fail"]
+    pass_signals = ["정상", "통과", "pass", "적합", "문제없", "이상없", "승인", "가능"]
+    reasoning_says_hold = any(s in reasoning for s in hold_signals)
+    reasoning_says_pass = any(s in reasoning for s in pass_signals)
+
+    # --- Critic ---
+    if node_name == "critic":
+        recommend_hold = bool(_get_attr(output, "recommend_hold"))
+        if recommend_hold and reasoning_says_pass and not reasoning_says_hold:
+            return ConsistencyCheckResult(
+                is_consistent=False,
+                conflict_description=(
+                    "reasoning은 '정상/통과' 취지이나 recommend_hold=True가 반환되었습니다. "
+                    "reasoning과 결과값이 일치하도록 재작성하십시오."
+                ),
+            )
+        if (not recommend_hold) and reasoning_says_hold and not reasoning_says_pass:
+            return ConsistencyCheckResult(
+                is_consistent=False,
+                conflict_description=(
+                    "reasoning은 '보류/위반' 취지이나 recommend_hold=False가 반환되었습니다. "
+                    "reasoning과 결과값이 일치하도록 재작성하십시오."
+                ),
+            )
+
+    # --- Verifier ---
+    if node_name in {"verify", "verifier"}:
+        gate = _get_attr(output, "gate")
+        gate_str = str(gate or "").upper()
+        # 기존 스펙은 PASS/FAIL 예시지만, 현재 구현은 READY/HITL_REQUIRED를 사용한다.
+        if gate_str in {"READY", "PASS"} and reasoning_says_hold and not reasoning_says_pass:
+            return ConsistencyCheckResult(
+                is_consistent=False,
+                conflict_description="reasoning은 검증 실패/보류 취지이나 gate=READY(PASS)가 반환되었습니다. 일치하도록 재작성하십시오.",
+            )
+        if gate_str in {"HITL_REQUIRED", "FAIL"} and reasoning_says_pass and not reasoning_says_hold:
+            return ConsistencyCheckResult(
+                is_consistent=False,
+                conflict_description="reasoning은 검증 통과 취지이나 gate=HITL_REQUIRED(FAIL)이 반환되었습니다. 일치하도록 재작성하십시오.",
+            )
+
+    # --- Reporter ---
+    if node_name == "reporter":
+        verdict = str(_get_attr(output, "verdict") or "").upper()
+        if verdict in {"HITL_REQUIRED", "HOLD", "REJECT", "HOLD_AFTER_HITL"} and reasoning_says_pass and not reasoning_says_hold:
+            return ConsistencyCheckResult(
+                is_consistent=False,
+                conflict_description=f"reasoning은 정상 처리 취지이나 verdict={verdict}가 반환되었습니다. 일치하도록 재작성하십시오.",
+            )
+
+    # --- Finalizer ---
+    if node_name == "finalizer":
+        status = str(_get_attr(output, "status") or _get_attr(output, "final_status") or "").upper()
+        if status in {"HITL_REQUIRED", "HOLD", "REJECT", "FAILED", "HOLD_AFTER_HITL"} and reasoning_says_pass and not reasoning_says_hold:
+            return ConsistencyCheckResult(
+                is_consistent=False,
+                conflict_description=f"reasoning은 정상 처리 취지이나 status={status}가 반환되었습니다. 일치하도록 재작성하십시오.",
+            )
+
+    return ConsistencyCheckResult(is_consistent=True, conflict_description="")
+
+
+def _repair_reasoning_for_consistency(node_name: str, output: Any, *, current_reasoning: str) -> str:
+    """LLM 재호출 없이도 모순을 차단하기 위한 1회 보정(템플릿 기반)."""
+    text = (current_reasoning or "").strip()
+    if node_name == "critic":
+        recommend_hold = bool(_get_attr(output, "recommend_hold"))
+        return (text + (" 결론: 보류가 적절하다." if recommend_hold else " 결론: 정상 진행이 가능하다.")).strip()
+    if node_name in {"verify", "verifier"}:
+        gate = str(_get_attr(output, "gate") or "").upper()
+        return (text + (" 결론: 사람 검토(HITL)가 필요하다." if gate == "HITL_REQUIRED" else " 결론: 자동 진행이 가능하다.")).strip()
+    if node_name == "reporter":
+        verdict = str(_get_attr(output, "verdict") or "").upper()
+        if verdict in {"HITL_REQUIRED", "HOLD", "REJECT", "HOLD_AFTER_HITL"}:
+            return (text + " 결론: 보류/사람 검토가 필요하다.").strip()
+        return (text + " 결론: 자동 확정 후보로 진행한다.").strip()
+    return text
 
 
 def _get_tools_by_name() -> dict[str, Any]:
@@ -72,6 +175,8 @@ class AgentState(TypedDict, total=False):
     critic_loop_count: int
     replan_context: dict[str, Any] | None
     plan_achievement: dict[str, Any]
+    # workspace.md: 이전 노드 결과 1줄 요약 (generate_working_note prev_result_summary용)
+    last_node_summary: str
 
 
 def _format_occurred_at(value: Any) -> str:
@@ -85,6 +190,41 @@ def _format_occurred_at(value: Any) -> str:
         return f"{dt.year}년 {dt.month:02d}월 {dt.day:02d}일 {dt.hour:02d}:{dt.minute:02d}:{dt.second:02d} ({weekdays[dt.weekday()]})"
     except Exception:
         return raw
+
+
+def _reasoning_stream_events(node_name: str, reasoning_text: str) -> list[dict[str, Any]]:
+    """workspace.md 추가보완: reasoning 문자열을 THINKING_TOKEN(단어 단위) + THINKING_DONE 이벤트로 변환."""
+    if not (reasoning_text or "").strip():
+        return [
+            AgentEvent(
+                event_type="THINKING_DONE",
+                node=node_name,
+                message="",
+                metadata={"reasoning": ""},
+            ).to_payload(),
+        ]
+    text = reasoning_text.strip()
+    events: list[dict[str, Any]] = []
+    for word in text.split():
+        if not word:
+            continue
+        events.append(
+            AgentEvent(
+                event_type="THINKING_TOKEN",
+                node=node_name,
+                message="",
+                metadata={"token": word + " "},
+            ).to_payload(),
+        )
+    events.append(
+        AgentEvent(
+            event_type="THINKING_DONE",
+            node=node_name,
+            message=text,
+            metadata={"reasoning": text},
+        ).to_payload(),
+    )
+    return events
 
 
 def _voucher_summary_for_context(body_evidence: dict[str, Any]) -> str:
@@ -140,10 +280,10 @@ def _score_with_hitl_adjustment(score: dict[str, Any], flags: dict[str, Any]) ->
     approved = flags.get("hitlApproved")
     if approved is True:
         adjusted["evidence_score"] = min(100, adjusted["evidence_score"] + 10)
-        adjusted["reasons"].append("사람 검토 승인 의견 반영")
+        adjusted["reasons"].append("담당자 검토 승인 의견 반영")
     elif approved is False:
         adjusted["final_score"] = min(adjusted["final_score"], 59)
-        adjusted["reasons"].append("사람 검토 보류 의견 반영")
+        adjusted["reasons"].append("담당자 검토 보류 의견 반영")
 
     if approved is not False:
         pw = float(adjusted.get("policy_weight", settings.score_policy_weight))
@@ -183,15 +323,15 @@ def _build_grounded_reason(state: AgentState) -> tuple[str, str]:
 
     if hitl_request:
         status = "HITL_REQUIRED"
-        tail = "현재는 사람 검토가 필요한 상태로 분류되었으며, 추가 소명 확인 후 최종 확정이 필요합니다."
+        tail = "현재는 담당자 검토가 필요한 상태로 분류되었으며, 추가 소명 확인 후 최종 확정이 필요합니다."
     else:
         if state["flags"].get("hasHitlResponse"):
             if state["flags"].get("hitlApproved") is True:
                 status = "COMPLETED_AFTER_HITL"
-                tail = "사람 검토 결과 승인 가능으로 확인되어 최종 판단을 확정했습니다."
+                tail = "담당자 검토 결과 승인 가능으로 확인되어 최종 판단을 확정했습니다."
             else:
                 status = "HOLD_AFTER_HITL"
-                tail = "사람 검토 결과 보류/추가 검토가 필요해 자동 확정을 중단합니다."
+                tail = "담당자 검토 결과 보류/추가 검토가 필요해 자동 확정을 중단합니다."
         else:
             status = "REVIEW_REQUIRED"
             tail = "현재 수집된 증거 기준으로 우선 검토 대상입니다."
@@ -422,8 +562,8 @@ def _score(flags: dict[str, Any], tool_results: list[dict[str, Any]]) -> dict[st
 
     if bool(flags.get("hasHitlResponse")):
         tool_evidence_delta += 10.0
-        reasons.append("사람 검토 응답 확보")
-        signals.append(ScoreSignalDetail(signal="hitlResponse", label="사람 검토 응답", raw_value=True, points=10.0, category="evidence"))
+        reasons.append("담당자 검토 응답 확보")
+        signals.append(ScoreSignalDetail(signal="hitlResponse", label="담당자 검토 응답", raw_value=True, points=10.0, category="evidence"))
 
     ref_count = int(((policy_result or {}).get("facts") or {}).get("ref_count") or 0)
     line_count = int(((doc_result or {}).get("facts") or {}).get("lineItemCount") or 0)
@@ -604,57 +744,26 @@ async def screener_node(state: AgentState) -> AgentState:
 
 async def intake_node(state: AgentState) -> AgentState:
     flags = _derive_flags(state["body_evidence"])
-    start_note = await generate_working_note(
-        node="intake",
-        role="intake_agent",
-        context={
-            "voucher_summary": _voucher_summary_for_context(state["body_evidence"]),
-            "occurredAt": state["body_evidence"].get("occurredAt"),
-            "merchantName": state["body_evidence"].get("merchantName"),
-            "amount": state["body_evidence"].get("amount"),
-            "raw_body_keys": sorted(state["body_evidence"].keys()),
-        },
-        fallback_message="입력 데이터를 정규화합니다.",
-        fallback_thought="전표 입력값에서 핵심 위험 지표를 추출해야 합니다.",
-        fallback_action="입력 필드와 파생 데이터를 정규화합니다.",
-        fallback_observation="정규화 전 입력 점검을 시작했습니다.",
-    )
-    end_note = await generate_working_note(
-        node="intake",
-        role="intake_agent",
-        context={
-            "voucher_summary": _voucher_summary_for_context(state["body_evidence"]),
-            "flags": flags,
-        },
-        fallback_message="입력 정규화가 완료되었습니다.",
-        fallback_thought="추출된 데이터를 다음 계획 단계로 넘길 수 있습니다.",
-        fallback_action="핵심 위험 지표를 구조화했습니다.",
-        fallback_observation="핵심 위험 지표를 추출했습니다.",
+    reasoning_parts = ["전표 입력값에서 핵심 위험 지표를 추출했다."]
+    if flags.get("isHoliday"):
+        reasoning_parts.append("휴일 사용 정황이 감지되었다.")
+    if flags.get("budgetExceeded"):
+        reasoning_parts.append("예산 초과 플래그가 있다.")
+    if flags.get("mccCode"):
+        reasoning_parts.append("MCC 업종 코드가 있어 업종 위험 검증이 필요하다.")
+    reasoning_text = " ".join(reasoning_parts)
+    last_node_summary = f"intake 완료: {reasoning_text[:60]}…" if len(reasoning_text) > 60 else f"intake 완료: {reasoning_text}"
+    pending: list[dict[str, Any]] = [
+        AgentEvent(event_type="NODE_START", node="intake", phase="analyze", message="입력 데이터를 정규화합니다.", metadata=dict(flags)).to_payload(),
+    ]
+    pending.extend(_reasoning_stream_events("intake", reasoning_text))
+    pending.append(
+        AgentEvent(event_type="NODE_END", node="intake", phase="analyze", message="입력 정규화가 완료되었습니다.", metadata={"reasoning": reasoning_text, **flags}).to_payload(),
     )
     return {
         "flags": flags,
-        "pending_events": [
-            AgentEvent(
-                event_type="NODE_START",
-                node="intake",
-                phase="analyze",
-                message=start_note["message"],
-                thought=start_note["thought"],
-                action=start_note["action"],
-                observation=start_note["observation"],
-                metadata={"role": "intake_agent", "note_source": start_note.get("source", "fallback"), "note_model": start_note.get("note_model")},
-            ).to_payload(),
-            AgentEvent(
-                event_type="NODE_END",
-                node="intake",
-                phase="analyze",
-                message=end_note["message"],
-                thought=end_note["thought"],
-                action=end_note["action"],
-                observation=end_note["observation"],
-                metadata={"role": "intake_agent", "note_source": end_note.get("source", "fallback"), "note_model": end_note.get("note_model"), **flags},
-            ).to_payload(),
-        ],
+        "last_node_summary": last_node_summary,
+        "pending_events": pending,
     }
 
 
@@ -679,72 +788,49 @@ async def planner_node(state: AgentState) -> AgentState:
         )
         for step in plan
     ]
+    tool_sequence = [s["tool"] for s in plan]
+    rationale = "플래그(휴일/예산/가맹점 업종 코드(MCC) 등)와 기본 조사 경로로 도구 순서를 결정했다."
+    reasoning_parts = [rationale]
+    if state["flags"].get("isHoliday") or state["flags"].get("hrStatus") in {"LEAVE", "OFF", "VACATION"}:
+        reasoning_parts.append("isHoliday 또는 hrStatus=LEAVE가 감지되어 휴일 경비 사용 여부를 최우선 검증 경로로 설정했다.")
+    if state["flags"].get("mccCode"):
+        reasoning_parts.append("MCC 업종 코드가 있으므로 merchant_risk_probe를 실행해 업종 위험도를 확인한다.")
+    if not state["flags"].get("budgetExceeded"):
+        reasoning_parts.append("budgetExceeded=False이므로 budget_probe는 생략한다.")
+    reasoning_parts.append(f"선택된 도구 순서: {', '.join(tool_sequence)}.")
+    reasoning_text = " ".join(reasoning_parts)
     planner_output = PlannerOutput(
         objective="위험 유형별 조사 순서에 따라 증거를 수집하고 규정 근거를 확보한다.",
         steps=steps,
         stop_after_sufficient_evidence=True,
         tool_budget=len(plan),
-        rationale="플래그(휴일/예산/가맹점 업종 코드(MCC) 등)와 기본 조사 경로로 도구 순서를 결정했다.",
+        rationale=rationale,
+        reasoning=reasoning_text,
     )
-    start_note = await generate_working_note(
-        node="planner",
-        role="planner_agent",
-        context={
-            "voucher_summary": _voucher_summary_for_context(state["body_evidence"]),
-            "flags": state["flags"],
-            "is_replan": bool(replan_context),
-            "critic_feedback": (replan_context or {}).get("critic_feedback", ""),
-            "loop_count": (replan_context or {}).get("loop_count", 0),
-        },
-        fallback_message="비판 검토 결과를 반영해 보완 조사 계획을 수립합니다." if replan_context else "조사 계획을 수립합니다.",
-        fallback_thought="이전 조사에서 부족했던 부분을 보완할 도구를 선택합니다." if replan_context else "위험 유형별로 어떤 조사 순서가 효율적인지 정해야 합니다.",
-        fallback_action="보완 조사 순서를 계산합니다." if replan_context else "위험 유형별 조사 순서를 계산합니다.",
-        fallback_observation="재계획에 필요한 정보를 검토합니다." if replan_context else "계획 수립에 필요한 정보를 검토합니다.",
-    )
-    plan_ready_note = await generate_working_note(
-        node="planner",
-        role="planner_agent",
-        context={
-            "voucher_summary": _voucher_summary_for_context(state["body_evidence"]),
-            "flags": state["flags"],
-            "plan": plan,
-        },
-        fallback_message="조사 계획이 확정되었습니다.",
-        fallback_thought="수집 우선순위와 생략 가능한 경로를 함께 정리했습니다.",
-        fallback_action="도구 선택 순서와 조사 의도를 결정했습니다.",
-        fallback_observation="도구 선택 순서와 조사 의도를 결정했습니다.",
+    last_node_summary = f"planner 완료: {reasoning_text[:80]}…" if len(reasoning_text) > 80 else f"planner 완료: {reasoning_text}"
+    pending: list[dict[str, Any]] = [
+        AgentEvent(event_type="NODE_START", node="planner", phase="plan", message="조사 계획을 수립합니다.", metadata={"plan": plan}).to_payload(),
+    ]
+    pending.extend(_reasoning_stream_events("planner", reasoning_text))
+    pending.append(
+        AgentEvent(
+            event_type="PLAN_READY",
+            node="planner",
+            phase="plan",
+            message="조사 계획이 확정되었습니다.",
+            metadata={"plan": plan, "reasoning": reasoning_text},
+        ).to_payload(),
     )
     return {
         "plan": plan,
         "planner_output": planner_output.model_dump(),
         "replan_context": None,
-        "pending_events": [
-            AgentEvent(
-                event_type="NODE_START",
-                node="planner",
-                phase="plan",
-                message=start_note["message"],
-                thought=start_note["thought"],
-                action=start_note["action"],
-                observation=start_note["observation"],
-                metadata={"role": "planner_agent", "note_source": start_note.get("source", "fallback"), "note_model": start_note.get("note_model")},
-            ).to_payload(),
-            AgentEvent(
-                event_type="PLAN_READY",
-                node="planner",
-                phase="plan",
-                message=plan_ready_note["message"],
-                thought=plan_ready_note["thought"],
-                action=plan_ready_note["action"],
-                observation=plan_ready_note["observation"],
-                metadata={"role": "planner_agent", "note_source": plan_ready_note.get("source", "fallback"), "note_model": plan_ready_note.get("note_model"), "plan": plan},
-            ).to_payload(),
-        ],
+        "last_node_summary": last_node_summary,
+        "pending_events": pending,
     }
 
 
 async def execute_node(state: AgentState) -> AgentState:
-    # Phase C: plan 기반 도구 실행은 LangChain tool 호출만 사용 (registry direct dispatch 제거)
     tools_by_name = _get_tools_by_name()
     tool_results: list[dict[str, Any]] = []
     pending_events: list[dict[str, Any]] = []
@@ -754,39 +840,18 @@ async def execute_node(state: AgentState) -> AgentState:
         if skip:
             tool_obj = tools_by_name.get(tool_name)
             tool_description = getattr(tool_obj, "description", None) if tool_obj else None
-            skip_note = await generate_working_note(
-                node="execute",
-                role="specialist_agent",
-                context={
-                    "voucher_summary": _voucher_summary_for_context(state["body_evidence"]),
-                    "tool": tool_name,
-                    "reason": step.get("reason"),
-                    "existing_tool_results": tool_results,
-                    "skip_reason": reason,
-                },
-                fallback_message=f"도구 생략: {tool_name}",
-                fallback_thought="이미 확보된 증거로 다음 판단을 이어갈 수 있습니다.",
-                fallback_action="추가 specialist 호출을 생략합니다.",
-                fallback_observation=reason or "기존 증거가 충분합니다.",
-            )
+            msg = reason or "기존 증거가 충분해 생략한다."
             pending_events.append(
                 AgentEvent(
                     event_type="TOOL_SKIPPED",
                     node="executor",
                     phase="execute",
                     tool=tool_name,
-                    message=skip_note["message"],
-                    thought=skip_note["thought"],
-                    action=skip_note["action"],
-                    observation=skip_note["observation"],
-                    metadata={
-                        "reason": reason,
-                        "role": "specialist_agent",
-                        "owner": step.get("owner"),
-                        "note_source": skip_note.get("source", "fallback"),
-                        "note_model": skip_note.get("note_model"),
-                        "tool_description": tool_description,
-                    },
+                    message=msg,
+                    thought=msg,
+                    action="추가 specialist 호출을 생략한다.",
+                    observation=msg,
+                    metadata={"reason": reason, "owner": step.get("owner"), "tool_description": tool_description},
                 ).to_payload()
             )
             continue
@@ -795,39 +860,18 @@ async def execute_node(state: AgentState) -> AgentState:
             tool_results.append({"skill": tool_name, "ok": False, "facts": {}, "summary": f"알 수 없는 도구: {tool_name}"})
             continue
         tool_description = getattr(tool, "description", None) or ""
-        call_note = await generate_working_note(
-            node="execute",
-            role="specialist_agent",
-            context={
-                "voucher_summary": _voucher_summary_for_context(state["body_evidence"]),
-                "tool": tool_name,
-                "reason": step.get("reason"),
-                "flags": state.get("flags"),
-                "tool_results_so_far": [r.get("skill") for r in tool_results],
-            },
-            fallback_message=f"도구 호출: {tool_name}",
-            fallback_thought=f"{step.get('reason', '')}에 대한 사실을 확보해야 합니다.",
-            fallback_action=f"{tool_name} 실행",
-            fallback_observation="도구 실행 전 상태를 정리했습니다.",
-        )
+        step_reason = step.get("reason", "")
         pending_events.append(
             AgentEvent(
                 event_type="TOOL_CALL",
                 node="executor",
                 phase="execute",
                 tool=tool_name,
-                message=call_note["message"],
-                thought=call_note["thought"],
-                action=call_note["action"],
-                observation=call_note["observation"],
-                metadata={
-                    "reason": step.get("reason"),
-                    "role": "specialist_agent",
-                    "owner": step.get("owner"),
-                    "note_source": call_note.get("source", "fallback"),
-                    "note_model": call_note.get("note_model"),
-                    "tool_description": tool_description,
-                },
+                message=f"{step_reason} — {tool_name} 실행.",
+                thought=step_reason,
+                action=f"{tool_name} 실행",
+                observation="도구 실행 중.",
+                metadata={"reason": step_reason, "owner": step.get("owner"), "tool_description": tool_description},
             ).to_payload()
         )
         inp = SkillContextInput(
@@ -840,37 +884,18 @@ async def execute_node(state: AgentState) -> AgentState:
         if not isinstance(result, dict):
             result = {"skill": tool_name, "ok": False, "facts": {}, "summary": str(result)}
         tool_results.append(result)
-        result_note = await generate_working_note(
-            node="execute",
-            role="specialist_agent",
-            context={
-                "voucher_summary": _voucher_summary_for_context(state["body_evidence"]),
-                "tool": tool_name,
-                "reason": step.get("reason"),
-                "tool_result": result,
-            },
-            fallback_message=result.get("summary") or f"도구 완료: {tool_name}",
-            fallback_thought="수집한 사실이 다음 판단 단계에 어떤 영향을 주는지 정리합니다.",
-            fallback_action=f"{tool_name} 결과를 반영합니다.",
-            fallback_observation=(result.get("summary") or "도구 결과 수집 완료"),
-        )
+        result_summary = result.get("summary") or "도구 결과 수집 완료"
         pending_events.append(
             AgentEvent(
                 event_type="TOOL_RESULT",
                 node="executor",
                 phase="execute",
                 tool=tool_name,
-                message=result_note["message"],
-                thought=result_note["thought"],
-                action=result_note["action"],
-                observation=result_note["observation"],
-                metadata={
-                    **result,
-                    "role": "specialist_agent",
-                    "note_source": result_note.get("source", "fallback"),
-                    "note_model": result_note.get("note_model"),
-                    "tool_description": tool_description,
-                },
+                message=result_summary,
+                thought="수집한 사실을 다음 판단 단계에 반영한다.",
+                action=f"{tool_name} 결과 반영",
+                observation=result_summary,
+                metadata={**result, "tool_description": tool_description},
             ).to_payload()
         )
     score = _score(state["flags"], tool_results)
@@ -891,6 +916,7 @@ async def execute_node(state: AgentState) -> AgentState:
         "score_breakdown": score,
         "pending_events": pending_events,
         "plan_achievement": plan_achievement,
+        "last_node_summary": f"execute 완료: {len(tool_results)}개 도구 실행",
     }
 
 
@@ -1056,58 +1082,50 @@ async def critic_node(state: AgentState) -> AgentState:
         replan_required=replan_required,
         replan_reason=replan_reason,
     )
-    start_note = await generate_working_note(
-        node="critic",
-        role="critic_agent",
-        context={
-            "voucher_summary": _voucher_summary_for_context(state["body_evidence"]),
-            "tool_results": state.get("tool_results", []),
-            "missing_fields": missing,
-        },
-        fallback_message="전문 도구 결과와 입력 품질을 교차 검토합니다.",
-        fallback_thought="입력 누락과 근거 부족을 점검해 과잉 주장을 막아야 합니다.",
-        fallback_action="과잉 주장 가능성과 누락 필드를 점검합니다.",
-        fallback_observation="비판적 재검토를 시작했습니다.",
-    )
-    end_note = await generate_working_note(
-        node="critic",
-        role="critic_agent",
-        context={
-            "voucher_summary": _voucher_summary_for_context(state["body_evidence"]),
-            "critique": critique,
-        },
-        fallback_message="비판적 재검토가 완료되었습니다.",
-        fallback_thought="확정 주장 전에 추가 보류 조건을 정리했습니다.",
-        fallback_action="과잉 주장 위험과 추가 검토 필요 여부를 정리했습니다.",
-        fallback_observation="과잉 주장 위험과 추가 검토 필요 여부를 정리했습니다.",
+    rationale = critic_output.rationale
+    reasoning_parts = [rationale]
+    if missing:
+        reasoning_parts.append(f"누락 필드: {', '.join(missing[:5])}. 과잉 주장 위험이 있어 보류를 권고한다.")
+    if replan_required:
+        reasoning_parts.append(replan_reason or "")
+    reasoning_text = " ".join(reasoning_parts).strip()
+    # v3 정합성 검증 + 1회 보정
+    check = check_reasoning_consistency("critic", {**critic_output.model_dump(), "reasoning": reasoning_text})
+    if not check.is_consistent:
+        reasoning_text = _repair_reasoning_for_consistency("critic", critic_output, current_reasoning=reasoning_text)
+    critic_output_dict = critic_output.model_dump()
+    critic_output_dict["reasoning"] = reasoning_text
+    last_node_summary = f"critic 완료: {reasoning_text[:60]}…" if len(reasoning_text) > 60 else f"critic 완료: {reasoning_text}"
+    pending: list[dict[str, Any]] = [
+        AgentEvent(event_type="NODE_START", node="critic", phase="reflect", message="전문 도구 결과와 입력 품질을 교차 검토합니다.", metadata={}).to_payload(),
+    ]
+    if not check.is_consistent:
+        pending.append(
+            AgentEvent(
+                event_type="THINKING_RETRY",
+                node="critic",
+                phase="reflect",
+                message="추론 정합성 불일치 감지 — 재검토 후 문구를 보정합니다.",
+                metadata={"conflict": check.conflict_description},
+            ).to_payload()
+        )
+    pending.extend(_reasoning_stream_events("critic", reasoning_text))
+    pending.append(
+        AgentEvent(
+            event_type="NODE_END",
+            node="critic",
+            phase="reflect",
+            message="비판적 재검토가 완료되었습니다.",
+            metadata={"reasoning": reasoning_text, **critique},
+        ).to_payload(),
     )
     return {
         "critique": critique,
-        "critic_output": critic_output.model_dump(),
+        "critic_output": critic_output_dict,
         "critic_loop_count": loop_count + 1 if replan_required else loop_count,
         "replan_context": replan_context,
-        "pending_events": [
-            AgentEvent(
-                event_type="NODE_START",
-                node="critic",
-                phase="reflect",
-                message=start_note["message"],
-                thought=start_note["thought"],
-                action=start_note["action"],
-                observation=start_note["observation"],
-                metadata={"role": "critic_agent", "note_source": start_note.get("source", "fallback"), "note_model": start_note.get("note_model")},
-            ).to_payload(),
-            AgentEvent(
-                event_type="NODE_END",
-                node="critic",
-                phase="reflect",
-                message=end_note["message"],
-                thought=end_note["thought"],
-                action=end_note["action"],
-                observation=end_note["observation"],
-                metadata={"role": "critic_agent", "note_source": end_note.get("source", "fallback"), "note_model": end_note.get("note_model"), **critique},
-            ).to_payload(),
-        ],
+        "last_node_summary": last_node_summary,
+        "pending_events": pending,
     }
 
 
@@ -1185,91 +1203,63 @@ async def verify_node(state: AgentState) -> AgentState:
             gap=gap_text,
         ))
 
+    rationale = hitl_request.get("why_hitl") if hitl_request else "자동 확정 가능한 상태로 검증이 완료되었습니다."
     verifier_output = VerifierOutput(
         grounded=not needs_hitl,
         needs_hitl=needs_hitl,
         missing_evidence=(hitl_request.get("missing_evidence") or hitl_request.get("reasons") or []) if hitl_request else [],
         gate=gate,
-        rationale=(hitl_request.get("why_hitl") if hitl_request else "자동 확정 가능한 상태로 검증이 완료되었습니다."),
+        rationale=rationale,
         quality_signals=verification["quality_signals"],
         claim_results=claim_results,
     )
-    start_note = await generate_working_note(
-        node="verify",
-        role="verifier_agent",
-        context={
-            "voucher_summary": _voucher_summary_for_context(state["body_evidence"]),
-            "critique": state.get("critique"),
-            "tool_results": state.get("tool_results", []),
-        },
-        fallback_message="근거 정합성과 추가 검토 필요 여부를 확인합니다.",
-        fallback_thought="사람 검토가 필요한 조건인지 게이트를 판정해야 합니다.",
-        fallback_action="검증 게이트와 HITL 조건을 평가합니다.",
-        fallback_observation="검증 게이트 적용 전 상태를 정리했습니다.",
-    )
-    gate_note = await generate_working_note(
-        node="verify",
-        role="verifier_agent",
-        context={
-            "voucher_summary": _voucher_summary_for_context(state["body_evidence"]),
-            "verification": verification,
-            "hitl_request": hitl_request,
-        },
-        fallback_message="검증 게이트 적용이 완료되었습니다.",
-        fallback_thought="자동 진행 여부와 사람 검토 전환 여부를 결정했습니다.",
-        fallback_action="검증 게이트 결과를 확정했습니다.",
-        fallback_observation=("사람 검토 필요" if needs_hitl else "자동 진행 가능"),
-    )
-    events = [
-        AgentEvent(
-            event_type="NODE_START",
-            node="verifier",
-            phase="verify",
-            message=start_note["message"],
-            thought=start_note["thought"],
-            action=start_note["action"],
-            observation=start_note["observation"],
-            metadata={"role": "verifier_agent", "note_source": start_note.get("source", "fallback"), "note_model": start_note.get("note_model")},
-        ).to_payload(),
+    reasoning_parts = [rationale]
+    reasoning_parts.append("담당자 검토 필요" if needs_hitl else "자동 진행 가능")
+    reasoning_text = " ".join(reasoning_parts).strip()
+    # v3 정합성 검증 + 1회 보정
+    check = check_reasoning_consistency("verify", {**verifier_output.model_dump(), "reasoning": reasoning_text})
+    if not check.is_consistent:
+        reasoning_text = _repair_reasoning_for_consistency("verify", verifier_output, current_reasoning=reasoning_text)
+    verifier_output_dict = verifier_output.model_dump()
+    verifier_output_dict["reasoning"] = reasoning_text
+    events: list[dict[str, Any]] = [
+        AgentEvent(event_type="NODE_START", node="verifier", phase="verify", message="근거 정합성과 추가 검토 필요 여부를 확인합니다.", metadata={}).to_payload(),
+    ]
+    if not check.is_consistent:
+        events.append(
+            AgentEvent(
+                event_type="THINKING_RETRY",
+                node="verifier",
+                phase="verify",
+                message="추론 정합성 불일치 감지 — 재검토 후 문구를 보정합니다.",
+                metadata={"conflict": check.conflict_description},
+            ).to_payload()
+        )
+    events.extend(_reasoning_stream_events("verifier", reasoning_text))
+    events.append(
         AgentEvent(
             event_type="GATE_APPLIED",
             node="verifier",
             phase="verify",
-            message=gate_note["message"],
+            message="검증 게이트 적용이 완료되었습니다.",
             decision_code="HITL_REQUIRED" if needs_hitl else "READY",
-            thought=gate_note["thought"],
-            action=gate_note["action"],
-            observation=gate_note["observation"],
-            metadata={"role": "verifier_agent", "note_source": gate_note.get("source", "fallback"), "note_model": gate_note.get("note_model"), **verification},
+            observation="담당자 검토 필요" if needs_hitl else "자동 진행 가능",
+            metadata={**verification},
         ).to_payload(),
-    ]
+    )
     if hitl_request:
-        hitl_note = await generate_working_note(
-            node="verify",
-            role="verifier_agent",
-            context={
-                "voucher_summary": _voucher_summary_for_context(state["body_evidence"]),
-                "hitl_request": hitl_request,
-            },
-            fallback_message="사람 검토가 필요한 케이스로 분류되었습니다.",
-            fallback_thought="현재 자동 확정은 위험해 사람 검토를 우선해야 합니다.",
-            fallback_action="재무 검토자에게 소명 요청을 생성합니다.",
-            fallback_observation="HITL 요청이 생성되었습니다.",
-        )
         events.append(
             AgentEvent(
                 event_type="HITL_REQUESTED",
                 node="verifier",
                 phase="verify",
-                message=hitl_note["message"],
+                message="담당자 검토가 필요한 케이스로 분류되었습니다.",
                 decision_code="HITL_REQUIRED",
-                thought=hitl_note["thought"],
-                action=hitl_note["action"],
-                observation=hitl_note["observation"],
-                metadata={**hitl_request, "note_source": hitl_note.get("source", "fallback"), "note_model": hitl_note.get("note_model")},
-            ).to_payload()
+                metadata=dict(hitl_request),
+            ).to_payload(),
         )
-    return {"verification": verification, "verifier_output": verifier_output.model_dump(), "hitl_request": hitl_request, "pending_events": events}
+    last_node_summary = f"verify 완료: {reasoning_text[:60]}…" if len(reasoning_text) > 60 else f"verify 완료: {reasoning_text}"
+    return {"verification": verification, "verifier_output": verifier_output_dict, "hitl_request": hitl_request, "last_node_summary": last_node_summary, "pending_events": events}
 
 
 def _route_after_critic(state: AgentState) -> str:
@@ -1313,13 +1303,13 @@ async def reporter_node(state: AgentState) -> AgentState:
         f"정책점수 {score['policy_score']}점, 근거점수 {score['evidence_score']}점, 최종점수 {score['final_score']}점입니다."
     )
     if hitl_request:
-        summary += " 사람 검토가 필요한 상태입니다."
+        summary += " 담당자 검토가 필요한 상태입니다."
         verdict = "HITL_REQUIRED"
     elif state["flags"].get("hasHitlResponse") and hitl_approved is True:
-        summary += " 사람 검토 결과 승인 가능으로 판단되어 최종 확정 후보로 전환되었습니다."
+        summary += " 담당자 검토 결과 승인 가능으로 판단되어 최종 확정 후보로 전환되었습니다."
         verdict = "COMPLETED_AFTER_HITL"
     elif state["flags"].get("hasHitlResponse") and hitl_approved is False:
-        summary += " 사람 검토 결과 보류/추가 검토 의견이 있어 자동 확정을 중단합니다."
+        summary += " 담당자 검토 결과 보류/추가 검토 의견이 있어 자동 확정을 중단합니다."
         verdict = "HOLD_AFTER_HITL"
     else:
         summary += " 현재 수집된 증거 기준으로 추가 검토 우선순위가 높습니다."
@@ -1333,56 +1323,41 @@ async def reporter_node(state: AgentState) -> AgentState:
     sentences_list: list[ReporterSentence] = [
         ReporterSentence(sentence=summary, citations=citations_list),
     ]
-    reporter_output = ReporterOutput(summary=summary, verdict=verdict, sentences=sentences_list)
-    start_note = await generate_working_note(
-        node="report",
-        role="reporter_agent",
-        context={
-            "voucher_summary": _voucher_summary_for_context(state["body_evidence"]),
-            "score_breakdown": score,
-            "policy_refs": _top_policy_refs(state.get("tool_results", []), limit=2),
-        },
-        fallback_message="사용자에게 제시할 보고 문안을 구성합니다.",
-        fallback_thought="핵심 사실과 규정 근거를 짧고 명확한 보고 문장으로 바꿔야 합니다.",
-        fallback_action="보고용 설명 문장을 구성합니다.",
-        fallback_observation="보고 문안 생성을 시작했습니다.",
-    )
-    end_note = await generate_working_note(
-        node="report",
-        role="reporter_agent",
-        context={
-            "voucher_summary": _voucher_summary_for_context(state["body_evidence"]),
-            "summary": summary,
-        },
-        fallback_message=summary,
-        fallback_thought="사용자에게 전달할 보고 요약이 준비되었습니다.",
-        fallback_action="최종 요약 문장을 정리했습니다.",
-        fallback_observation="사용자용 요약 문안이 준비되었습니다.",
+    reasoning_text = f"{summary} {verdict}".strip()
+    # v3 정합성 검증 + 1회 보정
+    check = check_reasoning_consistency("reporter", {"verdict": verdict, "reasoning": reasoning_text})
+    if not check.is_consistent:
+        reasoning_text = _repair_reasoning_for_consistency("reporter", {"verdict": verdict}, current_reasoning=reasoning_text)
+    reporter_output = ReporterOutput(summary=summary, verdict=verdict, sentences=sentences_list, reasoning=reasoning_text)
+    reporter_output_dict = reporter_output.model_dump()
+    last_node_summary = f"reporter 완료: {reasoning_text[:60]}…" if len(reasoning_text) > 60 else f"reporter 완료: {reasoning_text}"
+    pending: list[dict[str, Any]] = [
+        AgentEvent(event_type="NODE_START", node="reporter", phase="report", message="사용자에게 제시할 보고 문안을 구성합니다.", metadata={}).to_payload(),
+    ]
+    if not check.is_consistent:
+        pending.append(
+            AgentEvent(
+                event_type="THINKING_RETRY",
+                node="reporter",
+                phase="report",
+                message="추론 정합성 불일치 감지 — 재검토 후 문구를 보정합니다.",
+                metadata={"conflict": check.conflict_description},
+            ).to_payload()
+        )
+    pending.extend(_reasoning_stream_events("reporter", reasoning_text))
+    pending.append(
+        AgentEvent(
+            event_type="NODE_END",
+            node="reporter",
+            phase="report",
+            message=summary,
+            metadata={"summary": summary, "verdict": verdict},
+        ).to_payload(),
     )
     return {
-        "reporter_output": reporter_output.model_dump(),
-        "pending_events": [
-            AgentEvent(
-                event_type="NODE_START",
-                node="reporter",
-                phase="report",
-                message=start_note["message"],
-                thought=start_note["thought"],
-                action=start_note["action"],
-                observation=start_note["observation"],
-                metadata={"role": "reporter_agent", "note_source": start_note.get("source", "fallback"), "note_model": start_note.get("note_model")},
-            ).to_payload(),
-            AgentEvent(
-                event_type="NODE_END",
-                node="reporter",
-                phase="report",
-                message=end_note["message"],
-                thought=end_note["thought"],
-                action=end_note["action"],
-                observation=end_note["observation"],
-                metadata={"role": "reporter_agent", "summary": summary, "note_source": end_note.get("source", "fallback"), "note_model": end_note.get("note_model")},
-            ).to_payload(),
-        ],
+        "reporter_output": reporter_output_dict,
+        "last_node_summary": last_node_summary,
+        "pending_events": pending,
     }
 
 
@@ -1512,46 +1487,70 @@ async def run_langgraph_agentic_analysis(
         config["callbacks"] = [handler]
 
     graph = build_agent_graph()
-    if resume_value is not None:
-        inputs: Any = Command(resume=resume_value)
-    else:
-        inputs = {
-            "case_id": case_id,
-            "body_evidence": body_evidence,
-            "intended_risk_type": intended_risk_type,
-        }
 
-    async for chunk in graph.astream(inputs, stream_mode="updates", config=config):
-        if chunk.get("__interrupt__"):
-            # HITL: interrupt()로 일시정지. 호출자에게 HITL_REQUIRED 전달 후 같은 run_id로 재개 대기
-            interrupt_list = chunk["__interrupt__"]
-            hitl_payload = interrupt_list[0].value if interrupt_list else {}
-            yield "AGENT_EVENT", AgentEvent(
-                event_type="HITL_PAUSE",
-                node="hitl_pause",
-                phase="verify",
-                message="사람 검토가 필요합니다. HITL 응답 후 같은 run으로 재개됩니다.",
-                observation="interrupt",
-                metadata={"hitl_request": hitl_payload},
-            ).to_payload()
-            yield "completed", {
-                "status": "HITL_REQUIRED",
-                "hitl_request": hitl_payload,
-                "reasonText": "사람 검토 입력을 기다립니다.",
-            }
+    # HITL 이후 재개 시도: 우선 LangGraph의 Command(resume=...)를 사용하고,
+    # 체크포인트가 없어서 'body_evidence' KeyError가 나면 동일 run_id로 새 입력으로 재시작한다.
+    async def _stream_from_graph(_inputs: Any):
+        async for chunk in graph.astream(_inputs, stream_mode="updates", config=config):
+            yield chunk
+
+    async def _yield_updates(chunks):
+        async for chunk in chunks:
+            if chunk.get("__interrupt__"):
+                # HITL: interrupt()로 일시정지. 호출자에게 HITL_REQUIRED 전달 후 같은 run_id로 재개 대기
+                interrupt_list = chunk["__interrupt__"]
+                hitl_payload = interrupt_list[0].value if interrupt_list else {}
+                yield "AGENT_EVENT", AgentEvent(
+                    event_type="HITL_PAUSE",
+                    node="hitl_pause",
+                    phase="verify",
+                    message="담당자 검토가 필요합니다. HITL 응답 후 같은 run으로 재개됩니다.",
+                    observation="interrupt",
+                    metadata={"hitl_request": hitl_payload},
+                ).to_payload()
+                yield "completed", {
+                    "status": "HITL_REQUIRED",
+                    "hitl_request": hitl_payload,
+                    "reasonText": "담당자 검토 입력을 기다립니다.",
+                }
+                return
+            for _node, update in chunk.items():
+                if _node == "__interrupt__":
+                    continue
+                for ev in (update.get("pending_events") or []) or []:
+                    if ev.get("event_type") == "SCORE_BREAKDOWN":
+                        yield "confidence", {
+                            "label": "RISK_SCORE_BREAKDOWN",
+                            "detail": ev.get("message"),
+                            "score_breakdown": (ev.get("metadata") or {}),
+                        }
+                    else:
+                        yield "AGENT_EVENT", ev
+                final = update.get("final_result")
+                if final is not None:
+                    yield "completed", final
+
+    # 1차: checkpoint 기반 resume 시도
+    if resume_value is not None:
+        try:
+            async for ev in _yield_updates(_stream_from_graph(Command(resume=resume_value))):
+                yield ev
             return
-        for _node, update in chunk.items():
-            if _node == "__interrupt__":
-                continue
-            for ev in (update.get("pending_events") or []) or []:
-                if ev.get("event_type") == "SCORE_BREAKDOWN":
-                    yield "confidence", {
-                        "label": "RISK_SCORE_BREAKDOWN",
-                        "detail": ev.get("message"),
-                        "score_breakdown": (ev.get("metadata") or {}),
-                    }
-                else:
-                    yield "AGENT_EVENT", ev
-            final = update.get("final_result")
-            if final is not None:
-                yield "completed", final
+        except KeyError as e:
+            # 체크포인트가 없거나 깨진 경우: 'body_evidence' KeyError를 만나면 동일 run_id로 새 입력으로 재시작
+            if str(e) != "'body_evidence'":
+                raise
+            # fallthrough to fresh run with hitlResponse 주입
+
+    # 2차: 새 입력으로 실행 (resume 없음 또는 resume 실패)
+    body_with_hitl = dict(body_evidence or {})
+    if resume_value is not None:
+        body_with_hitl["hitlResponse"] = resume_value
+    inputs: Any = {
+        "case_id": case_id,
+        "body_evidence": body_with_hitl,
+        "intended_risk_type": intended_risk_type,
+    }
+
+    async for ev in _yield_updates(_stream_from_graph(inputs)):
+        yield ev

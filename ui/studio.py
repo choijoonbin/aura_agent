@@ -146,7 +146,7 @@ def render_agent_studio_page() -> None:
 4. **Execute Agent**: 실제 skill/tool 호출
 5. **Critic Agent**: 과잉 주장과 반례 검토
 6. **Verifier Agent**: 자동 판정 가능 여부 검증
-7. **HITL Review**: 사람 검토 필요 시 개입
+7. **HITL Review**: 담당자 검토 필요 시 개입
 8. **Reporter Agent**: 설명 문장과 최종 요약 생성
 9. **Finalizer**: 상태/점수/이력 최종 확정
 10. **END**: 저장/조회 가능한 결과로 종료

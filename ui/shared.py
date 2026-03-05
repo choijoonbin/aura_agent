@@ -344,7 +344,7 @@ def status_display_name(status: str | None) -> str:
         "IN_REVIEW": "검토 중",
         "REVIEW_REQUIRED": "검토 필요",
         "REVIEW_AFTER_HITL": "검토 재개",
-        "HITL_REQUIRED": "사람 검토 필요",
+        "HITL_REQUIRED": "담당자 검토 필요",
         "HOLD_AFTER_HITL": "보류",
         "COMPLETED": "완료",
         "COMPLETED_AFTER_HITL": "검토 후 완료",

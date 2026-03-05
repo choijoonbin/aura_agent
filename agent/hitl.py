@@ -175,10 +175,10 @@ def build_hitl_request(
     return {
         "required": True,
         "handoff": "FINANCE_REVIEWER",
-        "why_hitl": " ".join(why_parts) if why_parts else "자동 확정 근거가 충분하지 않아 사람 검토가 필요합니다.",
+        "why_hitl": " ".join(why_parts) if why_parts else "자동 확정 근거가 충분하지 않아 담당자 검토가 필요합니다.",
         "blocking_gate": str(gate_policy or "HITL_REQUIRED"),
         "blocking_reason": blocking_reasons[0] if blocking_reasons else "자동 확정을 중단한 상세 사유를 검토해 주세요.",
-        "reasons": blocking_reasons or ["사람 검토가 필요한 상태입니다."],
+        "reasons": blocking_reasons or ["담당자 검토가 필요한 상태입니다."],
         "auto_finalize_blockers": blocking_reasons or ["자동 확정을 중단한 근거가 있습니다."],
         "unresolved_claims": unresolved_claims,
         "missing_evidence": missing_evidence,

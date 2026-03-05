@@ -31,6 +31,7 @@ class PlannerOutput(BaseModel):
     stop_after_sufficient_evidence: bool = Field(default=True, description="증거 충분 시 조기 종료 여부")
     tool_budget: int | None = Field(default=None, description="최대 도구 호출 수(없으면 무제한)")
     rationale: str = Field(default="", description="계획 수립 근거")
+    reasoning: str = Field(default="", description="실제 판단 과정 서술(스트리밍용)")
 
 
 # ----- Critic -----
@@ -42,7 +43,7 @@ class CriticOutput(BaseModel):
     overclaim_risk: bool = Field(description="과잉 주장 위험 여부")
     contradictions: list[str] = Field(default_factory=list, description="발견된 모순 목록")
     missing_counter_evidence: list[str] = Field(default_factory=list, description="부족한 반증/누락 필드")
-    recommend_hold: bool = Field(description="사람 검토 보류 권고 여부")
+    recommend_hold: bool = Field(description="담당자 검토 보류 권고 여부")
     rationale: str = Field(default="", description="비판 근거")
     has_legacy_result: bool = Field(default=False, description="legacy 전문가 결과 존재 여부")
     verification_targets: list[str] = Field(
@@ -57,6 +58,7 @@ class CriticOutput(BaseModel):
         default="",
         description="재계획이 필요한 이유",
     )
+    reasoning: str = Field(default="", description="비판 근거 추론 과정 서술(스트리밍용)")
 
 
 # ----- Verifier -----
@@ -87,7 +89,7 @@ class VerifierOutput(BaseModel):
     """검증 노드 출력. 근거 충족·HITL 필요·게이트."""
 
     grounded: bool = Field(description="증거 기반으로 근거가 충족되었는지")
-    needs_hitl: bool = Field(description="사람 검토 필요 여부")
+    needs_hitl: bool = Field(description="담당자 검토 필요 여부")
     missing_evidence: list[str] = Field(default_factory=list, description="부족한 증거 목록")
     gate: VerifierGate = Field(description="진행 게이트: READY | HITL_REQUIRED | REJECTED")
     rationale: str = Field(default="", description="검증 근거")
@@ -96,6 +98,7 @@ class VerifierOutput(BaseModel):
         default_factory=list,
         description="주장(claim)별 개별 검증 결과 목록 (신규)",
     )
+    reasoning: str = Field(default="", description="검증 판단 과정 서술(스트리밍용)")
 
 
 # ----- Reporter -----
@@ -122,6 +125,7 @@ class ReporterOutput(BaseModel):
     summary: str = Field(description="사용자용 요약")
     verdict: str = Field(default="", description="판정(예: HITL_REQUIRED, READY)")
     sentences: list[ReporterSentence] = Field(default_factory=list, description="문장별 보고 + 인용")
+    reasoning: str = Field(default="", description="최종 판단에 이른 추론 과정(스트리밍용)")
 
     class Config:
         extra = "allow"

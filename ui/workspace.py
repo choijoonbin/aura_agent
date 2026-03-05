@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import html
 import json
+from collections import defaultdict
 from typing import Any, Iterator
 
 import requests
@@ -39,6 +41,37 @@ def _format_agent_event_line(obj: dict[str, Any]) -> str:
     if obj.get("observation"):
         parts.append(f"  - 관찰: {obj['observation']}")
     return "\n".join(parts) + "\n"
+
+
+# workspace.md B-6: 이벤트 타입별 아이콘 (TOOL_CALL은 ⚡로 통일)
+EVENT_ICON_MAP = {
+    "NODE_START": "🤖",
+    "NODE_END": "✅",
+    "TOOL_CALL": "⚡",
+    "TOOL_RESULT": "📊",
+    "TOOL_SKIPPED": "⏭️",
+    "HITL_PAUSE": "⏸️",
+    "HITL_REQUESTED": "⏸️",
+    "GATE_APPLIED": "🔒",
+    "PLAN_READY": "📋",
+    "SCORE_BREAKDOWN": "📈",
+    "FINAL_VERDICT": "⚖️",
+    "SCREENING_RESULT": "📋",
+    "THINKING_TOKEN": "💭",
+    "THINKING_DONE": "💭",
+    "THINKING_RETRY": "🔄",
+}
+
+PIPELINE_NODES = [
+    ("screener", "스크리닝"),
+    ("intake", "정보 수집"),
+    ("planner", "계획 수립"),
+    ("execute", "도구 실행"),
+    ("critic", "비판 검토"),
+    ("verify", "정책 검증"),
+    ("reporter", "보고서 생성"),
+    ("finalizer", "최종 판정"),
+]
 
 
 def _tool_caption_fragment(ev_type: str, tool: str | None, tool_description: str | None, html_tooltip: bool = False) -> str:
@@ -96,6 +129,7 @@ def sse_text_stream(stream_url: str, *, run_id: str | None = None) -> Iterator[s
         response.raise_for_status()
         event = None
         first_event = True
+        thinking_node: str | None = None
         for raw in response.iter_lines(decode_unicode=True):
             if not raw:
                 continue
@@ -112,18 +146,51 @@ def sse_text_stream(stream_url: str, *, run_id: str | None = None) -> Iterator[s
             try:
                 obj = json.loads(payload)
                 if event == "AGENT_EVENT":
-                    if not first_event:
-                        yield "\n\n⏳ *다음 이벤트 수신 중...*  \n\n"
-                    for chunk in _stream_card_chunks(obj):
-                        yield chunk
-                    first_event = False
-                    if str(obj.get("event_type") or "").upper() == "HITL_PAUSE":
-                        if run_id:
-                            st.session_state[_hitl_state_key("dismissed", run_id)] = False
-                            st.session_state[_hitl_state_key("shown", run_id)] = True
-                            st.session_state[_hitl_state_key("open", run_id)] = True
-                        yield "\n\n**[최종]** 사람 검토 입력을 기다립니다.\n"
-                        break
+                    ev_type = str(obj.get("event_type") or "").upper()
+                    if ev_type == "THINKING_TOKEN":
+                        token = (obj.get("metadata") or {}).get("token") or ""
+                        node = obj.get("node") or "agent"
+                        if thinking_node is None:
+                            if not first_event:
+                                yield "\n\n---\n\n"
+                            ts = fmt_dt_korea(obj.get("timestamp")) or "-"
+                            yield f"**{ts}** · {node} / 추론  \n"
+                            thinking_node = node
+                        if token:
+                            yield token
+                        first_event = False
+                    elif ev_type == "THINKING_DONE":
+                        yield "  \n\n---  \n\n"
+                        thinking_node = None
+                        first_event = False
+                    elif ev_type == "THINKING_RETRY":
+                        # 재검토 이벤트: 현재 thinking 카드를 닫고, 재검토 안내를 한 줄로 표시한 뒤 다음 토큰을 새 카드로 받는다.
+                        if thinking_node is not None:
+                            yield "  \n\n---  \n\n"
+                            thinking_node = None
+                        if not first_event:
+                            yield "\n\n---\n\n"
+                        ts = fmt_dt_korea(obj.get("timestamp")) or "-"
+                        node = obj.get("node") or "agent"
+                        yield f"**{ts}** · {node} / 재검토  \n"
+                        yield "_판단 결과와 추론 문구 정합성을 다시 맞추는 중..._  \n\n"
+                        first_event = False
+                    else:
+                        if thinking_node is not None:
+                            yield "  \n\n---  \n\n"
+                            thinking_node = None
+                        if not first_event:
+                            yield "\n\n---\n\n"
+                        for chunk in _stream_card_chunks(obj):
+                            yield chunk
+                        first_event = False
+                        if ev_type == "HITL_PAUSE":
+                            if run_id:
+                                st.session_state[_hitl_state_key("dismissed", run_id)] = False
+                                st.session_state[_hitl_state_key("shown", run_id)] = True
+                                st.session_state[_hitl_state_key("open", run_id)] = True
+                            yield "\n\n**[최종]** 담당자 검토 입력을 기다립니다.\n"
+                            break
                 elif event == "completed":
                     final_text = obj.get("reasonText") or obj.get("summary") or "완료"
                     result = obj.get("result") or {}
@@ -195,44 +262,186 @@ def render_tool_trace_summary(tool_results: list[dict[str, Any]]) -> None:
                 st.caption(card["detail"])
 
 
+def render_pipeline_progress(completed_nodes: list[str], current_node: str) -> None:
+    """workspace.md B-3: 파이프라인 진행 상태 바."""
+    total = len(PIPELINE_NODES)
+    completed_count = len(completed_nodes)
+    progress_pct = (completed_count / total * 100) if total else 0
+    node_html_parts = []
+    for node_id, node_label in PIPELINE_NODES:
+        if node_id in completed_nodes:
+            status_class, icon = "done", "✓"
+        elif node_id == current_node:
+            status_class, icon = "active", "◉"
+        else:
+            status_class, icon = "pending", "○"
+        node_html_parts.append(f"""
+        <div class="pipeline-node {status_class}">
+          <div class="pipeline-dot">{icon}</div>
+          <div class="pipeline-label">{node_label}</div>
+        </div>
+        """)
+    st.markdown(f"""
+    <style>
+    .pipeline-wrapper {{ background: #0d1117; border: 1px solid #1e2d3d; border-radius: 12px; padding: 16px 20px; margin-bottom: 16px; }}
+    .pipeline-track {{ display: flex; align-items: center; justify-content: space-between; position: relative; flex-wrap: wrap; gap: 8px; }}
+    .pipeline-track::before {{ content: ''; position: absolute; top: 14px; left: 0; right: 0; height: 2px; background: #1e2d3d; z-index: 0; }}
+    .pipeline-node {{ display: flex; flex-direction: column; align-items: center; gap: 6px; position: relative; z-index: 1; min-width: 48px; }}
+    .pipeline-dot {{ width: 28px; height: 28px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 13px; font-weight: 700; }}
+    .pipeline-node.done .pipeline-dot {{ background: #22c55e; color: #000; }}
+    .pipeline-node.active .pipeline-dot {{ background: #3b82f6; color: #fff; box-shadow: 0 0 12px #3b82f6aa; animation: pulse-dot 1.2s ease-in-out infinite; }}
+    .pipeline-node.pending .pipeline-dot {{ background: #1e2d3d; color: #4b5563; border: 2px solid #1e2d3d; }}
+    .pipeline-label {{ font-size: 10px; letter-spacing: 0.5px; color: #6b7280; text-align: center; white-space: nowrap; }}
+    .pipeline-node.done .pipeline-label {{ color: #22c55e; }}
+    .pipeline-node.active .pipeline-label {{ color: #3b82f6; font-weight: 700; }}
+    @keyframes pulse-dot {{ 0%, 100% {{ box-shadow: 0 0 8px #3b82f6aa; }} 50% {{ box-shadow: 0 0 20px #3b82f6; }} }}
+    .pipeline-progress-bar {{ height: 3px; background: linear-gradient(to right, #22c55e {progress_pct:.0f}%, #1e2d3d {progress_pct:.0f}%); border-radius: 2px; margin-top: 12px; }}
+    .pipeline-meta {{ display: flex; justify-content: space-between; margin-top: 8px; font-size: 11px; color: #4b5563; }}
+    </style>
+    <div class="pipeline-wrapper">
+      <div class="pipeline-track">
+        {''.join(node_html_parts)}
+      </div>
+      <div class="pipeline-progress-bar"></div>
+      <div class="pipeline-meta">
+        <span>{completed_count}/{total} 단계 완료</span>
+        <span>{'분석 완료' if completed_count == total else ('진행 중: ' + current_node) if current_node else ''}</span>
+      </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+
+def render_score_breakdown_card(policy_score: int, evidence_score: int, final_score: int) -> None:
+    """workspace.md B-7: Confidence Score 인라인 게이지 바."""
+    def _bar(label: str, value: int, color: str) -> str:
+        return f"""
+        <div style="margin: 8px 0;">
+          <div style="display:flex; justify-content:space-between; font-size:12px; margin-bottom:4px;">
+            <span style="color:#9ca3af;">{label}</span>
+            <span style="color:{color}; font-weight:700;">{value}</span>
+          </div>
+          <div style="background:#1e2d3d; border-radius:4px; height:8px;">
+            <div style="width:{min(100, value)}%; background:{color}; height:8px; border-radius:4px; transition:width 0.8s ease;"></div>
+          </div>
+        </div>
+        """
+    final_color = "#22c55e" if final_score >= 70 else "#f59e0b" if final_score >= 50 else "#ef4444"
+    st.markdown(
+        f"""
+        <div style="background:#0d1117; border:1px solid #1e2d3d; border-radius:10px; padding:16px; margin:10px 0;">
+          <div style="font-size:12px; font-weight:700; letter-spacing:1px; color:#6b7280; margin-bottom:12px;">CONFIDENCE SCORE</div>
+          {_bar('정책 점수', policy_score, '#3b82f6')}
+          {_bar('근거 점수', evidence_score, '#8b5cf6')}
+          {_bar('최종 점수', final_score, final_color)}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _thinking_row_html(label: str, icon: str, content: str, row_class: str, border_color: str) -> str:
+    if not content:
+        return ""
+    esc = html.escape(content)
+    return f"""
+    <div class="thinking-row {row_class}" style="border-left-color:{border_color}">
+      <span class="thinking-icon">{icon}</span>
+      <div class="thinking-content">
+        <span class="thinking-label">{label}</span>
+        <p>{esc}</p>
+      </div>
+    </div>
+    """
+
+
+def _pipeline_state_from_events(events: list[dict[str, Any]]) -> tuple[list[str], str]:
+    """이벤트 목록에서 완료된 노드와 현재 노드 추출."""
+    all_ids = [n[0] for n in PIPELINE_NODES]
+    completed = []
+    for node_id, _ in PIPELINE_NODES:
+        if any(
+            (e.get("payload") or {}).get("node") == node_id
+            and str((e.get("payload") or {}).get("event_type") or "").upper() == "NODE_END"
+            for e in events
+        ):
+            completed.append(node_id)
+    if not completed:
+        current = all_ids[0]
+    else:
+        idx = all_ids.index(completed[-1]) if completed[-1] in all_ids else 0
+        current = all_ids[idx + 1] if idx + 1 < len(all_ids) else all_ids[-1]
+    return completed, current
+
+
 def render_timeline_cards(events: list[dict[str, Any]], *, view_mode: str = "business") -> None:
     if not events:
         render_empty_state("표시할 스트림 이벤트가 없습니다.")
         return
+    completed_nodes, current_node = _pipeline_state_from_events(events)
+    render_pipeline_progress(completed_nodes, current_node)
+    node_labels_map = dict(PIPELINE_NODES)
+    node_groups = defaultdict(list)
+    node_order = []
+    for event in events:
+        payload = event.get("payload") or {}
+        if event.get("event_type") != "AGENT_EVENT":
+            continue
+        node = (payload.get("node") or "unknown").lower()
+        if node not in node_groups:
+            node_order.append(node)
+        node_groups[node].append(event)
+    latest_node = node_order[-1] if node_order else None
+    st.markdown("""
+    <style>
+    .thinking-row { display: flex; align-items: flex-start; gap: 12px; padding: 10px 14px; margin: 6px 0; border-radius: 8px; border-left: 3px solid; }
+    .thinking-row.thought { background: #0f1a2e; border-color: #3b82f6; }
+    .thinking-row.action { background: #0f2a1a; border-color: #22c55e; }
+    .thinking-row.observation { background: #1a1500; border-color: #f59e0b; }
+    .thinking-icon { font-size: 18px; margin-top: 2px; flex-shrink: 0; }
+    .thinking-label { font-size: 10px; font-weight: 700; letter-spacing: 1.2px; text-transform: uppercase; opacity: 0.6; display: block; margin-bottom: 4px; }
+    .thinking-content p { margin: 0; font-size: 14px; line-height: 1.6; color: #e2e8f0; }
+    </style>
+    """, unsafe_allow_html=True)
     with stylable_container(key="timeline_shell", css_styles="""{background: radial-gradient(circle at 1px 1px, rgba(15,23,42,0.10) 1px, transparent 0); background-size: 14px 14px; background-color:#f8fafc; border:1px dashed #dbe2ea; border-radius:18px; padding:14px;}"""):
-        for index, event in enumerate(events):
-            payload = event.get("payload") or {}
-            if event.get("event_type") != "AGENT_EVENT":
-                continue
-            with stylable_container(key=f"timeline_{index}", css_styles="""{padding: 14px 16px; border-radius: 16px; border: 1px solid #e5e7eb; background: #fff; margin-bottom: 10px;}"""):
-                meta = payload.get("metadata") or {}
-                ev_type = str(payload.get("event_type") or "").upper()
-                part2 = f"{payload.get('node') or '-'} / {ev_type}"
-                tool_frag = _tool_caption_fragment(ev_type, payload.get("tool"), meta.get("tool_description"), html_tooltip=True)
-                if tool_frag:
-                    part2 = f"{payload.get('node') or '-'} / {tool_frag}"
-                cap = f"{fmt_dt_korea(event.get('at') or payload.get('timestamp')) or '-'} · {part2}"
-                st.caption(cap, unsafe_allow_html=True)
-                ns = meta.get("note_source", "")
-                note_model = meta.get("note_model") or ""
-                if ns:
-                    lbl = note_model if ns == "llm" and note_model else ("LLM" if ns == "llm" else "정의문구")
-                    st.caption(f"*{lbl}*")
-                st.markdown(f"**{payload.get('node') or '-'} / {payload.get('event_type') or '-'}**")
-                if payload.get("message"):
-                    st.write(payload["message"])
-                cols = st.columns(3)
-                if payload.get("thought"):
-                    cols[0].caption("생각")
-                    cols[0].write(payload["thought"])
-                if payload.get("action"):
-                    cols[1].caption("행동")
-                    cols[1].write(payload["action"])
-                if payload.get("observation"):
-                    cols[2].caption("관찰")
-                    cols[2].write(payload["observation"])
-                if view_mode == "debug":
-                    st.json(payload)
+        for node in node_order:
+            node_events = node_groups[node]
+            node_label = node_labels_map.get(node, node)
+            is_latest = node == latest_node
+            with st.expander(
+                label=f"{'▶ ' if is_latest else '✓ '}{node_label}  ({len(node_events)}개 이벤트)",
+                expanded=is_latest,
+            ):
+                for index, event in enumerate(node_events):
+                    payload = event.get("payload") or {}
+                    meta = payload.get("metadata") or {}
+                    ev_type = str(payload.get("event_type") or "").upper()
+                    icon = EVENT_ICON_MAP.get(ev_type, "🤖")
+                    part2 = f"{payload.get('node') or '-'} / {ev_type}"
+                    tool_frag = _tool_caption_fragment(ev_type, payload.get("tool"), meta.get("tool_description"), html_tooltip=True)
+                    if tool_frag:
+                        part2 = f"{payload.get('node') or '-'} / {tool_frag}"
+                    cap = f"{icon} {fmt_dt_korea(event.get('at') or payload.get('timestamp')) or '-'} · {part2}"
+                    st.caption(cap, unsafe_allow_html=True)
+                    if ev_type == "SCORE_BREAKDOWN":
+                        sb = meta.get("score_breakdown") or meta
+                        policy_score = int(sb.get("policy_score") or sb.get("policy_score_raw") or 0)
+                        evidence_score = int(sb.get("evidence_score") or sb.get("evidence_score_raw") or 0)
+                        final_score = int(sb.get("final_score") or sb.get("score") or 0)
+                        render_score_breakdown_card(policy_score, evidence_score, final_score)
+                    if payload.get("message"):
+                        st.write(payload["message"])
+                    thought = (payload.get("thought") or "").strip()
+                    action = (payload.get("action") or "").strip()
+                    observation = (payload.get("observation") or "").strip()
+                    blocks = []
+                    blocks.append(_thinking_row_html("판단", "🧠", thought, "thought", "#3b82f6"))
+                    blocks.append(_thinking_row_html("실행", "⚡", action, "action", "#22c55e"))
+                    blocks.append(_thinking_row_html("발견", "🔍", observation, "observation", "#f59e0b"))
+                    combined = "".join(blocks)
+                    if combined:
+                        st.markdown(f"<div class=\"thinking-block\">{combined}</div>", unsafe_allow_html=True)
+                    if view_mode == "debug":
+                        st.json(payload)
 
 
 # 대표 메시지 선택 우선순위 (docs/work_info/langgraphPlan3.md 추가답변)
@@ -491,7 +700,7 @@ def _fallback_hitl_request(latest_bundle: dict[str, Any]) -> dict[str, Any]:
     if quality_codes:
         reasons.append(f"품질 신호: {', '.join(str(x) for x in quality_codes)}")
     if not reasons:
-        reasons.append("HITL payload가 생성되지 않았지만 현재 run 상태상 사람 검토가 필요한 것으로 표시되었습니다.")
+        reasons.append("HITL payload가 생성되지 않았지만 현재 run 상태상 담당자 검토가 필요한 것으로 표시되었습니다.")
     return {
         "required": True,
         "handoff": "FINANCE_REVIEWER",
@@ -721,7 +930,10 @@ def render_hitl_panel(latest_bundle: dict[str, Any]) -> None:
           border-radius: 16px;
           background: #ffffff;
           padding: 12px 13px;
-          min-height: 0;
+          height: 300px;
+          min-height: 300px;
+          display: flex;
+          flex-direction: column;
         }
         .mt-hitl-box--reason {
           border-color: #fecaca;
@@ -781,6 +993,10 @@ def render_hitl_panel(latest_bundle: dict[str, Any]) -> None:
           color: #334155;
           line-height: 1.45;
           font-size: 0.88rem;
+          flex: 1 1 auto;
+          min-height: 0;
+          overflow-y: auto;
+          padding-right: 4px;
         }
         .mt-hitl-list li + li {
           margin-top: 4px;
@@ -926,10 +1142,10 @@ def render_hitl_panel(latest_bundle: dict[str, Any]) -> None:
         lead_message = (
             hitl_request.get("why_hitl")
             or hitl_request.get("blocking_reason")
-            or "사람 검토가 필요한 상태입니다."
+            or "담당자 검토가 필요한 상태입니다."
         )
         st.markdown(
-            f'<div class="mt-hitl-note"><strong>사람 검토가 필요한 상태입니다.</strong> {lead_message}</div>',
+            f'<div class="mt-hitl-note"><strong>담당자 검토가 필요한 상태입니다.</strong> {lead_message}</div>',
             unsafe_allow_html=True,
         )
 
@@ -1037,8 +1253,8 @@ def build_workspace_plan_steps(latest_bundle: dict[str, Any]) -> list[dict[str, 
         "planner": ("조사 계획 수립", "검증할 사실과 사용할 skill 순서를 계획합니다."),
         "execute": ("근거 수집 실행", "휴일/예산/업종/전표/규정 근거를 실제로 조회합니다."),
         "critic": ("비판적 검토", "과잉 주장과 반례 가능성을 다시 점검합니다."),
-        "verify": ("검증 및 HITL 판단", "자동 판정 가능 여부와 사람 검토 필요 여부를 결정합니다."),
-        "hitl_pause": ("HITL 대기", "사람 검토 필요로 일시정지. HITL 응답 후 같은 run(thread)으로 재개됩니다."),
+        "verify": ("검증 및 HITL 판단", "자동 판정 가능 여부와 담당자 검토 필요 여부를 결정합니다."),
+        "hitl_pause": ("HITL 대기", "담당자 검토 필요로 일시정지. HITL 응답 후 같은 run(thread)으로 재개됩니다."),
         "reporter": ("보고 문장 생성", "근거 중심 설명 문장과 최종 요약을 만듭니다."),
         "finalizer": ("결과 확정", "상태, 점수, 이력, 저장 payload를 최종 확정합니다."),
     }
@@ -1053,9 +1269,9 @@ def build_workspace_plan_steps(latest_bundle: dict[str, Any]) -> list[dict[str, 
         event_type = str(payload.get("event_type") or "").upper()
         if node in meta:
             seen.add(node)
-            if event_type in {"NODE_END", "COMPLETE", "REPORT_READY", "RESULT_FINALIZED", "HITL_PAUSE"}:
+            if event_type in {"NODE_END", "COMPLETE", "REPORT_READY", "RESULT_FINALIZED", "HITL_PAUSE", "THINKING_DONE"}:
                 completed.add(node)
-            if event_type in {"NODE_START", "PLAN_READY", "TOOL_CALL", "TOOL_RESULT"}:
+            if event_type in {"NODE_START", "PLAN_READY", "TOOL_CALL", "TOOL_RESULT", "THINKING_TOKEN", "THINKING_RETRY"}:
                 running = node
     steps = []
     for order, node in enumerate(node_order, start=1):
@@ -1296,7 +1512,7 @@ def render_workspace_chat_panel(selected: dict[str, Any], latest_bundle: dict[st
         st.rerun()
 
     if _has_pending_hitl(latest_bundle):
-        st.warning("이 분석은 사람 검토가 필요합니다. 검토 의견을 입력하면 같은 run으로 재개됩니다.")
+        st.warning("이 분석은 담당자 검토가 필요합니다. 검토 의견을 입력하면 같은 run으로 재개됩니다.")
         _hl, hitl_btn_col, _hr = st.columns([0.01, 0.98, 0.01])
         run_id = latest_bundle.get("run_id")
         open_key = _hitl_state_key("open", run_id)
@@ -1316,7 +1532,9 @@ def render_workspace_chat_panel(selected: dict[str, Any], latest_bundle: dict[st
     if not timeline:
         render_empty_state("분석을 시작하면 이 영역에 실시간 스트림이 표시됩니다.")
         return
-    latest_events = [event for event in timeline if event.get("event_type") == "AGENT_EVENT"][-8:]
+    # THINKING_TOKEN은 스트림에서만 타이핑 효과로 표시; 타임라인에서는 제외하고 THINKING_DONE만 추론 카드로 표시
+    ag = [e for e in timeline if e.get("event_type") == "AGENT_EVENT"]
+    latest_events = [e for e in ag if str((e.get("payload") or {}).get("event_type") or "").upper() != "THINKING_TOKEN"][-8:]
     latest_nodes = []
     for event in latest_events:
         payload = event.get("payload") or {}
@@ -1367,6 +1585,8 @@ def render_workspace_chat_panel(selected: dict[str, Any], latest_bundle: dict[st
             tool_desc = meta.get("tool_description")
             caption_first = f"{fmt_dt_korea(event.get('at') or payload.get('timestamp')) or '-'}"
             part2 = f"{payload.get('node') or '-'} / {ev_type}"
+            if ev_type == "THINKING_DONE":
+                part2 = f"{payload.get('node') or '-'} / 추론"
             tool_frag = _tool_caption_fragment(ev_type, tool_name, tool_desc, html_tooltip=True)
             if tool_frag:
                 part2 = f"{payload.get('node') or '-'} / {tool_frag}"
@@ -1377,8 +1597,12 @@ def render_workspace_chat_panel(selected: dict[str, Any], latest_bundle: dict[st
                 st.caption(f"{caption_first} · {part2}", unsafe_allow_html=True)
                 if source_label:
                     st.caption(f"*{source_label}*")
-                if payload.get("message"):
-                    st.write(payload["message"])
+            # THINKING_DONE: 실제 노드 추론문을 메시지로 표시
+                display_message = payload.get("message") or ""
+                if ev_type == "THINKING_DONE":
+                    display_message = meta.get("reasoning") or display_message
+                if display_message:
+                    st.write(display_message)
                 cols = st.columns(3)
                 if payload.get("thought"):
                     cols[0].caption("생각")
@@ -1473,8 +1697,8 @@ def render_workspace_results(latest_bundle: dict[str, Any], debug_mode: bool) ->
         st.markdown("#### 품질 신호")
         st.markdown("".join(f'<span class="mt-badge mt-badge-amber">{code}</span>' for code in quality_codes), unsafe_allow_html=True)
     if result.get("hitl_request"):
-        st.markdown("#### 사람 검토 상태")
-        st.caption("이 run은 자동 확정이 아니라 사람 검토 이후 재개를 전제로 진행되었습니다.")
+        st.markdown("#### 담당자 검토 상태")
+        st.caption("이 run은 자동 확정이 아니라 담당자 검토 이후 재개를 전제로 진행되었습니다.")
     if result.get("verification_summary"):
         verification_summary = result.get("verification_summary") or {}
         st.markdown("#### 검증 요약")
@@ -1603,7 +1827,7 @@ def render_workspace_execution_review(latest_bundle: dict[str, Any], debug_mode:
 
 
 def render_workspace_review_history(latest_bundle: dict[str, Any]) -> None:
-    render_panel_header("검토 이력", "HITL 요청, 사람 검토 응답, 재개 이력을 run 단위로 확인합니다.")
+    render_panel_header("검토 이력", "HITL 요청, 담당자 검토 응답, 재개 이력을 run 단위로 확인합니다.")
     render_hitl_history(latest_bundle.get("history") or [])
 
 
@@ -1621,7 +1845,7 @@ def render_ai_workspace_page() -> None:
     # with k1:
     #     render_kpi_card("총 검토 전표", str(len(items)), "전체 큐 기준")
     # with k2:
-    #     render_kpi_card("검토 필요", str(review_count), "사람 또는 추가 검증 필요")
+    #     render_kpi_card("검토 필요", str(review_count), "담당자 또는 추가 검증 필요")
     # with k3:
     #     render_kpi_card("고위험 탐지", str(high_risk), "HIGH/CRITICAL")
     # with k4:

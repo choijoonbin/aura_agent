@@ -97,7 +97,7 @@
 
 **에이전트 스트림 UI (아이콘·문구·날짜)**  
 - **아이콘 구분**: Streamlit `st.chat_message(role)`에서 **사람 모양** = `role="user"` (TOOL_CALL, TOOL_RESULT, TOOL_SKIPPED 이벤트), **로봇 모양** = `role="assistant"` (NODE_START, NODE_END, PLAN_READY 등 그 외). 즉 도구 호출/결과는 사용자(도구) 측, 노드 진행은 에이전트 측으로 표시합니다. 이 role 기준은 **PoC UI에서만** 정의되어 있으며(`ui/workspace.py`), 백엔드 이벤트 스키마에는 role 필드가 없습니다.  
-- **생각/행동/관찰 문구**: `agent/reasoning_notes.py`의 `generate_working_note()`가 Aura LLM을 호출해 **message/thought/action/observation** JSON을 생성하고, 실패 시 `agent/langgraph_agent.py` 각 노드의 **fallback_thought, fallback_action, fallback_observation** (하드코딩 한글)을 사용합니다.
+- **추론 문구**: 각 노드(planner, critic, verifier, reporter 등)의 **실제 추론 결과**(`reasoning` 필드)를 스트림으로 전달합니다. `agent/langgraph_agent.py`에서 `THINKING_TOKEN`(단어 단위)과 `THINKING_DONE` 이벤트로 내보내며, UI(`ui/workspace.py`)에서는 이를 받아 추론 카드에 타이핑 효과로 표시합니다. `agent/reasoning_notes.py`의 `extract_reasoning()`으로 노드 출력에서 reasoning을 추출합니다.
 - **캡션·도구**: TOOL_CALL/TOOL_RESULT/TOOL_SKIPPED는 `노드 / TOOL_CALL: 도구명` 형식으로 표시합니다. 도구명에 마우스를 올리면 `agent/skills.py`의 해당 도구 **description**이 툴팁으로 표시됩니다.
 - **LLM 라벨**: LLM이 생성한 문구일 때 어떤 모델인지 표시합니다. `core.llm.client`에서 `model`/`model_name`을 가져오고, 없으면 환경변수 **REASONING_LLM_LABEL**(기본 `"LLM"`)을 사용합니다. 예: `GPT-4o`, `Claude 3.5 Sonnet` 등으로 설정 가능합니다.  
 - **날짜 형식**: UI에서는 모두 **한국 시간(KST) yyyy-mm-dd hh:mm:ss**로 표시합니다 (`ui/shared.py`의 `fmt_dt_korea()`).  

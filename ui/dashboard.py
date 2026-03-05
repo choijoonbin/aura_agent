@@ -55,7 +55,7 @@ def _metric_grid(overview: dict[str, Any]) -> None:
         ("고유 케이스", str(overview["unique_cases"]), "voucher_key / case_id 기준"),
         ("평균 인용 커버리지", _fmt_pct(overview["avg_citation_coverage"]), "문장별 citation 연결 평균"),
         ("도구 성공률", _fmt_pct(overview["avg_tool_success_rate"]), "tool_call_success_rate 평균"),
-        ("HITL 발생률", _fmt_pct(overview["hitl_rate"]), "사람 검토가 필요했던 비율"),
+        ("HITL 발생률", _fmt_pct(overview["hitl_rate"]), "담당자 검토가 필요했던 비율"),
         ("재개 성공률", _fmt_pct(overview["resume_success_rate"]), "interrupt 이후 same-run resume 성공 비율"),
         ("fallback 사용률", _fmt_pct(overview["fallback_rate"]), "LLM note 대신 fallback note 사용 비율"),
         ("평균 점수", _fmt_score(overview["avg_score"]), "저장된 최종 score 평균"),

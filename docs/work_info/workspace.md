@@ -565,3 +565,687 @@ def render_score_breakdown_card(policy_score: int, evidence_score: int, final_sc
 - [ ] TOOL_CALL 이벤트에 사람(user) 아이콘이 사용되지 않는가
 - [ ] 15개 이상 이벤트에서 초기 screener 결과가 보이는가 (더 보기 / 접기 동작)
 - [ ] Score 게이지 바가 최종 판정 전 스트림 흐름 안에서 나타나는가
+
+
+
+#추가보완작업
+# Aura Agent 고도화 v2 — 진짜 LLM 스트리밍 + 타이핑 효과
+
+> **전제**: v1 프롬프트 작업(⏳ 제거, 레이아웃 개선, 파이프라인 바)이 완료된 상태에서 추가 적용
+> **목표**: `generate_working_note()` 사후 해설 구조를 완전 폐기하고,
+> 각 노드 LLM이 실제로 추론하는 토큰을 실시간으로 UI에 타이핑 효과로 출력
+
+---
+
+## 왜 구조를 바꿔야 하는가
+
+현재 스트림에 보이는 내용은 이런 흐름으로 만들어집니다:
+
+```
+① planner LLM 실행 (진짜 판단) → 결과만 state에 저장
+② generate_working_note() 별도 LLM 호출 → "방금 한 일을 설명해줘"
+③ 설명 텍스트를 스트림에 표시
+```
+
+즉 스트림에 보이는 것은 **진짜 사고가 아닌 사후 요약**입니다.
+바꿔야 할 구조:
+
+```
+① planner LLM 실행 — stream=True로 토큰 단위로 직접 UI에 흘림
+② 토큰이 흐르는 동안 타이핑 효과로 화면에 표시
+③ 완료 후 state 저장
+```
+
+Claude나 Cursor가 답변을 타이핑하듯, 에이전트의 실제 추론이 실시간으로 보이는 구조입니다.
+
+---
+
+## STEP 1 — 각 노드 LLM 응답 스키마에 `reasoning` 필드 추가
+
+### 대상 파일: `langgraph_agent.py` (또는 각 노드 파일)
+
+각 노드가 LLM을 호출할 때 사용하는 Pydantic 응답 모델에 `reasoning` 필드를 추가합니다.
+이 필드가 스트림에 타이핑될 **진짜 LLM 사고 내용**입니다.
+
+```python
+# --- Planner 노드 응답 모델 ---
+class PlannerOutput(BaseModel):
+    tool_sequence: list[str]
+    skipped_tools: list[str]
+    skip_reasons: dict[str, str]
+    reasoning: str  # ← 추가: "왜 이 도구들을 이 순서로 선택했는가"
+
+# --- Critic 노드 응답 모델 ---
+class CriticOutput(BaseModel):
+    recommend_hold: bool
+    policy_violations: list[str]
+    severity: str
+    reasoning: str  # ← 추가: "어떤 근거로 이 판정을 내렸는가"
+
+# --- Verifier 노드 응답 모델 ---
+class VerifierOutput(BaseModel):
+    gate_result: str  # PASS / FAIL
+    failed_checks: list[str]
+    reasoning: str  # ← 추가: "어떤 정책 조항을 어떻게 검증했는가"
+
+# --- Reporter 노드 응답 모델 ---
+class ReporterOutput(BaseModel):
+    summary: str
+    score: int
+    final_status: str
+    reasoning: str  # ← 추가: "최종 판단에 이른 추론 과정"
+```
+
+### 각 노드 LLM 프롬프트에 reasoning 생성 지시 추가
+
+```python
+# planner_node의 LLM system prompt 끝에 추가
+"""
+[응답 형식]
+반드시 아래 JSON 형식으로 응답하라. reasoning 필드는 필수이며,
+단순 나열이 아닌 실제 판단 과정을 서술해야 한다.
+
+reasoning 작성 기준:
+- 어떤 신호(flag)가 이 결정을 유발했는가
+- 여러 선택지 중 왜 이 경로를 선택했는가
+- 생략한 도구가 있다면 왜 생략했는가
+- 다음 노드에서 주의해야 할 사항이 있는가
+
+예시:
+"isHoliday=True이고 hrStatus=LEAVE가 동시에 감지되어
+휴일 경비 사용 여부를 최우선 검증 경로로 설정했다.
+MCC 5813(주류업종)이므로 merchant_risk_probe를 먼저 실행해
+위험도가 휴일 판정에 영향을 주는지 확인할 필요가 있다.
+budgetExceeded=False이므로 budget_probe는 생략한다."
+"""
+```
+
+---
+
+## STEP 2 — `generate_working_note()` 완전 폐기
+
+### 대상 파일: `reasoning_notes.py`, `langgraph_agent.py`
+
+**`reasoning_notes.py`**: 파일 전체를 삭제하거나,
+하위 호환을 위해 아래처럼 pass-through 함수만 남깁니다.
+
+```python
+# reasoning_notes.py — 기존 generate_working_note() 전체 삭제 후
+# 각 노드에서 직접 reasoning 필드를 사용하므로 이 파일은 더 이상 필요 없음
+# langgraph_agent.py에서 import 중이라면 아래로 교체
+
+def extract_reasoning(node_output) -> str:
+    """노드 출력에서 reasoning 필드를 추출. 없으면 빈 문자열 반환."""
+    if hasattr(node_output, "reasoning"):
+        return node_output.reasoning
+    if isinstance(node_output, dict):
+        return node_output.get("reasoning", "")
+    return ""
+```
+
+**`langgraph_agent.py`**: 각 노드에서 `generate_working_note()` 호출 부분을 모두 제거하고,
+LLM 응답의 `.reasoning` 필드를 SSE 이벤트로 직접 emit합니다.
+
+```python
+# 기존 패턴 — 삭제
+note = generate_working_note(node_name="planner", context=voucher_summary)
+await emit_stream_event(type="NODE_THINKING", content=note)
+
+# 변경 패턴 — LLM 응답에서 직접 추출
+planner_output = await llm_call(prompt)          # 실제 플래너 LLM 호출
+reasoning_text = planner_output.reasoning        # 진짜 추론 텍스트
+await emit_stream_event(
+    type="NODE_THINKING",
+    node="planner",
+    content=reasoning_text                        # 실제 LLM이 쓴 내용
+)
+```
+
+---
+
+## STEP 3 — 핵심: LLM 스트리밍 직접 연결 (가장 중요)
+
+### 대상 파일: `langgraph_agent.py`
+
+LLM 호출을 `stream=True`로 전환하여 토큰이 생성되는 즉시 UI로 흘립니다.
+이것이 Claude/Cursor가 타이핑하듯 보이는 구조의 핵심입니다.
+
+```python
+async def stream_node_reasoning(
+    node_name: str,
+    prompt: str,
+    response_model: type,
+    event_queue: asyncio.Queue
+):
+    """
+    LLM을 stream=True로 호출하여 reasoning 토큰을 실시간으로 큐에 push.
+    UI는 이 큐를 SSE로 소비하여 타이핑 효과로 표시.
+    """
+    
+    # --- OpenAI/Azure 사용 시 ---
+    full_response = ""
+    reasoning_started = False
+    
+    async for chunk in await openai_client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": prompt}],
+        stream=True,
+        response_format={"type": "json_object"}
+    ):
+        delta = chunk.choices[0].delta.content or ""
+        full_response += delta
+        
+        # reasoning 필드 값이 시작되면 토큰을 실시간으로 큐에 push
+        # JSON 스트리밍 중 "reasoning": " 이후부터 닫는 " 전까지 추출
+        reasoning_token = _extract_reasoning_token(delta, full_response)
+        if reasoning_token:
+            await event_queue.put({
+                "type": "THINKING_TOKEN",
+                "node": node_name,
+                "token": reasoning_token   # 토큰 단위 (1~5글자)
+            })
+    
+    # 스트리밍 완료 후 전체 응답 파싱
+    parsed = response_model.model_validate_json(full_response)
+    return parsed
+
+
+def _extract_reasoning_token(delta: str, full_so_far: str) -> str:
+    """
+    JSON 스트리밍 중 reasoning 필드의 값 부분만 추출.
+    "reasoning": "← 여기서부터 토큰 추출 → " 닫히기 전까지
+    """
+    # reasoning 필드 시작 감지
+    if '"reasoning"' in full_so_far and '"reasoning": "' in full_so_far:
+        # reasoning 값 시작 이후의 delta만 반환
+        reasoning_start = full_so_far.index('"reasoning": "') + len('"reasoning": "')
+        current_reasoning = full_so_far[reasoning_start:]
+        
+        # 아직 닫히지 않았으면 (진행 중)
+        if not current_reasoning.endswith('"}') and not current_reasoning.endswith('",'):
+            return delta  # 현재 토큰 그대로 반환
+    return ""
+```
+
+---
+
+## STEP 4 — UI 타이핑 효과 구현
+
+### 대상 파일: `ui/workspace.py`
+
+SSE로 수신한 `THINKING_TOKEN` 이벤트를 타이핑 효과로 렌더링합니다.
+
+```python
+def render_live_thinking_stream(node_name: str, event_source):
+    """
+    THINKING_TOKEN 이벤트를 실시간으로 받아 타이핑 효과로 표시.
+    Claude/Cursor처럼 한 글자씩 나타나는 효과.
+    """
+    
+    node_label = NODE_LABEL_MAP.get(node_name, node_name)
+    
+    # 노드별 컬러 설정
+    NODE_COLORS = {
+        "planner":   {"bg": "#0f1a2e", "border": "#3b82f6", "icon": "🧠"},
+        "critic":    {"bg": "#1a0f0f", "border": "#ef4444", "icon": "🔍"},
+        "verify":    {"bg": "#0f1a14", "border": "#22c55e", "icon": "✅"},
+        "reporter":  {"bg": "#1a1500", "border": "#f59e0b", "icon": "📊"},
+        "execute":   {"bg": "#0f0f1a", "border": "#8b5cf6", "icon": "⚡"},
+        "intake":    {"bg": "#0d1117", "border": "#6b7280", "icon": "📥"},
+        "screener":  {"bg": "#0d1117", "border": "#6b7280", "icon": "🔎"},
+        "finalizer": {"bg": "#0f1a0f", "border": "#22c55e", "icon": "⚖️"},
+    }
+    color = NODE_COLORS.get(node_name, {"bg": "#0d1117", "border": "#4b5563", "icon": "🤖"})
+    
+    # 타이핑 컨테이너 CSS (한 번만 inject)
+    st.markdown(f"""
+    <style>
+    .thinking-stream-card {{
+        background: {color['bg']};
+        border: 1px solid {color['border']};
+        border-left: 3px solid {color['border']};
+        border-radius: 10px;
+        padding: 16px 20px;
+        margin: 10px 0;
+        font-family: 'JetBrains Mono', 'Fira Code', monospace;
+        font-size: 13px;
+        line-height: 1.8;
+        color: #e2e8f0;
+        position: relative;
+    }}
+    .thinking-node-label {{
+        font-size: 10px;
+        font-weight: 700;
+        letter-spacing: 1.5px;
+        text-transform: uppercase;
+        color: {color['border']};
+        margin-bottom: 10px;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+    }}
+    .thinking-cursor {{
+        display: inline-block;
+        width: 2px;
+        height: 1em;
+        background: {color['border']};
+        margin-left: 2px;
+        vertical-align: text-bottom;
+        animation: blink 0.7s step-end infinite;
+    }}
+    @keyframes blink {{
+        0%, 100% {{ opacity: 1; }}
+        50%       {{ opacity: 0; }}
+    }}
+    .thinking-text-content {{
+        min-height: 24px;
+    }}
+    </style>
+    """, unsafe_allow_html=True)
+    
+    # st.empty()로 자리 잡기 — 토큰 수신마다 in-place 업데이트
+    thinking_placeholder = st.empty()
+    accumulated_text = ""
+    
+    # SSE 이벤트 루프
+    for event in event_source:
+        if event.get("type") == "THINKING_TOKEN" and event.get("node") == node_name:
+            accumulated_text += event["token"]
+            
+            # 매 토큰마다 placeholder 업데이트 (타이핑 효과)
+            thinking_placeholder.markdown(f"""
+            <div class="thinking-stream-card">
+              <div class="thinking-node-label">
+                {color['icon']} {node_label} · 추론 중
+              </div>
+              <div class="thinking-text-content">
+                {accumulated_text}<span class="thinking-cursor"></span>
+              </div>
+            </div>
+            """, unsafe_allow_html=True)
+        
+        elif event.get("type") == "NODE_END" and event.get("node") == node_name:
+            # 완료 — 커서 제거, 완료 상태로 전환
+            thinking_placeholder.markdown(f"""
+            <div class="thinking-stream-card" style="opacity:0.85;">
+              <div class="thinking-node-label">
+                {color['icon']} {node_label} · 완료
+              </div>
+              <div class="thinking-text-content">
+                {accumulated_text}
+              </div>
+            </div>
+            """, unsafe_allow_html=True)
+            break
+    
+    return accumulated_text  # 완료된 텍스트 반환 (필요 시 저장)
+```
+
+---
+
+## STEP 5 — SSE 이벤트 타입 추가
+
+### 대상 파일: SSE 이벤트 정의 파일 (또는 `langgraph_agent.py`)
+
+```python
+# 기존 이벤트 타입에 추가
+class StreamEventType(str, Enum):
+    NODE_START      = "NODE_START"
+    NODE_END        = "NODE_END"
+    TOOL_CALL       = "TOOL_CALL"
+    TOOL_RESULT     = "TOOL_RESULT"
+    HITL_PAUSE      = "HITL_PAUSE"
+    GATE_APPLIED    = "GATE_APPLIED"
+    SCORE_BREAKDOWN = "SCORE_BREAKDOWN"
+    FINAL_VERDICT   = "FINAL_VERDICT"
+    THINKING_TOKEN  = "THINKING_TOKEN"   # ← 신규 추가: 토큰 단위 스트리밍
+    THINKING_DONE   = "THINKING_DONE"    # ← 신규 추가: 해당 노드 추론 완료
+
+# THINKING_TOKEN 이벤트 구조
+@dataclass
+class ThinkingTokenEvent:
+    type: str = "THINKING_TOKEN"
+    node: str = ""          # "planner", "critic", 등
+    token: str = ""         # 실제 토큰 텍스트 (1~5글자)
+    timestamp: str = ""
+```
+
+---
+
+## STEP 6 — 전체 스트리밍 흐름 연결
+
+`workspace.py`의 메인 스트리밍 루프를 이벤트 타입에 따라 분기:
+
+```python
+async def run_analysis_stream(case_id: str):
+    """
+    메인 스트리밍 루프.
+    THINKING_TOKEN → 타이핑 효과로 실시간 출력
+    NODE_START/END → 파이프라인 바 업데이트
+    TOOL_CALL/RESULT → 도구 카드 표시
+    SCORE_BREAKDOWN → 게이지 바 표시
+    """
+    pipeline_placeholder = st.empty()
+    current_thinking_placeholder = st.empty()
+    completed_nodes = []
+    current_node = ""
+    thinking_buffer = {}   # node_name → 누적 텍스트
+    
+    async for event in sse_stream(case_id):
+        
+        if event["type"] == "NODE_START":
+            current_node = event["node"]
+            thinking_buffer[current_node] = ""
+            # 파이프라인 바 업데이트
+            with pipeline_placeholder:
+                render_pipeline_progress(completed_nodes, current_node)
+        
+        elif event["type"] == "THINKING_TOKEN":
+            node = event["node"]
+            thinking_buffer[node] = thinking_buffer.get(node, "") + event["token"]
+            # 타이핑 효과 업데이트
+            current_thinking_placeholder.markdown(
+                _build_thinking_card_html(node, thinking_buffer[node], is_complete=False),
+                unsafe_allow_html=True
+            )
+        
+        elif event["type"] == "THINKING_DONE":
+            node = event["node"]
+            # 커서 제거, 완료 상태로 전환
+            current_thinking_placeholder.markdown(
+                _build_thinking_card_html(node, thinking_buffer[node], is_complete=True),
+                unsafe_allow_html=True
+            )
+        
+        elif event["type"] == "NODE_END":
+            completed_nodes.append(event["node"])
+            with pipeline_placeholder:
+                render_pipeline_progress(completed_nodes, current_node)
+        
+        elif event["type"] == "TOOL_CALL":
+            render_tool_call_card(event)
+        
+        elif event["type"] == "SCORE_BREAKDOWN":
+            render_score_breakdown_card(
+                event["policy_score"],
+                event["evidence_score"],
+                event["final_score"]
+            )
+        
+        elif event["type"] == "FINAL_VERDICT":
+            render_final_verdict(event)
+```
+
+---
+
+## 최종 구현 결과 — 사용자가 보게 되는 화면
+
+```
+┌─ 파이프라인 진행 바 ──────────────────────────────────────┐
+│ ✓스크리닝  ✓수집  ◉계획수립  ○실행  ○검토  ○검증  ○보고  ○판정 │
+│ ████████████████████░░░░░░░░░░░░░░░  3/8 단계            │
+└──────────────────────────────────────────────────────────┘
+
+┌─ 🧠 PLANNER · 추론 중 ────────────────────────────────────┐
+│                                                           │
+│  isHoliday=True이고 hrStatus=LEAVE가 동시에 감지되어       │
+│  휴일 경비 사용 여부를 최우선 검증 경로로 설정했다.          │
+│  MCC 5813(주류업종)이므로 merchant_risk_probe를 먼저       │
+│  실행해 위험도가 휴일 판정에 영향을 주는지 확인할│           │  ← 커서 깜빡임
+│                                                           │
+└──────────────────────────────────────────────────────────┘
+```
+
+Claude나 Cursor처럼 LLM이 실시간으로 타이핑하는 모습이 그대로 재현됩니다.
+
+---
+
+## 작업 체크리스트
+
+- [ ] 각 노드 Pydantic 모델에 `reasoning: str` 필드 추가 (planner, critic, verify, reporter, execute)
+- [ ] 각 노드 LLM 프롬프트에 reasoning 생성 지시 + 예시 추가
+- [ ] LLM 호출을 `stream=True`로 전환 + `_extract_reasoning_token()` 구현
+- [ ] `THINKING_TOKEN` / `THINKING_DONE` SSE 이벤트 타입 추가
+- [ ] `generate_working_note()` 호출 전체 제거 (`reasoning_notes.py` 폐기)
+- [ ] `workspace.py` 메인 루프에 `THINKING_TOKEN` 분기 추가
+- [ ] `_build_thinking_card_html()` 함수 구현 (노드별 컬러 + 깜빡이는 커서)
+- [ ] 완료 노드 thinking card → 커서 제거 + opacity 처리
+- [ ] 시연 테스트: 실제 전표 실행 시 각 노드에서 타이핑 텍스트가 순차적으로 출력되는지 확인
+
+
+
+# Aura Agent 고도화 v3 — Reasoning 정합성 검증
+
+> **전제**: v1(UI 개선) + v2(실시간 스트리밍 구조 전환) 작업이 완료된 상태에서 추가 적용
+> **목표**: reasoning 텍스트와 실제 판단 결과값 사이의 모순을 구조적으로 차단
+
+---
+
+## 왜 필요한가
+
+v2 작업 후 각 노드 LLM은 `reasoning` 필드에 판단 과정을 서술하고,
+동시에 `recommend_hold`, `gate_result`, `final_status` 같은 결과값을 반환합니다.
+
+문제는 LLM이 이 두 가지를 한 번에 생성할 때 **모순이 발생할 수 있다**는 점입니다.
+
+```
+# 실제로 발생 가능한 모순 예시
+
+reasoning:
+"isHoliday=True이고 hrStatus=LEAVE 동시 충족.
+ 정책 위반 가능성이 낮아 정상 처리가 적합하다고 판단한다."
+
+recommend_hold: True   # ← reasoning과 정반대
+```
+
+시연 중 화면에서 "통과"라고 타이핑된 직후 결과가 "보류"로 나오면
+에이전트 신뢰도가 즉각 붕괴됩니다.
+
+---
+
+## STEP 1 — 정합성 검증 함수 추가
+
+### 대상 파일: `agent/langgraph_agent.py` (또는 공통 유틸 파일)
+
+각 노드 LLM 응답을 파싱한 직후, `reasoning` 텍스트와 결과 필드를 교차 검증합니다.
+모순이 감지되면 LLM에게 재생성을 요청합니다 (최대 1회 재시도).
+
+```python
+from dataclasses import dataclass
+from typing import Any
+
+@dataclass
+class ConsistencyCheckResult:
+    is_consistent: bool
+    conflict_description: str  # 모순 내용 설명 (재시도 프롬프트에 활용)
+
+def check_reasoning_consistency(node_name: str, output: Any) -> ConsistencyCheckResult:
+    """
+    reasoning 텍스트와 실제 결과 필드 간 모순을 감지.
+    LLM에게 재시도를 요청하기 위한 conflict_description을 반환.
+    """
+    reasoning = (output.reasoning or "").lower()
+    
+    # --- Critic 노드 ---
+    if node_name == "critic" and hasattr(output, "recommend_hold"):
+        hold_signals   = ["보류", "hold", "위반", "문제", "검토 필요", "부적합", "중단"]
+        pass_signals   = ["정상", "통과", "pass", "적합", "문제없", "이상없", "승인"]
+        
+        reasoning_says_hold = any(s in reasoning for s in hold_signals)
+        reasoning_says_pass = any(s in reasoning for s in pass_signals)
+        
+        if output.recommend_hold and reasoning_says_pass and not reasoning_says_hold:
+            return ConsistencyCheckResult(
+                is_consistent=False,
+                conflict_description=(
+                    f"reasoning은 '정상/통과' 취지로 작성되었으나 "
+                    f"recommend_hold=True가 반환되었습니다. "
+                    f"reasoning과 결과값이 일치하도록 재작성하십시오."
+                )
+            )
+        if not output.recommend_hold and reasoning_says_hold and not reasoning_says_pass:
+            return ConsistencyCheckResult(
+                is_consistent=False,
+                conflict_description=(
+                    f"reasoning은 '보류/위반' 취지로 작성되었으나 "
+                    f"recommend_hold=False가 반환되었습니다. "
+                    f"reasoning과 결과값이 일치하도록 재작성하십시오."
+                )
+            )
+    
+    # --- Verifier 노드 ---
+    if node_name == "verify" and hasattr(output, "gate_result"):
+        if output.gate_result == "PASS" and any(s in reasoning for s in ["실패", "위반", "불일치", "fail"]):
+            return ConsistencyCheckResult(
+                is_consistent=False,
+                conflict_description=(
+                    f"reasoning은 검증 실패 취지이나 gate_result=PASS가 반환되었습니다. "
+                    f"일치하도록 재작성하십시오."
+                )
+            )
+        if output.gate_result == "FAIL" and any(s in reasoning for s in ["통과", "적합", "pass", "문제없"]):
+            return ConsistencyCheckResult(
+                is_consistent=False,
+                conflict_description=(
+                    f"reasoning은 검증 통과 취지이나 gate_result=FAIL이 반환되었습니다. "
+                    f"일치하도록 재작성하십시오."
+                )
+            )
+    
+    # --- Reporter / Finalizer 노드 ---
+    if node_name in ("reporter", "finalizer") and hasattr(output, "final_status"):
+        high_risk_status = ["HITL_REQUIRED", "REJECT", "HOLD"]
+        low_risk_signals = ["정상", "이상없", "통과", "승인", "문제없"]
+        
+        if output.final_status in high_risk_status:
+            if any(s in reasoning for s in low_risk_signals) and \
+               not any(s in reasoning for s in ["위반", "문제", "보류", "검토"]):
+                return ConsistencyCheckResult(
+                    is_consistent=False,
+                    conflict_description=(
+                        f"reasoning은 정상 처리 취지이나 "
+                        f"final_status={output.final_status}이 반환되었습니다. "
+                        f"일치하도록 재작성하십시오."
+                    )
+                )
+    
+    return ConsistencyCheckResult(is_consistent=True, conflict_description="")
+```
+
+---
+
+## STEP 2 — 모순 감지 시 자동 재시도 로직
+
+### 대상 파일: `agent/langgraph_agent.py`
+
+각 노드의 LLM 호출 직후 정합성 검사를 수행하고, 모순이 있으면 1회 재시도합니다.
+
+```python
+async def call_node_llm_with_consistency_check(
+    node_name: str,
+    prompt: str,
+    response_model: type,
+    event_queue: asyncio.Queue,
+    max_retries: int = 1
+) -> Any:
+    """
+    LLM 호출 → 정합성 검사 → 모순 시 재시도 (최대 1회).
+    reasoning과 결과값이 일치하는 응답만 스트림에 반영.
+    """
+    for attempt in range(max_retries + 1):
+        output = await stream_node_reasoning(
+            node_name=node_name,
+            prompt=prompt,
+            response_model=response_model,
+            event_queue=event_queue
+        )
+        
+        check = check_reasoning_consistency(node_name, output)
+        
+        if check.is_consistent:
+            return output
+        
+        if attempt < max_retries:
+            # 재시도 전 UI에 알림 (선택사항)
+            await event_queue.put({
+                "type": "THINKING_RETRY",
+                "node": node_name,
+                "reason": "추론 재검토 중..."  # 사용자에게는 이렇게만 표시
+            })
+            
+            # 재시도 프롬프트에 모순 설명 추가
+            prompt += f"\n\n[재작성 요청]\n{check.conflict_description}"
+        else:
+            # 최대 재시도 초과 — 그대로 사용하되 로그 기록
+            import logging
+            logging.warning(
+                f"[{node_name}] reasoning 정합성 실패 (재시도 초과): "
+                f"{check.conflict_description}"
+            )
+    
+    return output
+```
+
+---
+
+## STEP 3 — THINKING_RETRY 이벤트 UI 처리
+
+### 대상 파일: `ui/workspace.py`
+
+재시도 시 UI에 자연스럽게 "재검토 중" 상태를 표시합니다.
+사용자에게는 에이전트가 스스로 검토하는 모습으로 보입니다.
+
+```python
+# workspace.py 메인 스트리밍 루프에 분기 추가
+elif event["type"] == "THINKING_RETRY":
+    node = event["node"]
+    # 현재 타이핑 카드를 "재검토" 상태로 교체
+    current_thinking_placeholder.markdown(
+        f"""
+        <div class="thinking-stream-card" style="border-color:#f59e0b; background:#1a1200;">
+          <div class="thinking-node-label" style="color:#f59e0b;">
+            🔄 {NODE_LABEL_MAP.get(node, node)} · 재검토 중
+          </div>
+          <div class="thinking-text-content" style="color:#9ca3af; font-style:italic;">
+            판단 결과를 다시 검토하고 있습니다...
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+    # thinking_buffer 초기화 — 재시도 토큰이 새로 채워짐
+    thinking_buffer[node] = ""
+```
+
+---
+
+## 최종 동작 흐름
+
+```
+critic_node LLM 호출 (stream=True)
+    ↓
+reasoning 토큰 실시간 타이핑 출력
+    ↓
+응답 완료 → check_reasoning_consistency() 실행
+    ↓
+[일치] → 그대로 다음 노드 진행
+[불일치] → UI에 "재검토 중" 표시 → 수정된 프롬프트로 재호출
+    ↓
+재시도 reasoning 타이핑 출력 → 결과 확정
+```
+
+시연 중 화면에 타이핑된 reasoning과 최종 판정 결과가
+**구조적으로 항상 일치**함이 보장됩니다.
+
+---
+
+## 작업 체크리스트
+
+- [ ] `check_reasoning_consistency()` 함수 추가 (critic, verify, reporter/finalizer 커버)
+- [ ] `call_node_llm_with_consistency_check()` 래퍼로 각 노드 LLM 호출 교체
+- [ ] `THINKING_RETRY` SSE 이벤트 타입 추가
+- [ ] `workspace.py` 메인 루프에 `THINKING_RETRY` 분기 추가 (노란색 "재검토 중" 카드)
+- [ ] 재시도 초과 시 경고 로그 확인 (시연 전 로그 점검 필수)
+- [ ] 시연 테스트: critic이 HOLD 판정 시 reasoning에도 보류 근거가 명시되는지 확인
+
+
