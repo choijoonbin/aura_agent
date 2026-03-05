@@ -24,12 +24,16 @@ SAMPLE_TEXT = """
 class TestHierarchicalChunking(unittest.TestCase):
 
     def test_article_extraction(self):
-        """조문이 ARTICLE 노드로 추출되어야 한다."""
+        """조문이 ARTICLE 노드로 추출된다. 초단편은 병합되므로 1개 이상이면 통과."""
         from services.rag_chunk_lab_service import hierarchical_chunk
 
         nodes = hierarchical_chunk(SAMPLE_TEXT)
         article_nodes = [n for n in nodes if n.node_type == "ARTICLE"]
-        self.assertGreaterEqual(len(article_nodes), 2, "제23조, 제24조 최소 2개 추출")
+        self.assertGreaterEqual(len(article_nodes), 1, "ARTICLE 노드가 1개 이상 추출되어야 함")
+        # 병합 시 제23조·제24조 내용이 한 ARTICLE에 포함될 수 있음
+        combined = " ".join(n.chunk_text for n in article_nodes)
+        self.assertIn("제23조", combined)
+        self.assertIn("제24조", combined)
 
     def test_clause_extraction(self):
         """항(①②③)이 CLAUSE 노드로 추출되어야 한다."""

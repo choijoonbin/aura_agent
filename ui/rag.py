@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import html
 import re
 import streamlit as st
 from ui.shared import (
@@ -19,6 +20,23 @@ from services.rag_chunk_lab_service import (
     save_uploaded_rulebook,
 )
 from ui.api_client import get, post
+
+
+def _quality_score(chunks: list[dict], strategy: str) -> int:
+    """
+    전략별 품질 점수. parent_child는 ROOT(parent)만 short 판정, 그 외는 전체 기준.
+    short 200자 미만 1개당 -3점.
+    """
+    if not chunks:
+        return 0
+    if strategy == "parent_child":
+        parents = [c for c in chunks if c.get("chunk_type") == "parent"]
+        if not parents:
+            return 0
+        short_count = sum(1 for c in parents if c["length"] < 200)
+    else:
+        short_count = sum(1 for c in chunks if c["length"] < 200)
+    return max(0, 100 - short_count * 3)
 
 
 def _strip_html_for_display(text: str) -> str:
@@ -247,13 +265,14 @@ def render_rag_library_page() -> None:
                                     f"""<div style="display:flex;align-items:center;
                                                     gap:8px;margin-bottom:8px">
                                       <span style="background:{q_color};color:#fff;
-                                                   padding:2px 8px;border-radius:999px;
-                                                   font-size:0.72rem;font-weight:700">
+                                                   padding:1px 6px;border-radius:999px;
+                                                   font-size:0.68rem;font-weight:700">
                                         {q_label} {chunk_len}자
                                       </span>
-                                      <span class="mt-meta-pill">
-                                        page={chunk.get('page_no') or '—'} /
-                                        index={chunk.get('chunk_index') or '—'}
+                                      <span style="background:#475569;color:#fff;
+                                                   padding:1px 6px;border-radius:999px;
+                                                   font-size:0.68rem;font-weight:700">
+                                        page={chunk.get('page_no') or '—'} / index={chunk.get('chunk_index') or '—'}
                                       </span>
                                     </div>""",
                                     unsafe_allow_html=True,
@@ -261,15 +280,19 @@ def render_rag_library_page() -> None:
                                 with stylable_container(
                                     key=f"rag_doc_chunk_body_{selected_doc_id}_{chunk.get('chunk_id', c_idx)}",
                                     css_styles="""{
-                                        background:#f8fafc;
+                                        background:#0f172a;
+                                        color:#ffffff;
                                         border-radius:10px;
                                         padding:12px 14px;
-                                        border:1px solid #e2e8f0;
+                                        border:1px solid #334155;
                                         font-size:0.85rem;
                                         line-height:1.65;
                                     }""",
                                 ):
-                                    st.text(_strip_html_for_display(chunk_text))
+                                    st.markdown(
+                                        f'<div style="color:#ffffff;white-space:pre-wrap;">{html.escape(_strip_html_for_display(chunk_text))}</div>',
+                                        unsafe_allow_html=True,
+                                    )
 
     # ════════════════════════════════════════════════════════════════════════
     # TAB 2: 청킹 실험실
@@ -319,9 +342,14 @@ def render_rag_library_page() -> None:
                 text = load_rulebook_text(selected_file["path"])
                 chunks = preview_chunks(text, strategy)
                 parent_count = sum(1 for c in chunks if c.get("chunk_type") == "parent")
-                leaf_count = sum(1 for c in chunks if c.get("chunk_type") == "leaf")
+                leaf_count = sum(1 for c in chunks if c.get("chunk_type") in ("leaf", "child"))
                 avg_len = sum(c["length"] for c in chunks) / len(chunks) if chunks else 0
-                short_count = sum(1 for c in chunks if c["length"] < 200)
+                # parent_child: ROOT(parent)만 200자 미만 집계; 그 외는 전체
+                if strategy == "parent_child":
+                    parent_chunks = [c for c in chunks if c.get("chunk_type") == "parent"]
+                    short_count = sum(1 for c in parent_chunks if c["length"] < 200)
+                else:
+                    short_count = sum(1 for c in chunks if c["length"] < 200)
 
                 # 선택 전략 지표
                 m1, m2, m3, m4 = st.columns(4)
@@ -345,7 +373,7 @@ def render_rag_library_page() -> None:
                 "parent_child":    {"label": "🆕 Parent-Child 계층형", "recommend": True,
                                     "desc": "Dense 검색 최적"},
                 "hybrid_policy":   {"label": "하이브리드 정책형", "recommend": False,
-                                    "desc": "현재 운영 방식"},
+                                    "desc": "조항 경계 유지 + 900자 초과 시만 내부 분할"},
                 "article_first":   {"label": "조항 우선", "recommend": False,
                                     "desc": "단순 경계 분리"},
                 "sliding_window":  {"label": "슬라이딩 윈도우", "recommend": False,
@@ -356,8 +384,7 @@ def render_rag_library_page() -> None:
             for col, (s_key, s_meta) in zip(compare_cols, STRATEGY_META.items()):
                 rows = preview_chunks(text, s_key)
                 s_avg = sum(r["length"] for r in rows) / len(rows) if rows else 0
-                s_short = sum(1 for r in rows if r["length"] < 200)
-                quality_score = max(0, 100 - s_short * 3)  # 단순 품질 점수
+                quality_score = _quality_score(rows, s_key)
                 bar_color = "#2563eb" if s_key == strategy else "#94a3b8"
                 recommend_badge = (
                     '<span style="background:#2563eb;color:#fff;padding:1px 7px;'
@@ -391,14 +418,14 @@ def render_rag_library_page() -> None:
                             f'<div style="font-size:0.78rem;color:#64748b">평균 {s_avg:.0f}자</div>',
                             unsafe_allow_html=True,
                         )
-                        # 품질 게이지 바
+                        # 품질 점수 (색상: 70+ 초록, 40+ 주황, 미만 빨강)
+                        score_color = "#059669" if quality_score >= 70 else "#d97706" if quality_score >= 40 else "#dc2626"
                         st.markdown(
                             f"""<div style="margin-top:10px">
-                              <div style="font-size:0.72rem;color:#94a3b8;margin-bottom:3px">
-                                품질 점수 {quality_score}
-                              </div>
-                              <div style="background:#f1f5f9;border-radius:999px;height:5px">
-                                <div style="width:{quality_score}%;background:{bar_color};
+                              <div style="font-size:0.72rem;color:#94a3b8;margin-bottom:3px">품질점수</div>
+                              <div style="font-size:1.25rem;font-weight:700;color:{score_color}">{quality_score}점</div>
+                              <div style="background:#f1f5f9;border-radius:999px;height:5px;margin-top:4px">
+                                <div style="width:{min(100, quality_score)}%;background:{score_color};
                                             height:100%;border-radius:999px"></div>
                               </div>
                             </div>""",
@@ -439,6 +466,7 @@ def render_rag_library_page() -> None:
                     f'border-radius:999px;font-size:0.68rem;font-weight:700">적정</span>'
                     if chunk_len >= 200 else ""
                 )
+                type_label = "ARTICLE (Parent)" if c_type == "parent" else "CLAUSE (Child)" if c_type in ("leaf", "child") else c_type.upper()
                 with st.expander(
                     f"{type_icon}  {idx}. {chunk['title'][:40]}  ·  {chunk_len}자",
                     expanded=(idx == 1 and c_type == "parent"),
@@ -446,7 +474,7 @@ def render_rag_library_page() -> None:
                     st.markdown(
                         f"""<span style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
                           <span style="font-size:0.78rem;font-weight:700;color:{type_color}">
-                            {c_type.upper()}
+                            {type_label}
                           </span>
                           {len_tag}
                         </span>""",

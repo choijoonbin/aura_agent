@@ -11,6 +11,7 @@ DB 마이그레이션: embedding이 1536차원이면 별도 컬럼 사용 권장
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 from typing import Any
@@ -121,16 +122,18 @@ def save_hierarchical_chunks(
         INSERT INTO dwp_aura.rag_chunk (
             tenant_id, doc_id, chunk_text, search_text,
             regulation_article, regulation_clause,
-            parent_title, node_type, parent_id,
+            parent_title, node_type, parent_id, parent_chunk_id,
             chunk_level, chunk_index, page_no,
             version, effective_from, effective_to,
+            metadata_json,
             is_active, created_at
         ) VALUES (
             :tenant_id, :doc_id, :chunk_text, :search_text,
             :regulation_article, :regulation_clause,
-            :parent_title, :node_type, :parent_id,
+            :parent_title, :node_type, :parent_id, :parent_chunk_id,
             :chunk_level, :chunk_index, :page_no,
             :version, :effective_from, :effective_to,
+            CAST(:metadata_json AS jsonb),
             true, now()
         ) RETURNING chunk_id
     """)
@@ -138,6 +141,12 @@ def save_hierarchical_chunks(
     saved_chunks: list[dict[str, Any]] = []
 
     for node in article_nodes:
+        meta = {
+            "semantic_group": getattr(node, "semantic_group", "") or "",
+            "regulation_article": node.regulation_article or "",
+        }
+        if getattr(node, "merged_with", None):
+            meta["merged_with"] = node.merged_with
         row = db.execute(
             insert_sql,
             {
@@ -150,12 +159,14 @@ def save_hierarchical_chunks(
                 "parent_title": node.parent_title,
                 "node_type": "ARTICLE",
                 "parent_id": None,
+                "parent_chunk_id": None,
                 "chunk_level": "root",
                 "chunk_index": node.chunk_index,
                 "page_no": node.page_no,
                 "version": version,
                 "effective_from": effective_from,
                 "effective_to": effective_to,
+                "metadata_json": json.dumps(meta, ensure_ascii=False),
             },
         ).fetchone()
         chunk_id = row[0]
@@ -167,6 +178,11 @@ def save_hierarchical_chunks(
 
     for node in clause_nodes:
         parent_id = article_chunk_id_map.get(node.regulation_article or "")
+        meta = {
+            "semantic_group": getattr(node, "semantic_group", "") or "",
+            "regulation_article": node.regulation_article or "",
+            "parent_article": node.regulation_article or "",
+        }
         row = db.execute(
             insert_sql,
             {
@@ -179,12 +195,14 @@ def save_hierarchical_chunks(
                 "parent_title": node.parent_title,
                 "node_type": "CLAUSE",
                 "parent_id": parent_id,
+                "parent_chunk_id": str(parent_id) if parent_id else None,
                 "chunk_level": "child",
                 "chunk_index": node.chunk_index,
                 "page_no": node.page_no,
                 "version": version,
                 "effective_from": effective_from,
                 "effective_to": effective_to,
+                "metadata_json": json.dumps(meta, ensure_ascii=False),
             },
         ).fetchone()
         chunk_id = row[0]
@@ -220,12 +238,17 @@ def save_hierarchical_chunks(
 
     db.commit()
 
+    # ROOT(ARTICLE) 청크만 short 판정 — CHILD(CLAUSE)는 항목 단위로 짧은 것이 정상
+    short_roots = [n for n in article_nodes if len(n.chunk_text) < 200]
+    short_chunk_rate = len(short_roots) / len(article_nodes) if article_nodes else 0.0
+
     out = {
         "doc_id": doc_id,
         "total_chunks": len(saved_chunks),
         "article_chunks": len(article_nodes),
         "clause_chunks": len(clause_nodes),
         "embedding_saved": vectors is not None,
+        "short_chunk_rate": short_chunk_rate,
     }
     if vectors is None and _last_embedding_error:
         out["embedding_skip_reason"] = _last_embedding_error

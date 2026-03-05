@@ -50,6 +50,9 @@ def load_rulebook_text(path: str) -> str:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+PARENT_MIN = 200  # 이 길이 미만인 ARTICLE은 다음 조문과 병합
+
+
 @dataclass
 class ChunkNode:
     """계층적 청크 노드."""
@@ -63,6 +66,8 @@ class ChunkNode:
     children: list["ChunkNode"] = field(default_factory=list)
     chunk_index: int = 0
     page_no: int = 1
+    semantic_group: str = ""  # 장(章) 단위 그룹 (예: "제1장 총칙")
+    merged_with: str | None = None  # 병합된 조문 번호 (ARTICLE 병합 시)
 
 
 def _extract_article_title(header_line: str) -> tuple[str, str]:
@@ -109,13 +114,63 @@ def _build_contextual_header(article: str, title: str, chapter_context: str = ""
     return ""
 
 
+def _merge_short_articles(
+    articles: list[dict[str, Any]],
+    parent_min: int = PARENT_MIN,
+) -> list[dict[str, Any]]:
+    """
+    길이가 parent_min 미만인 ARTICLE을 바로 다음 ARTICLE과 병합한다.
+    병합 규칙: body 길이 < parent_min이면 다음 조문과 병합; 마지막 조문이 짧으면 이전에 흡수.
+    """
+    if not articles:
+        return articles
+
+    merged: list[dict[str, Any]] = []
+    skip_next = False
+
+    for i, art in enumerate(articles):
+        if skip_next:
+            skip_next = False
+            continue
+
+        body = art.get("body") or ""
+        body_len = len(body)
+        has_next = i + 1 < len(articles)
+
+        if body_len < parent_min and has_next:
+            next_art = articles[i + 1]
+            merged_title = f"{art.get('full_title') or art.get('regulation_article', '')} ~ {next_art.get('full_title') or next_art.get('regulation_article', '')}"
+            merged_body = body + "\n\n" + (next_art.get("body") or "")
+            merged_clauses = list(art.get("clauses") or []) + list(next_art.get("clauses") or [])
+            merged.append({
+                "regulation_article": art.get("regulation_article"),
+                "full_title": merged_title,
+                "article_header": merged_title,
+                "body": merged_body,
+                "clauses": merged_clauses,
+                "contextual_header": art.get("contextual_header", ""),
+                "current_chapter": art.get("current_chapter", ""),
+                "merged_with": next_art.get("regulation_article"),
+            })
+            skip_next = True
+        elif body_len < parent_min and not has_next and merged:
+            prev = merged[-1]
+            prev["body"] = (prev.get("body") or "") + "\n\n" + body
+            prev["full_title"] = f"{prev.get('full_title', '')} ~ {art.get('full_title') or art.get('regulation_article', '')}"
+            prev["clauses"] = list(prev.get("clauses") or []) + list(art.get("clauses") or [])
+        else:
+            merged.append(dict(art))
+
+    return merged
+
+
 def hierarchical_chunk(text: str) -> list[ChunkNode]:
     """
     규정집 텍스트를 조문-항/호 계층으로 분리.
     ARTICLE 노드(조문 전체) + CLAUSE 노드(항 단위). 단항 조문은 ARTICLE만.
+    초단편( body < PARENT_MIN ) ARTICLE은 다음 조문과 병합 후 노드 생성.
     """
-    nodes: list[ChunkNode] = []
-    chunk_index = 0
+    articles: list[dict[str, Any]] = []
     current_chapter = ""
 
     chapter_splits = _CHAPTER_PATTERN.split(text)
@@ -136,7 +191,6 @@ def hierarchical_chunk(text: str) -> list[ChunkNode]:
             if _ARTICLE_PATTERN.fullmatch(segment):
                 article_header = segment
                 i += 1
-                # 본문: 다음 조문 헤더가 나올 때까지 모든 세그먼트를 이어 붙임 (.*$는 한 줄만 매칭하므로)
                 body_parts = []
                 while i < len(article_splits):
                     seg = article_splits[i].strip()
@@ -152,42 +206,71 @@ def hierarchical_chunk(text: str) -> list[ChunkNode]:
                 article_num, article_title = _extract_article_title(article_header)
                 full_title = f"{article_num} {article_title}".strip()
                 contextual_header = _build_contextual_header(article_num, article_title, current_chapter)
-
-                article_full_text = f"{article_header}\n{article_body}".strip()
-                article_node = ChunkNode(
-                    node_type="ARTICLE",
-                    regulation_article=article_num,
-                    regulation_clause=None,
-                    parent_title=full_title,
-                    chunk_text=article_full_text,
-                    search_text=article_body,
-                    contextual_header=contextual_header,
-                    chunk_index=chunk_index,
-                )
-                chunk_index += 1
-
                 clauses = _split_into_clauses(article_body)
-                if len(clauses) >= 2:
-                    for marker, clause_text in clauses:
-                        clause_chunk_text = f"{contextual_header}{marker} {clause_text}".strip()
-                        clause_node = ChunkNode(
-                            node_type="CLAUSE",
-                            regulation_article=article_num,
-                            regulation_clause=marker or None,
-                            parent_title=full_title,
-                            chunk_text=clause_chunk_text,
-                            search_text=clause_text,
-                            contextual_header=contextual_header,
-                            chunk_index=chunk_index,
-                        )
-                        chunk_index += 1
-                        article_node.children.append(clause_node)
-                        nodes.append(clause_node)
-                    nodes.insert(len(nodes) - len(article_node.children), article_node)
-                else:
-                    nodes.append(article_node)
+
+                articles.append({
+                    "regulation_article": article_num,
+                    "full_title": full_title,
+                    "article_header": article_header,
+                    "body": article_body,
+                    "contextual_header": contextual_header,
+                    "current_chapter": current_chapter,
+                    "clauses": clauses,
+                })
             else:
                 i += 1
+
+    # 초단편 ARTICLE 병합
+    articles = _merge_short_articles(articles, parent_min=PARENT_MIN)
+
+    # ChunkNode 변환
+    nodes: list[ChunkNode] = []
+    chunk_index = 0
+    for art in articles:
+        full_title = art.get("full_title") or art.get("regulation_article") or ""
+        body = art.get("body") or ""
+        article_header = art.get("article_header") or full_title
+        contextual_header = art.get("contextual_header") or ""
+        current_chapter = art.get("current_chapter") or ""
+        regulation_article = art.get("regulation_article")
+        merged_with = art.get("merged_with")
+        clauses = art.get("clauses") or []
+
+        article_full_text = f"{article_header}\n{body}".strip()
+        article_node = ChunkNode(
+            node_type="ARTICLE",
+            regulation_article=regulation_article,
+            regulation_clause=None,
+            parent_title=full_title,
+            chunk_text=article_full_text,
+            search_text=body,
+            contextual_header=contextual_header,
+            chunk_index=chunk_index,
+            semantic_group=current_chapter,
+            merged_with=merged_with,
+        )
+        chunk_index += 1
+
+        if len(clauses) >= 2:
+            for marker, clause_text in clauses:
+                clause_chunk_text = f"{contextual_header}{marker} {clause_text}".strip()
+                clause_node = ChunkNode(
+                    node_type="CLAUSE",
+                    regulation_article=regulation_article,
+                    regulation_clause=marker or None,
+                    parent_title=full_title,
+                    chunk_text=clause_chunk_text,
+                    search_text=clause_text,
+                    contextual_header=contextual_header,
+                    chunk_index=chunk_index,
+                    semantic_group=current_chapter,
+                )
+                chunk_index += 1
+                article_node.children.append(clause_node)
+                nodes.append(clause_node)
+            nodes.insert(len(nodes) - len(article_node.children), article_node)
+        else:
+            nodes.append(article_node)
 
     return nodes
 
