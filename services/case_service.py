@@ -392,8 +392,10 @@ def build_analysis_payload(db: Session, voucher_key: str) -> dict:
         },
     }
 
+    case_id_int = _case_id_from_voucher(tenant_id, bukrs, belnr, gjahr)
     return {
         "case_id": f"POC-{bukrs}-{belnr}-{gjahr}",
+        "case_id_int": case_id_int,
         "body_evidence": body_evidence,
         "intended_risk_type": case_type,
         "document_items": document_items,

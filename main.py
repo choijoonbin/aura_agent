@@ -28,6 +28,7 @@ from services.chunking_pipeline import run_chunking_pipeline
 from services.rag_library_service import get_rag_document_detail, list_rag_documents
 from services.run_diagnostics import compare_runs_diagnostics, get_run_diagnostics
 from services.runtime_persistence_service import (
+    create_analysis_run_row,
     get_latest_run_id_by_case,
     get_persisted_timeline,
     get_run_aux_state,
@@ -314,6 +315,14 @@ async def start_analysis(voucher_key: str, db: Session = Depends(get_db)) -> Ana
     run_id = str(uuid.uuid4())
     case_id = payload["case_id"]
     runtime.create_run(case_id=case_id, run_id=run_id, mode="primary")
+    try:
+        create_analysis_run_row(
+            db,
+            run_id=run_id,
+            case_id_int=payload["case_id_int"],
+        )
+    except Exception:
+        pass
     try:
         log_run_event(
             db,

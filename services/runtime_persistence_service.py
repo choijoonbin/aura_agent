@@ -20,6 +20,56 @@ ACTOR_AGENT_ID = "mater_poc_langgraph"
 ACTOR_DISPLAY_NAME = "AuraAgent LangGraph Agent"
 
 
+def create_analysis_run_row(
+    db: Session,
+    *,
+    run_id: str,
+    case_id_int: int,
+    status: str = "STARTED",
+    mode: str = "LIVE",
+    requested_by: str = "HUMAN",
+) -> None:
+    """
+    case_analysis_run에 run 행을 삽입.
+    persist_analysis_result가 case_analysis_result에 넣을 때 FK(case_analysis_run.run_id)를 만족시키기 위해
+    분석 run 시작 시 호출해야 함.
+    """
+    sql = text(
+        """
+        insert into dwp_aura.case_analysis_run (
+            run_id,
+            tenant_id,
+            case_id,
+            status,
+            mode,
+            requested_by
+        ) values (
+            cast(:run_id as uuid),
+            :tenant_id,
+            :case_id_int,
+            :status,
+            :mode,
+            :requested_by
+        )
+        on conflict (run_id) do update set
+            status = excluded.status,
+            case_id = excluded.case_id
+        """
+    )
+    db.execute(
+        sql,
+        {
+            "run_id": run_id,
+            "tenant_id": settings.default_tenant_id,
+            "case_id_int": case_id_int,
+            "status": status,
+            "mode": mode,
+            "requested_by": requested_by,
+        },
+    )
+    db.commit()
+
+
 def _json_default(value: Any) -> str:
     return str(value)
 

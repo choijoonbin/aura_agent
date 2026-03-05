@@ -225,11 +225,27 @@ def _search_bm25(
     if not keywords:
         return []
 
-    # tsquery: simple config, prefix match. 단어 내 공백/특수문자 이스케이프
-    safe_kw = [str(kw).strip().replace("'", "''") for kw in keywords[:15] if kw and str(kw).strip()]
-    if not safe_kw:
+    # tsquery: simple config, prefix match. 공백 포함 키워드는 토큰으로 쪼개서 단일 토큰만 "t:*" 형태로 전달 (구문 오류 방지)
+    TSQUERY_OPERATORS = set("&|!():*")
+    ts_terms: list[str] = []
+    seen: set[str] = set()
+    for kw in keywords[:20]:
+        if not kw or not str(kw).strip():
+            continue
+        for part in str(kw).strip().split():
+            token = part.strip()
+            if len(token) < 2:
+                continue
+            if any(c in token for c in TSQUERY_OPERATORS):
+                continue
+            safe = token.replace("'", "''")
+            if safe in seen:
+                continue
+            seen.add(safe)
+            ts_terms.append(f"{safe}:*")
+    if not ts_terms:
         return []
-    ts_query = " | ".join(f"{kw}:*" for kw in safe_kw)
+    ts_query = " | ".join(ts_terms[:30])
 
     sql = text("""
         SELECT
@@ -290,14 +306,14 @@ def _search_dense(
             chunk_id, doc_id, regulation_article, regulation_clause,
             parent_title, chunk_text, search_text, node_type, parent_id,
             version, effective_from, effective_to, page_no, chunk_index,
-            1 - ({embed_column} <=> :query_vec::vector) AS dense_score
+            1 - ({embed_column} <=> CAST(:query_vec AS vector)) AS dense_score
         FROM dwp_aura.rag_chunk
         WHERE tenant_id = :tenant_id
           AND is_active = true
           AND {embed_column} IS NOT NULL
           AND (:effective_date IS NULL OR coalesce(effective_from, :effective_date) <= :effective_date)
           AND (:effective_date IS NULL OR coalesce(effective_to, :effective_date) >= :effective_date)
-        ORDER BY {embed_column} <=> :query_vec::vector
+        ORDER BY {embed_column} <=> CAST(:query_vec AS vector)
         LIMIT :limit
     """)
     rows = db.execute(
