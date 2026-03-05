@@ -413,7 +413,18 @@ def render_rag_library_page() -> None:
                 '<div class="mt-panel-title" style="margin-bottom:4px">청크 미리보기</div>',
                 unsafe_allow_html=True,
             )
-            st.caption("초단편: 100자 미만 · 적정: 200자 이상 (100~199자: 배지 없음)")
+            st.markdown(
+                """<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px;font-size:0.8rem;color:#64748b">
+                  <span style="background:#dc2626;color:#fff;padding:2px 8px;border-radius:999px;font-size:0.68rem;font-weight:700">초단편</span>
+                  <span>100자 미만</span>
+                  <span style="color:#cbd5e1">·</span>
+                  <span style="background:#059669;color:#fff;padding:2px 8px;border-radius:999px;font-size:0.68rem;font-weight:700">적정</span>
+                  <span>200자 이상</span>
+                  <span style="color:#cbd5e1">·</span>
+                  <span>(100~199자: 배지 없음)</span>
+                </div>""",
+                unsafe_allow_html=True,
+            )
 
             for idx, chunk in enumerate(chunks[:20], start=1):
                 c_type = chunk.get("chunk_type", "leaf")
