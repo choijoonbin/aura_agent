@@ -100,7 +100,7 @@ def inject_css() -> None:
         .mt-panel-title {{ font-size:1.02rem; font-weight:800; color:#0f172a; letter-spacing:-0.01em; }}
         .mt-panel-sub {{ font-size:0.84rem; color:#64748b; line-height:1.55; margin-top:4px; }}
         .mt-kpi {{ padding: 18px 20px; border-radius: 18px; border: 1px solid var(--mt-border); background: rgba(255,255,255,0.98); box-shadow: 0 10px 24px rgba(15,23,42,0.05); min-height: 132px; }}
-        .mt-kpi-label {{ font-size: 0.82rem; color: var(--mt-text-soft); font-weight: 800; text-transform: uppercase; letter-spacing: 0.04em; }}
+        .mt-kpi-label {{ font-size: 1.64rem; color: var(--mt-text-soft); font-weight: 800; text-transform: uppercase; letter-spacing: 0.04em; }}
         .mt-kpi-value {{ font-size: 2.15rem; font-weight: 800; color: #0f172a; line-height: 1.1; margin-top: 10px; }}
         .mt-kpi-foot {{ font-size: 0.84rem; color: var(--mt-text-soft); margin-top: 8px; line-height: 1.5; }}
         .mt-section-card {{ padding: 18px 20px; border-radius: 22px; border: 1px solid var(--mt-border); background: rgba(255,255,255,0.96); box-shadow: 0 12px 30px rgba(15,23,42,0.05); }}

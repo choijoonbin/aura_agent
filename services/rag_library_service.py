@@ -74,6 +74,22 @@ def get_rag_document_detail(db: Session, doc_id: int) -> dict[str, Any] | None:
     if not doc:
         return None
 
+    # DB 실제 청크 총 건수·평균 길이 (배지 등에 사용)
+    count_sql = text(
+        """
+        select
+            count(*) as total_chunk_count,
+            coalesce(avg(length(chunk_text)), 0)::numeric(12,2) as avg_chunk_length
+        from dwp_aura.rag_chunk
+        where tenant_id = :tenant_id
+          and doc_id = :doc_id
+          and is_active = true
+        """
+    )
+    row = db.execute(count_sql, {"tenant_id": settings.default_tenant_id, "doc_id": doc_id}).mappings().first()
+    doc["total_chunk_count"] = int(row["total_chunk_count"]) if row else 0
+    doc["avg_chunk_length"] = float(row["avg_chunk_length"]) if row and row["avg_chunk_length"] is not None else 0.0
+
     chunk_sql = text(
         """
         select

@@ -104,7 +104,18 @@ def post_rag_document_rechunk(
     doc = get_rag_document_detail(db, doc_id)
     if not doc:
         raise HTTPException(status_code=404, detail="rag document not found")
-    result = run_chunking_pipeline(db, doc_id, raw_text)
+    # 문서 메타(버전·시행일)를 청크에 반영 — 문서에 값이 있으면 청크 INSERT 시 함께 저장
+    version = str(doc["version"]) if doc.get("version") is not None else None
+    effective_from = doc.get("effective_from")
+    effective_to = doc.get("effective_to")
+    result = run_chunking_pipeline(
+        db,
+        doc_id,
+        raw_text,
+        version=version,
+        effective_from=effective_from,
+        effective_to=effective_to,
+    )
     if "error" in result:
         raise HTTPException(status_code=422, detail=result["error"])
     return result

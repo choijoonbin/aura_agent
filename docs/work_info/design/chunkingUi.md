@@ -638,7 +638,7 @@ def render_rag_library_page() -> None:
             "parent_child":    {"label": "🆕 Parent-Child 계층형", "recommend": True,
                                 "desc": "Dense 검색 최적"},
             "hybrid_policy":   {"label": "하이브리드 정책형", "recommend": False,
-                                "desc": "현재 운영 방식"},
+                                "desc": "조항 경계 유지 + 900자 초과 시만 내부 분할"},
             "article_first":   {"label": "조항 우선", "recommend": False,
                                 "desc": "단순 경계 분리"},
             "sliding_window":  {"label": "슬라이딩 윈도우", "recommend": False,
@@ -905,3 +905,272 @@ streamlit run app.py --server.port 8502
 | 전략 비교 | 숫자 3열 | 추천 뱃지 + 품질 게이지 + 설명 |
 | 청크 미리보기 | 단순 expander | Parent📦 / Child🔹 구조 시각화 |
 | Run 인용 조회 | 텍스트 나열 | 채택(초록) / 후보(회색) 카드 구분 |
+
+
+
+
+
+#추가ui작업
+with top_tabs[1]:
+    render_panel_header(
+        "🔬 청킹 실험실",
+        "규정 텍스트에 전략을 바꿔 적용하며 청킹 결과를 비교합니다. "
+        "전략 선택 → 지표 확인 → 미리보기 → DB 재청킹 순으로 진행하세요."
+    )
+
+    local_files = list_rulebook_files()
+
+    # ── Row 1: 컨트롤 3개 한 줄 (5-2 + A2) ─────────────────────────────────
+    ctrl1, ctrl2, ctrl3 = st.columns([0.35, 0.35, 0.30])
+
+    with ctrl1:
+        selected_file = st.selectbox(
+            "대상 문서",
+            options=local_files,
+            format_func=lambda x: f"{x['name']} ({x['source']})",
+            index=0,
+            key="lab_sel_file",
+        )
+    with ctrl2:
+        strategy = st.selectbox(
+            "청킹 전략",
+            options=["parent_child", "hybrid_policy", "article_first", "sliding_window"],
+            format_func=lambda x: {
+                "parent_child":   "🏆 Parent-Child 계층형 (권장)",
+                "hybrid_policy":  "하이브리드 정책형",
+                "article_first":  "조항 우선",
+                "sliding_window": "슬라이딩 윈도우",
+            }[x],
+            key="lab_strategy",
+        )
+    with ctrl3:
+        upload = st.file_uploader("규정 TXT 업로드", type=["txt"], key="lab_upload",
+                                   label_visibility="visible")
+        if upload is not None:
+            save_uploaded_rulebook(upload.name, upload.getvalue())
+            st.success(f"업로드: {upload.name}")
+            st.rerun()
+
+    if not local_files:
+        render_empty_state("업로드된 규정 파일이 없습니다.")
+        return   # 이하 코드 실행 안 함
+
+    text   = load_rulebook_text(selected_file["path"])
+    chunks = preview_chunks(text, strategy)
+    parent_chunks = [c for c in chunks if c.get("chunk_type") == "parent"] if strategy == "parent_child" else chunks
+
+    # ── Row 2: 통계 지표 4개 한 줄 (5-2) ────────────────────────────────────
+    s1, s2, s3, s4 = st.columns(4)
+
+    total_chunks = len(chunks)
+    avg_len = int(sum(c["length"] for c in chunks) / total_chunks) if total_chunks else 0
+
+    # 초단편: parent_child면 parent만, 나머지는 전체
+    check_chunks = parent_chunks if strategy == "parent_child" else chunks
+    short_count  = sum(1 for c in check_chunks if c["length"] < 200)
+    short_label  = f"초단편 ({('ROOT' if strategy == 'parent_child' else '전체')})"
+
+    s1.metric("원문 길이",   f"{len(text):,}자")
+    s2.metric("총 청크 수",  str(total_chunks),
+              delta=f"Parent {len(parent_chunks)} + Leaf {total_chunks - len(parent_chunks)}"
+              if strategy == "parent_child" else None)
+    s3.metric("평균 길이",   f"{avg_len}자")
+
+    # 초단편 수 — 양호/개선필요 배지 (5-4 툴팁 포함)
+    is_good = short_count <= 5
+    badge_text  = "양호" if is_good else "개선필요"
+    badge_color = "#059669" if is_good else "#dc2626"
+    badge_bg    = "#ecfdf5" if is_good else "#fef2f2"
+
+    # 5-4: 배지 툴팁 설명 (HTML title 속성)
+    if is_good:
+        badge_title = (
+            f"초단편 {short_count}개 (기준: 5개 이하) — 청킹 품질이 양호합니다. "
+            f"200자 미만 ARTICLE이 적어 AI 검색 정확도에 유리합니다."
+        )
+    else:
+        badge_title = (
+            f"초단편 {short_count}개 (기준: 5개 이하 권장) — 재청킹을 권장합니다. "
+            f"200자 미만의 짧은 ARTICLE 청크가 많으면 AI가 관련 조항을 검색할 때 "
+            f"문맥이 부족해 정확도가 떨어질 수 있습니다. "
+            f"'DB 재청킹 실행' 버튼을 눌러 현재 전략으로 재적재하세요."
+        )
+
+    with s4:
+        st.metric(short_label, str(short_count))
+        st.markdown(
+            f"<span title='{badge_title}' style='cursor:help;"
+            f"background:{badge_bg};color:{badge_color};"
+            f"font-size:0.75rem;font-weight:700;padding:3px 10px;"
+            f"border-radius:20px;border:1px solid {badge_color}33;'>"
+            f"{'✅ ' if is_good else '⚠️ '}{badge_text}</span>",
+            unsafe_allow_html=True,
+        )
+
+    st.markdown("<div style='height:4px'></div>", unsafe_allow_html=True)
+
+    # ── 전략 비교 (A3 + 5-3 + 5-4) ──────────────────────────────────────────
+    st.markdown("#### 전략 비교")
+
+    _STRATEGY_LABELS = {
+        "parent_child":   ("🏆 Parent-Child 계층형", "parent_child"),
+        "하이브리드 정책형": ("하이브리드 정책형",    "hybrid_policy"),
+        "조항 우선":        ("조항 우선",              "article_first"),
+        "슬라이딩 윈도우":  ("슬라이딩 윈도우",        "sliding_window"),
+    }
+
+    compare = {
+        "🏆 Parent-Child 계층형": preview_chunks(text, "parent_child"),
+        "하이브리드 정책형":       preview_chunks(text, "hybrid_policy"),
+        "조항 우선":               preview_chunks(text, "article_first"),
+        "슬라이딩 윈도우":         preview_chunks(text, "sliding_window"),
+    }
+    _STRAT_KEYS = {
+        "🏆 Parent-Child 계층형": "parent_child",
+        "하이브리드 정책형":       "hybrid_policy",
+        "조항 우선":               "article_first",
+        "슬라이딩 윈도우":         "sliding_window",
+    }
+
+    def _quality_score_and_detail(cks: list, strat_key: str) -> tuple[int, str]:
+        """
+        품질 점수 계산 + 5-3 툴팁 설명 문자열 반환.
+        parent_child: ROOT(parent) 청크만 기준
+        기타: 전체 기준
+        """
+        if not cks:
+            return 0, "청크 없음"
+        if strat_key == "parent_child":
+            base = [c for c in cks if c.get("chunk_type") == "parent"]
+        else:
+            base = cks
+        if not base:
+            return 0, "parent 청크 없음"
+        total_b = len(base)
+        short_b = sum(1 for c in base if c["length"] < 200)
+        penalty = short_b * 3
+        score   = max(0, 100 - penalty)
+        avg_b   = int(sum(c["length"] for c in base) / total_b)
+        detail_str = (
+            f"기준 청크: {total_b}개 ({'ARTICLE(Parent)만' if strat_key == 'parent_child' else '전체'})\n"
+            f"200자 미만 단편: {short_b}개 × (-3점) = -{penalty}점\n"
+            f"평균 길이: {avg_b}자\n"
+            f"최종 점수: 100 - {penalty} = {score}점"
+        )
+        return score, detail_str
+
+    compare_cols = st.columns(4)
+    for col, (label, ck_list) in zip(compare_cols, compare.items()):
+        strat_key = _STRAT_KEYS[label]
+        q_score, q_detail = _quality_score_and_detail(ck_list, strat_key)
+        is_recommended = strat_key == "parent_child"
+        is_good_strat  = q_score >= 70
+
+        border_color = "#2563eb" if is_recommended else "#e5e7eb"
+        border_width = "2px"     if is_recommended else "1px"
+
+        score_color = "#059669" if q_score >= 70 else "#d97706" if q_score >= 40 else "#dc2626"
+
+        badge_t  = "양호"    if is_good_strat else "개선필요"
+        badge_c  = "#059669" if is_good_strat else "#dc2626"
+        badge_bg2= "#ecfdf5" if is_good_strat else "#fef2f2"
+
+        # 5-4: 배지 툴팁
+        if is_good_strat:
+            b_tip = f"단편 {sum(1 for c in ([c for c in ck_list if c.get('chunk_type')=='parent'] if strat_key=='parent_child' else ck_list) if c['length']<200)}개 (기준: 5개 이하). 청킹 품질 양호, AI 검색 정확도 유리."
+        else:
+            b_tip = f"단편 초과. 200자 미만 ARTICLE이 많아 AI 검색 시 문맥 부족 우려. 재청킹 권장."
+
+        with col:
+            with stylable_container(
+                key=f"rag_cmp_{strat_key}",
+                css_styles=f"{{padding:14px 16px;border-radius:16px;"
+                           f"border:{border_width} solid {border_color};"
+                           f"background:rgba(255,255,255,0.98);"
+                           f"box-shadow:0 8px 22px rgba(15,23,42,0.04);min-height:180px;}}"
+            ):
+                rec_label = "🏆 권장" if is_recommended else ""
+                st.caption(f"{label} {rec_label}".strip())
+                st.subheader(str(len(ck_list)))
+                avg_l = f"{int(sum(c['length'] for c in ck_list)/len(ck_list)):.0f}" if ck_list else "0"
+                st.caption(f"평균 {avg_l}자")
+
+                # 5-3: 품질점수 + 마우스오버 툴팁
+                st.markdown(
+                    f"<div title='{q_detail}' style='cursor:help;margin-top:8px;'>"
+                    f"<span style='font-size:11px;color:#6b7280;'>품질점수</span><br>"
+                    f"<span style='font-size:24px;font-weight:800;color:{score_color};'>{q_score}점</span>"
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
+
+                # 5-4: 배지 + 툴팁
+                st.markdown(
+                    f"<span title='{b_tip}' style='cursor:help;"
+                    f"background:{badge_bg2};color:{badge_c};"
+                    f"font-size:0.72rem;font-weight:700;padding:2px 8px;"
+                    f"border-radius:20px;'>"
+                    f"{'✅' if is_good_strat else '⚠️'} {badge_t}</span>",
+                    unsafe_allow_html=True,
+                )
+
+    # ── 청크 미리보기 ──────────────────────────────────────────────────────
+    st.markdown("#### 청크 미리보기")
+    # 범례
+    if strategy == "parent_child":
+        st.markdown(
+            "<span style='background:#ef4444;color:#fff;font-size:0.72rem;"
+            "padding:2px 8px;border-radius:4px;margin-right:6px;'>100자 미만</span>"
+            "<span style='background:#22c55e;color:#fff;font-size:0.72rem;"
+            "padding:2px 8px;border-radius:4px;margin-right:6px;'>200자 이상</span>"
+            "<span style='font-size:0.72rem;color:#6b7280;'>(100~199자: 배지 없음)</span>",
+            unsafe_allow_html=True,
+        )
+    for idx, chunk in enumerate(chunks[:20], start=1):
+        ctype = chunk.get("chunk_type", "")
+        icon  = "📦" if ctype == "parent" else ("🔹" if ctype == "child" else "")
+        clen  = chunk["length"]
+        len_badge = ""
+        if clen < 100:
+            len_badge = " 🔴"
+        elif clen >= 200:
+            len_badge = " 🟢"
+        label = f"{icon} {chunk['title']} · {clen}자{len_badge}"
+        with st.expander(label, expanded=(idx == 1)):
+            if ctype:
+                type_label = "ARTICLE (Parent)" if ctype == "parent" else "CLAUSE (Child)"
+                clr = "#1d4ed8" if ctype == "parent" else "#6b7280"
+                st.markdown(f"<span style='color:{clr};font-size:11px;font-weight:700;'>{type_label}</span>", unsafe_allow_html=True)
+            st.write(chunk["content"])
+
+    # ── DB 재청킹 — 전략비교 바로 아래, 미리보기 위 (5-1) ──────────────────
+    st.markdown("---")
+    with stylable_container(
+        key="rag_rechunk_box",
+        css_styles="""{
+            background: #fffbeb;
+            border: 1px solid #fde68a;
+            border-radius: 14px;
+            padding: 16px 18px;
+            margin-bottom: 16px;
+        }"""
+    ):
+        st.markdown(
+            "<div style='font-weight:700;color:#92400e;font-size:0.9rem;margin-bottom:6px;'>"
+            "⚡ DB 재청킹</div>"
+            "<div style='font-size:0.82rem;color:#78350f;'>"
+            "현재 선택된 규정집 문서로 지정된 문서(doc_id)에 각종 청킹 입력값(search_tsv)을 적용합니다. "
+            "위 전략 비교에서 최적 전략을 확인한 뒤 실행하세요."
+            "</div>",
+            unsafe_allow_html=True,
+        )
+        doc_options = [{"label": f"doc_id={d['doc_id']} · {d['title']}", "value": d["doc_id"]} for d in items]
+        sel_doc_rechunk = st.selectbox(
+            "대상 문서 [doc_id]",
+            options=[d["doc_id"] for d in items],
+            format_func=lambda v: next((f"doc_id={d['doc_id']} · {d['title']}" for d in items if d["doc_id"] == v), str(v)),
+            key="rechunk_doc_id",
+        )
+        if st.button("🔄 현재 규정집으로 재청킹 실행", type="primary", key="rechunk_btn"):
+            st.info(f"doc_id={sel_doc_rechunk} 재청킹 요청 전송 중...")
+            # 실제 재청킹 API 호출 로직 (기존 코드 유지)
