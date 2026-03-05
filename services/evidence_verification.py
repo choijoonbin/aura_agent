@@ -21,20 +21,50 @@ _WORD_RE = re.compile(r"[0-9A-Za-z가-힣]{2,}")
 
 
 def _chunk_supports_claim(claim: str, chunk: dict[str, Any]) -> bool:
-    """청크가 주장 문장을 뒷받침할 수 있는지 (단어 중복 2개 이상)."""
-    words = set(_WORD_RE.findall((claim or "").lower()))
-    if len(words) < 2:
-        return bool(chunk)
+    """
+    강화된 판정 기준:
+    규칙 1. 주장에 '제XX조'가 명시된 경우 청크도 해당 조항을 포함해야 함 (필수)
+    규칙 2. 불용어 제거 후 의미 단어 3개 이상 중복 (기존 2개에서 상향)
+    규칙 3. 숫자·코드 키워드 추가 가중치
+    """
+    if not claim or not chunk:
+        return False
+
+    claim_lower = (claim or "").lower()
     text_parts = [
         str(chunk.get("chunk_text") or ""),
         str(chunk.get("parent_title") or ""),
-        str(chunk.get("article") or ""),
+        str(chunk.get("article") or chunk.get("regulation_article") or ""),
         str(chunk.get("regulation_clause") or ""),
     ]
     combined = " ".join(text_parts).lower()
-    chunk_words = set(_WORD_RE.findall(combined))
-    overlap = len(words & chunk_words)
-    return overlap >= 2
+
+    # 규칙 1: 조항 번호 명시 시 청크와 일치 필수
+    claim_articles = re.findall(r"제\s*(\d+)\s*조", claim_lower)
+    if claim_articles:
+        chunk_articles = re.findall(r"제\s*(\d+)\s*조", combined)
+        if not any(article in chunk_articles for article in claim_articles):
+            return False
+
+    # 규칙 2: 의미 단어 추출 (불용어 제거)
+    stop_words = {
+        "이", "가", "을", "를", "의", "에", "에서", "으로", "로", "와", "과",
+        "이다", "있음", "있다", "수", "하며", "하여", "해당", "필요", "경우",
+        "대상", "조항", "기준", "해야", "한다", "되어", "위반", "가능성",
+    }
+    claim_words = {word for word in _WORD_RE.findall(claim_lower) if len(word) >= 2 and word not in stop_words}
+    chunk_words = {word for word in _WORD_RE.findall(combined) if len(word) >= 2 and word not in stop_words}
+
+    if len(claim_words) < 2:
+        return bool(chunk)
+
+    overlap = len(claim_words & chunk_words)
+
+    # 규칙 3: 숫자·코드 키워드 가중치
+    numeric_bonus = len({word for word in claim_words if any(ch.isdigit() for ch in word)} & chunk_words)
+    weighted = overlap + numeric_bonus
+
+    return weighted >= 3
 
 
 def verify_evidence_coverage_claims(

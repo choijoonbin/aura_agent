@@ -7,6 +7,8 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
+from pydantic import BaseModel
+
 from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
@@ -22,6 +24,7 @@ from services.case_service import (
 )
 from services.demo_data_service import clear_demo_data, list_demo_scenarios, list_seeded_demo_cases, seed_demo_scenarios
 from services.persistence_service import persist_analysis_result
+from services.chunking_pipeline import run_chunking_pipeline
 from services.rag_library_service import get_rag_document_detail, list_rag_documents
 from services.run_diagnostics import compare_runs_diagnostics, get_run_diagnostics
 from services.runtime_persistence_service import (
@@ -82,6 +85,29 @@ def get_rag_document(doc_id: int, db: Session = Depends(get_db)) -> dict[str, An
     if not item:
         raise HTTPException(status_code=404, detail="rag document not found")
     return item
+
+
+class RechunkRequest(BaseModel):
+    raw_text: str
+
+
+@app.post("/api/v1/rag/documents/{doc_id}/rechunk")
+def post_rag_document_rechunk(
+    doc_id: int,
+    body: RechunkRequest,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """선택한 규정집 원문으로 해당 doc_id에 대해 계층 청킹 + embedding_ko + search_tsv 재색인."""
+    raw_text = (body.raw_text or "").strip()
+    if not raw_text:
+        raise HTTPException(status_code=400, detail="raw_text is required and must be non-empty")
+    doc = get_rag_document_detail(db, doc_id)
+    if not doc:
+        raise HTTPException(status_code=404, detail="rag document not found")
+    result = run_chunking_pipeline(db, doc_id, raw_text)
+    if "error" in result:
+        raise HTTPException(status_code=422, detail=result["error"])
+    return result
 
 
 @app.get("/api/v1/agents")

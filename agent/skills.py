@@ -62,9 +62,33 @@ async def merchant_risk_probe(context: dict[str, Any]) -> dict[str, Any]:
     body = context["body_evidence"]
     mcc = body.get("mccCode")
     merchant = body.get("merchantName")
-    risk = "MEDIUM" if mcc else "UNKNOWN"
-    if str(mcc) in {"5813", "7992"}:
+
+    high_mcc = {"5813", "7992", "5912", "7997", "5999"}
+    medium_mcc = {"5812", "5814", "7011", "4722"}
+    mcc_str = str(mcc or "")
+    if mcc_str in high_mcc:
+        base_risk = "HIGH"
+    elif mcc_str in medium_mcc or mcc_str:
+        base_risk = "MEDIUM"
+    else:
+        base_risk = "UNKNOWN"
+
+    prior = context.get("prior_tool_results") or []
+    holiday_facts = next(
+        ((result.get("facts") or {}) for result in prior if result.get("skill") == "holiday_compliance_probe"),
+        {},
+    )
+    holiday_risk = bool(holiday_facts.get("holidayRisk"))
+    compound_flags: list[str] = []
+
+    if holiday_risk and base_risk == "HIGH":
+        risk = "CRITICAL"
+        compound_flags.append("휴일+고위험업종 복합")
+    elif holiday_risk and base_risk == "MEDIUM":
         risk = "HIGH"
+        compound_flags.append("휴일+중간위험업종 복합")
+    else:
+        risk = base_risk
     return {
         "skill": "merchant_risk_probe",
         "ok": True,
@@ -72,8 +96,13 @@ async def merchant_risk_probe(context: dict[str, Any]) -> dict[str, Any]:
             "mccCode": mcc,
             "merchantName": merchant,
             "merchantRisk": risk,
+            "compoundRiskFlags": compound_flags,
+            "holidayRiskConsidered": holiday_risk,
         },
-        "summary": "거래처/가맹점 업종 코드(MCC) 기반 위험도를 평가했습니다.",
+        "summary": (
+            "거래처/가맹점 업종 코드(MCC) 기반 위험도를 평가했습니다."
+            + (f" 복합 위험 감지: {', '.join(compound_flags)}" if compound_flags else "")
+        ),
     }
 
 
@@ -104,20 +133,36 @@ def _adoption_reason_for_ref(ref: dict[str, Any], body_evidence: dict[str, Any])
 
 
 async def policy_rulebook_probe(context: dict[str, Any]) -> dict[str, Any]:
+    prior = context.get("prior_tool_results") or []
+    enriched_body = dict(context["body_evidence"])
+
+    for result in prior:
+        skill = result.get("skill", "")
+        facts = result.get("facts") or {}
+        if skill == "holiday_compliance_probe" and facts.get("holidayRisk"):
+            enriched_body["_enriched_holidayRisk"] = True
+            if facts.get("hrStatus"):
+                enriched_body.setdefault("hrStatus", facts.get("hrStatus"))
+        elif skill == "merchant_risk_probe":
+            m_risk = str(facts.get("merchantRisk") or "").upper()
+            if m_risk in {"CRITICAL", "HIGH"}:
+                enriched_body["_enriched_merchantRisk"] = m_risk
+                enriched_body["_extra_keywords"] = ["고위험", "업종", "강화승인"]
+
     engine = create_engine(settings.database_url, future=True)
     with Session(engine) as db:
         # Phase F/8: top-20 후보 확보 후 상위 5건만 채택. candidates는 별도 payload 저장용
-        candidates = search_policy_chunks(db, context["body_evidence"], limit=20)
+        candidates = search_policy_chunks(db, enriched_body, limit=20)
         refs = []
         for r in candidates[:5]:
             ref = dict(r)
-            ref["adoption_reason"] = _adoption_reason_for_ref(ref, context["body_evidence"])
+            ref["adoption_reason"] = _adoption_reason_for_ref(ref, enriched_body)
             refs.append(ref)
         # 나머지 candidates도 adoption_reason 붙여서 저장 (후보 표시용)
         candidates_with_reason = []
         for r in candidates:
             ref = dict(r)
-            ref.setdefault("adoption_reason", _adoption_reason_for_ref(ref, context["body_evidence"]))
+            ref.setdefault("adoption_reason", _adoption_reason_for_ref(ref, enriched_body))
             candidates_with_reason.append(ref)
     return {
         "skill": "policy_rulebook_probe",
@@ -126,8 +171,12 @@ async def policy_rulebook_probe(context: dict[str, Any]) -> dict[str, Any]:
             "policy_refs": refs,
             "ref_count": len(refs),
             "retrieval_candidates": candidates_with_reason,
+            "enriched_from_prior": [r.get("skill") for r in prior],
         },
-        "summary": f"규정집에서 관련 조항 {len(refs)}건을 조회했습니다.",
+        "summary": (
+            f"규정집에서 관련 조항 {len(refs)}건을 조회했습니다."
+            + (f" (prior {len(prior)}개 결과 반영)" if prior else "")
+        ),
     }
 
 
@@ -217,6 +266,7 @@ def _make_langchain_tool(skill_name: str) -> StructuredTool:
             "case_id": inp.case_id,
             "body_evidence": inp.body_evidence,
             "intended_risk_type": inp.intended_risk_type,
+            "prior_tool_results": inp.prior_tool_results,
         }
         return await skill.handler(ctx)
 

@@ -15,6 +15,10 @@ class SkillContextInput(BaseModel):
     case_id: str = Field(description="분석 대상 케이스 ID")
     body_evidence: dict[str, Any] = Field(default_factory=dict, description="전표/입력 증거 (occurredAt, amount, mccCode, document 등)")
     intended_risk_type: str | None = Field(default=None, description="스크리닝된 위험 유형")
+    prior_tool_results: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description="현재 도구 호출 이전에 완료된 도구 결과 목록 (상호참조용). 각 원소는 {skill, ok, facts, summary} 형태.",
+    )
 
 
 class ToolResultEnvelope(BaseModel):

@@ -15,8 +15,13 @@ def get(path: str) -> dict[str, Any]:
     return response.json()
 
 
-def post(path: str, params: dict[str, Any] | None = None, json_body: dict[str, Any] | None = None) -> dict[str, Any]:
-    response = requests.post(f"{API}{path}", params=params or {}, json=json_body, timeout=30)
+def post(
+    path: str,
+    params: dict[str, Any] | None = None,
+    json_body: dict[str, Any] | None = None,
+    timeout: int = 30,
+) -> dict[str, Any]:
+    response = requests.post(f"{API}{path}", params=params or {}, json=json_body, timeout=timeout)
     response.raise_for_status()
     return response.json()
 

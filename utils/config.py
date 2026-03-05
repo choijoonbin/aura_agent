@@ -50,6 +50,12 @@ class Settings:
     # Reasoning note LLM label (shown in UI when note_source is "llm")
     reasoning_llm_label: str = os.getenv("REASONING_LLM_LABEL", "LLM")
 
+    # Score engine weights
+    score_policy_weight: float = float(os.getenv("SCORE_POLICY_WEIGHT", "0.6"))
+    score_evidence_weight: float = float(os.getenv("SCORE_EVIDENCE_WEIGHT", "0.4"))
+    score_compound_multiplier_max: float = float(os.getenv("SCORE_COMPOUND_MULTIPLIER_MAX", "1.5"))
+    score_amount_multiplier_max: float = float(os.getenv("SCORE_AMOUNT_MULTIPLIER_MAX", "1.3"))
+
     # Langfuse (observability, optional)
     langfuse_enabled: bool = os.getenv("LANGFUSE_ENABLED", "false").lower() == "true"
     langfuse_public_key: str | None = os.getenv("LANGFUSE_PUBLIC_KEY") or None

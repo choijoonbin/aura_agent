@@ -1,6 +1,10 @@
 fastapi>=0.115.0
 uvicorn[standard]>=0.30.0
 streamlit>=1.42.0
+streamlit-option-menu>=0.3.0
+pandas>=2.0.0
+plotly>=5.0.0
+matplotlib>=3.7.0
 sqlalchemy>=2.0.30
 psycopg2-binary>=2.9.9
 httpx>=0.27.0
@@ -15,6 +19,8 @@ langchain>=0.3.0
 # Langfuse (observability, optional)
 langfuse>=2.0.0
 
-# Phase F cross-encoder rerank (optional). 미설치 시 rerank 단계는 스킵되고 기존 lexical 순위 유지.
-# 설치: pip install torch sentence-transformers  (Python/torch 호환 환경에서만)
-# sentence-transformers>=3.0.0
+# Phase F: cross-encoder rerank + 한국어 임베딩 (optional).
+# 미설치 시 rerank/임베딩은 스킵되고 BM25 또는 LIKE fallback 사용.
+# torch 2.6 미만 환경에서는 jhgan/ko-sbert-sts 사용 (safetensors).
+sentence-transformers>=2.2,<3.3
+safetensors>=0.4.0

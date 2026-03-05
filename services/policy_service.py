@@ -81,7 +81,19 @@ def build_policy_keywords(body_evidence: dict[str, Any]) -> list[str]:
             continue
         expanded.append(kw)
         expanded.extend(_tokenize(kw))
-    return _dedupe_keep_order(expanded)
+    keywords = _dedupe_keep_order(expanded)
+
+    if body_evidence.get("_enriched_holidayRisk"):
+        for kw in ["휴일", "주말", "공휴일"]:
+            if kw not in keywords:
+                keywords.append(kw)
+
+    for kw in (body_evidence.get("_extra_keywords") or []):
+        token = str(kw).strip()
+        if token and token not in keywords:
+            keywords.append(token)
+
+    return keywords
 
 
 def query_rewrite_for_retrieval(body_evidence: dict[str, Any]) -> dict[str, Any]:
@@ -133,6 +145,9 @@ def _build_candidate_sql(keyword_count: int) -> str:
             regulation_clause,
             parent_title,
             chunk_text,
+            search_text,
+            node_type,
+            parent_id,
             version,
             effective_from,
             effective_to,
@@ -193,6 +208,222 @@ def _expand_group_context(db: Session, doc_id: int, article: str | None, parent_
     return [dict(row) for row in db.execute(sql, params).mappings().all()]
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Hybrid 검색: BM25 (tsvector) + Dense (pgvector) + RRF
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _search_bm25(
+    db: Session,
+    body_evidence: dict[str, Any],
+    *,
+    limit: int = 20,
+    effective_date: Any = None,
+) -> list[dict[str, Any]]:
+    """BM25 검색: search_tsv GIN 인덱스 활용."""
+    keywords = build_policy_keywords(body_evidence)
+    if not keywords:
+        return []
+
+    # tsquery: simple config, prefix match. 단어 내 공백/특수문자 이스케이프
+    safe_kw = [str(kw).strip().replace("'", "''") for kw in keywords[:15] if kw and str(kw).strip()]
+    if not safe_kw:
+        return []
+    ts_query = " | ".join(f"{kw}:*" for kw in safe_kw)
+
+    sql = text("""
+        SELECT
+            chunk_id, doc_id, regulation_article, regulation_clause,
+            parent_title, chunk_text, search_text, node_type, parent_id,
+            version, effective_from, effective_to, page_no, chunk_index,
+            ts_rank_cd(search_tsv, query) AS bm25_score
+        FROM dwp_aura.rag_chunk,
+             to_tsquery('simple', :ts_query) AS query
+        WHERE tenant_id = :tenant_id
+          AND is_active = true
+          AND search_tsv @@ query
+          AND (:effective_date IS NULL OR coalesce(effective_from, :effective_date) <= :effective_date)
+          AND (:effective_date IS NULL OR coalesce(effective_to, :effective_date) >= :effective_date)
+        ORDER BY bm25_score DESC
+        LIMIT :limit
+    """)
+    rows = db.execute(
+        sql,
+        {
+            "tenant_id": settings.default_tenant_id,
+            "ts_query": ts_query,
+            "effective_date": effective_date,
+            "limit": limit,
+        },
+    ).mappings().all()
+    return [dict(row) for row in rows]
+
+
+def _search_dense(
+    db: Session,
+    body_evidence: dict[str, Any],
+    *,
+    limit: int = 20,
+    effective_date: Any = None,
+    embed_column: str = "embedding_ko",
+) -> list[dict[str, Any]]:
+    """Dense 벡터 검색: pgvector <=> (cosine distance)."""
+    try:
+        from services.chunking_pipeline import embed_texts
+    except ImportError:
+        return []
+
+    keywords = build_policy_keywords(body_evidence)
+    case_type = body_evidence.get("case_type") or ""
+    merchant = body_evidence.get("merchantName") or ""
+    query_text = f"{case_type} {merchant} {' '.join(keywords[:10])}".strip()
+    if not query_text:
+        return []
+
+    vectors = embed_texts([query_text])
+    if not vectors:
+        return []
+    query_vector = vectors[0]
+
+    sql = text(f"""
+        SELECT
+            chunk_id, doc_id, regulation_article, regulation_clause,
+            parent_title, chunk_text, search_text, node_type, parent_id,
+            version, effective_from, effective_to, page_no, chunk_index,
+            1 - ({embed_column} <=> :query_vec::vector) AS dense_score
+        FROM dwp_aura.rag_chunk
+        WHERE tenant_id = :tenant_id
+          AND is_active = true
+          AND {embed_column} IS NOT NULL
+          AND (:effective_date IS NULL OR coalesce(effective_from, :effective_date) <= :effective_date)
+          AND (:effective_date IS NULL OR coalesce(effective_to, :effective_date) >= :effective_date)
+        ORDER BY {embed_column} <=> :query_vec::vector
+        LIMIT :limit
+    """)
+    rows = db.execute(
+        sql,
+        {
+            "tenant_id": settings.default_tenant_id,
+            "query_vec": str(query_vector),
+            "effective_date": effective_date,
+            "limit": limit,
+        },
+    ).mappings().all()
+    return [dict(row) for row in rows]
+
+
+def _reciprocal_rank_fusion(
+    bm25_results: list[dict[str, Any]],
+    dense_results: list[dict[str, Any]],
+    *,
+    k: int = 60,
+    bm25_weight: float = 0.5,
+    dense_weight: float = 0.5,
+) -> list[dict[str, Any]]:
+    """RRF: 순위 기반 융합. RRF_score(d) = Σ weight / (k + rank(d))."""
+    scores: dict[int, float] = {}
+    chunk_data: dict[int, dict[str, Any]] = {}
+
+    for rank, item in enumerate(bm25_results, start=1):
+        cid = item.get("chunk_id")
+        if cid is None:
+            continue
+        scores[cid] = scores.get(cid, 0.0) + bm25_weight / (k + rank)
+        chunk_data[cid] = {**item, "bm25_rank": rank, "bm25_score": item.get("bm25_score", 0)}
+
+    for rank, item in enumerate(dense_results, start=1):
+        cid = item.get("chunk_id")
+        if cid is None:
+            continue
+        scores[cid] = scores.get(cid, 0.0) + dense_weight / (k + rank)
+        if cid not in chunk_data:
+            chunk_data[cid] = item
+        chunk_data[cid]["dense_rank"] = rank
+        chunk_data[cid]["dense_score"] = item.get("dense_score", 0)
+
+    ranked = sorted(scores.keys(), key=lambda cid: scores[cid], reverse=True)
+    result = []
+    for cid in ranked:
+        item = dict(chunk_data[cid])
+        item["rrf_score"] = round(scores[cid], 6)
+        result.append(item)
+    return result
+
+
+def _enrich_with_parent_context(
+    db: Session,
+    chunks: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """CLAUSE 노드에 부모 ARTICLE 청크 맥락 prepend."""
+    parent_ids = [
+        c.get("parent_id")
+        for c in chunks
+        if c.get("node_type") == "CLAUSE" and c.get("parent_id")
+    ]
+    if not parent_ids:
+        return chunks
+
+    parent_sql = text("""
+        SELECT chunk_id, chunk_text, regulation_article, parent_title
+        FROM dwp_aura.rag_chunk
+        WHERE chunk_id = ANY(:ids) AND tenant_id = :tid
+    """)
+    rows = db.execute(
+        parent_sql,
+        {"ids": parent_ids, "tid": settings.default_tenant_id},
+    ).mappings().all()
+    parent_map = {row["chunk_id"]: dict(row) for row in rows}
+
+    enriched = []
+    for chunk in chunks:
+        if chunk.get("node_type") == "CLAUSE" and chunk.get("parent_id") in parent_map:
+            parent = parent_map[chunk["parent_id"]]
+            chunk = dict(chunk)
+            chunk["context_chunk_ids"] = [parent["chunk_id"]]
+            if chunk.get("chunk_text") and parent.get("parent_title") and not chunk["chunk_text"].strip().startswith("["):
+                chunk["chunk_text"] = (
+                    f"[{parent.get('regulation_article', '')} {parent.get('parent_title', '')}] "
+                    + chunk["chunk_text"]
+                )
+        else:
+            chunk = dict(chunk)
+            if "context_chunk_ids" not in chunk:
+                chunk["context_chunk_ids"] = []
+        enriched.append(chunk)
+    return enriched
+
+
+def _search_lexical_legacy(
+    db: Session,
+    body_evidence: dict[str, Any],
+    *,
+    limit: int = 20,
+    effective_date: Any = None,
+) -> list[dict[str, Any]]:
+    """기존 LIKE 기반 검색 (fallback). BM25/Dense 모두 실패 시 사용."""
+    keywords = build_policy_keywords(body_evidence)
+    if not keywords:
+        return []
+
+    params: dict[str, Any] = {
+        "tenant_id": settings.default_tenant_id,
+        "candidate_limit": limit,
+        "effective_date": effective_date,
+    }
+    for i, kw in enumerate(keywords[:10]):
+        params[f"p{i}"] = f"%{kw.lower()}%"
+
+    sql = text(_build_candidate_sql(min(len(keywords), 10)))
+    rows = db.execute(sql, params).mappings().all()
+
+    out = []
+    for row in rows:
+        d = dict(row)
+        d["bm25_score"] = d.get("lexical_score", 0)
+        out.append(d)
+    return out
+
+
 def _rerank_groups(groups: list[dict[str, Any]], body_evidence: dict[str, Any], keywords: list[str]) -> list[dict[str, Any]]:
     is_holiday = bool(body_evidence.get("isHoliday"))
     line_text = " ".join(
@@ -217,94 +448,68 @@ def _rerank_groups(groups: list[dict[str, Any]], body_evidence: dict[str, Any], 
 
 
 def search_policy_chunks(db: Session, body_evidence: dict[str, Any], limit: int = 5) -> list[dict[str, Any]]:
-    keywords = build_policy_keywords(body_evidence)
-    if not keywords:
-        return []
+    """
+    메인 검색 함수 (기존 인터페이스 유지).
 
+    파이프라인: BM25 → Dense → RRF 융합 → Contextual 보강 → Cross-Encoder 재정렬.
+    BM25/Dense 모두 실패 시 LIKE 기반 legacy fallback.
+    """
     effective_date = None
     occurred_at = body_evidence.get("occurredAt")
     if occurred_at:
         try:
             effective_date = date.fromisoformat(str(occurred_at)[:10])
         except Exception:
-            effective_date = None
+            pass
 
-    params: dict[str, Any] = {
-        "tenant_id": settings.default_tenant_id,
-        "candidate_limit": max(limit * 8, 20),
-        "effective_date": effective_date,
-    }
-    for i, kw in enumerate(keywords[:10]):
-        params[f"p{i}"] = f"%{kw.lower()}%"
+    candidate_limit = max(limit * 6, 20)
 
-    sql = text(_build_candidate_sql(min(len(keywords), 10)))
-    rows = db.execute(sql, params).mappings().all()
+    bm25_results = _search_bm25(db, body_evidence, limit=candidate_limit, effective_date=effective_date)
+    dense_results = _search_dense(db, body_evidence, limit=candidate_limit, effective_date=effective_date)
 
-    grouped: dict[tuple[Any, str, str], dict[str, Any]] = {}
-    for row in rows:
-        key = (
-            row.get("doc_id"),
-            str(row.get("regulation_article") or ""),
-            str(row.get("parent_title") or ""),
-        )
-        group = grouped.setdefault(
-            key,
-            {
-                "doc_id": row.get("doc_id"),
-                "article": row.get("regulation_article"),
-                "clause": row.get("regulation_clause"),
-                "parent_title": row.get("parent_title"),
-                "version": row.get("version"),
-                "effective_from": str(row.get("effective_from")) if row.get("effective_from") else None,
-                "effective_to": str(row.get("effective_to")) if row.get("effective_to") else None,
-                "chunk_ids": [],
-                "snippets": [],
-                "lexical_score": 0.0,
-            },
-        )
-        group["chunk_ids"].append(row.get("chunk_id"))
-        if row.get("chunk_text"):
-            group["snippets"].append(str(row.get("chunk_text")))
-        group["lexical_score"] = max(float(group["lexical_score"]), float(row.get("lexical_score") or 0))
+    if bm25_results and dense_results:
+        fused = _reciprocal_rank_fusion(bm25_results, dense_results, k=60)
+    elif bm25_results:
+        fused = [dict(r, rrf_score=r.get("bm25_score", 0)) for r in bm25_results]
+        fused.sort(key=lambda x: x.get("rrf_score", 0), reverse=True)
+    elif dense_results:
+        fused = [dict(r, rrf_score=r.get("dense_score", 0)) for r in dense_results]
+        fused.sort(key=lambda x: x.get("rrf_score", 0), reverse=True)
+    else:
+        fused = _search_lexical_legacy(db, body_evidence, limit=candidate_limit, effective_date=effective_date)
+        for r in fused:
+            r.setdefault("rrf_score", r.get("bm25_score", 0))
 
-    groups = list(grouped.values())
-    for group in groups:
-        context_rows = _expand_group_context(
-            db,
-            doc_id=group.get("doc_id"),
-            article=group.get("article"),
-            parent_title=group.get("parent_title"),
-            limit=3,
-        )
-        context_snippets = [str(row.get("chunk_text") or "") for row in context_rows if row.get("chunk_text")]
-        merged_snippets = _dedupe_keep_order(group["snippets"] + context_snippets)
-        group["chunk_text"] = " ".join(merged_snippets[:3])
-        group["context_chunk_ids"] = [row.get("chunk_id") for row in context_rows if row.get("chunk_id")]
-        group["source_strategy"] = "hierarchical_keyword_rerank"
+    enriched = _enrich_with_parent_context(db, fused[:candidate_limit])
 
-    ranked = _rerank_groups(groups, body_evidence, keywords)
+    keywords = build_policy_keywords(body_evidence)
+    query_str = " ".join(keywords[:12])
     try:
         from services.retrieval_quality import rerank_with_cross_encoder
-        query_str = " ".join(keywords[:12])
-        ranked = rerank_with_cross_encoder(ranked, query_str)
+        enriched = rerank_with_cross_encoder(enriched, query_str)
     except Exception:
         pass
-    results: list[dict[str, Any]] = []
-    for group in ranked[:limit]:
-        results.append(
-            {
-                "doc_id": group.get("doc_id"),
-                "article": group.get("article"),
-                "clause": group.get("clause"),
-                "parent_title": group.get("parent_title"),
-                "chunk_text": group.get("chunk_text"),
-                "version": group.get("version"),
-                "effective_from": group.get("effective_from"),
-                "effective_to": group.get("effective_to"),
-                "chunk_ids": group.get("chunk_ids", []),
-                "context_chunk_ids": group.get("context_chunk_ids", []),
-                "retrieval_score": group.get("retrieval_score", 0),
-                "source_strategy": group.get("source_strategy"),
-            }
-        )
+
+    results = []
+    for item in enriched[:limit]:
+        results.append({
+            "doc_id": item.get("doc_id"),
+            "article": item.get("regulation_article"),
+            "clause": item.get("regulation_clause"),
+            "parent_title": item.get("parent_title"),
+            "chunk_text": item.get("chunk_text"),
+            "version": item.get("version"),
+            "effective_from": str(item.get("effective_from")) if item.get("effective_from") else None,
+            "effective_to": str(item.get("effective_to")) if item.get("effective_to") else None,
+            "chunk_ids": [item.get("chunk_id")] if item.get("chunk_id") is not None else [],
+            "context_chunk_ids": item.get("context_chunk_ids", []),
+            "retrieval_score": item.get("cross_encoder_score") or item.get("rrf_score") or item.get("bm25_score") or 0,
+            "source_strategy": "hybrid_bm25_dense_rrf",
+            "score_detail": {
+                "bm25_score": item.get("bm25_score"),
+                "dense_score": item.get("dense_score"),
+                "rrf_score": item.get("rrf_score"),
+                "cross_encoder_score": item.get("cross_encoder_score"),
+            },
+        })
     return results

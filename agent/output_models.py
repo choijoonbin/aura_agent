@@ -49,6 +49,14 @@ class CriticOutput(BaseModel):
         default_factory=list,
         description="검증할 주장 문장 1~3개. evidence로 뒷받침 가능한 핵심 주장만.",
     )
+    replan_required: bool = Field(
+        default=False,
+        description="재계획(planner 재실행) 필요 여부",
+    )
+    replan_reason: str = Field(
+        default="",
+        description="재계획이 필요한 이유",
+    )
 
 
 # ----- Verifier -----
@@ -60,6 +68,21 @@ class VerifierGate(str, Enum):
     REJECTED = "REJECTED"
 
 
+class ClaimVerificationResult(BaseModel):
+    """개별 검증 타겟 주장에 대한 검증 결과."""
+
+    claim: str = Field(description="검증 대상 주장 문장 전체")
+    covered: bool = Field(description="retrieval 청크로 뒷받침 가능 여부")
+    supporting_articles: list[str] = Field(
+        default_factory=list,
+        description="이 주장을 실제로 뒷받침한 규정 조항 번호 목록",
+    )
+    gap: str = Field(
+        default="",
+        description="covered=False일 때 어떤 근거가 부족한지 설명",
+    )
+
+
 class VerifierOutput(BaseModel):
     """검증 노드 출력. 근거 충족·HITL 필요·게이트."""
 
@@ -69,6 +92,10 @@ class VerifierOutput(BaseModel):
     gate: VerifierGate = Field(description="진행 게이트: READY | HITL_REQUIRED | REJECTED")
     rationale: str = Field(default="", description="검증 근거")
     quality_signals: list[str] = Field(default_factory=list, description="품질 지표 코드 목록(호환용)")
+    claim_results: list[ClaimVerificationResult] = Field(
+        default_factory=list,
+        description="주장(claim)별 개별 검증 결과 목록 (신규)",
+    )
 
 
 # ----- Reporter -----
@@ -98,3 +125,32 @@ class ReporterOutput(BaseModel):
 
     class Config:
         extra = "allow"
+
+
+# ----- Score Breakdown -----
+
+
+class ScoreSignalDetail(BaseModel):
+    """개별 점수 신호 항목."""
+
+    signal: str = Field(description="신호 식별자")
+    label: str = Field(description="사용자 표시용 레이블")
+    raw_value: Any = Field(default=None, description="원본 값")
+    points: float = Field(description="이 신호로 부여된 점수")
+    category: str = Field(description="'policy' | 'evidence' | 'multiplier' | 'amount'")
+
+
+class ScoreBreakdown(BaseModel):
+    """점수 산출 전체 분해 결과."""
+
+    policy_score: float = Field(description="정책 위반 점수 (0~100)")
+    evidence_score: float = Field(description="증거 품질 점수 (0~100)")
+    amount_weight: float = Field(default=1.0, description="금액 구간 가중 승수 (1.0~1.3)")
+    compound_multiplier: float = Field(default=1.0, description="복합 위험 승수 (1.0~1.5)")
+    policy_weight: float = Field(default=0.6, description="policy_score 가중치")
+    evidence_weight: float = Field(default=0.4, description="evidence_score 가중치")
+    final_score: float = Field(description="최종 점수 (0~100)")
+    severity: str = Field(description="'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL'")
+    signals: list[ScoreSignalDetail] = Field(default_factory=list, description="점수 구성 신호")
+    reasons: list[str] = Field(default_factory=list, description="호환용 이유 목록")
+    calculation_trace: str = Field(default="", description="최종 점수 계산식")

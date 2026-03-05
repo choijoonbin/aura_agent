@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import html
 import io
 from datetime import datetime, timezone
 from typing import Any
@@ -435,6 +436,170 @@ def render_kpi_card(label: str, value: str, foot: str = "") -> None:
 
 def render_empty_state(message: str) -> None:
     st.markdown(f'<div class="mt-empty-box">{message}</div>', unsafe_allow_html=True)
+
+
+# ── RAG 라이브러리 전용 컴포넌트 ────────────────────────────────────────────
+
+def render_rag_kpi_card(
+    label: str,
+    value: str,
+    foot: str = "",
+    status: str = "normal",   # "normal" | "warning" | "error" | "success"
+    icon: str = "",
+) -> None:
+    """
+    상태 색상이 있는 RAG KPI 카드.
+    status에 따라 좌측 border 색과 배경 tint가 달라짐.
+    """
+    color_map = {
+        "normal":  ("#2563eb", "#eff6ff"),
+        "warning": ("#d97706", "#fffbeb"),
+        "error":   ("#dc2626", "#fef2f2"),
+        "success": ("#059669", "#ecfdf5"),
+    }
+    border_color, bg_tint = color_map.get(status, color_map["normal"])
+    icon_html = f'<span style="font-size:1.3rem;flex-shrink:0;line-height:1">{icon}</span>' if icon else ""
+    st.markdown(f"""
+    <div style="
+        padding: 18px 20px;
+        border-radius: 18px;
+        border: 1px solid #e5e7eb;
+        border-left: 4px solid {border_color};
+        background: {bg_tint};
+        box-shadow: 0 10px 24px rgba(15,23,42,0.05);
+        min-height: 132px;
+    ">
+        <div style="display:flex;align-items:baseline;gap:10px;margin-bottom:4px">
+            {icon_html}
+            <div style="display:flex;justify-content:space-between;align-items:baseline;gap:12px;flex:1;min-width:0">
+                <div class="mt-kpi-label" style="margin-bottom:0">{label}</div>
+                <div class="mt-kpi-value" style="color:{border_color};font-size:1.75rem;margin:0;flex-shrink:0">{value}</div>
+            </div>
+        </div>
+        <div class="mt-kpi-foot">{foot}</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+
+def render_rag_meta_grid(meta: dict) -> None:
+    """
+    문서 메타를 Key-Value 그리드로 렌더링.
+    탭 내부에서 HTML 이스케이프되는 문제를 피하기 위해 Streamlit 네이티브만 사용.
+    """
+    label_map = {
+        "status": "처리 상태",
+        "version": "버전",
+        "effective_from": "시행 시작일",
+        "effective_to": "시행 종료일",
+        "lifecycle_status": "라이프사이클",
+        "active_from": "활성 시작",
+        "active_to": "활성 종료",
+        "quality_gate_passed": "품질 게이트",
+        "updated_at": "최종 수정",
+    }
+    status_icon_map = {
+        "COMPLETED": "✅",
+        "PROCESSING": "⏳",
+        "FAILED": "❌",
+        "ACTIVE": "🟢",
+        "INACTIVE": "⚫",
+    }
+
+    def _format_val(raw: Any) -> str:
+        if raw is None:
+            return "—"
+        if isinstance(raw, bool):
+            return "✅ 통과" if raw else "❌ 미통과"
+        val_str = str(raw)
+        icon = status_icon_map.get(val_str.upper(), "")
+        return f"{icon} {val_str}" if icon else val_str
+
+    for key, display_label in label_map.items():
+        raw = meta.get(key)
+        val = _format_val(raw)
+        c1, c2 = st.columns([0.32, 0.68])
+        with c1:
+            st.caption(f"**{display_label}**")
+        with c2:
+            st.caption(val)
+
+
+def render_rag_quality_report(report: dict) -> None:
+    """
+    품질 리포트를 게이지 바 + 수치로 시각화.
+    JSON 덤프 대신 직관적 지표 카드.
+    """
+    def _gauge(label: str, value: float | None, *, higher_is_bad: bool = True,
+               threshold_warn: float = 0.1, threshold_err: float = 0.3,
+               suffix: str = "%") -> str:
+        if value is None:
+            return f"""
+            <div style="margin-bottom:14px">
+                <div style="font-size:0.8rem;font-weight:700;color:#64748b;margin-bottom:4px">{label}</div>
+                <div style="font-size:0.85rem;color:#94a3b8">데이터 없음</div>
+            </div>"""
+        pct = float(value) * 100 if suffix == "%" else float(value)
+        if higher_is_bad:
+            color = "#dc2626" if pct >= threshold_err * 100 else ("#d97706" if pct >= threshold_warn * 100 else "#059669")
+        else:
+            color = "#059669" if pct >= 80 else ("#d97706" if pct >= 50 else "#dc2626")
+        bar_width = min(100, max(0, pct))
+        return f"""
+        <div style="margin-bottom:14px">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:5px">
+                <div style="font-size:0.8rem;font-weight:700;color:#64748b">{label}</div>
+                <div style="font-size:0.9rem;font-weight:800;color:{color}">{pct:.1f}{suffix}</div>
+            </div>
+            <div style="background:#f1f5f9;border-radius:999px;height:7px;overflow:hidden">
+                <div style="width:{bar_width}%;background:{color};height:100%;border-radius:999px;
+                            transition:width 0.6s ease"></div>
+            </div>
+        </div>"""
+
+    passed = report.get("quality_report_passed")
+    input_c = report.get("input_chunks")
+    final_c = report.get("final_chunks")
+    missing = report.get("missing_required") or []
+
+    gate_html = f"""
+    <div style="display:flex;align-items:center;gap:10px;padding:12px 16px;
+                border-radius:12px;background:{'#ecfdf5' if passed else '#fef2f2'};
+                border:1px solid {'#a7f3d0' if passed else '#fecaca'};margin-bottom:16px">
+        <span style="font-size:1.4rem">{'✅' if passed else '❌'}</span>
+        <div>
+            <div style="font-size:0.9rem;font-weight:800;color:{'#059669' if passed else '#dc2626'}">
+                품질 게이트 {'통과' if passed else '미통과'}
+            </div>
+            <div style="font-size:0.78rem;color:#64748b">
+                입력 {input_c or '?'}개 → 최종 {final_c or '?'}개 청크
+            </div>
+        </div>
+    </div>"""
+
+    gauges_html = (
+        _gauge("노이즈율", report.get("noise_rate"), higher_is_bad=True,
+               threshold_warn=0.05, threshold_err=0.15)
+        + _gauge("중복율", report.get("duplicate_rate"), higher_is_bad=True,
+                 threshold_warn=0.05, threshold_err=0.20)
+        + _gauge("초단편 청크율", report.get("short_chunk_rate"), higher_is_bad=True,
+                 threshold_warn=0.10, threshold_err=0.30)
+        + _gauge("조항 커버리지", report.get("article_coverage"), higher_is_bad=False,
+                 threshold_warn=50, threshold_err=30, suffix="%")
+    )
+
+    missing_html = ""
+    if missing:
+        items_html = "".join(f'<div style="color:#dc2626;font-size:0.8rem">• {m}</div>' for m in missing)
+        missing_html = f"""
+        <div style="padding:10px 14px;background:#fef2f2;border-radius:10px;
+                    border:1px solid #fecaca;margin-top:10px">
+            <div style="font-size:0.8rem;font-weight:700;color:#dc2626;margin-bottom:6px">
+                ⚠ 누락 필수 항목
+            </div>
+            {items_html}
+        </div>"""
+
+    st.markdown(gate_html + gauges_html + missing_html, unsafe_allow_html=True)
 
 
 def render_legend(items: list[tuple[str, str]]) -> None:

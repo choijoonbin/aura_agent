@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+import re
 from typing import Any, TypedDict
 
 from langgraph.graph import END, START, StateGraph
@@ -10,6 +11,7 @@ from agent.event_schema import AgentEvent
 from agent.hitl import build_hitl_request
 from agent.output_models import (
     Citation,
+    ClaimVerificationResult,
     CriticOutput,
     PlanStep,
     PlannerOutput,
@@ -28,6 +30,16 @@ from utils.config import settings
 _TOOLS_BY_NAME: dict[str, Any] = {}
 _CHECKPOINTER: Any | None = None
 _COMPILED_GRAPH: Any | None = None
+_MAX_CRITIC_LOOP = 2
+_WORD_RE = re.compile(r"[0-9A-Za-z가-힣]{2,}")
+_CLAIM_PRIORITY: dict[str, int] = {
+    "night_violation": 10,
+    "holiday_hr_conflict": 9,
+    "merchant_high_risk": 8,
+    "budget_exceeded": 7,
+    "amount_approval_tier": 6,
+    "policy_ref_direct": 5,
+}
 
 
 def _get_tools_by_name() -> dict[str, Any]:
@@ -57,6 +69,9 @@ class AgentState(TypedDict, total=False):
     critic_output: dict[str, Any]
     verifier_output: dict[str, Any]
     reporter_output: dict[str, Any]
+    critic_loop_count: int
+    replan_context: dict[str, Any] | None
+    plan_achievement: dict[str, Any]
 
 
 def _format_occurred_at(value: Any) -> str:
@@ -107,13 +122,19 @@ def _should_skip_skill(step: dict[str, Any], *, state: AgentState, tool_results:
 
 
 def _score_with_hitl_adjustment(score: dict[str, Any], flags: dict[str, Any]) -> dict[str, Any]:
-    adjusted = {
-        "policy_score": int(score.get("policy_score", 0)),
-        "evidence_score": int(score.get("evidence_score", 0)),
-        "final_score": int(score.get("final_score", 0)),
-        "reasons": list(score.get("reasons") or []),
-    }
+    adjusted = dict(score or {})
+    adjusted.setdefault("policy_score", int(score.get("policy_score", 0)))
+    adjusted.setdefault("evidence_score", int(score.get("evidence_score", 0)))
+    adjusted.setdefault("final_score", int(score.get("final_score", 0)))
+    adjusted.setdefault("reasons", list(score.get("reasons") or []))
+    adjusted.setdefault("policy_weight", float(score.get("policy_weight", settings.score_policy_weight)))
+    adjusted.setdefault("evidence_weight", float(score.get("evidence_weight", settings.score_evidence_weight)))
+    adjusted.setdefault("compound_multiplier", float(score.get("compound_multiplier", 1.0)))
+    adjusted.setdefault("amount_weight", float(score.get("amount_weight", 1.0)))
+    adjusted.setdefault("signals", list(score.get("signals") or []))
+    adjusted.setdefault("calculation_trace", str(score.get("calculation_trace") or ""))
     if not flags.get("hasHitlResponse"):
+        adjusted["severity"] = _score_to_severity(float(adjusted.get("final_score", 0)))
         return adjusted
 
     approved = flags.get("hitlApproved")
@@ -124,10 +145,16 @@ def _score_with_hitl_adjustment(score: dict[str, Any], flags: dict[str, Any]) ->
         adjusted["final_score"] = min(adjusted["final_score"], 59)
         adjusted["reasons"].append("사람 검토 보류 의견 반영")
 
-    adjusted["final_score"] = min(
-        100,
-        int(adjusted["policy_score"] * 0.6 + adjusted["evidence_score"] * 0.4),
-    ) if approved is not False else adjusted["final_score"]
+    if approved is not False:
+        pw = float(adjusted.get("policy_weight", settings.score_policy_weight))
+        ew = float(adjusted.get("evidence_weight", settings.score_evidence_weight))
+        adjusted["final_score"] = min(100, int(adjusted["policy_score"] * pw + adjusted["evidence_score"] * ew))
+    adjusted["severity"] = _score_to_severity(float(adjusted.get("final_score", 0)))
+    adjusted["calculation_trace"] = (
+        f"policy({float(adjusted.get('policy_score', 0)):.1f}) × {float(adjusted.get('policy_weight', settings.score_policy_weight)):.1f} + "
+        f"evidence({float(adjusted.get('evidence_score', 0)):.1f}) × {float(adjusted.get('evidence_weight', settings.score_evidence_weight)):.1f} = "
+        f"{float(adjusted.get('final_score', 0)):.1f} [compound×{float(adjusted.get('compound_multiplier', 1.0)):.2f}, amount×{float(adjusted.get('amount_weight', 1.0)):.2f}]"
+    )
     return adjusted
 
 
@@ -209,40 +236,297 @@ def _plan_from_flags(flags: dict[str, Any]) -> list[dict[str, Any]]:
     return plan
 
 
-def _score(flags: dict[str, Any], tool_results: list[dict[str, Any]]) -> dict[str, Any]:
-    policy_score = 0
-    evidence_score = 30
-    reasons: list[str] = []
-    if flags.get("isHoliday"):
-        policy_score += 35
-        reasons.append("휴일 사용 정황")
-    if flags.get("hrStatus") in {"LEAVE", "OFF", "VACATION"}:
-        policy_score += 20
-        reasons.append("근태 상태 충돌")
-    if flags.get("isNight"):
-        policy_score += 10
-        reasons.append("심야 시간대")
-    if flags.get("budgetExceeded"):
-        policy_score += 10
-        reasons.append("예산 초과")
-    if any(r.get("skill") == "document_evidence_probe" and (r.get("facts") or {}).get("lineItemCount", 0) > 0 for r in tool_results):
-        evidence_score += 20
-        reasons.append("전표 라인아이템 확보")
-    if any(r.get("skill") == "policy_rulebook_probe" and (r.get("facts") or {}).get("ref_count", 0) > 0 for r in tool_results):
-        evidence_score += 20
-        reasons.append("규정 조항 확보")
-    if any(r.get("skill") == "legacy_aura_deep_audit" and r.get("facts") for r in tool_results):
-        evidence_score += 20
-        reasons.append("심층 감사 결과 확보")
-    if flags.get("hasHitlResponse"):
-        evidence_score += 10
-        reasons.append("사람 검토 응답 확보")
-    final_score = min(100, int(policy_score * 0.6 + evidence_score * 0.4))
+_POLICY_SIGNAL_POINTS: dict[str, float] = {
+    "isHoliday": 35.0,
+    "hrStatus_conflict": 20.0,
+    "isNight": 10.0,
+    "budgetExceeded": 15.0,
+}
+
+_HOLIDAY_RISK_POLICY_DELTA: dict[str, float] = {
+    "HIGH": 10.0,
+    "MEDIUM": 5.0,
+    "LOW": 0.0,
+}
+
+_MERCHANT_RISK_POLICY_DELTA: dict[str, float] = {
+    "HIGH": 20.0,
+    "MEDIUM": 10.0,
+    "LOW": 3.0,
+    "UNKNOWN": 0.0,
+}
+
+_POLICY_REF_EVIDENCE_POINTS: list[tuple[int, float]] = [
+    (5, 30.0),
+    (3, 22.0),
+    (2, 15.0),
+    (1, 10.0),
+    (0, 0.0),
+]
+
+_LINE_ITEM_EVIDENCE_POINTS: list[tuple[int, float]] = [
+    (3, 20.0),
+    (2, 15.0),
+    (1, 10.0),
+    (0, 0.0),
+]
+
+
+def _lookup_tiered(value: int, table: list[tuple[int, float]]) -> float:
+    for threshold, points in table:
+        if value >= threshold:
+            return points
+    return 0.0
+
+
+def _score_to_severity(final_score: float) -> str:
+    if final_score >= 75:
+        return "CRITICAL"
+    if final_score >= 55:
+        return "HIGH"
+    if final_score >= 35:
+        return "MEDIUM"
+    return "LOW"
+
+
+def _compute_plan_achievement(
+    plan: list[dict[str, Any]],
+    tool_results: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """planner 계획 대비 실제 실행 달성도를 계산한다."""
+    executed_map = {r.get("skill"): r for r in tool_results}
+    planned_tools = [step.get("tool", "") for step in plan]
+
+    step_results: list[dict[str, Any]] = []
+    succeeded = failed = skipped = 0
+
+    for tool_name in planned_tools:
+        if tool_name not in executed_map:
+            step_results.append({"tool": tool_name, "status": "skipped", "ok": None})
+            skipped += 1
+            continue
+        result = executed_map[tool_name]
+        ok = bool(result.get("ok"))
+        step_results.append({
+            "tool": tool_name,
+            "status": "success" if ok else "failed",
+            "ok": ok,
+            "facts_keys": list((result.get("facts") or {}).keys()),
+        })
+        if ok:
+            succeeded += 1
+        else:
+            failed += 1
+
+    total = len(planned_tools)
+    executed = succeeded + failed
+    rate = round(succeeded / total, 3) if total else 0.0
+
     return {
-        "policy_score": policy_score,
-        "evidence_score": evidence_score,
-        "final_score": final_score,
+        "total_planned": total,
+        "executed": executed,
+        "succeeded": succeeded,
+        "failed": failed,
+        "skipped": skipped,
+        "achievement_rate": rate,
+        "step_results": step_results,
+    }
+
+
+def _score(flags: dict[str, Any], tool_results: list[dict[str, Any]]) -> dict[str, Any]:
+    from agent.output_models import ScoreSignalDetail
+
+    signals: list[ScoreSignalDetail] = []
+    reasons: list[str] = []
+
+    base_policy_score = 0.0
+    base_evidence_score = 20.0
+
+    if bool(flags.get("isHoliday")):
+        pts = _POLICY_SIGNAL_POINTS["isHoliday"]
+        base_policy_score += pts
+        reasons.append("휴일 사용 정황")
+        signals.append(ScoreSignalDetail(signal="isHoliday", label="휴일/주말 사용", raw_value=True, points=pts, category="policy"))
+
+    hr = str(flags.get("hrStatus") or "").upper()
+    if hr in {"LEAVE", "OFF", "VACATION"}:
+        pts = _POLICY_SIGNAL_POINTS["hrStatus_conflict"]
+        base_policy_score += pts
+        reasons.append(f"근태 상태 충돌 ({hr})")
+        signals.append(ScoreSignalDetail(signal="hrStatus_conflict", label=f"근태 충돌({hr})", raw_value=hr, points=pts, category="policy"))
+
+    if bool(flags.get("isNight")):
+        pts = _POLICY_SIGNAL_POINTS["isNight"]
+        base_policy_score += pts
+        reasons.append("심야 시간대")
+        signals.append(ScoreSignalDetail(signal="isNight", label="심야 시간대(22시~06시)", raw_value=True, points=pts, category="policy"))
+
+    if bool(flags.get("budgetExceeded")):
+        pts = _POLICY_SIGNAL_POINTS["budgetExceeded"]
+        base_policy_score += pts
+        reasons.append("예산 초과")
+        signals.append(ScoreSignalDetail(signal="budgetExceeded", label="예산 한도 초과", raw_value=True, points=pts, category="policy"))
+
+    tool_policy_delta = 0.0
+    tool_evidence_delta = 0.0
+    holiday_result = _find_tool_result(tool_results, "holiday_compliance_probe")
+    merchant_result = _find_tool_result(tool_results, "merchant_risk_probe")
+    policy_result = _find_tool_result(tool_results, "policy_rulebook_probe")
+    doc_result = _find_tool_result(tool_results, "document_evidence_probe")
+
+    if holiday_result:
+        h_facts = holiday_result.get("facts") or {}
+        holiday_risk = h_facts.get("holidayRisk")
+        if holiday_risk is True and bool(flags.get("isHoliday")) and hr in {"LEAVE", "OFF", "VACATION"}:
+            delta = _HOLIDAY_RISK_POLICY_DELTA["HIGH"]
+            tool_policy_delta += delta
+            reasons.append("도구 확인: 휴일+근태 중복 위험(HIGH)")
+            signals.append(ScoreSignalDetail(signal="holidayRisk_HIGH", label="도구 확인 - 휴일+근태 중복", raw_value="HIGH", points=delta, category="policy"))
+        elif holiday_risk is True:
+            delta = _HOLIDAY_RISK_POLICY_DELTA["MEDIUM"]
+            tool_policy_delta += delta
+            reasons.append("도구 확인: 휴일 위험(MEDIUM)")
+            signals.append(ScoreSignalDetail(signal="holidayRisk_MEDIUM", label="도구 확인 - 휴일 위험", raw_value="MEDIUM", points=delta, category="policy"))
+
+    if merchant_result:
+        m_facts = merchant_result.get("facts") or {}
+        merchant_risk = str(m_facts.get("merchantRisk") or "UNKNOWN").upper()
+        delta = _MERCHANT_RISK_POLICY_DELTA.get(merchant_risk, 0.0)
+        if delta > 0:
+            tool_policy_delta += delta
+            reasons.append(f"도구 확인: 가맹점 위험도 {merchant_risk}")
+            signals.append(ScoreSignalDetail(signal=f"merchantRisk_{merchant_risk}", label=f"가맹점/업종 위험도({merchant_risk})", raw_value=merchant_risk, points=delta, category="policy"))
+
+    if policy_result:
+        p_facts = policy_result.get("facts") or {}
+        ref_count = int(p_facts.get("ref_count") or 0)
+        delta = _lookup_tiered(ref_count, _POLICY_REF_EVIDENCE_POINTS)
+        if delta > 0:
+            tool_evidence_delta += delta
+            reasons.append(f"규정 조항 {ref_count}건 확보")
+            signals.append(ScoreSignalDetail(signal="policyRefs", label=f"규정 조항 {ref_count}건", raw_value=ref_count, points=delta, category="evidence"))
+
+    if doc_result:
+        d_facts = doc_result.get("facts") or {}
+        line_count = int(d_facts.get("lineItemCount") or 0)
+        delta = _lookup_tiered(line_count, _LINE_ITEM_EVIDENCE_POINTS)
+        if delta > 0:
+            tool_evidence_delta += delta
+            reasons.append(f"전표 라인아이템 {line_count}건 확보")
+            signals.append(ScoreSignalDetail(signal="lineItems", label=f"전표 라인 {line_count}건", raw_value=line_count, points=delta, category="evidence"))
+
+    if any(r.get("skill") == "legacy_aura_deep_audit" and r.get("facts") for r in tool_results):
+        tool_evidence_delta += 15.0
+        reasons.append("심층 감사 결과 확보")
+        signals.append(ScoreSignalDetail(signal="legacyAudit", label="심층 감사 결과", raw_value=True, points=15.0, category="evidence"))
+
+    if bool(flags.get("hasHitlResponse")):
+        tool_evidence_delta += 10.0
+        reasons.append("사람 검토 응답 확보")
+        signals.append(ScoreSignalDetail(signal="hitlResponse", label="사람 검토 응답", raw_value=True, points=10.0, category="evidence"))
+
+    ref_count = int(((policy_result or {}).get("facts") or {}).get("ref_count") or 0)
+    line_count = int(((doc_result or {}).get("facts") or {}).get("lineItemCount") or 0)
+
+    policy_score = base_policy_score + tool_policy_delta
+    evidence_score = min(100.0, base_evidence_score + tool_evidence_delta)
+
+    total_tools = len(tool_results)
+    ok_tools = sum(1 for result in tool_results if result.get("ok"))
+    success_rate = (ok_tools / total_tools) if total_tools else 0.0
+    if total_tools > 0 and success_rate < 0.5:
+        penalty = round((0.5 - success_rate) * 40, 1)
+        evidence_score = max(0.0, evidence_score - penalty)
+        reasons.append(f"도구 실행 성공률 {success_rate:.0%} → evidence_score -{penalty}점")
+    if total_tools >= 3 and success_rate == 1.0:
+        evidence_score = min(100.0, evidence_score + 5.0)
+        reasons.append(f"계획한 {total_tools}개 도구 전체 성공 → evidence_score +5점")
+
+    high_risk_count = sum(
+        [
+            bool(flags.get("isHoliday")),
+            bool(hr in {"LEAVE", "OFF", "VACATION"}),
+            bool(flags.get("isNight")),
+            bool(flags.get("budgetExceeded")),
+            bool(merchant_result and str((merchant_result.get("facts") or {}).get("merchantRisk") or "").upper() == "HIGH"),
+        ]
+    )
+
+    compound_multiplier = 1.0
+    if high_risk_count >= 4:
+        compound_multiplier = settings.score_compound_multiplier_max
+    elif high_risk_count == 3:
+        compound_multiplier = 1.3
+    elif high_risk_count == 2:
+        compound_multiplier = 1.15
+    if compound_multiplier > 1.0:
+        reasons.append(f"복합 위험 승수 적용 ({high_risk_count}개 고위험 신호)")
+        signals.append(ScoreSignalDetail(signal="compound_multiplier", label=f"복합 위험({high_risk_count}개)", raw_value=high_risk_count, points=0.0, category="multiplier"))
+
+    policy_score = policy_score * compound_multiplier
+
+    amount = float(flags.get("amount") or 0)
+    # 금액 승수를 계단식이 아닌 연속 함수로 적용해 경계값 점프를 완화한다.
+    # 0~100k: 1.00~1.07, 100k~500k: 1.07~1.15, 500k~2m: 1.15~1.30
+    if amount <= 100_000:
+        amount_multiplier = 1.0 + 0.07 * (max(amount, 0.0) / 100_000.0)
+        amount_label = "금액 구간 10만원 이하"
+    elif amount <= 500_000:
+        amount_multiplier = 1.07 + 0.08 * ((amount - 100_000.0) / 400_000.0)
+        amount_label = "금액 구간 10만원~50만원"
+    elif amount <= 2_000_000:
+        amount_multiplier = 1.15 + 0.15 * ((amount - 500_000.0) / 1_500_000.0)
+        amount_label = "금액 구간 50만원~200만원"
+    else:
+        amount_multiplier = 1.3
+        amount_label = "금액 구간 200만원 초과"
+    amount_multiplier = min(amount_multiplier, settings.score_amount_multiplier_max)
+    reasons.append(f"{amount_label} ({int(amount):,}원)")
+    signals.append(ScoreSignalDetail(signal="amount_weight", label=f"{amount_label}({int(amount):,}원)", raw_value=amount, points=0.0, category="amount"))
+
+    policy_score = min(100.0, policy_score * amount_multiplier)
+
+    has_strong_evidence = bool(ref_count >= 3 and line_count >= 1)
+    evidence_completeness = min(1.0, (min(ref_count, 3) / 3.0) * 0.6 + (min(line_count, 2) / 2.0) * 0.4)
+    # 증거 품질이 높을수록 0.75/0.25 -> 0.5/0.5 로 점진 전환
+    policy_weight = 0.75 - (0.25 * evidence_completeness)
+    evidence_weight = 1.0 - policy_weight
+
+    final_score_raw = policy_score * policy_weight + evidence_score * evidence_weight
+    # 고위험 신호가 많지만 증거가 빈약하면 과대확신을 막기 위해 보수 패널티를 적용
+    if high_risk_count >= 3 and evidence_completeness < 0.4:
+        penalty = (0.4 - evidence_completeness) * 20.0
+        final_score_raw -= penalty
+        reasons.append(f"증거 부족 보수 패널티 적용 (-{penalty:.1f})")
+        signals.append(
+            ScoreSignalDetail(
+                signal="evidence_shortage_penalty",
+                label="증거 부족 보수 패널티",
+                raw_value=round(evidence_completeness, 3),
+                points=-round(penalty, 1),
+                category="evidence",
+            )
+        )
+    final_score = min(100.0, max(0.0, round(final_score_raw, 1)))
+    severity = _score_to_severity(final_score)
+    calculation_trace = (
+        f"policy({policy_score:.1f}) × {policy_weight} + "
+        f"evidence({evidence_score:.1f}) × {evidence_weight} = {final_score:.1f} "
+        f"[compound×{compound_multiplier:.2f}, amount×{amount_multiplier:.2f}]"
+    )
+
+    return {
+        "policy_score": int(round(policy_score)),
+        "evidence_score": int(round(evidence_score)),
+        "final_score": int(round(final_score)),
         "reasons": reasons,
+        "amount_weight": amount_multiplier,
+        "compound_multiplier": compound_multiplier,
+        "policy_weight": policy_weight,
+        "evidence_weight": evidence_weight,
+        "severity": severity,
+        "signals": [s.model_dump() for s in signals],
+        "calculation_trace": calculation_trace,
     }
 
 
@@ -375,7 +659,16 @@ async def intake_node(state: AgentState) -> AgentState:
 
 
 async def planner_node(state: AgentState) -> AgentState:
-    plan = _plan_from_flags(state["flags"])
+    replan_context = state.get("replan_context")
+    if replan_context:
+        already_run = set(replan_context.get("previous_tool_results") or [])
+        base_plan = _plan_from_flags(state["flags"])
+        always_rerun = {"policy_rulebook_probe", "document_evidence_probe"}
+        plan = [step for step in base_plan if step["tool"] not in already_run or step["tool"] in always_rerun]
+        if not plan:
+            plan = base_plan
+    else:
+        plan = _plan_from_flags(state["flags"])
     steps = [
         PlanStep(
             tool_name=step["tool"],
@@ -399,11 +692,14 @@ async def planner_node(state: AgentState) -> AgentState:
         context={
             "voucher_summary": _voucher_summary_for_context(state["body_evidence"]),
             "flags": state["flags"],
+            "is_replan": bool(replan_context),
+            "critic_feedback": (replan_context or {}).get("critic_feedback", ""),
+            "loop_count": (replan_context or {}).get("loop_count", 0),
         },
-        fallback_message="조사 계획을 수립합니다.",
-        fallback_thought="위험 유형별로 어떤 조사 순서가 효율적인지 정해야 합니다.",
-        fallback_action="위험 유형별 조사 순서를 계산합니다.",
-        fallback_observation="계획 수립에 필요한 정보를 검토합니다.",
+        fallback_message="비판 검토 결과를 반영해 보완 조사 계획을 수립합니다." if replan_context else "조사 계획을 수립합니다.",
+        fallback_thought="이전 조사에서 부족했던 부분을 보완할 도구를 선택합니다." if replan_context else "위험 유형별로 어떤 조사 순서가 효율적인지 정해야 합니다.",
+        fallback_action="보완 조사 순서를 계산합니다." if replan_context else "위험 유형별 조사 순서를 계산합니다.",
+        fallback_observation="재계획에 필요한 정보를 검토합니다." if replan_context else "계획 수립에 필요한 정보를 검토합니다.",
     )
     plan_ready_note = await generate_working_note(
         node="planner",
@@ -421,6 +717,7 @@ async def planner_node(state: AgentState) -> AgentState:
     return {
         "plan": plan,
         "planner_output": planner_output.model_dump(),
+        "replan_context": None,
         "pending_events": [
             AgentEvent(
                 event_type="NODE_START",
@@ -537,6 +834,7 @@ async def execute_node(state: AgentState) -> AgentState:
             case_id=state["case_id"],
             body_evidence=state["body_evidence"],
             intended_risk_type=state.get("intended_risk_type"),
+            prior_tool_results=list(tool_results),
         )
         result = await tool.ainvoke(inp.model_dump())
         if not isinstance(result, dict):
@@ -576,35 +874,146 @@ async def execute_node(state: AgentState) -> AgentState:
             ).to_payload()
         )
     score = _score(state["flags"], tool_results)
+    trace = score.get("calculation_trace", "")
     pending_events.append({
         "event_type": "SCORE_BREAKDOWN",
-        "message": f"정책점수 {score['policy_score']}, 근거점수 {score['evidence_score']}, 최종점수 {score['final_score']}",
+        "message": (
+            f"정책점수 {score['policy_score']}점 / 근거점수 {score['evidence_score']}점 / "
+            f"최종 {score['final_score']}점 [{score.get('severity', '-')}] — {trace}"
+        ),
         "node": "executor",
         "phase": "execute",
         "metadata": score,
     })
-    return {"tool_results": tool_results, "score_breakdown": score, "pending_events": pending_events}
+    plan_achievement = _compute_plan_achievement(state.get("plan") or [], tool_results)
+    return {
+        "tool_results": tool_results,
+        "score_breakdown": score,
+        "pending_events": pending_events,
+        "plan_achievement": plan_achievement,
+    }
 
 
 def _build_verification_targets(state: AgentState) -> list[str]:
-    """검증할 주장 문장 1~3개. policy_refs 또는 planner steps에서 파생 (발표 전: LLM 없이 규칙 기반)."""
-    probe = _find_tool_result(state.get("tool_results", []), "policy_rulebook_probe")
-    refs = (probe or {}).get("facts", {}).get("policy_refs") or []
-    targets: list[str] = []
-    for ref in refs[:3]:
-        art = ref.get("article") or ""
-        title = (ref.get("parent_title") or "")[:50]
-        if art or title:
-            targets.append(f"{art} {title} 조항이 해당 사례에 적용될 수 있음.".strip())
-    if targets:
-        return targets
-    plan = state.get("planner_output") or {}
-    steps = plan.get("steps") or []
-    for step in steps[:3]:
-        purpose = (step.get("purpose") or "").strip()
-        if purpose:
-            targets.append(purpose)
-    return targets[:3]
+    """
+    Verifier가 검증할 구체적·반박 가능한 주장 문장 최대 4개 생성.
+
+    설계 원칙:
+    1) 전표 사실(시간·금액·근태·MCC)을 주장에 직접 삽입
+    2) 특정 조항 번호(제XX조 ③항)까지 명시
+    3) "적용될 수 있음" 대신 "해당한다 / 위반 가능성" 수준의 주장
+    4) _chunk_supports_claim()이 단순 단어 중복만으로 통과하지 못하도록 충분히 구체화
+    5) tool_results의 실제 facts 값을 반드시 참조
+    """
+    body = state["body_evidence"]
+    flags = state.get("flags") or {}
+    tool_results = state.get("tool_results") or []
+
+    occurred_at = str(body.get("occurredAt") or "")
+    date_part = occurred_at[:10] if len(occurred_at) >= 10 else "날짜 미상"
+    time_part = occurred_at[11:16] if len(occurred_at) >= 16 else ""
+    amount = body.get("amount")
+    amount_str = f"{int(amount):,}원" if amount else "금액 미상"
+    merchant = body.get("merchantName") or "거래처 미상"
+    mcc_code = body.get("mccCode") or flags.get("mccCode") or ""
+    mcc_name = body.get("mccName") or ""
+    hr_status = str(flags.get("hrStatus") or body.get("hrStatus") or "").upper()
+    is_holiday = bool(flags.get("isHoliday") or body.get("isHoliday"))
+    is_night = bool(flags.get("isNight"))
+    budget_exceeded = bool(flags.get("budgetExceeded"))
+
+    holiday_facts = (_find_tool_result(tool_results, "holiday_compliance_probe") or {}).get("facts") or {}
+    merchant_facts = (_find_tool_result(tool_results, "merchant_risk_probe") or {}).get("facts") or {}
+    policy_facts = (_find_tool_result(tool_results, "policy_rulebook_probe") or {}).get("facts") or {}
+
+    merchant_risk = str(merchant_facts.get("merchantRisk") or "").upper()
+    holiday_risk = bool(holiday_facts.get("holidayRisk"))
+    policy_refs = policy_facts.get("policy_refs") or []
+
+    claims: list[tuple[int, str]] = []
+
+    if is_night and time_part:
+        claims.append((
+            _CLAIM_PRIORITY["night_violation"],
+            f"{date_part} {time_part} 심야 시간대에 {merchant}에서 {amount_str} 결제가 발생하여 "
+            f"제23조 ③-1항 '23:00~06:00 심야 식대 경고 대상' 및 "
+            f"제38조 ②항 '심야 시간대 지출 검토 대상'에 해당한다.",
+        ))
+
+    if is_holiday and hr_status in {"LEAVE", "OFF", "VACATION"}:
+        hr_label = {"LEAVE": "휴가·결근", "OFF": "휴무", "VACATION": "휴가"}.get(hr_status, hr_status)
+        claims.append((
+            _CLAIM_PRIORITY["holiday_hr_conflict"],
+            f"결제일({date_part}) 근태 상태 {hr_status}({hr_label}) 및 휴일 결제가 동시에 확인되어 "
+            f"제39조 ①항 주말·공휴일 지출 제한과 "
+            f"제23조 ③-2항 '주말/공휴일 식대(예외 승인 없는 경우)' 경고 조건 모두에 해당한다.",
+        ))
+    elif (is_holiday or holiday_risk) and not hr_status:
+        claims.append((
+            _CLAIM_PRIORITY["holiday_hr_conflict"] - 1,
+            f"결제일({date_part})이 휴일로 확인되나 근태 상태 데이터가 누락되어 "
+            f"제39조 주말·공휴일 지출 제한 적용 여부 완전 판단이 불가하다. 근태 보완 후 재검토 필요.",
+        ))
+
+    if merchant_risk in {"HIGH", "CRITICAL"} and mcc_code:
+        mcc_display = f"MCC {mcc_code}({mcc_name})" if mcc_name else f"MCC {mcc_code}"
+        compound = "복합 위험" if merchant_risk == "CRITICAL" else "고위험"
+        claims.append((
+            _CLAIM_PRIORITY["merchant_high_risk"],
+            f"{merchant}({mcc_display})은 제42조 {compound} 업종으로 분류되어 "
+            f"금액과 무관하게 강화 승인 대상이며, 제11조 ③항 고위험 업종 거래 강화 승인 조건을 충족한다.",
+        ))
+    elif merchant_risk == "MEDIUM" and mcc_code:
+        claims.append((
+            _CLAIM_PRIORITY["merchant_high_risk"] - 2,
+            f"{merchant}(MCC {mcc_code}) 업종 위험도 MEDIUM으로 제42조 업종 제한 기준 검토 대상이다.",
+        ))
+
+    if budget_exceeded:
+        claims.append((
+            _CLAIM_PRIORITY["budget_exceeded"],
+            f"{amount_str} 결제가 예산 한도를 초과하여 제40조 ①항 금액·누적한도 제약 및 "
+            f"제19조 ①항 예산 초과 처리 기준에 따른 상위 승인이 필요하다.",
+        ))
+
+    if amount and not budget_exceeded:
+        if amount >= 2_000_000:
+            claims.append((
+                _CLAIM_PRIORITY["amount_approval_tier"],
+                f"{amount_str}은 제11조 ②-4항 임원·CFO 승인 구간(200만원 초과)에 해당하며 "
+                f"증빙 완결성과 결재권자 확인이 필수이다.",
+            ))
+        elif amount >= 500_000:
+            claims.append((
+                _CLAIM_PRIORITY["amount_approval_tier"],
+                f"{amount_str}은 제11조 ②-3항 본부장 승인 구간(50만~200만원)에 해당한다.",
+            ))
+        elif amount >= 100_000:
+            claims.append((
+                _CLAIM_PRIORITY["amount_approval_tier"] - 1,
+                f"{amount_str}은 제11조 ②-2항 부서장 승인 구간(10만~50만원)에 해당한다.",
+            ))
+
+    for ref in policy_refs[:2]:
+        article = ref.get("article") or ""
+        parent_title = (ref.get("parent_title") or "")[:35]
+        reason = ref.get("adoption_reason") or ""
+        if article:
+            reason_part = f" ({reason})" if reason else ""
+            claims.append((
+                _CLAIM_PRIORITY["policy_ref_direct"],
+                f"policy_rulebook_probe 채택 조항 {article}({parent_title}){reason_part}이 "
+                f"{merchant} {amount_str} 전표에 직접 적용 가능한 위반 근거를 갖는다.",
+            ))
+
+    claims.sort(key=lambda item: item[0], reverse=True)
+    if claims:
+        return [text for _, text in claims[:4]]
+
+    return [
+        f"{merchant} {amount_str} 전표({date_part})가 사내 경비 지출 관리 규정 위반 여부 "
+        f"검토 대상으로 판정되었으며 세부 조항 적용 근거 확인이 필요하다."
+    ]
 
 
 async def critic_node(state: AgentState) -> AgentState:
@@ -616,6 +1025,25 @@ async def critic_node(state: AgentState) -> AgentState:
         "risk_of_overclaim": bool(missing),
         "recommend_hold": bool(missing and not state["flags"].get("hasHitlResponse")),
     }
+    loop_count = state.get("critic_loop_count") or 0
+    replan_required = bool(
+        critique["risk_of_overclaim"]
+        and not state["flags"].get("hasHitlResponse")
+        and loop_count < _MAX_CRITIC_LOOP
+    )
+    replan_reason = ""
+    replan_context: dict[str, Any] | None = None
+    if replan_required:
+        replan_reason = (
+            f"누락 필드 {missing}로 인해 과잉 주장 위험이 감지되었습니다. "
+            "재조사 시 해당 필드를 보완하는 도구를 우선 실행하십시오."
+        )
+        replan_context = {
+            "critic_feedback": replan_reason,
+            "missing_fields": missing,
+            "loop_count": loop_count + 1,
+            "previous_tool_results": [r.get("skill") for r in state.get("tool_results", [])],
+        }
     verification_targets = _build_verification_targets(state)
     critic_output = CriticOutput(
         overclaim_risk=critique["risk_of_overclaim"],
@@ -625,6 +1053,8 @@ async def critic_node(state: AgentState) -> AgentState:
         rationale="입력 누락 필드가 있으면 과잉 주장 위험이 있어 보류를 권고한다." if missing else "추가 보류 조건 없이 진행 가능하다.",
         has_legacy_result=critique["has_legacy_result"],
         verification_targets=verification_targets,
+        replan_required=replan_required,
+        replan_reason=replan_reason,
     )
     start_note = await generate_working_note(
         node="critic",
@@ -654,6 +1084,8 @@ async def critic_node(state: AgentState) -> AgentState:
     return {
         "critique": critique,
         "critic_output": critic_output.model_dump(),
+        "critic_loop_count": loop_count + 1 if replan_required else loop_count,
+        "replan_context": replan_context,
         "pending_events": [
             AgentEvent(
                 event_type="NODE_START",
@@ -706,6 +1138,53 @@ async def verify_node(state: AgentState) -> AgentState:
     verification["needs_hitl"] = needs_hitl
     verification["quality_signals"] = ["HITL_REQUIRED"] if needs_hitl else ["OK"]
     gate = VerifierGate.HITL_REQUIRED if needs_hitl else VerifierGate.READY
+
+    stop_words = {
+        "이", "가", "을", "를", "의", "에", "으로", "로", "와", "과",
+        "이다", "있음", "있다", "수", "하며", "하여", "해당", "필요",
+        "대상", "조항", "기준", "한다", "되어", "위반", "가능성",
+    }
+    claim_results: list[ClaimVerificationResult] = []
+    for detail in (verification_summary.get("details") or []):
+        idx = detail.get("index", 0)
+        claim_text = verification_targets[idx] if idx < len(verification_targets) else ""
+        is_covered = bool(detail.get("covered"))
+
+        supporting: list[str] = []
+        if is_covered and retrieved_chunks:
+            claim_words = {word for word in _WORD_RE.findall(claim_text.lower()) if word not in stop_words}
+            for chunk in retrieved_chunks:
+                chunk_combined = " ".join([
+                    str(chunk.get("chunk_text") or ""),
+                    str(chunk.get("parent_title") or ""),
+                    str(chunk.get("article") or chunk.get("regulation_article") or ""),
+                ])
+                chunk_words = {word for word in _WORD_RE.findall(chunk_combined.lower()) if word not in stop_words}
+                if len(claim_words & chunk_words) >= 3:
+                    article = chunk.get("article") or chunk.get("regulation_article")
+                    if article and article not in supporting:
+                        supporting.append(article)
+
+        gap_text = ""
+        if not is_covered:
+            if "심야" in claim_text or "23:00" in claim_text:
+                gap_text = "심야 시간대 규정 조항(제23조/제38조)이 retrieval 결과에 포함되지 않음"
+            elif "LEAVE" in claim_text or "휴일" in claim_text or "근태" in claim_text:
+                gap_text = "근태·휴일 지출 연계 규정 청크 부족"
+            elif "MCC" in claim_text or "업종" in claim_text:
+                gap_text = "고위험 업종 관련 조항(제42조)이 retrieval 결과에 부재"
+            elif "예산" in claim_text:
+                gap_text = "예산 초과 관련 조항(제40조/제19조) 청크 미확보"
+            else:
+                gap_text = "해당 주장을 뒷받침할 규정 청크를 retrieval에서 찾지 못함"
+
+        claim_results.append(ClaimVerificationResult(
+            claim=claim_text,
+            covered=is_covered,
+            supporting_articles=supporting[:3],
+            gap=gap_text,
+        ))
+
     verifier_output = VerifierOutput(
         grounded=not needs_hitl,
         needs_hitl=needs_hitl,
@@ -713,6 +1192,7 @@ async def verify_node(state: AgentState) -> AgentState:
         gate=gate,
         rationale=(hitl_request.get("why_hitl") if hitl_request else "자동 확정 가능한 상태로 검증이 완료되었습니다."),
         quality_signals=verification["quality_signals"],
+        claim_results=claim_results,
     )
     start_note = await generate_working_note(
         node="verify",
@@ -790,6 +1270,17 @@ async def verify_node(state: AgentState) -> AgentState:
             ).to_payload()
         )
     return {"verification": verification, "verifier_output": verifier_output.model_dump(), "hitl_request": hitl_request, "pending_events": events}
+
+
+def _route_after_critic(state: AgentState) -> str:
+    critic_out = state.get("critic_output") or {}
+    loop_count = state.get("critic_loop_count") or 0
+    has_hitl_response = (state.get("flags") or {}).get("hasHitlResponse", False)
+    replan_required = bool(critic_out.get("replan_required"))
+    under_limit = loop_count < _MAX_CRITIC_LOOP
+    if replan_required and under_limit and not has_hitl_response:
+        return "planner"
+    return "verify"
 
 
 def _route_after_verify(state: AgentState) -> str:
@@ -934,7 +1425,7 @@ async def finalizer_node(state: AgentState) -> AgentState:
         "status": status,
         "reasonText": reason,
         "score": score["final_score"] / 100,
-        "severity": "HIGH" if score["final_score"] >= 70 else ("MEDIUM" if score["final_score"] >= 40 else "LOW"),
+        "severity": score.get("severity") or ("HIGH" if score["final_score"] >= 70 else ("MEDIUM" if score["final_score"] >= 40 else "LOW")),
         "analysis_mode": "langgraph_agentic",
         "score_breakdown": score,
         "quality_gate_codes": state["verification"]["quality_signals"],
@@ -990,7 +1481,7 @@ def build_agent_graph():
     workflow.add_edge("intake", "planner")
     workflow.add_edge("planner", "execute")
     workflow.add_edge("execute", "critic")
-    workflow.add_edge("critic", "verify")
+    workflow.add_conditional_edges("critic", _route_after_critic, {"planner": "planner", "verify": "verify"})
     workflow.add_conditional_edges("verify", _route_after_verify, {"hitl_pause": "hitl_pause", "reporter": "reporter"})
     workflow.add_edge("hitl_pause", "reporter")  # resume 후 reporter로 이어짐
     workflow.add_edge("reporter", "finalizer")

@@ -9,14 +9,18 @@ from typing import Any
 # 1차 구현: cross-encoder. 미설치 시 입력 그대로 반환
 _CROSS_ENCODER_MODEL: Any = None
 
+# 한국어 규정 텍스트용 cross-encoder (영어 ms-marco 대체)
+_KO_CROSS_ENCODER_MODEL_NAME = "Dongjin-kr/ko-reranker"
 
-def _get_cross_encoder(model_name: str = "cross-encoder/ms-marco-MiniLM-L6-v2"):
+
+def _get_cross_encoder(model_name: str | None = None):
     global _CROSS_ENCODER_MODEL
     if _CROSS_ENCODER_MODEL is not None:
         return _CROSS_ENCODER_MODEL
+    target = model_name or _KO_CROSS_ENCODER_MODEL_NAME
     try:
         from sentence_transformers import CrossEncoder
-        _CROSS_ENCODER_MODEL = CrossEncoder(model_name)
+        _CROSS_ENCODER_MODEL = CrossEncoder(target)
         return _CROSS_ENCODER_MODEL
     except Exception:
         return None
@@ -29,11 +33,11 @@ def rerank_with_cross_encoder(
     model_name: str | None = None,
 ) -> list[dict[str, Any]]:
     """
-    cross-encoder rerank 적용. sentence-transformers 미설치 시 입력 그대로 반환.
+    cross-encoder rerank 적용. 한국어 ko-reranker 기본. sentence-transformers 미설치 시 입력 그대로 반환.
     """
     if not groups or not query or not query.strip():
         return groups
-    model = _get_cross_encoder(model_name or "cross-encoder/ms-marco-MiniLM-L6-v2")
+    model = _get_cross_encoder(model_name or _KO_CROSS_ENCODER_MODEL_NAME)
     if model is None:
         return groups
     try:
