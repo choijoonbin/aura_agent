@@ -49,6 +49,10 @@ class Settings:
 
     # Reasoning note LLM label (shown in UI when note_source is "llm")
     reasoning_llm_label: str = os.getenv("REASONING_LLM_LABEL", "LLM")
+    enable_reasoning_live_llm: bool = os.getenv("ENABLE_REASONING_LIVE_LLM", "false").lower() == "true"
+    reasoning_llm_model: str = os.getenv("REASONING_LLM_MODEL", "gpt-5.2")
+    openai_api_key: str | None = os.getenv("OPENAI_API_KEY") or None
+    openai_base_url: str | None = os.getenv("OPENAI_BASE_URL") or None
 
     # Score engine weights
     score_policy_weight: float = float(os.getenv("SCORE_POLICY_WEIGHT", "0.6"))

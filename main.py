@@ -9,7 +9,7 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi import Body, Depends, FastAPI, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
@@ -35,7 +35,7 @@ from services.runtime_persistence_service import (
     list_run_ids_by_case,
     log_run_event,
 )
-from services.schemas import AnalysisStartResponse, HitlDraftRequest, HitlSubmitRequest, HitlSubmitResponse
+from services.schemas import AnalysisStartRequest, AnalysisStartResponse, HitlDraftRequest, HitlSubmitRequest, HitlSubmitResponse
 from services.stream_runtime import runtime
 from utils.config import ensure_source_paths, settings
 
@@ -143,6 +143,7 @@ async def _run_analysis_task(
     body_evidence: dict[str, Any],
     intended_risk_type: str | None,
     resume_value: dict[str, Any] | None = None,
+    enable_hitl: bool = True,
 ) -> None:
     last_payload: dict[str, Any] | None = None
     voucher_key = case_id.replace("POC-", "")
@@ -153,6 +154,7 @@ async def _run_analysis_task(
             intended_risk_type=intended_risk_type,
             run_id=run_id,
             resume_value=resume_value,
+            enable_hitl=enable_hitl,
         ):
             data = ev_payload if isinstance(ev_payload, dict) else {"value": ev_payload}
             await runtime.publish(run_id, ev_type, data)
@@ -306,7 +308,11 @@ def screen_voucher(voucher_key: str, db: Session = Depends(get_db)) -> dict[str,
 
 
 @app.post("/api/v1/cases/{voucher_key}/analysis-runs", response_model=AnalysisStartResponse)
-async def start_analysis(voucher_key: str, db: Session = Depends(get_db)) -> AnalysisStartResponse:
+async def start_analysis(
+    voucher_key: str,
+    body: AnalysisStartRequest | None = Body(None),
+    db: Session = Depends(get_db),
+) -> AnalysisStartResponse:
     try:
         payload = build_analysis_payload(db, voucher_key)
     except Exception as e:
@@ -314,6 +320,7 @@ async def start_analysis(voucher_key: str, db: Session = Depends(get_db)) -> Ana
 
     run_id = str(uuid.uuid4())
     case_id = payload["case_id"]
+    enable_hitl = body.enable_hitl if body is not None else True
     runtime.create_run(case_id=case_id, run_id=run_id, mode="primary")
     try:
         create_analysis_run_row(
@@ -345,6 +352,7 @@ async def start_analysis(voucher_key: str, db: Session = Depends(get_db)) -> Ana
             case_id=case_id,
             body_evidence=payload["body_evidence"],
             intended_risk_type=payload.get("intended_risk_type"),
+            enable_hitl=enable_hitl,
         )
     )
     return AnalysisStartResponse(

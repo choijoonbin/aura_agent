@@ -21,6 +21,12 @@ class VoucherRow(BaseModel):
     case_status: str | None = None
 
 
+class AnalysisStartRequest(BaseModel):
+    """분석 시작 시 옵션. enable_hitl=False면 HITL 팝업 없이 AI가 끝까지 분석."""
+
+    enable_hitl: bool = True
+
+
 class AnalysisStartResponse(BaseModel):
     accepted: bool = True
     run_id: str

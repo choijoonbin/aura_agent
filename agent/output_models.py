@@ -101,6 +101,21 @@ class VerifierOutput(BaseModel):
     reasoning: str = Field(default="", description="검증 판단 과정 서술(스트리밍용)")
 
 
+# ----- Execute -----
+
+
+class ExecuteOutput(BaseModel):
+    """실행 노드 출력. 도구 실행 요약 + 추론."""
+
+    executed_tools: list[str] = Field(default_factory=list, description="실행된 도구 이름 목록")
+    skipped_tools: list[str] = Field(default_factory=list, description="생략된 도구 이름 목록")
+    failed_tools: list[str] = Field(default_factory=list, description="실패한 도구 이름 목록")
+    policy_score: int = Field(default=0, description="정책 점수")
+    evidence_score: int = Field(default=0, description="근거 점수")
+    final_score: int = Field(default=0, description="최종 점수")
+    reasoning: str = Field(default="", description="실행 결과를 다음 노드에 넘기는 추론 서술")
+
+
 # ----- Reporter -----
 
 

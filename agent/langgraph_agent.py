@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+import json
 import re
 from typing import Any, TypedDict
 
@@ -14,6 +15,7 @@ from agent.output_models import (
     Citation,
     ClaimVerificationResult,
     CriticOutput,
+    ExecuteOutput,
     PlanStep,
     PlannerOutput,
     ReporterOutput,
@@ -21,7 +23,6 @@ from agent.output_models import (
     VerifierGate,
     VerifierOutput,
 )
-from agent.reasoning_notes import extract_reasoning
 from agent.screener import run_screening
 from agent.skills import get_langchain_tools
 from agent.tool_schemas import SkillContextInput
@@ -41,6 +42,7 @@ _CLAIM_PRIORITY: dict[str, int] = {
     "amount_approval_tier": 6,
     "policy_ref_direct": 5,
 }
+_REASONING_JSON_MARKER = '"reasoning"'
 
 
 @dataclass
@@ -142,7 +144,37 @@ def _repair_reasoning_for_consistency(node_name: str, output: Any, *, current_re
         if verdict in {"HITL_REQUIRED", "HOLD", "REJECT", "HOLD_AFTER_HITL"}:
             return (text + " 결론: 보류/사람 검토가 필요하다.").strip()
         return (text + " 결론: 자동 확정 후보로 진행한다.").strip()
+    if node_name == "finalizer":
+        status = str(_get_attr(output, "status") or _get_attr(output, "final_status") or "").upper()
+        if status in {"HITL_REQUIRED", "HOLD", "REJECT", "FAILED", "HOLD_AFTER_HITL"}:
+            return (text + " 결론: 보류 또는 사람 검토가 필요하다.").strip()
+        return (text + " 결론: 최종 확정을 진행한다.").strip()
     return text
+
+
+def call_node_llm_with_consistency_check(
+    node_name: str,
+    output: Any,
+    reasoning_text: str,
+    *,
+    max_retries: int = 1,
+) -> tuple[str, ConsistencyCheckResult, bool]:
+    """
+    workspace.md v3 체크리스트 대응:
+    reasoning 정합성 검사 후 모순 시 최대 1회 자동 재검토(보정)한다.
+    반환: (최종 reasoning, 마지막 검사 결과, 재시도 여부)
+    """
+    text = (reasoning_text or "").strip()
+    retried = False
+    last_check = ConsistencyCheckResult(is_consistent=True, conflict_description="")
+    for attempt in range(max_retries + 1):
+        last_check = check_reasoning_consistency(node_name, {**(output if isinstance(output, dict) else {}), "reasoning": text} if isinstance(output, dict) else output)
+        if last_check.is_consistent:
+            return text, last_check, retried
+        if attempt < max_retries:
+            retried = True
+            text = _repair_reasoning_for_consistency(node_name, output, current_reasoning=text)
+    return text, last_check, retried
 
 
 def _get_tools_by_name() -> dict[str, Any]:
@@ -169,6 +201,7 @@ class AgentState(TypedDict, total=False):
     pending_events: list[dict[str, Any]]
     # Phase B: structured output (planner/critic/verifier/reporter)
     planner_output: dict[str, Any]
+    execute_output: dict[str, Any]
     critic_output: dict[str, Any]
     verifier_output: dict[str, Any]
     reporter_output: dict[str, Any]
@@ -225,6 +258,135 @@ def _reasoning_stream_events(node_name: str, reasoning_text: str) -> list[dict[s
         ).to_payload(),
     )
     return events
+
+
+def _extract_reasoning_token(delta: str, full_so_far: str, emitted_len: int) -> tuple[str, int, bool]:
+    """
+    workspace.md v2 STEP-3: JSON 스트리밍 중 reasoning 필드의 신규 토큰만 추출.
+    반환값: (new_token, new_emitted_len, completed)
+    """
+    if not delta and not full_so_far:
+        return "", emitted_len, False
+    marker_idx = full_so_far.find(_REASONING_JSON_MARKER)
+    if marker_idx < 0:
+        return "", emitted_len, False
+    colon_idx = full_so_far.find(":", marker_idx + len(_REASONING_JSON_MARKER))
+    if colon_idx < 0:
+        return "", emitted_len, False
+    q0 = full_so_far.find('"', colon_idx + 1)
+    if q0 < 0:
+        return "", emitted_len, False
+
+    chars: list[str] = []
+    escaped = False
+    i = q0 + 1
+    completed = False
+    while i < len(full_so_far):
+        ch = full_so_far[i]
+        if escaped:
+            chars.append(ch)
+            escaped = False
+        elif ch == "\\":
+            escaped = True
+        elif ch == '"':
+            completed = True
+            break
+        else:
+            chars.append(ch)
+        i += 1
+    current = "".join(chars)
+    if len(current) <= emitted_len:
+        return "", emitted_len, completed
+    new_piece = current[emitted_len:]
+    return new_piece, len(current), completed
+
+
+async def _stream_reasoning_events_with_llm(
+    node_name: str,
+    reasoning_text: str,
+    *,
+    context: dict[str, Any] | None = None,
+) -> tuple[str, list[dict[str, Any]], str]:
+    """
+    ENABLE_REASONING_LIVE_LLM=true 일 때 OpenAI stream=True JSON 응답으로 reasoning을 실시간 생성.
+    실패 시 기존 reasoning_text 단어 분해 fallback.
+    return: (final_reasoning, events, source["llm"|"fallback"])
+    """
+    if not settings.enable_reasoning_live_llm:
+        return reasoning_text, _reasoning_stream_events(node_name, reasoning_text), "fallback"
+    if not settings.openai_api_key:
+        return reasoning_text, _reasoning_stream_events(node_name, reasoning_text), "fallback"
+
+    try:
+        from openai import AsyncOpenAI  # type: ignore
+
+        client_kwargs: dict[str, Any] = {"api_key": settings.openai_api_key}
+        if settings.openai_base_url:
+            client_kwargs["base_url"] = settings.openai_base_url
+        client = AsyncOpenAI(**client_kwargs)
+
+        context_json = json.dumps(context or {}, ensure_ascii=False, default=str)
+        prompt = (
+            "당신은 엔터프라이즈 감사 에이전트의 reasoning 생성기다.\n"
+            "아래 초안을 기반으로 더 구체적이고 판단 중심의 reasoning을 JSON으로 출력하라.\n"
+            "반드시 JSON 객체 1개만 출력하고 키는 reasoning 하나만 사용.\n"
+            "불필요한 설명, 코드블록, 마크다운 금지.\n\n"
+            f"[node] {node_name}\n"
+            f"[context] {context_json}\n"
+            f"[draft_reasoning] {reasoning_text}\n"
+        )
+
+        stream = await client.chat.completions.create(
+            model=settings.reasoning_llm_model,
+            messages=[
+                {"role": "system", "content": "reasoning 필드만 포함된 JSON을 출력한다."},
+                {"role": "user", "content": prompt},
+            ],
+            stream=True,
+            response_format={"type": "json_object"},
+            temperature=0.2,
+        )
+
+        full_response = ""
+        emitted_len = 0
+        events: list[dict[str, Any]] = []
+        for_chunk_reasoning = ""
+        async for chunk in stream:
+            delta = (chunk.choices[0].delta.content or "") if chunk.choices else ""
+            if not delta:
+                continue
+            full_response += delta
+            token, emitted_len, _done = _extract_reasoning_token(delta, full_response, emitted_len)
+            if token:
+                for_chunk_reasoning += token
+                events.append(
+                    AgentEvent(
+                        event_type="THINKING_TOKEN",
+                        node=node_name,
+                        message="",
+                        metadata={"token": token},
+                    ).to_payload()
+                )
+
+        parsed_reasoning = ""
+        try:
+            parsed = json.loads(full_response)
+            parsed_reasoning = str(parsed.get("reasoning") or "").strip()
+        except Exception:
+            parsed_reasoning = for_chunk_reasoning.strip()
+
+        final_reasoning = parsed_reasoning or (for_chunk_reasoning.strip() or reasoning_text)
+        events.append(
+            AgentEvent(
+                event_type="THINKING_DONE",
+                node=node_name,
+                message=final_reasoning,
+                metadata={"reasoning": final_reasoning},
+            ).to_payload()
+        )
+        return final_reasoning, events, "llm"
+    except Exception:
+        return reasoning_text, _reasoning_stream_events(node_name, reasoning_text), "fallback"
 
 
 def _voucher_summary_for_context(body_evidence: dict[str, Any]) -> str:
@@ -738,6 +900,17 @@ async def screener_node(state: AgentState) -> AgentState:
                     "reasons": screening.get("reasons", []),
                 },
             ).to_payload(),
+            AgentEvent(
+                event_type="NODE_END",
+                node="screener",
+                phase="screen",
+                message="스크리닝 단계가 완료되었습니다.",
+                metadata={
+                    "case_type": screening["case_type"],
+                    "severity": severity,
+                    "score": score,
+                },
+            ).to_payload(),
         ],
     }
 
@@ -756,9 +929,20 @@ async def intake_node(state: AgentState) -> AgentState:
     pending: list[dict[str, Any]] = [
         AgentEvent(event_type="NODE_START", node="intake", phase="analyze", message="입력 데이터를 정규화합니다.", metadata=dict(flags)).to_payload(),
     ]
-    pending.extend(_reasoning_stream_events("intake", reasoning_text))
+    intake_context = {
+        "flags": flags,
+        "last_node_summary": state.get("last_node_summary", "없음"),
+    }
+    reasoning_text, reasoning_events, note_source = await _stream_reasoning_events_with_llm("intake", reasoning_text, context=intake_context)
+    pending.extend(reasoning_events)
     pending.append(
-        AgentEvent(event_type="NODE_END", node="intake", phase="analyze", message="입력 정규화가 완료되었습니다.", metadata={"reasoning": reasoning_text, **flags}).to_payload(),
+        AgentEvent(
+            event_type="NODE_END",
+            node="intake",
+            phase="analyze",
+            message="입력 정규화가 완료되었습니다.",
+            metadata={"reasoning": reasoning_text, "note_source": note_source, **flags},
+        ).to_payload(),
     )
     return {
         "flags": flags,
@@ -811,15 +995,30 @@ async def planner_node(state: AgentState) -> AgentState:
     pending: list[dict[str, Any]] = [
         AgentEvent(event_type="NODE_START", node="planner", phase="plan", message="조사 계획을 수립합니다.", metadata={"plan": plan}).to_payload(),
     ]
-    pending.extend(_reasoning_stream_events("planner", reasoning_text))
+    planner_context = {
+        "selected_tools": tool_sequence,
+        "flags": state.get("flags") or {},
+        "last_node_summary": state.get("last_node_summary", "없음"),
+    }
+    reasoning_text, reasoning_events, note_source = await _stream_reasoning_events_with_llm("planner", reasoning_text, context=planner_context)
+    pending.extend(reasoning_events)
     pending.append(
         AgentEvent(
             event_type="PLAN_READY",
             node="planner",
             phase="plan",
             message="조사 계획이 확정되었습니다.",
-            metadata={"plan": plan, "reasoning": reasoning_text},
+            metadata={"plan": plan, "reasoning": reasoning_text, "note_source": note_source},
         ).to_payload(),
+    )
+    pending.append(
+        AgentEvent(
+            event_type="NODE_END",
+            node="planner",
+            phase="plan",
+            message="조사 계획 수립이 완료되었습니다.",
+            metadata={"plan_size": len(plan)},
+        ).to_payload()
     )
     return {
         "plan": plan,
@@ -833,7 +1032,17 @@ async def planner_node(state: AgentState) -> AgentState:
 async def execute_node(state: AgentState) -> AgentState:
     tools_by_name = _get_tools_by_name()
     tool_results: list[dict[str, Any]] = []
-    pending_events: list[dict[str, Any]] = []
+    skipped_tools: list[str] = []
+    failed_tools: list[str] = []
+    pending_events: list[dict[str, Any]] = [
+        AgentEvent(
+            event_type="NODE_START",
+            node="execute",
+            phase="execute",
+            message="계획된 도구를 순차 실행합니다.",
+            metadata={"planned_tools": [step.get("tool") for step in state.get("plan") or []]},
+        ).to_payload()
+    ]
     for step in state["plan"]:
         tool_name = step.get("tool", "")
         skip, reason = _should_skip_skill(step, state=state, tool_results=tool_results)
@@ -841,10 +1050,11 @@ async def execute_node(state: AgentState) -> AgentState:
             tool_obj = tools_by_name.get(tool_name)
             tool_description = getattr(tool_obj, "description", None) if tool_obj else None
             msg = reason or "기존 증거가 충분해 생략한다."
+            skipped_tools.append(tool_name)
             pending_events.append(
                 AgentEvent(
                     event_type="TOOL_SKIPPED",
-                    node="executor",
+                    node="execute",
                     phase="execute",
                     tool=tool_name,
                     message=msg,
@@ -857,6 +1067,7 @@ async def execute_node(state: AgentState) -> AgentState:
             continue
         tool = tools_by_name.get(tool_name)
         if not tool:
+            failed_tools.append(tool_name)
             tool_results.append({"skill": tool_name, "ok": False, "facts": {}, "summary": f"알 수 없는 도구: {tool_name}"})
             continue
         tool_description = getattr(tool, "description", None) or ""
@@ -864,7 +1075,7 @@ async def execute_node(state: AgentState) -> AgentState:
         pending_events.append(
             AgentEvent(
                 event_type="TOOL_CALL",
-                node="executor",
+                node="execute",
                 phase="execute",
                 tool=tool_name,
                 message=f"{step_reason} — {tool_name} 실행.",
@@ -883,12 +1094,14 @@ async def execute_node(state: AgentState) -> AgentState:
         result = await tool.ainvoke(inp.model_dump())
         if not isinstance(result, dict):
             result = {"skill": tool_name, "ok": False, "facts": {}, "summary": str(result)}
+        if not bool(result.get("ok")):
+            failed_tools.append(tool_name)
         tool_results.append(result)
         result_summary = result.get("summary") or "도구 결과 수집 완료"
         pending_events.append(
             AgentEvent(
                 event_type="TOOL_RESULT",
-                node="executor",
+                node="execute",
                 phase="execute",
                 tool=tool_name,
                 message=result_summary,
@@ -906,17 +1119,59 @@ async def execute_node(state: AgentState) -> AgentState:
             f"정책점수 {score['policy_score']}점 / 근거점수 {score['evidence_score']}점 / "
             f"최종 {score['final_score']}점 [{score.get('severity', '-')}] — {trace}"
         ),
-        "node": "executor",
+        "node": "execute",
         "phase": "execute",
         "metadata": score,
     })
+    executed_tools = [str(result.get("skill") or "") for result in tool_results if result.get("skill")]
+    reasoning_parts = [
+        f"{len(executed_tools)}개 도구를 실행해 정책점수 {score['policy_score']}점, 근거점수 {score['evidence_score']}점을 산출했다.",
+        "수집된 도구 결과를 critic 단계의 반박 가능성 검토 입력으로 전달한다.",
+    ]
+    if skipped_tools:
+        reasoning_parts.append(f"생략 도구: {', '.join(skipped_tools)}.")
+    if failed_tools:
+        reasoning_parts.append(f"실패 도구: {', '.join(sorted(set(failed_tools)))}.")
+    execute_reasoning = " ".join(reasoning_parts).strip()
+    execute_context = {
+        "executed_tools": executed_tools,
+        "skipped_tools": skipped_tools,
+        "failed_tools": sorted(set(failed_tools)),
+        "score": score,
+        "last_node_summary": state.get("last_node_summary", "없음"),
+    }
+    execute_reasoning, execute_reasoning_events, note_source = await _stream_reasoning_events_with_llm(
+        "execute",
+        execute_reasoning,
+        context=execute_context,
+    )
+    pending_events.extend(execute_reasoning_events)
+    execute_output = ExecuteOutput(
+        executed_tools=executed_tools,
+        skipped_tools=skipped_tools,
+        failed_tools=sorted(set(failed_tools)),
+        policy_score=int(score.get("policy_score") or 0),
+        evidence_score=int(score.get("evidence_score") or 0),
+        final_score=int(score.get("final_score") or 0),
+        reasoning=execute_reasoning,
+    )
+    pending_events.append(
+        AgentEvent(
+            event_type="NODE_END",
+            node="execute",
+            phase="execute",
+            message="도구 실행과 점수 산출이 완료되었습니다.",
+            metadata={"executed_tools": len(tool_results), "reasoning": execute_reasoning, "note_source": note_source},
+        ).to_payload()
+    )
     plan_achievement = _compute_plan_achievement(state.get("plan") or [], tool_results)
     return {
         "tool_results": tool_results,
         "score_breakdown": score,
+        "execute_output": execute_output.model_dump(),
         "pending_events": pending_events,
         "plan_achievement": plan_achievement,
-        "last_node_summary": f"execute 완료: {len(tool_results)}개 도구 실행",
+        "last_node_summary": f"execute 완료: {execute_reasoning[:60]}…" if len(execute_reasoning) > 60 else f"execute 완료: {execute_reasoning}",
     }
 
 
@@ -1090,16 +1345,21 @@ async def critic_node(state: AgentState) -> AgentState:
         reasoning_parts.append(replan_reason or "")
     reasoning_text = " ".join(reasoning_parts).strip()
     # v3 정합성 검증 + 1회 보정
-    check = check_reasoning_consistency("critic", {**critic_output.model_dump(), "reasoning": reasoning_text})
-    if not check.is_consistent:
-        reasoning_text = _repair_reasoning_for_consistency("critic", critic_output, current_reasoning=reasoning_text)
+    reasoning_text, check, retried = call_node_llm_with_consistency_check("critic", critic_output.model_dump(), reasoning_text, max_retries=1)
+    critic_context = {
+        "missing_fields": missing,
+        "recommend_hold": critique.get("recommend_hold"),
+        "replan_required": replan_required,
+        "last_node_summary": state.get("last_node_summary", "없음"),
+    }
+    reasoning_text, reasoning_events, note_source = await _stream_reasoning_events_with_llm("critic", reasoning_text, context=critic_context)
     critic_output_dict = critic_output.model_dump()
     critic_output_dict["reasoning"] = reasoning_text
     last_node_summary = f"critic 완료: {reasoning_text[:60]}…" if len(reasoning_text) > 60 else f"critic 완료: {reasoning_text}"
     pending: list[dict[str, Any]] = [
         AgentEvent(event_type="NODE_START", node="critic", phase="reflect", message="전문 도구 결과와 입력 품질을 교차 검토합니다.", metadata={}).to_payload(),
     ]
-    if not check.is_consistent:
+    if retried:
         pending.append(
             AgentEvent(
                 event_type="THINKING_RETRY",
@@ -1109,14 +1369,14 @@ async def critic_node(state: AgentState) -> AgentState:
                 metadata={"conflict": check.conflict_description},
             ).to_payload()
         )
-    pending.extend(_reasoning_stream_events("critic", reasoning_text))
+    pending.extend(reasoning_events)
     pending.append(
         AgentEvent(
             event_type="NODE_END",
             node="critic",
             phase="reflect",
             message="비판적 재검토가 완료되었습니다.",
-            metadata={"reasoning": reasoning_text, **critique},
+            metadata={"reasoning": reasoning_text, "note_source": note_source, **critique},
         ).to_payload(),
     )
     return {
@@ -1151,6 +1411,9 @@ async def verify_node(state: AgentState) -> AgentState:
         score_breakdown=state.get("score_breakdown"),
     )
     if state["flags"].get("hasHitlResponse"):
+        hitl_request = None
+    # HITL 확인 체크 해제 시: 팝업/중단 없이 reporter로 직행 (이벤트·상태에 HITL 남기지 않음)
+    if (state.get("body_evidence") or {}).get("_enable_hitl", True) is False:
         hitl_request = None
     needs_hitl = bool(hitl_request)
     verification["needs_hitl"] = needs_hitl
@@ -1217,29 +1480,34 @@ async def verify_node(state: AgentState) -> AgentState:
     reasoning_parts.append("담당자 검토 필요" if needs_hitl else "자동 진행 가능")
     reasoning_text = " ".join(reasoning_parts).strip()
     # v3 정합성 검증 + 1회 보정
-    check = check_reasoning_consistency("verify", {**verifier_output.model_dump(), "reasoning": reasoning_text})
-    if not check.is_consistent:
-        reasoning_text = _repair_reasoning_for_consistency("verify", verifier_output, current_reasoning=reasoning_text)
+    reasoning_text, check, retried = call_node_llm_with_consistency_check("verify", verifier_output.model_dump(), reasoning_text, max_retries=1)
+    verify_context = {
+        "gate_result": gate.value,
+        "needs_hitl": needs_hitl,
+        "verification_targets": verification_targets,
+        "last_node_summary": state.get("last_node_summary", "없음"),
+    }
+    reasoning_text, reasoning_events, note_source = await _stream_reasoning_events_with_llm("verify", reasoning_text, context=verify_context)
     verifier_output_dict = verifier_output.model_dump()
     verifier_output_dict["reasoning"] = reasoning_text
     events: list[dict[str, Any]] = [
-        AgentEvent(event_type="NODE_START", node="verifier", phase="verify", message="근거 정합성과 추가 검토 필요 여부를 확인합니다.", metadata={}).to_payload(),
+        AgentEvent(event_type="NODE_START", node="verify", phase="verify", message="근거 정합성과 추가 검토 필요 여부를 확인합니다.", metadata={}).to_payload(),
     ]
-    if not check.is_consistent:
+    if retried:
         events.append(
             AgentEvent(
                 event_type="THINKING_RETRY",
-                node="verifier",
+                node="verify",
                 phase="verify",
                 message="추론 정합성 불일치 감지 — 재검토 후 문구를 보정합니다.",
                 metadata={"conflict": check.conflict_description},
             ).to_payload()
         )
-    events.extend(_reasoning_stream_events("verifier", reasoning_text))
+    events.extend(reasoning_events)
     events.append(
         AgentEvent(
             event_type="GATE_APPLIED",
-            node="verifier",
+            node="verify",
             phase="verify",
             message="검증 게이트 적용이 완료되었습니다.",
             decision_code="HITL_REQUIRED" if needs_hitl else "READY",
@@ -1247,11 +1515,21 @@ async def verify_node(state: AgentState) -> AgentState:
             metadata={**verification},
         ).to_payload(),
     )
+    events.append(
+        AgentEvent(
+            event_type="NODE_END",
+            node="verify",
+            phase="verify",
+            message="검증 단계가 완료되었습니다.",
+            observation="담당자 검토 필요" if needs_hitl else "자동 진행 가능",
+            metadata={"needs_hitl": needs_hitl, "reasoning": reasoning_text, "note_source": note_source},
+        ).to_payload()
+    )
     if hitl_request:
         events.append(
             AgentEvent(
                 event_type="HITL_REQUESTED",
-                node="verifier",
+                node="verify",
                 phase="verify",
                 message="담당자 검토가 필요한 케이스로 분류되었습니다.",
                 decision_code="HITL_REQUIRED",
@@ -1274,7 +1552,9 @@ def _route_after_critic(state: AgentState) -> str:
 
 
 def _route_after_verify(state: AgentState) -> str:
-    """Phase D: HITL 필요 시 reporter로 가지 않고 hitl_pause로 끝낸다."""
+    """Phase D: HITL 필요 시 reporter로 가지 않고 hitl_pause로 끝낸다. enable_hitl=False면 HITL 없이 reporter로 직행."""
+    if (state.get("body_evidence") or {}).get("_enable_hitl", True) is False:
+        return "reporter"
     if state.get("hitl_request"):
         return "hitl_pause"
     return "reporter"
@@ -1325,16 +1605,21 @@ async def reporter_node(state: AgentState) -> AgentState:
     ]
     reasoning_text = f"{summary} {verdict}".strip()
     # v3 정합성 검증 + 1회 보정
-    check = check_reasoning_consistency("reporter", {"verdict": verdict, "reasoning": reasoning_text})
-    if not check.is_consistent:
-        reasoning_text = _repair_reasoning_for_consistency("reporter", {"verdict": verdict}, current_reasoning=reasoning_text)
+    reasoning_text, check, retried = call_node_llm_with_consistency_check("reporter", {"verdict": verdict}, reasoning_text, max_retries=1)
+    reporter_context = {
+        "verdict": verdict,
+        "summary": summary,
+        "score_breakdown": score,
+        "last_node_summary": state.get("last_node_summary", "없음"),
+    }
+    reasoning_text, reasoning_events, note_source = await _stream_reasoning_events_with_llm("reporter", reasoning_text, context=reporter_context)
     reporter_output = ReporterOutput(summary=summary, verdict=verdict, sentences=sentences_list, reasoning=reasoning_text)
     reporter_output_dict = reporter_output.model_dump()
     last_node_summary = f"reporter 완료: {reasoning_text[:60]}…" if len(reasoning_text) > 60 else f"reporter 완료: {reasoning_text}"
     pending: list[dict[str, Any]] = [
         AgentEvent(event_type="NODE_START", node="reporter", phase="report", message="사용자에게 제시할 보고 문안을 구성합니다.", metadata={}).to_payload(),
     ]
-    if not check.is_consistent:
+    if retried:
         pending.append(
             AgentEvent(
                 event_type="THINKING_RETRY",
@@ -1344,14 +1629,14 @@ async def reporter_node(state: AgentState) -> AgentState:
                 metadata={"conflict": check.conflict_description},
             ).to_payload()
         )
-    pending.extend(_reasoning_stream_events("reporter", reasoning_text))
+    pending.extend(reasoning_events)
     pending.append(
         AgentEvent(
             event_type="NODE_END",
             node="reporter",
             phase="report",
             message=summary,
-            metadata={"summary": summary, "verdict": verdict},
+            metadata={"summary": summary, "verdict": verdict, "reasoning": reasoning_text, "note_source": note_source},
         ).to_payload(),
     )
     return {
@@ -1365,6 +1650,15 @@ async def finalizer_node(state: AgentState) -> AgentState:
     score = _score_with_hitl_adjustment(state["score_breakdown"], state["flags"])
     hitl_request = state.get("hitl_request")
     reason, status = _build_grounded_reason(state)
+    final_reasoning = f"{reason} 최종 상태는 {status}로 확정한다.".strip()
+    final_reasoning, final_check, final_retried = call_node_llm_with_consistency_check("finalizer", {"status": status}, final_reasoning, max_retries=1)
+    finalizer_context = {
+        "status": status,
+        "score_breakdown": score,
+        "has_hitl_request": bool(hitl_request),
+        "last_node_summary": state.get("last_node_summary", "없음"),
+    }
+    final_reasoning, final_reasoning_events, note_source = await _stream_reasoning_events_with_llm("finalizer", final_reasoning, context=finalizer_context)
     probe_facts = (_find_tool_result(state["tool_results"], "policy_rulebook_probe") or {}).get("facts", {}) or {}
     policy_refs = probe_facts.get("policy_refs") or []
     reporter_out = state.get("reporter_output") or {}
@@ -1410,17 +1704,40 @@ async def finalizer_node(state: AgentState) -> AgentState:
         "critique": state.get("critique"),
         "hitl_response": (state["body_evidence"].get("hitlResponse") or None),
         "planner_output": state.get("planner_output"),
+        "execute_output": state.get("execute_output"),
         "critic_output": state.get("critic_output"),
         "verifier_output": state.get("verifier_output"),
         "reporter_output": state.get("reporter_output"),
         "retrieval_snapshot": retrieval_snapshot,
         "verification_summary": (state.get("verification") or {}).get("verification_summary"),
     }
+    pending_events: list[dict[str, Any]] = [
+        AgentEvent(event_type="NODE_START", node="finalizer", phase="finalize", message="최종 판정 결과를 확정합니다.", metadata={}).to_payload(),
+    ]
+    if final_retried:
+        pending_events.append(
+            AgentEvent(
+                event_type="THINKING_RETRY",
+                node="finalizer",
+                phase="finalize",
+                message="추론 정합성 불일치 감지 — 재검토 후 문구를 보정합니다.",
+                metadata={"conflict": final_check.conflict_description},
+            ).to_payload()
+        )
+    pending_events.extend(final_reasoning_events)
+    pending_events.append(
+        AgentEvent(
+            event_type="NODE_END",
+            node="finalizer",
+            phase="finalize",
+            message="최종 분석 결과가 생성되었습니다.",
+            observation=f"최종 상태={status}",
+            metadata={"status": status, "reasoning": final_reasoning, "note_source": note_source},
+        ).to_payload()
+    )
     return {
         "final_result": final,
-        "pending_events": [
-            AgentEvent(event_type="NODE_END", node="finalizer", phase="finalize", message="최종 분석 결과가 생성되었습니다.", observation=f"최종 상태={status}", metadata={"status": status}).to_payload(),
-        ],
+        "pending_events": pending_events,
     }
 
 
@@ -1472,6 +1789,7 @@ async def run_langgraph_agentic_analysis(
     intended_risk_type: str | None = None,
     run_id: str | None = None,
     resume_value: dict[str, Any] | None = None,
+    enable_hitl: bool = True,
 ):
     from langgraph.types import Command
     from utils.config import get_langfuse_handler
@@ -1546,6 +1864,7 @@ async def run_langgraph_agentic_analysis(
     body_with_hitl = dict(body_evidence or {})
     if resume_value is not None:
         body_with_hitl["hitlResponse"] = resume_value
+    body_with_hitl["_enable_hitl"] = enable_hitl
     inputs: Any = {
         "case_id": case_id,
         "body_evidence": body_with_hitl,
