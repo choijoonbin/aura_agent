@@ -281,9 +281,14 @@ def _search_dense(
     *,
     limit: int = 20,
     effective_date: Any = None,
-    embed_column: str = "embedding_ko",
+    embed_column: str = settings.rag_embedding_column,
 ) -> list[dict[str, Any]]:
     """Dense 벡터 검색: pgvector <=> (cosine distance)."""
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", str(embed_column or "")):
+        return []
+    cast_type = str(settings.rag_embedding_cast_type or "halfvec").strip().lower()
+    if cast_type not in {"vector", "halfvec"}:
+        cast_type = "halfvec"
     try:
         from services.chunking_pipeline import embed_texts
     except ImportError:
@@ -306,14 +311,14 @@ def _search_dense(
             chunk_id, doc_id, regulation_article, regulation_clause,
             parent_title, chunk_text, search_text, node_type, parent_id,
             version, effective_from, effective_to, page_no, chunk_index,
-            1 - ({embed_column} <=> CAST(:query_vec AS vector)) AS dense_score
+            1 - ({embed_column} <=> CAST(:query_vec AS {cast_type})) AS dense_score
         FROM dwp_aura.rag_chunk
         WHERE tenant_id = :tenant_id
           AND is_active = true
           AND {embed_column} IS NOT NULL
           AND (:effective_date IS NULL OR coalesce(effective_from, :effective_date) <= :effective_date)
           AND (:effective_date IS NULL OR coalesce(effective_to, :effective_date) >= :effective_date)
-        ORDER BY {embed_column} <=> CAST(:query_vec AS vector)
+        ORDER BY {embed_column} <=> CAST(:query_vec AS {cast_type})
         LIMIT :limit
     """)
     rows = db.execute(

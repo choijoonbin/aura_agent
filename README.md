@@ -96,12 +96,12 @@
 > 참고: [`app.py`](app.py#L1192) — AI 워크스페이스, [`app.py`](app.py#L1332) — 에이전트 스튜디오, [`app.py`](app.py#L1479) — 규정문서 라이브러리, [`app.py`](app.py#L1607) — 시연 데이터 제어
 
 **에이전트 스트림 UI (아이콘·문구·날짜)**  
-- **아이콘 구분**: Streamlit `st.chat_message(role)`에서 **사람 모양** = `role="user"` (TOOL_CALL, TOOL_RESULT, TOOL_SKIPPED 이벤트), **로봇 모양** = `role="assistant"` (NODE_START, NODE_END, PLAN_READY 등 그 외). 즉 도구 호출/결과는 사용자(도구) 측, 노드 진행은 에이전트 측으로 표시합니다. 이 role 기준은 **PoC UI에서만** 정의되어 있으며(`ui/workspace.py`), 백엔드 이벤트 스키마에는 role 필드가 없습니다.  
+- **아이콘 구분**: 이벤트 타입별 아이콘 매핑(`EVENT_ICON_MAP`)으로 표시합니다. (`NODE_START`=🤖, `TOOL_CALL`=⚡, `TOOL_RESULT`=📊, `SCORE_BREAKDOWN`=📈 등)  
 - **추론 문구**: 각 노드(planner, critic, verifier, reporter 등)의 **실제 추론 결과**(`reasoning` 필드)를 스트림으로 전달합니다. `agent/langgraph_agent.py`에서 `THINKING_TOKEN`(단어 단위)과 `THINKING_DONE` 이벤트로 내보내며, UI(`ui/workspace.py`)에서는 이를 받아 추론 카드에 타이핑 효과로 표시합니다. `agent/reasoning_notes.py`의 `extract_reasoning()`으로 노드 출력에서 reasoning을 추출합니다.
 - **캡션·도구**: TOOL_CALL/TOOL_RESULT/TOOL_SKIPPED는 `노드 / TOOL_CALL: 도구명` 형식으로 표시합니다. 도구명에 마우스를 올리면 `agent/skills.py`의 해당 도구 **description**이 툴팁으로 표시됩니다.
-- **LLM 라벨**: LLM이 생성한 문구일 때 어떤 모델인지 표시합니다. `core.llm.client`에서 `model`/`model_name`을 가져오고, 없으면 환경변수 **REASONING_LLM_LABEL**(기본 `"LLM"`)을 사용합니다. 예: `GPT-4o`, `Claude 3.5 Sonnet` 등으로 설정 가능합니다.  
+- **LLM 라벨**: 상단에 1회 표시합니다. 환경변수 **REASONING_LLM_LABEL**(기본 `OpenAI gpt-5`)을 사용합니다.  
 - **날짜 형식**: UI에서는 모두 **한국 시간(KST) yyyy-mm-dd hh:mm:ss**로 표시합니다 (`ui/shared.py`의 `fmt_dt_korea()`).  
-- **스트림 vs 조회 데이터**: 분석 시작 시 **SSE 스트림**에서는 이벤트가 **카드 형식**(타임스탬프·노드·이벤트타입·도구명·LLM/정의문구·메시지·생각/행동/관찰)으로 한 카드씩 전달되며, 메시지는 단어 단위로 타이핑되듯 표시되고 이벤트 사이에는 "다음 이벤트 수신 중..."이 노출됩니다. 스트림이 끝나면 `st.rerun()` 후 **API로 해당 run의 이벤트 타임라인**을 조회해 동일한 이벤트를 `st.chat_message(role)` 카드로 다시 표시합니다. 즉 **내용은 동일한 런 이벤트**이며, 먼저는 실시간 카드 스트리밍, 이후에는 저장된 이벤트 조회 표시입니다.
+- **스트림 vs 조회 데이터**: 분석 시작 시 SSE 스트림으로 이벤트를 표시하고, 완료 후 같은 화면에서 최신 run 이벤트를 재조회해 노드별 접기/펼치기 타임라인으로 유지합니다(강제 rerun로 인한 화면 단절 없음).  
 
 ### 6. RAG 규정집 통합
 - 규정집 계층형 후보 수집 및 조항 재정렬
@@ -347,6 +347,22 @@ AGENT_RUNTIME_MODE=langgraph
 # 멀티 에이전트 역할 분리
 ENABLE_MULTI_AGENT=true
 ENABLE_LANGGRAPH_IF_AVAILABLE=true
+
+# Reasoning LLM 스트림
+ENABLE_REASONING_LIVE_LLM=true
+REASONING_LLM_MODEL=gpt-5
+REASONING_LLM_LABEL=Azure OpenAI gpt-5
+OPENAI_BASE_URL=https://<your-resource>.openai.azure.com/
+OPENAI_API_VERSION=2024-12-01-preview
+OPENAI_API_KEY=<your-key>
+
+# RAG 임베딩 (Azure/OpenAI)
+OPENAI_EMBEDDING_MODEL=text-embedding-3-large
+OPENAI_EMBEDDING_DIM=3072
+RAG_EMBEDDING_COLUMN=embedding_az
+RAG_EMBEDDING_CAST_TYPE=halfvec
+OPENAI_EMBEDDING_BATCH_SIZE=64
+OPENAI_EMBEDDING_MAX_RETRIES=3
 ```
 
 ### 주요 환경 변수 설명
@@ -363,6 +379,13 @@ ENABLE_LANGGRAPH_IF_AVAILABLE=true
 | `LANGFUSE_PUBLIC_KEY` | Langfuse Public Key | - |
 | `LANGFUSE_SECRET_KEY` | Langfuse Secret Key | - |
 | `LANGFUSE_HOST` | Langfuse 서버 URL | https://cloud.langfuse.com |
+| `OPENAI_BASE_URL` | OpenAI/Azure 엔드포인트 | - |
+| `OPENAI_API_KEY` | OpenAI/Azure API 키 | - |
+| `REASONING_LLM_MODEL` | Reasoning 생성 모델 | gpt-5 |
+| `OPENAI_EMBEDDING_MODEL` | 임베딩 모델(배포명) | text-embedding-3-large |
+| `OPENAI_EMBEDDING_DIM` | 임베딩 차원 | 3072 |
+| `RAG_EMBEDDING_COLUMN` | rag_chunk 임베딩 컬럼 | embedding_az |
+| `RAG_EMBEDDING_CAST_TYPE` | 쿼리/저장 캐스팅 타입(`vector`/`halfvec`) | halfvec |
 
 > 참고: [`.env.example`](.env.example) — 환경 변수 예시, [`utils/config.py`](utils/config.py) — 설정 로드
 

@@ -49,6 +49,8 @@ def _strip_html_for_display(text: str) -> str:
 
 
 def render_rag_library_page() -> None:
+    st.session_state.setdefault("lab_upload_nonce", 0)
+
     # ── 페이지 헤더 ────────────────────────────────────────────────────────
     render_page_header(
         "규정문서 라이브러리",
@@ -340,11 +342,20 @@ def render_rag_library_page() -> None:
             )
 
         with ctrl3:
-            upload = st.file_uploader("규정 TXT 업로드", type=["txt"], key="lab_upload",
-                                       label_visibility="visible")
+            upload_key = f"lab_upload_{st.session_state['lab_upload_nonce']}"
+            upload = st.file_uploader(
+                "규정 TXT 업로드",
+                type=["txt"],
+                key=upload_key,
+                label_visibility="visible",
+            )
+            upload_msg = st.session_state.pop("lab_upload_message", None)
+            if upload_msg:
+                st.success(upload_msg)
             if upload is not None:
                 save_uploaded_rulebook(upload.name, upload.getvalue())
-                st.success(f"업로드: {upload.name}")
+                st.session_state["lab_upload_message"] = f"업로드: {upload.name}"
+                st.session_state["lab_upload_nonce"] += 1
                 st.rerun()
 
         if not local_files:

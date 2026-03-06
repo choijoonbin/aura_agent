@@ -49,10 +49,17 @@ class Settings:
 
     # Reasoning note LLM label (shown in UI when note_source is "llm")
     reasoning_llm_label: str = os.getenv("REASONING_LLM_LABEL", "LLM")
-    enable_reasoning_live_llm: bool = os.getenv("ENABLE_REASONING_LIVE_LLM", "false").lower() == "true"
-    reasoning_llm_model: str = os.getenv("REASONING_LLM_MODEL", "gpt-5.2")
+    enable_reasoning_live_llm: bool = os.getenv("ENABLE_REASONING_LIVE_LLM", "true").lower() == "true"
+    reasoning_llm_model: str = os.getenv("REASONING_LLM_MODEL", "gpt-5")
     openai_api_key: str | None = os.getenv("OPENAI_API_KEY") or None
     openai_base_url: str | None = os.getenv("OPENAI_BASE_URL") or None
+    openai_api_version: str = os.getenv("OPENAI_API_VERSION", "2024-12-01-preview")
+    openai_embedding_model: str = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-large")
+    openai_embedding_dim: int = int(os.getenv("OPENAI_EMBEDDING_DIM", "3072"))
+    rag_embedding_column: str = os.getenv("RAG_EMBEDDING_COLUMN", "embedding_az")
+    rag_embedding_cast_type: str = os.getenv("RAG_EMBEDDING_CAST_TYPE", "halfvec")
+    openai_embedding_batch_size: int = int(os.getenv("OPENAI_EMBEDDING_BATCH_SIZE", "64"))
+    openai_embedding_max_retries: int = int(os.getenv("OPENAI_EMBEDDING_MAX_RETRIES", "3"))
 
     # Score engine weights
     score_policy_weight: float = float(os.getenv("SCORE_POLICY_WEIGHT", "0.6"))

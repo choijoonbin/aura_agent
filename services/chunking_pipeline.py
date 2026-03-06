@@ -1,19 +1,20 @@
 """
 계층적 청킹 → 임베딩 생성 → pgvector 저장 파이프라인.
 
-임베딩 모델: paraphrase-multilingual-mpnet-base-v2 (768차원, 다국어·한국어, safetensors 우선 — torch 2.6 미만 대응)
-저장 대상: dwp_aura.rag_chunk (embedding_ko 컬럼 또는 embedding, search_text 컬럼)
+임베딩 모델: Azure/OpenAI text-embedding-3-large (3072차원, 기본)
+저장 대상: dwp_aura.rag_chunk (embedding_az 컬럼 기본, 설정으로 변경 가능)
 
-DB 마이그레이션: embedding이 1536차원이면 별도 컬럼 사용 권장.
-  ALTER TABLE dwp_aura.rag_chunk ADD COLUMN IF NOT EXISTS embedding_ko vector(768);
-  CREATE INDEX IF NOT EXISTS ix_rag_chunk_embedding_ko_hnsw ON dwp_aura.rag_chunk
-    USING hnsw (embedding_ko vector_cosine_ops) WITH (m = 16, ef_construction = 64);
+DB 마이그레이션(기본값 기준):
+  ALTER TABLE dwp_aura.rag_chunk ADD COLUMN IF NOT EXISTS embedding_az vector(3072);
+  CREATE INDEX IF NOT EXISTS ix_rag_chunk_embedding_az_hnsw ON dwp_aura.rag_chunk
+    USING hnsw (embedding_az vector_cosine_ops) WITH (m = 16, ef_construction = 64);
 """
 from __future__ import annotations
 
 import json
 import logging
 import os
+import time
 from typing import Any
 
 # torch 2.6 미만: safetensors만 사용하도록 유도 (CVE-2025-32434 대응)
@@ -28,59 +29,108 @@ from utils.config import settings
 
 logger = logging.getLogger(__name__)
 
-# 768차원 ko 모델. DB에 embedding_ko vector(768) 컬럼 필요 (마이그레이션 B).
-_EMBEDDING_MODEL: Any = None
-_EMBEDDING_DIM = 768
-_EMBED_COLUMN = "embedding_ko"
+# Azure/OpenAI 임베딩 기본값 (config로 override 가능)
+_EMBEDDING_DIM = settings.openai_embedding_dim
+_EMBED_COLUMN = settings.rag_embedding_column
 _last_embedding_error: str | None = None
 
 
-def get_embedding_model():
-    """
-    ko-sroberta-multitask 모델 싱글톤 로더.
-    sentence-transformers 미설치 시 None 반환 (graceful degradation).
-    """
-    global _EMBEDDING_MODEL
-    if _EMBEDDING_MODEL is not None:
-        return _EMBEDDING_MODEL
-    global _last_embedding_error
-    _last_embedding_error = None
-    try:
-        from sentence_transformers import SentenceTransformer
+def _embedding_cast_type() -> str:
+    cast_type = str(settings.rag_embedding_cast_type or "halfvec").strip().lower()
+    if cast_type not in {"vector", "halfvec"}:
+        return "halfvec"
+    return cast_type
 
-        logger.info("Loading paraphrase-multilingual-mpnet-base-v2 (768d)...")
-        _EMBEDDING_MODEL = SentenceTransformer(
-            "sentence-transformers/paraphrase-multilingual-mpnet-base-v2"
+
+def _embedding_column_exists(db: Session, column_name: str) -> bool:
+    row = db.execute(
+        text(
+            """
+            SELECT 1
+            FROM information_schema.columns
+            WHERE table_schema = 'dwp_aura'
+              AND table_name = 'rag_chunk'
+              AND column_name = :col
+            LIMIT 1
+            """
+        ),
+        {"col": column_name},
+    ).fetchone()
+    return bool(row)
+
+
+def _build_embedding_client():
+    from openai import AzureOpenAI, OpenAI  # type: ignore
+
+    base_url = (settings.openai_base_url or "").strip()
+    if not settings.openai_api_key:
+        raise RuntimeError("OPENAI_API_KEY 미설정")
+    if not base_url:
+        return OpenAI(api_key=settings.openai_api_key)
+    if ".openai.azure.com" in base_url:
+        azure_endpoint = base_url.rstrip("/")
+        if azure_endpoint.endswith("/openai/v1"):
+            azure_endpoint = azure_endpoint[: -len("/openai/v1")]
+        return AzureOpenAI(
+            api_key=settings.openai_api_key,
+            azure_endpoint=azure_endpoint,
+            api_version=settings.openai_api_version,
         )
-        dim = _EMBEDDING_MODEL.get_sentence_embedding_dimension()
-        logger.info("Embedding model loaded. Dim: %s", dim)
-        return _EMBEDDING_MODEL
-    except ImportError as e:
-        _last_embedding_error = "sentence-transformers 미설치 또는 import 실패 (해당 venv에서 pip install torch sentence-transformers 후 API 재시작)"
-        logger.warning("%s: %s", _last_embedding_error, e)
-        return None
-    except Exception as e:
-        _last_embedding_error = f"모델 로드 실패: {e}"
-        logger.error("Failed to load embedding model: %s", e)
-        return None
+    return OpenAI(api_key=settings.openai_api_key, base_url=base_url)
 
 
-def embed_texts(texts: list[str]) -> list[list[float]] | None:
+def _embed_batch(client: Any, batch: list[str]) -> list[list[float]]:
+    response = client.embeddings.create(
+        input=batch,
+        model=settings.openai_embedding_model,
+    )
+    vectors = [list(d.embedding) for d in response.data]
+    for idx, vec in enumerate(vectors):
+        if len(vec) != _EMBEDDING_DIM:
+            raise RuntimeError(
+                f"임베딩 차원 불일치: expected={_EMBEDDING_DIM}, got={len(vec)} (index={idx})"
+            )
+    return vectors
+
+
+def embed_texts(texts: list[str], *, batch_size: int | None = None) -> list[list[float]] | None:
     """
     텍스트 목록을 배치 임베딩. 실패 시 None 반환.
     search_text(prefix 제거된 순수 본문)를 임베딩 대상으로 사용.
     """
-    model = get_embedding_model()
-    if model is None:
-        return None
+    if not texts:
+        return []
+    global _last_embedding_error
+    _last_embedding_error = None
     try:
-        vectors = model.encode(
-            texts, batch_size=32, show_progress_bar=False, normalize_embeddings=True
-        )
-        return [v.tolist() for v in vectors]
+        client = _build_embedding_client()
     except Exception as e:
-        logger.error("Embedding failed: %s", e)
+        _last_embedding_error = f"임베딩 클라이언트 초기화 실패: {e}"
+        logger.warning(_last_embedding_error)
         return None
+
+    bs = max(1, int(batch_size or settings.openai_embedding_batch_size))
+    max_retries = max(0, int(settings.openai_embedding_max_retries))
+    all_vectors: list[list[float]] = []
+    for i in range(0, len(texts), bs):
+        batch = texts[i : i + bs]
+        last_err: Exception | None = None
+        for attempt in range(max_retries + 1):
+            try:
+                vectors = _embed_batch(client, batch)
+                all_vectors.extend(vectors)
+                last_err = None
+                break
+            except Exception as e:
+                last_err = e
+                if attempt < max_retries:
+                    sleep_s = 0.5 * (2**attempt)
+                    time.sleep(sleep_s)
+        if last_err is not None:
+            _last_embedding_error = f"Embedding failed after retries: {last_err}"
+            logger.error(_last_embedding_error)
+            return None
+    return all_vectors
 
 
 def save_hierarchical_chunks(
@@ -100,7 +150,7 @@ def save_hierarchical_chunks(
     1. 기존 청크 비활성화 (is_active=false)
     2. ARTICLE 노드 먼저 저장 (parent_id 확보)
     3. CLAUSE 노드 저장 (parent_id = 해당 ARTICLE의 chunk_id)
-    4. 임베딩 생성 후 embedding_ko(또는 지정 컬럼) 업데이트
+    4. 임베딩 생성 후 embedding_az(또는 지정 컬럼) 업데이트
     5. tsvector 업데이트 (search_tsv)
     """
     col = embed_column or _EMBED_COLUMN
@@ -211,13 +261,20 @@ def save_hierarchical_chunks(
         )
 
     search_texts = [c["search_text"] for c in saved_chunks]
-    vectors = embed_texts(search_texts)
+    vectors = None
+    if not _embedding_column_exists(db, col):
+        global _last_embedding_error
+        _last_embedding_error = f"임베딩 컬럼 누락: {col} (scripts/migrate_embedding_az.sql 실행 필요)"
+        logger.warning(_last_embedding_error)
+    else:
+        vectors = embed_texts(search_texts)
 
     if vectors:
+        cast_type = _embedding_cast_type()
         for chunk, vector in zip(saved_chunks, vectors):
             db.execute(
                 text(
-                    f"UPDATE dwp_aura.rag_chunk SET {col} = CAST(:vec AS vector) WHERE chunk_id = :cid"
+                    f"UPDATE dwp_aura.rag_chunk SET {col} = CAST(:vec AS {cast_type}) WHERE chunk_id = :cid"
                 ),
                 {"vec": str(vector), "cid": chunk["chunk_id"]},
             )

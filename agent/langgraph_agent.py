@@ -318,12 +318,24 @@ async def _stream_reasoning_events_with_llm(
         return reasoning_text, _reasoning_stream_events(node_name, reasoning_text), "fallback"
 
     try:
-        from openai import AsyncOpenAI  # type: ignore
+        from openai import AsyncAzureOpenAI, AsyncOpenAI  # type: ignore
 
-        client_kwargs: dict[str, Any] = {"api_key": settings.openai_api_key}
-        if settings.openai_base_url:
-            client_kwargs["base_url"] = settings.openai_base_url
-        client = AsyncOpenAI(**client_kwargs)
+        base_url = (settings.openai_base_url or "").strip()
+        is_azure = ".openai.azure.com" in base_url
+        if is_azure:
+            azure_endpoint = base_url.rstrip("/")
+            if azure_endpoint.endswith("/openai/v1"):
+                azure_endpoint = azure_endpoint[: -len("/openai/v1")]
+            client = AsyncAzureOpenAI(
+                api_key=settings.openai_api_key,
+                azure_endpoint=azure_endpoint,
+                api_version=settings.openai_api_version,
+            )
+        else:
+            client_kwargs: dict[str, Any] = {"api_key": settings.openai_api_key}
+            if base_url:
+                client_kwargs["base_url"] = base_url
+            client = AsyncOpenAI(**client_kwargs)
 
         context_json = json.dumps(context or {}, ensure_ascii=False, default=str)
         prompt = (
@@ -344,7 +356,6 @@ async def _stream_reasoning_events_with_llm(
             ],
             stream=True,
             response_format={"type": "json_object"},
-            temperature=0.2,
         )
 
         full_response = ""
