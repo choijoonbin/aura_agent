@@ -51,6 +51,8 @@ class Settings:
     reasoning_llm_label: str = os.getenv("REASONING_LLM_LABEL", "LLM")
     enable_reasoning_live_llm: bool = os.getenv("ENABLE_REASONING_LIVE_LLM", "true").lower() == "true"
     reasoning_llm_model: str = os.getenv("REASONING_LLM_MODEL", "gpt-5")
+    reasoning_stream_max_chars: int = int(os.getenv("REASONING_STREAM_MAX_CHARS", "5000"))
+    reasoning_stream_max_sentences: int = int(os.getenv("REASONING_STREAM_MAX_SENTENCES", "10"))
     openai_api_key: str | None = os.getenv("OPENAI_API_KEY") or None
     openai_base_url: str | None = os.getenv("OPENAI_BASE_URL") or None
     openai_api_version: str = os.getenv("OPENAI_API_VERSION", "2024-12-01-preview")

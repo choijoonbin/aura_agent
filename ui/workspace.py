@@ -75,6 +75,33 @@ PIPELINE_NODES = [
     ("finalizer", "최종 판정"),
 ]
 
+STREAM_TERM_MAP: dict[str, str] = {
+    "policy_rulebook_probe": "규정 조항 조회 도구",
+    "holiday_compliance_probe": "휴일/휴무 적격성 점검 도구",
+    "merchant_risk_probe": "가맹점 업종 위험 점검 도구",
+    "document_evidence_probe": "증빙 점검 도구",
+    "budget_risk_probe": "예산 초과 점검 도구",
+    "legacy_aura_deep_audit": "심층 감사 도구",
+    "MCC": "가맹점 업종 코드(MCC)",
+    "HITL": "담당자 검토(HITL)",
+    "REVIEW_REQUIRED": "검토 필요(REVIEW_REQUIRED)",
+    "finalizer": "최종 판정 단계",
+    "FINALIZER": "최종 판정 단계",
+    "NODE_START": "단계 시작",
+    "NODE_END": "단계 종료",
+    "TOOL_CALL": "도구 호출",
+    "TOOL_RESULT": "도구 결과",
+    "THINKING_TOKEN": "추론 중",
+    "THINKING_DONE": "추론 완료",
+}
+
+
+def _humanize_stream_text(text: str) -> str:
+    out = str(text or "")
+    for key in sorted(STREAM_TERM_MAP.keys(), key=len, reverse=True):
+        out = out.replace(key, STREAM_TERM_MAP[key])
+    return out
+
 
 def _build_thinking_card_html(node_name: str, text: str, *, is_complete: bool) -> str:
     colors = {
@@ -105,10 +132,11 @@ def _tool_caption_fragment(ev_type: str, tool: str | None, tool_description: str
     """TOOL_* 이벤트용 캡션 조각: 'TOOL_CALL: toolname' 형식. html_tooltip=True이면 도구명에 title 툴팁."""
     if not tool or str(ev_type).upper() not in {"TOOL_CALL", "TOOL_RESULT", "TOOL_SKIPPED"}:
         return ""
+    tool_label = _humanize_stream_text(tool)
     if html_tooltip and tool_description:
         desc = (tool_description or "").replace('"', "&quot;").replace("<", "&lt;")
-        return f"{ev_type}: <span title=\"{desc}\">{tool}</span>"
-    return f"{ev_type}: {tool}"
+        return f"{_humanize_stream_text(ev_type)}: <span title=\"{desc}\">{tool_label}</span>"
+    return f"{_humanize_stream_text(ev_type)}: {tool_label}"
 
 
 def _stream_card_chunks(obj: dict[str, Any]) -> Iterator[str]:
@@ -120,7 +148,7 @@ def _stream_card_chunks(obj: dict[str, Any]) -> Iterator[str]:
     meta = obj.get("metadata") or {}
     tool_desc = meta.get("tool_description")
 
-    part2 = f"{node} / {ev_type}"
+    part2 = f"{node} / {_humanize_stream_text(ev_type)}"
     tool_frag = _tool_caption_fragment(ev_type, tool, tool_desc, html_tooltip=False)
     if tool_frag:
         part2 = f"{node} / {tool_frag}"
@@ -128,15 +156,15 @@ def _stream_card_chunks(obj: dict[str, Any]) -> Iterator[str]:
     header = f"{icon} **{ts}** · {part2}  \n"
     yield header
 
-    message = (obj.get("message") or "").strip()
+    message = _humanize_stream_text((obj.get("message") or "").strip())
     if message:
         for word in message.split():
             yield word + " "
         yield "  \n\n"
 
-    thought = (obj.get("thought") or "").strip()
-    action = (obj.get("action") or "").strip()
-    observation = (obj.get("observation") or "").strip()
+    thought = _humanize_stream_text((obj.get("thought") or "").strip())
+    action = _humanize_stream_text((obj.get("action") or "").strip())
+    observation = _humanize_stream_text((obj.get("observation") or "").strip())
     if thought or action or observation:
         if thought:
             yield f"🧠 **판단** {thought}  \n\n"
@@ -363,7 +391,7 @@ def sse_node_block_generator(stream_url: str, *, run_id: str | None = None) -> I
                     current_node = node
 
                 if ev_type == "THINKING_TOKEN":
-                    token = (obj.get("metadata") or {}).get("token") or ""
+                    token = _humanize_stream_text((obj.get("metadata") or {}).get("token") or "")
                     if not thinking_open:
                         ts = fmt_dt_korea(obj.get("timestamp")) or "-"
                         if current_block:
@@ -402,7 +430,7 @@ def sse_node_block_generator(stream_url: str, *, run_id: str | None = None) -> I
                 score = obj.get("score_breakdown") or obj
                 addition = _score_breakdown_stream_block(score)
             elif event_name == "completed":
-                final_text = obj.get("reasonText") or obj.get("summary") or "완료"
+                final_text = _humanize_stream_text(obj.get("reasonText") or obj.get("summary") or "완료")
                 result = obj.get("result") or {}
                 status = str(result.get("status") or obj.get("status") or "").upper()
                 if status == "HITL_REQUIRED" and run_id:
@@ -411,13 +439,14 @@ def sse_node_block_generator(stream_url: str, *, run_id: str | None = None) -> I
                     st.session_state[_hitl_state_key("open", run_id)] = True
                 addition = f"\n\n**[최종]** {final_text}\n"
             elif event_name == "failed":
-                addition = f"\n\n**[실패]** {obj.get('error', 'unknown error')}\n"
+                addition = f"\n\n**[실패]** {_humanize_stream_text(obj.get('error', 'unknown error'))}\n"
             else:
                 detail = obj.get("detail") or obj.get("message") or obj.get("content") or payload
-                addition = f"[{event_name}] {detail}\n"
+                addition = f"[{_humanize_stream_text(str(event_name or 'event'))}] {_humanize_stream_text(str(detail))}\n"
 
             if not addition:
                 continue
+            addition = _humanize_stream_text(addition)
             prefix = current_block
             current_block += addition
             history_buffer.append(addition)
@@ -668,7 +697,7 @@ def render_timeline_cards(events: list[dict[str, Any]], *, view_mode: str = "bus
                     meta = payload.get("metadata") or {}
                     ev_type = str(payload.get("event_type") or "").upper()
                     icon = EVENT_ICON_MAP.get(ev_type, "🤖")
-                    part2 = f"{payload.get('node') or '-'} / {'추론' if ev_type == 'THINKING_DONE' else ev_type}"
+                    part2 = f"{payload.get('node') or '-'} / {'추론' if ev_type == 'THINKING_DONE' else _humanize_stream_text(ev_type)}"
                     tool_frag = _tool_caption_fragment(ev_type, payload.get("tool"), meta.get("tool_description"), html_tooltip=True)
                     if tool_frag:
                         part2 = f"{payload.get('node') or '-'} / {tool_frag}"
@@ -684,13 +713,14 @@ def render_timeline_cards(events: list[dict[str, Any]], *, view_mode: str = "bus
                     if ev_type == "THINKING_DONE":
                         display_message = meta.get("reasoning") or display_message
                     if display_message:
+                        display_message = _humanize_stream_text(str(display_message))
                         if ev_type == "THINKING_DONE":
                             st.markdown(_build_thinking_card_html(str(payload.get("node") or "agent"), str(display_message), is_complete=True), unsafe_allow_html=True)
                         else:
                             st.write(display_message)
-                    thought = (payload.get("thought") or "").strip()
-                    action = (payload.get("action") or "").strip()
-                    observation = (payload.get("observation") or "").strip()
+                    thought = _humanize_stream_text((payload.get("thought") or "").strip())
+                    action = _humanize_stream_text((payload.get("action") or "").strip())
+                    observation = _humanize_stream_text((payload.get("observation") or "").strip())
                     blocks = []
                     blocks.append(_thinking_row_html("판단", "🧠", thought, "thought", "#3b82f6"))
                     blocks.append(_thinking_row_html("실행", "⚡", action, "action", "#22c55e"))
@@ -1788,6 +1818,8 @@ def render_workspace_chat_panel(selected: dict[str, Any], latest_bundle: dict[st
                 render_hitl_dialog(latest_bundle)
 
     st.markdown('<div class="mt-stream-note">실시간 패널은 현재 노드 로그를 고정 패널에 타이핑으로 표시합니다. 새 노드가 시작되면 화면이 교체됩니다.</div>', unsafe_allow_html=True)
+    latest_run_id = str(latest_bundle.get("run_id") or "")
+    cached_stream_text = st.session_state.get(f"mt_last_stream_content_{latest_run_id}", "") if latest_run_id else ""
     with stylable_container(
         key=f"workspace_stream_shell_{selected_vkey}",
         css_styles="""{
@@ -1799,6 +1831,7 @@ def render_workspace_chat_panel(selected: dict[str, Any], latest_bundle: dict[st
           padding: 14px;
           height: 500px;
           overflow-y: auto;
+          overflow-x: hidden;
         }""",
     ):
         stream_placeholder = st.empty()
@@ -1810,12 +1843,17 @@ def render_workspace_chat_panel(selected: dict[str, Any], latest_bundle: dict[st
             latest_bundle = fetch_case_bundle(vkey)
             result = ((latest_bundle.get("result") or {}).get("result") or {})
             timeline = latest_bundle.get("timeline") or []
+            latest_run_id = str(latest_bundle.get("run_id") or "")
+            cached_stream_text = st.session_state.get(f"mt_last_stream_content_{latest_run_id}", "") if latest_run_id else ""
+        elif cached_stream_text:
+            stream_placeholder.markdown(cached_stream_text)
+        else:
+            stream_placeholder.markdown("분석을 시작하면 이 영역에 실시간 스트림이 표시됩니다.")
 
-        if not timeline:
-            render_empty_state("분석을 시작하면 이 영역에 실시간 스트림이 표시됩니다.")
-            return
-        ag = [e for e in timeline if e.get("event_type") == "AGENT_EVENT"]
-        render_timeline_cards(ag)
+    ag = [e for e in timeline if e.get("event_type") == "AGENT_EVENT"]
+    if ag:
+        with st.expander("이전 타임라인 카드 보기", expanded=False):
+            render_timeline_cards(ag)
 
 
 def render_workspace_results(latest_bundle: dict[str, Any], debug_mode: bool) -> None:

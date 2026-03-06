@@ -51,6 +51,26 @@ class ConsistencyCheckResult:
     conflict_description: str
 
 
+def _compact_reasoning_for_stream(text: str) -> str:
+    """스트림 가독성을 위해 reasoning 길이를 문장/문자 기준으로 압축."""
+    raw = str(text or "").replace("\\n", " ").replace("\n", " ")
+    normalized = re.sub(r"\s+", " ", raw).strip()
+    if not normalized:
+        return ""
+
+    sentence_splits = re.split(r"(?<=[.!?])\s+|(?<=다\.)\s+", normalized)
+    sentence_splits = [s.strip() for s in sentence_splits if s and s.strip()]
+    max_sentences = max(1, int(settings.reasoning_stream_max_sentences))
+    compact = " ".join(sentence_splits[:max_sentences]) if sentence_splits else normalized
+
+    max_chars = max(80, int(settings.reasoning_stream_max_chars))
+    if len(compact) > max_chars:
+        compact = compact[:max_chars].rstrip()
+        compact = re.sub(r"[,:;·/\-]\s*[^,:;·/\-]*$", "", compact).rstrip()
+        compact = compact.rstrip(".") + "..."
+    return compact
+
+
 def _get_attr(output: Any, key: str) -> Any:
     if hasattr(output, key):
         return getattr(output, key)
@@ -312,10 +332,11 @@ async def _stream_reasoning_events_with_llm(
     실패 시 기존 reasoning_text 단어 분해 fallback.
     return: (final_reasoning, events, source["llm"|"fallback"])
     """
+    compact_fallback = _compact_reasoning_for_stream(reasoning_text)
     if not settings.enable_reasoning_live_llm:
-        return reasoning_text, _reasoning_stream_events(node_name, reasoning_text), "fallback"
+        return compact_fallback, _reasoning_stream_events(node_name, compact_fallback), "fallback"
     if not settings.openai_api_key:
-        return reasoning_text, _reasoning_stream_events(node_name, reasoning_text), "fallback"
+        return compact_fallback, _reasoning_stream_events(node_name, compact_fallback), "fallback"
 
     try:
         from openai import AsyncAzureOpenAI, AsyncOpenAI  # type: ignore
@@ -338,9 +359,14 @@ async def _stream_reasoning_events_with_llm(
             client = AsyncOpenAI(**client_kwargs)
 
         context_json = json.dumps(context or {}, ensure_ascii=False, default=str)
+        min_sentences = max(4, settings.reasoning_stream_max_sentences // 2)
         prompt = (
             "당신은 엔터프라이즈 감사 에이전트의 reasoning 생성기다.\n"
-            "아래 초안을 기반으로 더 구체적이고 판단 중심의 reasoning을 JSON으로 출력하라.\n"
+            "아래 초안을 기반으로 판단 중심의 reasoning을 '식별하기 좋은 중간 길이 요약'으로 JSON 출력하라.\n"
+            f"출력은 한국어 최소 {min_sentences}문장, 최대 {settings.reasoning_stream_max_sentences}문장, 최대 {settings.reasoning_stream_max_chars}자.\n"
+            "장황한 체크리스트/긴 번호 목록은 금지하되, 너무 짧은 한두 문장 요약도 금지한다.\n"
+            "핵심 판단, 근거, 위험 요인, 다음 행동을 구분해서 읽기 쉽게 작성한다.\n"
+            "기술 용어(도구명, 영문 약어, 내부 코드)는 가능한 한 한글 설명을 괄호와 함께 병기한다.\n"
             "반드시 JSON 객체 1개만 출력하고 키는 reasoning 하나만 사용.\n"
             "불필요한 설명, 코드블록, 마크다운 금지.\n\n"
             f"[node] {node_name}\n"
@@ -351,11 +377,18 @@ async def _stream_reasoning_events_with_llm(
         stream = await client.chat.completions.create(
             model=settings.reasoning_llm_model,
             messages=[
-                {"role": "system", "content": "reasoning 필드만 포함된 JSON을 출력한다."},
+                {
+                    "role": "system",
+                    "content": (
+                        "reasoning 필드만 포함된 JSON을 출력한다. "
+                        "reasoning은 식별하기 쉬운 한국어 중간 길이 요약문이어야 하며, 전문 용어는 사용자 친화적으로 풀어쓴다."
+                    ),
+                },
                 {"role": "user", "content": prompt},
             ],
             stream=True,
             response_format={"type": "json_object"},
+            max_tokens=520,
         )
 
         full_response = ""
@@ -386,7 +419,7 @@ async def _stream_reasoning_events_with_llm(
         except Exception:
             parsed_reasoning = for_chunk_reasoning.strip()
 
-        final_reasoning = parsed_reasoning or (for_chunk_reasoning.strip() or reasoning_text)
+        final_reasoning = _compact_reasoning_for_stream(parsed_reasoning or (for_chunk_reasoning.strip() or reasoning_text))
         events.append(
             AgentEvent(
                 event_type="THINKING_DONE",
@@ -397,7 +430,7 @@ async def _stream_reasoning_events_with_llm(
         )
         return final_reasoning, events, "llm"
     except Exception:
-        return reasoning_text, _reasoning_stream_events(node_name, reasoning_text), "fallback"
+        return compact_fallback, _reasoning_stream_events(node_name, compact_fallback), "fallback"
 
 
 def _voucher_summary_for_context(body_evidence: dict[str, Any]) -> str:
