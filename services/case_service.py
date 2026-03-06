@@ -273,6 +273,44 @@ def list_vouchers(db: Session, queue: str = "all", limit: int = 50) -> list[Vouc
     return out
 
 
+def update_agent_case_status_from_run(db: Session, voucher_key: str, run_status: str | None) -> None:
+    """
+    Run 결과 상태를 AgentCase.status에 반영해 케이스 목록/KPI 집계가 올바르게 나오도록 함.
+    voucher_key는 bukrs-belnr-gjahr 형식.
+    """
+    if not run_status or not isinstance(run_status, str):
+        return
+    status = str(run_status).strip().upper()
+    # dwp_aura.agent_case.status는 enum일 수 있어, 런타임 전용 상태(HITL_REQUIRED 등)는 DB에 직접 저장하지 않는다.
+    # DB에는 "검토중" 계열로 최소 반영하고, UI 표시/집계용 HITL 상태는 API 응답에서 파생한다.
+    status_map = {
+        "HITL_REQUIRED": "IN_REVIEW",
+        "REVIEW_AFTER_HITL": "IN_REVIEW",
+        "HOLD_AFTER_HITL": "IN_REVIEW",
+    }
+    status = status_map.get(status, status)
+    parts = voucher_key.split("-")
+    if len(parts) < 3:
+        return
+    bukrs, belnr, gjahr = parts[0], parts[1], parts[2]
+    tenant_id = settings.default_tenant_id
+    agent_case = db.scalar(
+        select(AgentCase).where(
+            AgentCase.tenant_id == tenant_id,
+            AgentCase.bukrs == bukrs,
+            AgentCase.belnr == belnr,
+            AgentCase.gjahr == gjahr,
+        )
+    )
+    if agent_case is not None:
+        agent_case.status = status
+        try:
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+
+
 def build_analysis_payload(db: Session, voucher_key: str) -> dict:
     tenant_id = settings.default_tenant_id
     parts = voucher_key.split("-")

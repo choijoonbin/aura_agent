@@ -22,14 +22,15 @@ def stylable_container(key: str, css_styles: str | list[str]):
     streamlit-extras 0.7.8은 내부적으로 container.html()을 사용해 iframe을 생성하고,
     브라우저가 'allow-scripts + allow-same-origin' iframe 경고를 초기 로드 시 1회 출력함.
     본 구현은 st.markdown()으로 CSS를 직접 주입해 iframe을 완전히 제거한다.
+    Streamlit은 container(key=...)에 자동으로 st-key- 접두사를 붙이므로, key에는 접두사 없이 전달.
     """
-    class_name = re.sub(r"[^a-zA-Z0-9_-]", "-", key.strip())
-    class_name = f"st-key-{class_name}"
+    base_key = re.sub(r"[^a-zA-Z0-9_-]", "-", key.strip())
+    class_name = f"st-key-{base_key}"
     if isinstance(css_styles, str):
         css_styles = [css_styles]
     style_parts = "".join(f"\n.{class_name} {s}" for s in css_styles)
     st.markdown(f"<style>{style_parts}\n</style>", unsafe_allow_html=True)
-    return st.container(key=class_name)
+    return st.container(key=base_key)
 
 
 def inject_css() -> None:
@@ -145,6 +146,15 @@ def inject_css() -> None:
         .stMetric label, .stMetric div {{ color:#0f172a !important; }}
         [data-testid="stExpanderDetails"] {{ background: #0f172a !important; color: #ffffff !important; }}
         [data-testid="stExpanderDetails"] *, [data-testid="stExpanderDetails"] pre, [data-testid="stExpanderDetails"] code, [data-testid="stExpanderDetails"] pre span {{ color: #ffffff !important; }}
+        /* 펼쳤을 때 어두운 영역에서 라벨이 보이도록: 이전 타임라인 카드 보기, 판단 흐름 요약 */
+        [data-testid="stExpander"]:has(.pipeline-wrapper) details[open] summary,
+        [data-testid="stExpander"]:has(.pipeline-wrapper) details[open] summary * {{ color: #e2e8f0 !important; }}
+        [data-testid="stExpander"]:has(.pipeline-wrapper) [aria-expanded="true"],
+        [data-testid="stExpander"]:has(.pipeline-wrapper) [aria-expanded="true"] * {{ color: #e2e8f0 !important; }}
+        [data-testid="stExpander"]:has([class*="st-key-process_story_"]) details[open] summary,
+        [data-testid="stExpander"]:has([class*="st-key-process_story_"]) details[open] summary * {{ color: #e2e8f0 !important; }}
+        [data-testid="stExpander"]:has([class*="st-key-process_story_"]) [aria-expanded="true"],
+        [data-testid="stExpander"]:has([class*="st-key-process_story_"]) [aria-expanded="true"] * {{ color: #e2e8f0 !important; }}
         [data-testid="stExpanderDetails"] pre, [data-testid="stExpanderDetails"] code {{ background: #0f172a !important; }}
         [data-testid="stExpanderDetails"] div[data-testid="stJson"] {{ color: #ffffff !important; background: #0f172a !important; }}
         [data-testid="stExpanderDetails"] .token {{ color: #ffffff !important; }}
@@ -177,6 +187,8 @@ def inject_css() -> None:
         .mt-workspace-action-key {{ color:#64748b; font-weight:700; }}
         .mt-workspace-action-value {{ color:#0f172a; font-weight:600; }}
         .mt-workspace-strip {{ margin-top:12px; padding:10px 12px; border-radius:14px; border:1px solid #bfdbfe; background:#eff6ff; font-size:0.82rem; color:#1e3a8a; font-weight:700; }}
+        .mt-workspace-strip-inline {{ margin-top:0 !important; padding:6px 12px !important; border-radius:14px; border:1px solid #bfdbfe; background:#eff6ff; font-size:0.82rem; color:#1e3a8a; font-weight:700; display:inline-flex; align-items:center; min-height:36px; box-sizing:border-box; }}
+        [class*="st-key-workspace_chat_card"] [data-testid="stHorizontalBlock"] [data-testid="column"] {{ align-self: center !important; }}
         .mt-workspace-case-stats {{ display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:10px; margin:8px 0 14px 0; }}
         .mt-workspace-case-stat {{ padding:10px 12px; border-radius:14px; border:1px solid #e5e7eb; background:#f8fafc; }}
         .mt-workspace-case-stat-value {{ font-size:1rem; font-weight:800; color:#0f172a; }}
@@ -194,6 +206,10 @@ def inject_css() -> None:
         .mt-case-submeta-label {{ color:#64748b; font-weight:700; margin-right:6px; }}
         .mt-stream-note {{ margin-top:8px; font-size:0.78rem; color:#64748b; }}
         .mt-section-note {{ font-size:0.82rem; color:#64748b; line-height:1.55; margin-bottom:12px; }}
+        .mt-hitl-banner {{ width:100%; background:#fef9c3; border:1px solid #fde68a; color:#92400e; font-weight:700; border-radius:12px; padding:10px 12px; line-height:1.35; box-sizing:border-box; }}
+        .mt-section-inline {{ display:flex; align-items:center; flex-wrap:wrap; gap:8px 12px; margin-bottom:12px; }}
+        .mt-section-inline-title {{ font-size:0.95rem; font-weight:800; color:#0f172a; flex-shrink:0; }}
+        .mt-section-inline-content {{ font-size:0.84rem; color:#64748b; line-height:1.5; }}
         .mt-stream-stage-row {{ display:flex; flex-wrap:wrap; gap:8px; margin:10px 0 12px 0; }}
         .mt-stream-stage-pill {{ display:inline-flex; align-items:center; gap:6px; padding:6px 10px; border-radius:999px; background:#fff; border:1px solid #dbeafe; font-size:0.76rem; font-weight:700; color:#1d4ed8; }}
         .mt-result-grid {{ display:grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap:12px; margin-top:14px; margin-bottom:16px; }}
@@ -422,10 +438,11 @@ def render_page_header(title: str, subtitle: str, right_html: str | None = None)
                 st.markdown(right_html, unsafe_allow_html=True)
 
 
-def render_panel_header(title: str, subtitle: str = "") -> None:
+def render_panel_header(title: str, subtitle: str = "", trailing: str = "") -> None:
     subtitle_html = f'<div class="mt-panel-sub">{subtitle}</div>' if subtitle else ''
+    trailing_html = f'<div class="mt-panel-sub" style="flex-shrink:0;">{trailing}</div>' if trailing else ''
     st.markdown(
-        f'<div class="mt-panel-header"><div><div class="mt-panel-title">{title}</div>{subtitle_html}</div></div>',
+        f'<div class="mt-panel-header"><div><div class="mt-panel-title">{title}</div>{subtitle_html}</div>{trailing_html}</div>',
         unsafe_allow_html=True,
     )
 

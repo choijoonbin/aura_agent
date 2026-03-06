@@ -508,7 +508,7 @@ def render_tool_trace_summary(tool_results: list[dict[str, Any]]) -> None:
 
 
 def render_pipeline_progress(completed_nodes: list[str], current_node: str) -> None:
-    """workspace.md B-3: 파이프라인 진행 상태 바."""
+    """workspace.md B-3: 파이프라인 진행 상태 바. st.html로 렌더해 expander 내부에서도 태그가 이스케이프되지 않고 표시되도록 함."""
     total = len(PIPELINE_NODES)
     completed_count = len(completed_nodes)
     progress_pct = (completed_count / total * 100) if total else 0
@@ -526,7 +526,7 @@ def render_pipeline_progress(completed_nodes: list[str], current_node: str) -> N
           <div class="pipeline-label">{node_label}</div>
         </div>
         """)
-    st.markdown(f"""
+    pipeline_html = f"""
     <style>
     .pipeline-wrapper {{ background: #0d1117; border: 1px solid #1e2d3d; border-radius: 12px; padding: 16px 20px; margin-bottom: 16px; }}
     .pipeline-track {{ display: flex; align-items: center; justify-content: space-between; position: relative; flex-wrap: wrap; gap: 8px; }}
@@ -553,11 +553,15 @@ def render_pipeline_progress(completed_nodes: list[str], current_node: str) -> N
         <span>{'분석 완료' if completed_count == total else ('진행 중: ' + current_node) if current_node else ''}</span>
       </div>
     </div>
-    """, unsafe_allow_html=True)
+    """
+    try:
+        st.html(pipeline_html)
+    except Exception:
+        st.markdown(pipeline_html, unsafe_allow_html=True)
 
 
 def render_score_breakdown_card(policy_score: int, evidence_score: int, final_score: int) -> None:
-    """workspace.md B-7: Confidence Score 인라인 게이지 바."""
+    """workspace.md B-7: Confidence Score 인라인 게이지 바. st.html로 렌더해 expander 내부에서도 태그가 보이지 않도록 함."""
     def _bar(label: str, value: int, color: str) -> str:
         return f"""
         <div style="margin: 8px 0;">
@@ -571,17 +575,18 @@ def render_score_breakdown_card(policy_score: int, evidence_score: int, final_sc
         </div>
         """
     final_color = "#22c55e" if final_score >= 70 else "#f59e0b" if final_score >= 50 else "#ef4444"
-    st.markdown(
-        f"""
-        <div style="background:#0d1117; border:1px solid #1e2d3d; border-radius:10px; padding:16px; margin:10px 0;">
-          <div style="font-size:12px; font-weight:700; letter-spacing:1px; color:#6b7280; margin-bottom:12px;">CONFIDENCE SCORE</div>
-          {_bar('정책 점수', policy_score, '#3b82f6')}
-          {_bar('근거 점수', evidence_score, '#8b5cf6')}
-          {_bar('최종 점수', final_score, final_color)}
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+    score_html = f"""
+    <div style="background:#0d1117; border:1px solid #1e2d3d; border-radius:10px; padding:16px; margin:10px 0;">
+      <div style="font-size:12px; font-weight:700; letter-spacing:1px; color:#6b7280; margin-bottom:12px;">CONFIDENCE SCORE</div>
+      {_bar('정책 점수', policy_score, '#3b82f6')}
+      {_bar('근거 점수', evidence_score, '#8b5cf6')}
+      {_bar('최종 점수', final_score, final_color)}
+    </div>
+    """
+    try:
+        st.html(score_html)
+    except Exception:
+        st.markdown(score_html, unsafe_allow_html=True)
 
 
 def _thinking_row_html(label: str, icon: str, content: str, row_class: str, border_color: str) -> str:
@@ -672,7 +677,7 @@ def render_timeline_cards(events: list[dict[str, Any]], *, view_mode: str = "bus
             node_groups[node].append(synthetic)
             continue
     latest_node = node_order[-1] if node_order else None
-    st.markdown("""
+    _THINKING_ROW_CSS = """
     <style>
     .thinking-row { display: flex; align-items: flex-start; gap: 12px; padding: 10px 14px; margin: 6px 0; border-radius: 8px; border-left: 3px solid; }
     .thinking-row.thought { background: #0f1a2e; border-color: #3b82f6; }
@@ -682,7 +687,11 @@ def render_timeline_cards(events: list[dict[str, Any]], *, view_mode: str = "bus
     .thinking-label { font-size: 10px; font-weight: 700; letter-spacing: 1.2px; text-transform: uppercase; opacity: 0.6; display: block; margin-bottom: 4px; }
     .thinking-content p { margin: 0; font-size: 14px; line-height: 1.6; color: #e2e8f0; }
     </style>
-    """, unsafe_allow_html=True)
+    """
+    try:
+        st.html(_THINKING_ROW_CSS)
+    except Exception:
+        st.markdown(_THINKING_ROW_CSS, unsafe_allow_html=True)
     with stylable_container(key="timeline_shell", css_styles="""{background: radial-gradient(circle at 1px 1px, rgba(15,23,42,0.10) 1px, transparent 0); background-size: 14px 14px; background-color:#f8fafc; border:1px dashed #dbe2ea; border-radius:18px; padding:14px;}"""):
         for node in node_order:
             node_events = node_groups[node]
@@ -715,7 +724,11 @@ def render_timeline_cards(events: list[dict[str, Any]], *, view_mode: str = "bus
                     if display_message:
                         display_message = _humanize_stream_text(str(display_message))
                         if ev_type == "THINKING_DONE":
-                            st.markdown(_build_thinking_card_html(str(payload.get("node") or "agent"), str(display_message), is_complete=True), unsafe_allow_html=True)
+                            _html = _build_thinking_card_html(str(payload.get("node") or "agent"), str(display_message), is_complete=True)
+                            try:
+                                st.html(_html)
+                            except Exception:
+                                st.markdown(_html, unsafe_allow_html=True)
                         else:
                             st.write(display_message)
                     thought = _humanize_stream_text((payload.get("thought") or "").strip())
@@ -727,7 +740,11 @@ def render_timeline_cards(events: list[dict[str, Any]], *, view_mode: str = "bus
                     blocks.append(_thinking_row_html("발견", "🔍", observation, "observation", "#f59e0b"))
                     combined = "".join(blocks)
                     if combined:
-                        st.markdown(f"<div class=\"thinking-block\">{combined}</div>", unsafe_allow_html=True)
+                        _block_html = _THINKING_ROW_CSS + f'<div class="thinking-block">{combined}</div>'
+                        try:
+                            st.html(_block_html)
+                        except Exception:
+                            st.markdown(_block_html, unsafe_allow_html=True)
                     if view_mode == "debug":
                         st.json(payload)
 
@@ -1592,33 +1609,108 @@ def build_workspace_execution_logs(latest_bundle: dict[str, Any]) -> list[dict[s
 
 def render_workspace_case_queue(items: list[dict[str, Any]], selected_key: str | None) -> None:
     render_panel_header("케이스", "분석할 전표를 선택합니다. 좌측은 선택, 우측은 실시간 실행과 판단 리뷰에 집중합니다.")
+    # 4개 KPI: items는 /api/v1/vouchers 응답(각 item.case_status = AgentCase.status). run 종료 시 백엔드에서 AgentCase.status 동기화.
+    # 검토 필요: 신규·검토중·검토필요만 (HITL_REQUIRED는 HITL 대기로만 집계)
     review_count = len(
-        [item for item in items if str(item.get("case_status") or "").upper() in {"NEW", "IN_REVIEW", "REVIEW_REQUIRED", "HITL_REQUIRED"}]
+        [item for item in items if str(item.get("case_status") or "").upper() in {"NEW", "IN_REVIEW", "REVIEW_REQUIRED"}]
     )
+    # 완료: 최종 완료/해결
     completed_count = len(
         [item for item in items if str(item.get("case_status") or "").upper() in {"COMPLETED", "COMPLETED_AFTER_HITL", "RESOLVED", "OK"}]
     )
+    # HITL 대기: 담당자 검토 대기·재개·보류
     hitl_count = len(
         [item for item in items if str(item.get("case_status") or "").upper() in {"HITL_REQUIRED", "REVIEW_AFTER_HITL", "HOLD_AFTER_HITL"}]
     )
-    st.markdown(
-        f"""
-        <div class="mt-workspace-case-stats">
-          <div class="mt-workspace-case-stat"><div class="mt-workspace-case-stat-value">{len(items)}</div><div class="mt-workspace-case-stat-label">전체 케이스</div></div>
-          <div class="mt-workspace-case-stat"><div class="mt-workspace-case-stat-value">{review_count}</div><div class="mt-workspace-case-stat-label">검토 필요</div></div>
-          <div class="mt-workspace-case-stat"><div class="mt-workspace-case-stat-value">{completed_count}</div><div class="mt-workspace-case-stat-label">완료</div></div>
-          <div class="mt-workspace-case-stat"><div class="mt-workspace-case-stat-value">{hitl_count}</div><div class="mt-workspace-case-stat-label">HITL 대기</div></div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-    tabs = st.tabs(["전체", "검토 필요", "완료", "HITL 대기"])
+    # 상단 KPI(클릭) → 목록 필터 상태
     grouped = {
         "전체": items,
-        "검토 필요": [item for item in items if str(item.get("case_status") or "").upper() in {"NEW", "IN_REVIEW", "REVIEW_REQUIRED", "HITL_REQUIRED"}],
+        "검토 필요": [item for item in items if str(item.get("case_status") or "").upper() in {"NEW", "IN_REVIEW", "REVIEW_REQUIRED"}],
         "완료": [item for item in items if str(item.get("case_status") or "").upper() in {"COMPLETED", "COMPLETED_AFTER_HITL", "RESOLVED", "OK"}],
         "HITL 대기": [item for item in items if str(item.get("case_status") or "").upper() in {"HITL_REQUIRED", "REVIEW_AFTER_HITL", "HOLD_AFTER_HITL"}],
     }
+    active_filter = str(st.session_state.get("mt_case_filter") or "전체")
+    if active_filter not in grouped:
+        active_filter = "전체"
+
+    st.markdown(
+        """
+        <style>
+        /* 헤더- KPI 간격 축소 */
+        [class*="st-key-workspace_case_queue_card"] .mt-panel-header {
+          margin-bottom: 4px !important;
+        }
+        [class*="st-key-workspace_case_queue_card"] .mt-panel-sub {
+          margin-top: 1px !important;
+          line-height: 1.35 !important;
+        }
+        [class*="st-key-workspace_case_queue_card"] [data-testid="stElementContainer"]:has(.mt-panel-header) {
+          margin-bottom: 4px !important;
+        }
+
+        /* KPI 카드 버튼 스타일 (tabs 제거, KPI 클릭으로 필터) */
+        [class*="st-key-case_kpi_"] [data-testid="stButton"] > button {
+          width: 100% !important;
+          text-align: center !important;
+          padding: 12px 14px !important;
+          border-radius: 14px !important;
+          border: 1px solid #e5e7eb !important;
+          background: rgba(255,255,255,0.98) !important;
+          box-shadow: 0 10px 24px rgba(15,23,42,0.05) !important;
+          min-height: 72px !important;
+          white-space: pre-line !important;
+          font-size: 1.75rem !important; /* count */
+          font-weight: 900 !important;
+          font-variant-numeric: tabular-nums !important;
+          line-height: 1.08 !important;
+        }
+        [class*="st-key-case_kpi_"] [data-testid="stButton"] > button p {
+          margin: 0 !important;
+          font-size: 1.75rem !important;
+          font-weight: 900 !important;
+          line-height: 1.08 !important;
+          font-variant-numeric: tabular-nums !important;
+        }
+        /* 첫 줄(타이틀)은 더 작게 */
+        [class*="st-key-case_kpi_"] [data-testid="stButton"] > button p::first-line {
+          font-size: 0.74rem !important;
+          font-weight: 800 !important;
+          color: #64748b !important;
+        }
+        [class*="st-key-case_kpi_"] [data-testid="stButton"] > button:hover {
+          border-color: #bfdbfe !important;
+          box-shadow: 0 12px 28px rgba(37,99,235,0.10) !important;
+        }
+        [class*="st-key-case_kpi_sel_"] [data-testid="stButton"] > button {
+          border: 2px solid #2563eb !important;
+          box-shadow: 0 0 0 3px rgba(37,99,235,0.08), 0 12px 26px rgba(15,23,42,0.08) !important;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    k1, k2, k3, k4 = st.columns(4)
+    with k1:
+        key = "case_kpi_sel_all" if active_filter == "전체" else "case_kpi_all"
+        if st.button(f"전체 케이스\n{len(items)}", key=key, width="stretch"):
+            st.session_state["mt_case_filter"] = "전체"
+            st.rerun()
+    with k2:
+        key = "case_kpi_sel_review" if active_filter == "검토 필요" else "case_kpi_review"
+        if st.button(f"검토 필요\n{review_count}", key=key, width="stretch"):
+            st.session_state["mt_case_filter"] = "검토 필요"
+            st.rerun()
+    with k3:
+        key = "case_kpi_sel_done" if active_filter == "완료" else "case_kpi_done"
+        if st.button(f"완료\n{completed_count}", key=key, width="stretch"):
+            st.session_state["mt_case_filter"] = "완료"
+            st.rerun()
+    with k4:
+        key = "case_kpi_sel_hitl" if active_filter == "HITL 대기" else "case_kpi_hitl"
+        if st.button(f"HITL 대기\n{hitl_count}", key=key, width="stretch"):
+            st.session_state["mt_case_filter"] = "HITL 대기"
+            st.rerun()
     # 배지는 st.markdown(HTML) → 시각 레이어 (pointer-events: none)
     # 버튼은 margin-top:-55px 으로 배지 영역까지 올려 클릭 영역이 카드 전체를 커버
     st.markdown("""
@@ -1653,17 +1745,17 @@ def render_workspace_case_queue(items: list[dict[str, Any]], selected_key: str |
     }
     /* 버튼 element-container — 배지 바로 아래까지 끌어올려 공백 최소화 */
     [class*="st-key-case_btn_"] [data-testid="element-container"]:last-child {
-      margin-top: -42px !important;
+      margin-top: -28px !important;
       position: relative !important;
       z-index: 1 !important;
     }
-    /* 실제 button — 투명, 카드 컨텐츠 텍스트 스타일, 배지 높이만큼만 위 패딩 */
+    /* 실제 button — 투명, 카드 컨텐츠 텍스트 스타일, 배지 높이만큼만 위 패딩(초록 영역 축소) */
     [class*="st-key-case_btn_"] [data-testid="stButton"] > button {
       width: 100% !important;
       height: auto !important;
       min-height: unset !important;
       text-align: left !important;
-      padding: 42px 0 12px 0 !important;
+      padding: 28px 0 10px 0 !important;
       padding-left: 0 !important;
       border: none !important;
       background: transparent !important;
@@ -1671,68 +1763,72 @@ def render_workspace_case_queue(items: list[dict[str, Any]], selected_key: str |
       color: #0f172a !important;
       font-size: 0.9rem !important;
       white-space: pre-wrap !important;
-      line-height: 1.6 !important;
+      line-height: 1.35 !important;
       cursor: pointer !important;
       margin: 0 !important;
     }
-    /* 버튼 내부 마크다운/문단 왼쪽 여백 완전 제거 */
+    /* 버튼 내부 마크다운/문단 — 왼쪽 여백 제거, 줄 간격 축소 */
     [class*="st-key-case_btn_"] [data-testid="stButton"] [data-testid="stMarkdownContainer"],
     [class*="st-key-case_btn_"] [data-testid="stButton"] [data-testid="stMarkdownContainer"] p,
     [class*="st-key-case_btn_"] [data-testid="stButton"] > button > div {
       padding-left: 0 !important;
       margin-left: 0 !important;
     }
-    [class*="st-key-case_btn_"] [data-testid="stMarkdownContainer"] p { margin: 0 !important; }
+    [class*="st-key-case_btn_"] [data-testid="stMarkdownContainer"] p {
+      margin: 0 0 2px 0 !important;
+      line-height: 1.35 !important;
+    }
     </style>
     """, unsafe_allow_html=True)
-    for idx, (tab, label) in enumerate(zip(tabs, ["전체", "검토 필요", "완료", "HITL 대기"])):
-        with tab:
-            with st.container(key=f"workspace_case_scroll_{idx}"):
-                if not grouped[label]:
-                    render_empty_state("표시할 케이스가 없습니다.")
-                    continue
-                for item in grouped[label]:
-                    case_key = item["voucher_key"]
-                    is_selected = case_key == selected_key
-                    status = status_display_name(item.get("case_status"))
-                    severity = severity_display_name(item.get("severity"))
-                    case_type = case_type_display_name(item.get("case_type"))
-                    occurred_at = fmt_dt(item.get("occurred_at")) or "-"
-                    amount = f"{fmt_num(item.get('amount'))} {item.get('currency') or ''}".strip()
-                    merchant = item.get("merchant_name") or "-"
-                    title = item.get("demo_name") or merchant
-                    wrap_key = f"case_btn_sel_{idx}_{case_key}" if is_selected else f"case_btn_{idx}_{case_key}"
-                    with st.container(key=wrap_key):
-                        # 배지 행 — HTML 유지, pointer-events:none 으로 클릭 투과
-                        st.markdown(
-                            f'<div style="display:flex;gap:6px;flex-wrap:wrap;">'
-                            f'{status_badge(item.get("case_status"))}'
-                            f'{severity_badge(item.get("severity"))}'
-                            f'{case_type_badge(item.get("case_type"))}'
-                            f'</div>',
-                            unsafe_allow_html=True,
-                        )
-                        # 버튼 — margin-top:-55px 으로 배지 위까지 클릭 영역 확장
-                        btn_label = (
-                            f"**{title}**\n\n"
-                            f"{amount} · {occurred_at}\n\n"
-                            f"전표키　{case_key}　　가맹점　{merchant}"
-                        )
-                        if st.button(
-                            btn_label,
-                            key=f"select_{idx}_{case_key}",
-                            width="stretch",
-                        ):
-                            st.session_state["mt_selected_voucher"] = case_key
-                            st.rerun()
+    with st.container(key=f"workspace_case_scroll_{active_filter}"):
+        filtered = grouped.get(active_filter) or []
+        if not filtered:
+            render_empty_state("표시할 케이스가 없습니다.")
+            return
+        for item in filtered:
+            case_key = item["voucher_key"]
+            is_selected = case_key == selected_key
+            status = status_display_name(item.get("case_status"))
+            severity = severity_display_name(item.get("severity"))
+            case_type = case_type_display_name(item.get("case_type"))
+            occurred_at = fmt_dt(item.get("occurred_at")) or "-"
+            amount = f"{fmt_num(item.get('amount'))} {item.get('currency') or ''}".strip()
+            merchant = item.get("merchant_name") or "-"
+            title = item.get("demo_name") or merchant
+            wrap_key = f"case_btn_sel_{active_filter}_{case_key}" if is_selected else f"case_btn_{active_filter}_{case_key}"
+            with st.container(key=wrap_key):
+                # 배지 행 — HTML 유지, pointer-events:none 으로 클릭 투과
+                st.markdown(
+                    f'<div style="display:flex;gap:6px;flex-wrap:wrap;">'
+                    f'{status_badge(item.get("case_status"))}'
+                    f'{severity_badge(item.get("severity"))}'
+                    f'{case_type_badge(item.get("case_type"))}'
+                    f'</div>',
+                    unsafe_allow_html=True,
+                )
+                btn_label = (
+                    f"**{title}**\n\n"
+                    f"{amount} · {occurred_at}\n\n"
+                    f"전표키　{case_key}　　가맹점　{merchant}"
+                )
+                if st.button(
+                    btn_label,
+                    key=f"select_{active_filter}_{case_key}",
+                    width="stretch",
+                ):
+                    st.session_state["mt_selected_voucher"] = case_key
+                    st.rerun()
 
 
 def render_workspace_chat_panel(selected: dict[str, Any], latest_bundle: dict[str, Any]) -> None:
     result = ((latest_bundle.get("result") or {}).get("result") or {})
     timeline = latest_bundle.get("timeline") or []
     selected_vkey = selected.get("voucher_key") or ""
-    render_panel_header("에이전트 대화", "선택한 전표에 대해 LangGraph가 현재 무엇을 하고 있는지 실시간으로 보여줍니다.")
-    st.caption(f"분석 모델: {settings.reasoning_llm_label}")
+    render_panel_header(
+        "에이전트 대화",
+        "선택한 전표에 대해 LangGraph가 현재 무엇을 하고 있는지 실시간으로 보여줍니다.",
+        trailing=f"분석 모델: {settings.reasoning_llm_label}",
+    )
 
     vkey = selected_vkey
     is_unscreened = str(selected.get("case_type") or "").upper() == "UNSCREENED"
@@ -1744,41 +1840,48 @@ def render_workspace_chat_panel(selected: dict[str, Any], latest_bundle: dict[st
         if is_unscreened
         else f"스크리닝 완료 · {case_type_display_name(selected.get('case_type'))} · 심각도 {severity_display_name(selected.get('severity'))}"
     )
-    summary_html = f"""
-    <div class="mt-workspace-summary">
-      <div class="mt-workspace-hero">
-        <div>{status_badge(result.get("status") if result else selected.get("case_status"))}{severity_badge(result.get("severity") if result else selected.get("severity"))}{case_type_badge(selected.get("case_type"))}</div>
-        <div class="mt-workspace-hero-title">{selected.get("demo_name") or selected.get("merchant_name") or "선택 전표"}</div>
-        <div class="mt-workspace-hero-sub">실시간 스트림은 planning, tool 실행, 검증 게이트, HITL 요청, 최종 결론까지 공개 가능한 이벤트만 표시합니다.</div>
-        <div class="mt-workspace-inline-meta">
-          <div class="mt-workspace-inline-item"><span class="mt-workspace-inline-label">전표키</span>{selected.get("voucher_key") or "-"}</div>
-          <div class="mt-workspace-inline-item"><span class="mt-workspace-inline-label">가맹점</span>{selected.get("merchant_name") or "-"}</div>
-          <div class="mt-workspace-inline-item"><span class="mt-workspace-inline-label">금액</span>{fmt_num(selected.get('amount'))} {selected.get('currency') or ''}</div>
-          <div class="mt-workspace-inline-item"><span class="mt-workspace-inline-label">발생일시</span>{fmt_dt(selected.get("occurred_at")) or "-"}</div>
-        </div>
-        <div class="mt-workspace-strip">{strip_text}</div>
-      </div>
-      <div class="mt-workspace-action">
-        <div>
-          <div class="mt-workspace-action-title">실행 상태</div>
-          <div class="mt-workspace-action-top">이 영역은 현재 선택한 전표의 최신 run 상태와 다음 액션을 한 번에 제시합니다.</div>
-          <div class="mt-workspace-action-meta">
-            <div class="mt-workspace-action-key">현재 상태</div><div class="mt-workspace-action-value">{status_display_name(current_status)}</div>
-            <div class="mt-workspace-action-key">심각도</div><div class="mt-workspace-action-value">{severity_display_name(current_severity)}</div>
-            <div class="mt-workspace-action-key">실행 run</div><div class="mt-workspace-action-value">{str(live_run_id)[:12] + "…" if isinstance(live_run_id, str) and len(live_run_id) > 12 else live_run_id}</div>
-            <div class="mt-workspace-action-key">다음 액션</div><div class="mt-workspace-action-value">분석 시작 또는 검토 재개</div>
-          </div>
-        </div>
-      </div>
-    </div>
-    """
-    st.markdown(summary_html, unsafe_allow_html=True)
-    _cta_l, cta_button_col = st.columns([0.78, 0.22])
+    # 카드 영역 2개 주석 처리(향후 제거 판단 시 소스에서 제거 예정). strip_text만 표시.
+    # summary_html = f"""
+    # <div class="mt-workspace-summary">
+    #   <div class="mt-workspace-hero">
+    #     <div>{status_badge(result.get("status") if result else selected.get("case_status"))}{severity_badge(result.get("severity") if result else selected.get("severity"))}{case_type_badge(selected.get("case_type"))}</div>
+    #     <div class="mt-workspace-hero-title">{selected.get("demo_name") or selected.get("merchant_name") or "선택 전표"}</div>
+    #     <div class="mt-workspace-hero-sub">실시간 스트림은 planning, tool 실행, 검증 게이트, HITL 요청, 최종 결론까지 공개 가능한 이벤트만 표시합니다.</div>
+    #     <div class="mt-workspace-inline-meta">
+    #       <div class="mt-workspace-inline-item"><span class="mt-workspace-inline-label">전표키</span>{selected.get("voucher_key") or "-"}</div>
+    #       <div class="mt-workspace-inline-item"><span class="mt-workspace-inline-label">가맹점</span>{selected.get("merchant_name") or "-"}</div>
+    #       <div class="mt-workspace-inline-item"><span class="mt-workspace-inline-label">금액</span>{fmt_num(selected.get('amount'))} {selected.get('currency') or ''}</div>
+    #       <div class="mt-workspace-inline-item"><span class="mt-workspace-inline-label">발생일시</span>{fmt_dt(selected.get("occurred_at")) or "-"}</div>
+    #     </div>
+    #     <div class="mt-workspace-strip">{strip_text}</div>
+    #   </div>
+    #   <div class="mt-workspace-action">
+    #     <div>
+    #       <div class="mt-workspace-action-title">실행 상태</div>
+    #       <div class="mt-workspace-action-top">이 영역은 현재 선택한 전표의 최신 run 상태와 다음 액션을 한 번에 제시합니다.</div>
+    #       <div class="mt-workspace-action-meta">
+    #         <div class="mt-workspace-action-key">현재 상태</div><div class="mt-workspace-action-value">{status_display_name(current_status)}</div>
+    #         <div class="mt-workspace-action-key">심각도</div><div class="mt-workspace-action-value">{severity_display_name(current_severity)}</div>
+    #         <div class="mt-workspace-action-key">실행 run</div><div class="mt-workspace-action-value">{str(live_run_id)[:12] + "…" if isinstance(live_run_id, str) and len(live_run_id) > 12 else live_run_id}</div>
+    #         <div class="mt-workspace-action-key">다음 액션</div><div class="mt-workspace-action-value">분석 시작 또는 검토 재개</div>
+    #       </div>
+    #     </div>
+    #   </div>
+    # </div>
+    # """
+    # st.markdown(summary_html, unsafe_allow_html=True)
+    # strip_text와 HITL 확인·분석 시작을 동일 라인에 배치, 두 컨트롤 간격 좁게
+    strip_col, cta_hitl_col, cta_btn_col = st.columns([0.52, 0.14, 0.34])
     pending_stream: dict[str, str] | None = None
-    with cta_button_col:
+    with strip_col:
+        st.markdown(f'<div class="mt-workspace-strip-inline">{strip_text}</div>', unsafe_allow_html=True)
+    with cta_hitl_col:
         enable_hitl = st.checkbox("HITL 확인", key=f"workspace_hitl_check_{vkey}", value=False)
+    with cta_btn_col:
         run_clicked = st.button("분석 시작", key=f"workspace_run_{vkey}", width="stretch", type="primary")
     if run_clicked:
+        # 분석 시작 시 스트림/타임라인 패널을 자동으로 펼침
+        st.session_state[f"agent_stream_exp_{vkey}"] = True
         response = post(f"/api/v1/cases/{vkey}/analysis-runs", json_body={"enable_hitl": enable_hitl})
         run_id = response["run_id"]
         st.session_state.pop(_hitl_state_key("dismissed", run_id), None)
@@ -1801,11 +1904,15 @@ def render_workspace_chat_panel(selected: dict[str, Any], latest_bundle: dict[st
         pending_stream = {"run_id": run_id, "stream_path": stream_path}
 
     if _has_pending_hitl(latest_bundle):
-        st.warning("이 분석은 담당자 검토가 필요합니다. 검토 의견을 입력하면 같은 run으로 재개됩니다.")
-        _hl, hitl_btn_col, _hr = st.columns([0.01, 0.98, 0.01])
+        hitl_msg_col, hitl_btn_col = st.columns([0.66, 0.34])
         run_id = latest_bundle.get("run_id")
         open_key = _hitl_state_key("open", run_id)
         dismissed_key = _hitl_state_key("dismissed", run_id)
+        with hitl_msg_col:
+            st.markdown(
+                '<div class="mt-hitl-banner">이 분석은 담당자 검토가 필요합니다. 검토 의견을 입력하면 같은 run으로 재개됩니다.</div>',
+                unsafe_allow_html=True,
+            )
         with hitl_btn_col:
             if st.button("HITL 검토 입력 열기", key=f"workspace_hitl_open_{vkey}", width="stretch"):
                 st.session_state[dismissed_key] = False
@@ -1817,72 +1924,101 @@ def render_workspace_chat_panel(selected: dict[str, Any], latest_bundle: dict[st
                 st.session_state[open_key] = False
                 render_hitl_dialog(latest_bundle)
 
-    st.markdown('<div class="mt-stream-note">실시간 패널은 현재 노드 로그를 고정 패널에 타이핑으로 표시합니다. 새 노드가 시작되면 화면이 교체됩니다.</div>', unsafe_allow_html=True)
+    # 분석 시작 버튼 아래 영역(실시간 스트림/타임라인)을 접었다 펼 수 있도록 expander로 감싼다.
+    # 스트리밍 중에는 기본으로 펼쳐진 상태 유지.
     latest_run_id = str(latest_bundle.get("run_id") or "")
     cached_stream_text = st.session_state.get(f"mt_last_stream_content_{latest_run_id}", "") if latest_run_id else ""
-    # 스트림 패널 테두리용 앵커 + CSS (다음 형제인 고정 높이 컨테이너에 테두리 적용)
-    st.markdown(
-        '<div id="mt-stream-panel-anchor" aria-hidden="true" style="display:none"></div>'
-        '<style>'
-        '.stMarkdown:has(#mt-stream-panel-anchor) + div { '
-        '  border: 1px solid #dbe2ea; border-radius: 18px; box-sizing: border-box; '
-        '  background: #f8fafc; '
-        '}'
-        '</style>',
-        unsafe_allow_html=True,
-    )
-    # 고정 높이 500px 컨테이너 — 텍스트 길이와 관계없이 탭 메뉴 위치 고정, 내부 스크롤로 타이핑 표시
-    _STREAM_PANEL_HEIGHT = 500
-    stream_container = st.container(height=_STREAM_PANEL_HEIGHT, border=False)
-    with stream_container:
-        stream_placeholder = st.empty()
-        if pending_stream:
-            stream_url = f"{API}{pending_stream['stream_path']}"
-            run_id = pending_stream["run_id"]
-            for prefix, addition in sse_node_block_generator(stream_url, run_id=run_id):
-                stream_placeholder.write_stream(_prefix_with_typed_append(prefix, addition))
-            latest_bundle = fetch_case_bundle(vkey)
-            result = ((latest_bundle.get("result") or {}).get("result") or {})
-            timeline = latest_bundle.get("timeline") or []
-            latest_run_id = str(latest_bundle.get("run_id") or "")
-            cached_stream_text = st.session_state.get(f"mt_last_stream_content_{latest_run_id}", "") if latest_run_id else ""
-        elif cached_stream_text:
-            stream_placeholder.markdown(cached_stream_text)
-        else:
-            stream_placeholder.markdown("분석을 시작하면 이 영역에 실시간 스트림이 표시됩니다.")
+    _stream_expanded_default = True if pending_stream else bool(cached_stream_text)
+    _stream_exp_key = f"agent_stream_exp_{vkey}"
+    with st.expander(
+        "실시간 스트림/타임라인 보기",
+        expanded=bool(st.session_state.get(_stream_exp_key, _stream_expanded_default)),
+        key=_stream_exp_key,
+    ):
+        # 고정 높이 컨테이너 + 테두리 — stylable_container로 안정적으로 적용
+        _STREAM_PANEL_HEIGHT = 300
+        with stylable_container(
+            key=f"stream_border_{selected_vkey}",
+            css_styles=[
+                """
+                {
+                    border: 1px solid #e5e7eb !important;
+                    border-radius: 18px !important;
+                    background: #f8fafc !important;
+                    padding: 0 !important;
+                    overflow: hidden !important;
+                }
+                """,
+                """
+                > div {
+                    background: transparent !important;
+                }
+                """,
+                """
+                > div > div {
+                    background: transparent !important;
+                }
+                """,
+            ],
+        ):
+            stream_container = st.container(height=_STREAM_PANEL_HEIGHT, border=False)
+        with stream_container:
+            stream_placeholder = st.empty()
+            if pending_stream:
+                stream_url = f"{API}{pending_stream['stream_path']}"
+                run_id = pending_stream["run_id"]
+                for prefix, addition in sse_node_block_generator(stream_url, run_id=run_id):
+                    stream_placeholder.write_stream(_prefix_with_typed_append(prefix, addition))
+                latest_bundle = fetch_case_bundle(vkey)
+                result = ((latest_bundle.get("result") or {}).get("result") or {})
+                timeline = latest_bundle.get("timeline") or []
+                latest_run_id = str(latest_bundle.get("run_id") or "")
+                cached_stream_text = st.session_state.get(f"mt_last_stream_content_{latest_run_id}", "") if latest_run_id else ""
+                # 스트림 종료 후 HITL 대기 상태면 rerun 후 팝업 자동 오픈(팝업은 상단 _has_pending_hitl 블록에서 처리)
+                if _has_pending_hitl(latest_bundle) and latest_bundle.get("run_id"):
+                    _rid = latest_bundle.get("run_id")
+                    st.session_state[_hitl_state_key("dismissed", _rid)] = False
+                    st.session_state[_hitl_state_key("open", _rid)] = True
+                    st.rerun()
+            elif cached_stream_text:
+                stream_placeholder.markdown(cached_stream_text)
+            else:
+                stream_placeholder.markdown("분석을 시작하면 이 영역에 실시간 스트림이 표시됩니다.")
 
-    # 타이핑 시 스크롤이 자동으로 맨 아래로 따라가도록 스크립트 주입 (iframe이므로 parent document 기준)
-    _stream_auto_scroll_script = """
-    <script>
-    (function() {
-        var doc = window.parent && window.parent.document ? window.parent.document : document;
-        var anchor = doc.getElementById('mt-stream-panel-anchor');
-        if (!anchor) return;
-        var markdown = anchor.closest && anchor.closest('.stMarkdown');
-        var block = markdown && markdown.nextElementSibling;
-        if (!block) return;
-        var scrollEl = block.querySelector('[style*="overflow-y"]') || block.querySelector('[style*="overflow:"]') || block;
-        if (typeof scrollEl.scrollHeight === 'undefined') return;
-        function scrollToBottom() {
-            if (scrollEl.scrollHeight > scrollEl.clientHeight)
-                scrollEl.scrollTop = scrollEl.scrollHeight;
-        }
-        scrollToBottom();
-        var obs = new MutationObserver(function() { scrollToBottom(); });
-        obs.observe(scrollEl, { childList: true, subtree: true, characterData: true });
-    })();
-    </script>
-    """
-    try:
-        import streamlit.components.v1 as components
-        components.html(_stream_auto_scroll_script, height=0)
-    except Exception:
-        pass
+        # 타이핑 시 스크롤이 자동으로 맨 아래로 따라가도록 스크립트 주입
+        # stylable_container 키로 생성된 class를 통해 스크롤 가능한 내부 div를 탐색
+        _safe_vkey = selected_vkey.replace("-", "").replace("_", "")
+        _stream_auto_scroll_script = f"""
+        <script>
+        (function() {{
+            var doc = window.parent && window.parent.document ? window.parent.document : document;
+            // st-key-stream_border_ 로 시작하는 컨테이너 탐색
+            var panel = doc.querySelector('[class*="st-key-stream_border_"]');
+            if (!panel) return;
+            var scrollEl = panel.querySelector('[style*="overflow-y: auto"]')
+                        || panel.querySelector('[style*="overflow-y:auto"]')
+                        || panel.querySelector('[style*="overflow: auto"]')
+                        || panel;
+            function scrollToBottom() {{
+                if (scrollEl.scrollHeight > scrollEl.clientHeight)
+                    scrollEl.scrollTop = scrollEl.scrollHeight;
+            }}
+            scrollToBottom();
+            var obs = new MutationObserver(function() {{ scrollToBottom(); }});
+            obs.observe(panel, {{ childList: true, subtree: true, characterData: true }});
+        }})();
+        </script>
+        """
+        try:
+            import streamlit.components.v1 as components
+            components.html(_stream_auto_scroll_script, height=0)
+        except Exception:
+            pass
 
-    ag = [e for e in timeline if e.get("event_type") == "AGENT_EVENT"]
-    if ag:
-        with st.expander("이전 타임라인 카드 보기", expanded=False):
-            render_timeline_cards(ag)
+        ag = [e for e in timeline if e.get("event_type") == "AGENT_EVENT"]
+        if ag:
+            with st.expander("이전 타임라인 카드 보기", expanded=False):
+                render_timeline_cards(ag)
 
 
 def render_workspace_results(latest_bundle: dict[str, Any], debug_mode: bool) -> None:
@@ -1913,7 +2049,13 @@ def render_workspace_results(latest_bundle: dict[str, Any], debug_mode: bool) ->
             result["status"] = "HITL_REQUIRED"
 
     failed = bool(result.get("error"))
-    hero_title = "분석 실패" if failed else (result.get("status") or "결과 없음")
+    raw_status = result.get("status")
+    status_label = status_display_name(raw_status)
+    hero_title = "분석 실패" if failed else (raw_status or "결과 없음")
+    if not failed and raw_status and status_label != str(raw_status):
+        hero_title = f"{raw_status} ({status_label})"
+    elif not failed and not raw_status:
+        hero_title = "결과 없음"
     hero_sub = (
         f"{result.get('stage') or 'runner'} 단계에서 오류가 발생했습니다: {result.get('error')}"
         if failed
@@ -1940,7 +2082,7 @@ def render_workspace_results(latest_bundle: dict[str, Any], debug_mode: bool) ->
         <div class="mt-result-grid">
           <div class="mt-result-metric">
             <div class="mt-result-metric-label">상태</div>
-            <div class="mt-result-metric-value">{"FAILED" if failed else str(result.get("status") or "-")}</div>
+            <div class="mt-result-metric-value">{"FAILED" if failed else (status_label or "-")}</div>
             <div class="mt-result-metric-foot">현재 run의 최종 상태</div>
           </div>
           <div class="mt-result-metric">
@@ -1964,17 +2106,23 @@ def render_workspace_results(latest_bundle: dict[str, Any], debug_mode: bool) ->
         st.caption(f"정책점수 {sb.get('policy_score', '-')} · 근거점수 {sb.get('evidence_score', '-')} · 최종점수 {sb.get('final_score', '-')}")
     quality_codes = result.get("quality_gate_codes") or []
     if quality_codes:
-        st.markdown("#### 품질 신호")
-        st.markdown("".join(f'<span class="mt-badge mt-badge-amber">{code}</span>' for code in quality_codes), unsafe_allow_html=True)
+        badges_html = "".join(f'<span class="mt-badge mt-badge-amber">{code}</span>' for code in quality_codes)
+        st.markdown(
+            f'<div class="mt-section-inline"><span class="mt-section-inline-title">품질 신호</span> <span class="mt-section-inline-content">{badges_html}</span></div>',
+            unsafe_allow_html=True,
+        )
     if result.get("hitl_request"):
         st.markdown("#### 담당자 검토 상태")
         st.caption("이 run은 자동 확정이 아니라 담당자 검토 이후 재개를 전제로 진행되었습니다.")
     if result.get("verification_summary"):
         verification_summary = result.get("verification_summary") or {}
-        st.markdown("#### 검증 요약")
-        st.caption(
+        summary_text = (
             f"게이트 판정 {verification_summary.get('gate_policy') or '-'} · "
             f"근거 연결 {verification_summary.get('covered', 0)}/{verification_summary.get('total', 0)}"
+        )
+        st.markdown(
+            f'<div class="mt-section-inline"><span class="mt-section-inline-title">검증 요약</span> <span class="mt-section-inline-content">{summary_text}</span></div>',
+            unsafe_allow_html=True,
         )
     if result.get("critique") and debug_mode:
         st.markdown("#### 검증 메모 (debug)")
@@ -2107,6 +2255,15 @@ def render_ai_workspace_page() -> None:
     debug_mode = bool(st.session_state.get("mt_debug_mode", False))
     selected_key = st.session_state.get("mt_selected_voucher") or (items[0]["voucher_key"] if items else None)
     latest_bundle = fetch_case_bundle(selected_key) if selected_key else {"timeline": [], "history": []}
+    # 우측(최신 run 결과)과 좌측(목록 case_status) 간 표기/집계가 어긋나는 것을 방지: 선택 케이스는 최신 run status로 즉시 동기화
+    if selected_key:
+        latest_result = (latest_bundle.get("result") or {}).get("result") or {}
+        run_status = latest_result.get("status")
+        if run_status:
+            for item in items:
+                if item.get("voucher_key") == selected_key:
+                    item["case_status"] = run_status
+                    break
 
     # review_count = len([i for i in items if str(i.get("case_status") or "").upper() in {"NEW", "IN_REVIEW", "REVIEW_REQUIRED", "HITL_REQUIRED"}])
     # analyzed_count = len([i for i in items if str(i.get("case_status") or "").upper() in {"COMPLETED", "RESOLVED", "OK"}])

@@ -20,6 +20,7 @@ from services.case_service import (
     build_analysis_payload,
     list_vouchers,
     run_case_screening,
+    update_agent_case_status_from_run,
     upsert_agent_case_from_screening_result,
 )
 from services.demo_data_service import clear_demo_data, list_demo_scenarios, list_seeded_demo_cases, seed_demo_scenarios
@@ -71,7 +72,26 @@ def get_vouchers(
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     rows = list_vouchers(db, queue=queue, limit=limit)
-    return {"items": [r.model_dump() for r in rows], "total": len(rows)}
+    # UI 집계(case_status)는 AgentCase.status만으로는 HITL 대기 상태를 표현할 수 없으므로,
+    # 최신 run의 hitl_request/response를 확인해 "HITL_REQUIRED"를 파생해 내려준다.
+    out = [r.model_dump() for r in rows]
+    for item in out:
+        try:
+            voucher_key = item.get("voucher_key")
+            if not voucher_key:
+                continue
+            case_id = f"POC-{voucher_key}"
+            run_id = runtime.latest_run_of_case(case_id) or get_latest_run_id_by_case(db, case_id=case_id)
+            if not run_id:
+                continue
+            aux = get_run_aux_state(db, run_id=run_id)
+            hitl_req = runtime.get_hitl_request(run_id) or aux.get("hitl_request")
+            hitl_res = runtime.get_hitl_response(run_id) or aux.get("hitl_response")
+            if hitl_req and not hitl_res:
+                item["case_status"] = "HITL_REQUIRED"
+        except Exception:
+            continue
+    return {"items": out, "total": len(out)}
 
 
 @app.get("/api/v1/rag/documents")
@@ -218,6 +238,29 @@ async def _run_analysis_task(
                 }
                 if data.get("status") == "HITL_REQUIRED":
                     runtime.set_hitl_request(run_id, data.get("hitl_request") or data)
+            elif str(ev_type).upper() == "HITL_REQUIRED":
+                # 일부 실행 경로는 terminal event로 'completed' 대신 'HITL_REQUIRED'를 방출함.
+                # 이 경우에도 result/status를 저장해야 UI/목록(case_status) 집계가 일관되게 동작한다.
+                hitl_req = runtime.get_hitl_request(run_id) or data.get("hitl_request") or data
+                if hitl_req:
+                    try:
+                        runtime.set_hitl_request(run_id, hitl_req)
+                    except Exception:
+                        pass
+                src = (hitl_req or {}).get("source_summary") or {}
+                last_payload = {
+                    "run_id": run_id,
+                    "case_id": case_id,
+                    "event_type": "completed",
+                    "result": {
+                        "status": "HITL_REQUIRED",
+                        "severity": src.get("severity"),
+                        "score": src.get("score"),
+                        "case_type": src.get("case_type"),
+                        "hitl_request": hitl_req,
+                    },
+                    "completed_at": datetime.now(timezone.utc).isoformat(),
+                }
             elif ev_type == "failed":
                 last_payload = {
                     "run_id": run_id,
@@ -257,6 +300,8 @@ async def _run_analysis_task(
                 from db.session import SessionLocal
                 with SessionLocal() as persist_db:
                     persist_analysis_result(persist_db, run_id=run_id, result_payload=last_payload)
+                    run_status = (last_payload.get("result") or {}).get("status")
+                    update_agent_case_status_from_run(persist_db, voucher_key, run_status)
             except Exception as e:
                 logger.warning("persist_analysis_result failed run_id=%s case_id=%s error=%s", run_id, case_id, e)
 
@@ -469,12 +514,27 @@ def get_latest_analysis(voucher_key: str, db: Session = Depends(get_db)) -> dict
             "event_type": "completed",
             "result": aux.get("result_payload"),
         }
+    hitl_request = runtime.get_hitl_request(run_id) or aux.get("hitl_request")
+    # 최신 run 상태를 AgentCase.status에 반영해 vouchers 목록/KPI가 즉시 일관되게 보이도록 함
+    try:
+        derived_status = None
+        final_payload = {}
+        if isinstance(result, dict) and isinstance(result.get("result"), dict):
+            final_payload = result.get("result") or {}
+        elif isinstance(aux.get("result_payload"), dict):
+            final_payload = aux.get("result_payload") or {}
+        derived_status = final_payload.get("status")
+        if not derived_status and hitl_request:
+            derived_status = "HITL_REQUIRED"
+        update_agent_case_status_from_run(db, voucher_key, derived_status)
+    except Exception:
+        pass
     return {
         "case_id": case_id,
         "run_id": run_id,
         "result": result,
         "timeline_count": len(runtime.get_timeline(run_id)) or len(get_persisted_timeline(db, run_id=run_id)),
-        "hitl_request": runtime.get_hitl_request(run_id) or aux.get("hitl_request"),
+        "hitl_request": hitl_request,
         "hitl_draft": runtime.get_hitl_draft(run_id) or aux.get("hitl_draft"),
         "hitl_response": runtime.get_hitl_response(run_id) or aux.get("hitl_response"),
         "lineage": runtime.get_lineage(run_id) or aux.get("lineage"),
