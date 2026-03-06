@@ -132,7 +132,7 @@ def render_rag_library_page() -> None:
                     if st.button(
                         label,
                         key=f"doc_{doc_id}",
-                        use_container_width=True,
+                        width="stretch",
                         type="primary" if is_selected else "secondary",
                     ):
                         st.session_state["mt_selected_doc_id"] = doc_id

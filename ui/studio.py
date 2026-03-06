@@ -68,7 +68,7 @@ def render_agent_studio_page() -> None:
                     if st.button(
                         agent.get("name") or "-",
                         key=f"agent_{agent['agent_id']}",
-                        use_container_width=True,
+                        width="stretch",
                         type="primary" if int(agent["agent_id"]) == int(selected_id) else "secondary",
                     ):
                         st.session_state["mt_selected_agent_id"] = agent["agent_id"]

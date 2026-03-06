@@ -151,7 +151,7 @@ def _render_line_plot(frame: pd.DataFrame, cols: list[str], *, x_col: str = "dat
         categoryarray=chart[x_col].tolist() if x_col == "date" else None,
     )
     fig.update_yaxes(title_text=y_title or "값", tickfont={"size": 11, "color": "#0f172a"}, title_font={"size": 12, "color": "#0f172a"})
-    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+    st.plotly_chart(fig, width="stretch", config={"displayModeBar": False})
 
 
 def _render_bar_plot(frame: pd.DataFrame, x: str, y: str, *, height: int = 260, color: str = "#2563eb", x_title: str | None = None, y_title: str | None = None) -> None:
@@ -178,7 +178,7 @@ def _render_bar_plot(frame: pd.DataFrame, x: str, y: str, *, height: int = 260, 
         categoryarray=data[x].tolist() if x == "date" else None,
     )
     fig.update_yaxes(title_text=y_title or y, tickfont={"size": 11, "color": "#0f172a"}, title_font={"size": 12, "color": "#0f172a"})
-    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+    st.plotly_chart(fig, width="stretch", config={"displayModeBar": False})
 
 
 def _render_overview_tab(frame: pd.DataFrame) -> None:
@@ -255,7 +255,7 @@ def _render_overview_tab(frame: pd.DataFrame) -> None:
                 "quality_signals": "품질 신호",
                 "source_mode": "집계 방식",
             })
-            st.dataframe(present, use_container_width=True, hide_index=True, height=400)
+            st.dataframe(present, width="stretch", hide_index=True, height=400)
 
 
 def _render_quality_tab(frame: pd.DataFrame) -> None:
@@ -276,7 +276,7 @@ def _render_quality_tab(frame: pd.DataFrame) -> None:
             else:
                 _render_bar_plot(signal_df, "signal", "count", height=360, color="#8b5cf6", x_title="품질 신호", y_title="발생 횟수")
                 signal_present = signal_df.rename(columns={"signal": "품질 신호", "count": "건수"})
-                st.dataframe(signal_present, use_container_width=True, hide_index=True, height=260)
+                st.dataframe(signal_present, width="stretch", hide_index=True, height=260)
 
     with right:
         with stylable_container(
@@ -293,7 +293,7 @@ def _render_quality_tab(frame: pd.DataFrame) -> None:
                 sev = frame["severity"].fillna("UNKNOWN").value_counts().rename_axis("severity").reset_index(name="count")
                 _render_bar_plot(sev, "severity", "count", height=220, color="#14b8a6", x_title="심각도", y_title="건수")
                 sev_present = sev.rename(columns={"severity": "심각도", "count": "건수"})
-                st.dataframe(sev_present, use_container_width=True, hide_index=True, height=220)
+                st.dataframe(sev_present, width="stretch", hide_index=True, height=220)
 
         with stylable_container(
             key="dash_lineage_mix",
@@ -313,7 +313,7 @@ def _render_quality_tab(frame: pd.DataFrame) -> None:
                     .reset_index()
                 )
                 lineage_present = lineage.rename(columns={"lineage_mode": "실행 계보", "run_count": "run 수", "avg_events": "평균 이벤트 수"})
-                st.dataframe(lineage_present, use_container_width=True, hide_index=True, height=220)
+                st.dataframe(lineage_present, width="stretch", hide_index=True, height=220)
 
 
 def _render_compare_tab(frame: pd.DataFrame) -> None:
@@ -365,7 +365,7 @@ def _render_compare_tab(frame: pd.DataFrame) -> None:
                 "quality_signals": "품질 신호",
                 "source_mode": "집계 방식",
             })
-            st.dataframe(present, use_container_width=True, hide_index=True, height=400)
+            st.dataframe(present, width="stretch", hide_index=True, height=400)
 
     with top_right:
         with stylable_container(

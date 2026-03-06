@@ -1721,7 +1721,7 @@ def render_workspace_case_queue(items: list[dict[str, Any]], selected_key: str |
                         if st.button(
                             btn_label,
                             key=f"select_{idx}_{case_key}",
-                            use_container_width=True,
+                            width="stretch",
                         ):
                             st.session_state["mt_selected_voucher"] = case_key
                             st.rerun()
@@ -1777,7 +1777,7 @@ def render_workspace_chat_panel(selected: dict[str, Any], latest_bundle: dict[st
     pending_stream: dict[str, str] | None = None
     with cta_button_col:
         enable_hitl = st.checkbox("HITL 확인", key=f"workspace_hitl_check_{vkey}", value=False)
-        run_clicked = st.button("분석 시작", key=f"workspace_run_{vkey}", use_container_width=True, type="primary")
+        run_clicked = st.button("분석 시작", key=f"workspace_run_{vkey}", width="stretch", type="primary")
     if run_clicked:
         response = post(f"/api/v1/cases/{vkey}/analysis-runs", json_body={"enable_hitl": enable_hitl})
         run_id = response["run_id"]
@@ -1807,7 +1807,7 @@ def render_workspace_chat_panel(selected: dict[str, Any], latest_bundle: dict[st
         open_key = _hitl_state_key("open", run_id)
         dismissed_key = _hitl_state_key("dismissed", run_id)
         with hitl_btn_col:
-            if st.button("HITL 검토 입력 열기", key=f"workspace_hitl_open_{vkey}", use_container_width=True):
+            if st.button("HITL 검토 입력 열기", key=f"workspace_hitl_open_{vkey}", width="stretch"):
                 st.session_state[dismissed_key] = False
                 st.session_state[open_key] = True
                 st.rerun()
@@ -1820,20 +1820,21 @@ def render_workspace_chat_panel(selected: dict[str, Any], latest_bundle: dict[st
     st.markdown('<div class="mt-stream-note">실시간 패널은 현재 노드 로그를 고정 패널에 타이핑으로 표시합니다. 새 노드가 시작되면 화면이 교체됩니다.</div>', unsafe_allow_html=True)
     latest_run_id = str(latest_bundle.get("run_id") or "")
     cached_stream_text = st.session_state.get(f"mt_last_stream_content_{latest_run_id}", "") if latest_run_id else ""
-    with stylable_container(
-        key=f"workspace_stream_shell_{selected_vkey}",
-        css_styles="""{
-          background: radial-gradient(circle at 1px 1px, rgba(15,23,42,0.10) 1px, transparent 0);
-          background-size: 14px 14px;
-          background-color: #f8fafc;
-          border: 1px dashed #dbe2ea;
-          border-radius: 18px;
-          padding: 14px;
-          height: 500px;
-          overflow-y: auto;
-          overflow-x: hidden;
-        }""",
-    ):
+    # 스트림 패널 테두리용 앵커 + CSS (다음 형제인 고정 높이 컨테이너에 테두리 적용)
+    st.markdown(
+        '<div id="mt-stream-panel-anchor" aria-hidden="true" style="display:none"></div>'
+        '<style>'
+        '.stMarkdown:has(#mt-stream-panel-anchor) + div { '
+        '  border: 1px solid #dbe2ea; border-radius: 18px; box-sizing: border-box; '
+        '  background: #f8fafc; '
+        '}'
+        '</style>',
+        unsafe_allow_html=True,
+    )
+    # 고정 높이 500px 컨테이너 — 텍스트 길이와 관계없이 탭 메뉴 위치 고정, 내부 스크롤로 타이핑 표시
+    _STREAM_PANEL_HEIGHT = 500
+    stream_container = st.container(height=_STREAM_PANEL_HEIGHT, border=False)
+    with stream_container:
         stream_placeholder = st.empty()
         if pending_stream:
             stream_url = f"{API}{pending_stream['stream_path']}"
@@ -1849,6 +1850,34 @@ def render_workspace_chat_panel(selected: dict[str, Any], latest_bundle: dict[st
             stream_placeholder.markdown(cached_stream_text)
         else:
             stream_placeholder.markdown("분석을 시작하면 이 영역에 실시간 스트림이 표시됩니다.")
+
+    # 타이핑 시 스크롤이 자동으로 맨 아래로 따라가도록 스크립트 주입 (iframe이므로 parent document 기준)
+    _stream_auto_scroll_script = """
+    <script>
+    (function() {
+        var doc = window.parent && window.parent.document ? window.parent.document : document;
+        var anchor = doc.getElementById('mt-stream-panel-anchor');
+        if (!anchor) return;
+        var markdown = anchor.closest && anchor.closest('.stMarkdown');
+        var block = markdown && markdown.nextElementSibling;
+        if (!block) return;
+        var scrollEl = block.querySelector('[style*="overflow-y"]') || block.querySelector('[style*="overflow:"]') || block;
+        if (typeof scrollEl.scrollHeight === 'undefined') return;
+        function scrollToBottom() {
+            if (scrollEl.scrollHeight > scrollEl.clientHeight)
+                scrollEl.scrollTop = scrollEl.scrollHeight;
+        }
+        scrollToBottom();
+        var obs = new MutationObserver(function() { scrollToBottom(); });
+        obs.observe(scrollEl, { childList: true, subtree: true, characterData: true });
+    })();
+    </script>
+    """
+    try:
+        import streamlit.components.v1 as components
+        components.html(_stream_auto_scroll_script, height=0)
+    except Exception:
+        pass
 
     ag = [e for e in timeline if e.get("event_type") == "AGENT_EVENT"]
     if ag:

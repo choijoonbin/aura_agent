@@ -748,7 +748,7 @@ def render_graph_image(title: str, image_bytes: bytes | None, fallback_graph: by
     with center:
         png = image_bytes or fallback_graph
         if png:
-            st.image(png, use_container_width=True)
+            st.image(png, width="stretch")
         else:
             st.caption("그래프를 표시할 수 없습니다.")
         st.caption(caption)
