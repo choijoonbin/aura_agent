@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import html
 import json
+import time
 from collections import defaultdict
 from typing import Any, Iterator
 
@@ -143,7 +144,7 @@ def _stream_card_chunks(obj: dict[str, Any]) -> Iterator[str]:
             yield f"⚡ **실행** {action}  \n\n"
         if observation:
             yield f"🔍 **발견** {observation}  \n\n"
-    yield "---  \n\n"
+    yield "\n"
 
 
 def _score_breakdown_stream_block(score: dict[str, Any]) -> str:
@@ -159,9 +160,9 @@ def _score_breakdown_stream_block(score: dict[str, Any]) -> str:
 
     return (
         "\n\n📈 **CONFIDENCE SCORE**  \n"
-        f"- 정책 점수: `{policy:>3}` `{_bar(policy)}`  \n"
-        f"- 근거 점수: `{evidence:>3}` `{_bar(evidence)}`  \n"
-        f"- 최종 점수: `{final:>3}` `{_bar(final)}` ({severity})  \n\n---\n\n"
+        f"- 정책 점수: **{policy:>3}** {_bar(policy)}  \n"
+        f"- 근거 점수: **{evidence:>3}** {_bar(evidence)}  \n"
+        f"- 최종 점수: **{final:>3}** {_bar(final)} ({severity})  \n\n"
     )
 
 
@@ -292,6 +293,138 @@ def sse_text_stream(stream_url: str, *, run_id: str | None = None) -> Iterator[s
                 yield raw_line
     if run_id:
         st.session_state[f"mt_last_stream_content_{run_id}"] = "".join(stream_buffer)
+
+
+def _prefix_with_typed_append(prefix: str, addition: str) -> Iterator[str]:
+    """placeholder.write_stream용: 기존 본문은 즉시, 새 본문은 타이핑."""
+    if prefix:
+        yield prefix
+    for ch in addition:
+        yield ch
+        time.sleep(0.004)
+
+
+def sse_node_block_generator(stream_url: str, *, run_id: str | None = None) -> Iterator[tuple[str, str]]:
+    """
+    노드 단위 Replace 스트림.
+    - NODE_START 수신 시 prefix를 비워 기존 화면을 교체
+    - 같은 노드 내 이벤트는 prefix(현재 누적본)+addition(신규) 형태로 전달
+    """
+    history_buffer: list[str] = []
+    current_block = ""
+    current_node: str | None = None
+    thinking_open = False
+    event_name: str | None = None
+
+    with requests.get(stream_url, stream=True, timeout=300) as response:
+        response.raise_for_status()
+        for raw in response.iter_lines(decode_unicode=True):
+            if not raw:
+                continue
+            line = raw.strip()
+            if line.startswith("event:"):
+                event_name = line.split(":", 1)[1].strip()
+                continue
+            if not line.startswith("data:"):
+                continue
+            payload = line.split(":", 1)[1].strip()
+            if payload == "[DONE]":
+                done_line = "\n\n**분석 스트림 종료**\n"
+                prefix = current_block
+                current_block += done_line
+                history_buffer.append(done_line)
+                yield prefix, done_line
+                break
+            try:
+                obj = json.loads(payload)
+            except Exception:
+                raw_line = f"[{event_name}] {payload}\n"
+                prefix = current_block
+                current_block += raw_line
+                history_buffer.append(raw_line)
+                yield prefix, raw_line
+                continue
+
+            addition = ""
+            if event_name == "AGENT_EVENT":
+                ev_type = str(obj.get("event_type") or "").upper()
+                node = str(obj.get("node") or "agent")
+
+                if ev_type == "NODE_START":
+                    thinking_open = False
+                    current_node = node
+                    addition = "".join(_stream_card_chunks(obj))
+                    current_block = addition
+                    history_buffer.append(addition)
+                    yield "", addition
+                    continue
+
+                if current_node is None:
+                    current_node = node
+
+                if ev_type == "THINKING_TOKEN":
+                    token = (obj.get("metadata") or {}).get("token") or ""
+                    if not thinking_open:
+                        ts = fmt_dt_korea(obj.get("timestamp")) or "-"
+                        if current_block:
+                            addition += "\n\n"
+                        addition += f"💭 **{ts}** · {node} / 추론  \n"
+                        thinking_open = True
+                    if token:
+                        addition += token
+                elif ev_type == "THINKING_DONE":
+                    if thinking_open:
+                        addition += "  \n\n"
+                    thinking_open = False
+                elif ev_type == "THINKING_RETRY":
+                    if thinking_open:
+                        addition += "  \n\n"
+                        thinking_open = False
+                    if current_block or addition:
+                        addition += "\n\n"
+                    ts = fmt_dt_korea(obj.get("timestamp")) or "-"
+                    addition += f"🔄 **{ts}** · {node} / 재검토  \n"
+                    addition += "_판단 결과와 추론 문구 정합성을 다시 맞추는 중..._  \n\n"
+                else:
+                    if thinking_open:
+                        addition += "  \n\n"
+                        thinking_open = False
+                    if current_block or addition:
+                        addition += "\n\n"
+                    addition += "".join(_stream_card_chunks(obj))
+                    if ev_type == "HITL_PAUSE":
+                        if run_id:
+                            st.session_state[_hitl_state_key("dismissed", run_id)] = False
+                            st.session_state[_hitl_state_key("shown", run_id)] = True
+                            st.session_state[_hitl_state_key("open", run_id)] = True
+                        addition += "\n\n**[최종]** 담당자 검토 입력을 기다립니다.\n"
+            elif event_name == "confidence":
+                score = obj.get("score_breakdown") or obj
+                addition = _score_breakdown_stream_block(score)
+            elif event_name == "completed":
+                final_text = obj.get("reasonText") or obj.get("summary") or "완료"
+                result = obj.get("result") or {}
+                status = str(result.get("status") or obj.get("status") or "").upper()
+                if status == "HITL_REQUIRED" and run_id:
+                    st.session_state[_hitl_state_key("dismissed", run_id)] = False
+                    st.session_state[_hitl_state_key("shown", run_id)] = True
+                    st.session_state[_hitl_state_key("open", run_id)] = True
+                addition = f"\n\n**[최종]** {final_text}\n"
+            elif event_name == "failed":
+                addition = f"\n\n**[실패]** {obj.get('error', 'unknown error')}\n"
+            else:
+                detail = obj.get("detail") or obj.get("message") or obj.get("content") or payload
+                addition = f"[{event_name}] {detail}\n"
+
+            if not addition:
+                continue
+            prefix = current_block
+            current_block += addition
+            history_buffer.append(addition)
+            yield prefix, addition
+
+    if run_id:
+        st.session_state[f"mt_last_stream_content_{run_id}"] = "".join(history_buffer)
 
 
 def fetch_case_bundle(voucher_key: str) -> dict[str, Any]:
@@ -1611,6 +1744,7 @@ def render_workspace_chat_panel(selected: dict[str, Any], latest_bundle: dict[st
     """
     st.markdown(summary_html, unsafe_allow_html=True)
     _cta_l, cta_button_col = st.columns([0.78, 0.22])
+    pending_stream: dict[str, str] | None = None
     with cta_button_col:
         enable_hitl = st.checkbox("HITL 확인", key=f"workspace_hitl_check_{vkey}", value=False)
         run_clicked = st.button("분석 시작", key=f"workspace_run_{vkey}", use_container_width=True, type="primary")
@@ -1621,10 +1755,7 @@ def render_workspace_chat_panel(selected: dict[str, Any], latest_bundle: dict[st
         st.session_state.pop(_hitl_state_key("open", run_id), None)
         st.session_state.pop(_hitl_state_key("shown", run_id), None)
         st.success(f"분석 시작: run_id={response['run_id']}")
-        st.write_stream(sse_text_stream(f"{API}{response['stream_path']}", run_id=run_id))
-        latest_bundle = fetch_case_bundle(vkey)
-        result = ((latest_bundle.get("result") or {}).get("result") or {})
-        timeline = latest_bundle.get("timeline") or []
+        pending_stream = {"run_id": str(run_id), "stream_path": str(response["stream_path"])}
 
     resume_stream = st.session_state.get("mt_resume_stream")
     if (
@@ -1637,10 +1768,7 @@ def render_workspace_chat_panel(selected: dict[str, Any], latest_bundle: dict[st
         stream_path = str(resume_stream["stream_path"])
         st.session_state.pop("mt_resume_stream", None)
         st.success(f"HITL 응답 반영 후 재개: run_id={run_id}")
-        st.write_stream(sse_text_stream(f"{API}{stream_path}", run_id=run_id))
-        latest_bundle = fetch_case_bundle(vkey)
-        result = ((latest_bundle.get("result") or {}).get("result") or {})
-        timeline = latest_bundle.get("timeline") or []
+        pending_stream = {"run_id": run_id, "stream_path": stream_path}
 
     if _has_pending_hitl(latest_bundle):
         st.warning("이 분석은 담당자 검토가 필요합니다. 검토 의견을 입력하면 같은 run으로 재개됩니다.")
@@ -1659,11 +1787,7 @@ def render_workspace_chat_panel(selected: dict[str, Any], latest_bundle: dict[st
                 st.session_state[open_key] = False
                 render_hitl_dialog(latest_bundle)
 
-    st.markdown('<div class="mt-stream-note">실시간 패널은 전체 이벤트를 노드별로 정리해 보여주며, 최신 노드는 펼침 상태로 표시됩니다.</div>', unsafe_allow_html=True)
-    if not timeline:
-        render_empty_state("분석을 시작하면 이 영역에 실시간 스트림이 표시됩니다.")
-        return
-    ag = [e for e in timeline if e.get("event_type") == "AGENT_EVENT"]
+    st.markdown('<div class="mt-stream-note">실시간 패널은 현재 노드 로그를 고정 패널에 타이핑으로 표시합니다. 새 노드가 시작되면 화면이 교체됩니다.</div>', unsafe_allow_html=True)
     with stylable_container(
         key=f"workspace_stream_shell_{selected_vkey}",
         css_styles="""{
@@ -1673,8 +1797,24 @@ def render_workspace_chat_panel(selected: dict[str, Any], latest_bundle: dict[st
           border: 1px dashed #dbe2ea;
           border-radius: 18px;
           padding: 14px;
+          height: 500px;
+          overflow-y: auto;
         }""",
     ):
+        stream_placeholder = st.empty()
+        if pending_stream:
+            stream_url = f"{API}{pending_stream['stream_path']}"
+            run_id = pending_stream["run_id"]
+            for prefix, addition in sse_node_block_generator(stream_url, run_id=run_id):
+                stream_placeholder.write_stream(_prefix_with_typed_append(prefix, addition))
+            latest_bundle = fetch_case_bundle(vkey)
+            result = ((latest_bundle.get("result") or {}).get("result") or {})
+            timeline = latest_bundle.get("timeline") or []
+
+        if not timeline:
+            render_empty_state("분석을 시작하면 이 영역에 실시간 스트림이 표시됩니다.")
+            return
+        ag = [e for e in timeline if e.get("event_type") == "AGENT_EVENT"]
         render_timeline_cards(ag)
 
 
