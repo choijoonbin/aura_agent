@@ -36,13 +36,15 @@ def rerank_with_cross_encoder(
 ) -> list[dict[str, Any]]:
     """
     cross-encoder rerank 적용. 한국어 ko-reranker 기본.
-    sentence-transformers 미설치 시 입력 그대로 반환.
+    sentence-transformers 미설치 시 입력 그대로 반환하되 cross_encoder_available=False 마킹.
     batch_size: CrossEncoder.predict() 배치 크기 (GPU 메모리에 따라 조정).
     """
     if not groups or not query or not query.strip():
         return groups
     model = _get_cross_encoder(model_name or _KO_CROSS_ENCODER_MODEL_NAME)
     if model is None:
+        for g in groups:
+            g["cross_encoder_available"] = False
         return groups
     try:
         passages = [g.get("chunk_text") or " ".join(g.get("snippets") or []) or "" for g in groups]
@@ -52,6 +54,7 @@ def rerank_with_cross_encoder(
         scores = model.predict(pairs, batch_size=batch_size, show_progress_bar=False)
         for i, g in enumerate(groups):
             g["cross_encoder_score"] = float(scores[i]) if i < len(scores) else 0.0
+            g["cross_encoder_available"] = True
         return sorted(groups, key=lambda x: x.get("cross_encoder_score", 0), reverse=True)
     except Exception:
         return groups

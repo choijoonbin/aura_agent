@@ -226,6 +226,13 @@ def save_hierarchical_chunks(
             "regulation_article": node.regulation_article or "",
             "current_section": getattr(node, "current_section", "") or "",
         }
+        merged_articles = [
+            str(a).strip()
+            for a in (getattr(node, "merged_articles", None) or [])
+            if str(a).strip()
+        ]
+        if merged_articles:
+            meta["merged_articles"] = merged_articles
         if getattr(node, "merged_with", None):
             meta["merged_with"] = node.merged_with
         row_params: dict[str, Any] = {
@@ -253,6 +260,8 @@ def save_hierarchical_chunks(
         chunk_id = row[0]
         key = node.regulation_article or str(node.chunk_index)
         article_chunk_id_map[key] = chunk_id
+        for alt_article in merged_articles:
+            article_chunk_id_map[alt_article] = chunk_id
         saved_chunks.append(
             {"chunk_id": chunk_id, "search_text": node.search_text, "node_type": "ARTICLE"}
         )

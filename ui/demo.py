@@ -76,7 +76,7 @@ def render_demo_control_page() -> None:
                 count = st.slider("*생성건수", min_value=1, max_value=20, value=5, key="demo_count")
             with btn_col:
                 st.markdown('<div style="height:1.75rem"></div>', unsafe_allow_html=True)
-                if st.button("생성", key="demo_seed_btn", width="stretch", type="primary") and scenario:
+                if st.button("생성", key="demo_seed_btn", type="primary") and scenario:
                     out = post("/api/v1/demo/seed", params={"scenario": scenario["scenario"], "count": int(count)})
                     st.success(f"생성 완료: {out['scenario']} / {out['inserted']}건")
                     st.rerun()
@@ -100,7 +100,7 @@ def render_demo_control_page() -> None:
                     grouped[k] = grouped.get(k, 0) + 1
                 for k, v in grouped.items():
                     st.caption(f"{k}: {v}건")
-                if st.button("시연 데이터 전체 삭제", width="stretch", key="demo_delete_all"):
+                if st.button("시연 데이터 전체 삭제", key="demo_delete_all"):
                     out = delete("/api/v1/demo/seed")
                     st.warning(f"삭제 완료: {out.get('deleted', 0)}건")
                     st.rerun()
@@ -135,7 +135,6 @@ def render_demo_control_page() -> None:
                     if st.button(
                         "워크스페이스 열기",
                         key=f"open_workspace_{item['voucher_key']}",
-                        width="stretch",
                         type="secondary",
                     ):
                         # mt_menu_option은 사이드바 위젯 키라 직접 수정 불가 → 리다이렉트 키로 넘기고 rerun

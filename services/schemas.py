@@ -10,6 +10,7 @@ class VoucherRow(BaseModel):
     gjahr: str
     amount: float | None = None
     currency: str | None = None
+    demo_name: str | None = None
     merchant_name: str | None = None
     occurred_at: str | None = None
     hr_status: str | None = None

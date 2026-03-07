@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import html
 import json
+import queue
+import threading
 import time
 from collections import defaultdict
 from typing import Any, Iterator
@@ -332,6 +334,109 @@ def _prefix_with_typed_append(prefix: str, addition: str) -> Iterator[str]:
         time.sleep(0.004)
 
 
+def _render_stream_waiting_indicator(placeholder: Any, status_text: str, node_name: str | None = None) -> None:
+    """스트림 이벤트 간 공백 구간에 표시되는 진행중 인디케이터."""
+    safe_status = html.escape((status_text or "").strip())
+    if not safe_status:
+        safe_status = "LLM 응답을 기다리는 중입니다."
+    safe_node = html.escape((node_name or "agent").strip() or "agent")
+    html_block = f"""
+    <style>
+      @keyframes mtWaitPulse {{ 0%,100%{{opacity:.28; transform:translateY(0)}} 50%{{opacity:1; transform:translateY(-1px)}} }}
+      .mt-stream-wait {{
+        display:flex; align-items:center; gap:10px;
+        padding:8px 10px; margin-top:6px;
+        border:1px dashed #cbd5e1; border-radius:12px; background:#f8fafc;
+        color:#334155; font-size:12px; line-height:1.4;
+      }}
+      .mt-stream-wait .dots {{ display:inline-flex; gap:4px; }}
+      .mt-stream-wait .dot {{
+        width:7px; height:7px; border-radius:999px; background:#2563eb;
+        animation: mtWaitPulse 1s infinite ease-in-out;
+      }}
+      .mt-stream-wait .dot:nth-child(2) {{ animation-delay:.15s; }}
+      .mt-stream-wait .dot:nth-child(3) {{ animation-delay:.3s; }}
+      .mt-stream-wait .label {{ font-weight:700; color:#1e40af; margin-right:2px; }}
+      .mt-stream-wait .node {{
+        display:inline-flex; align-items:center; justify-content:center;
+        font-size:11px; font-weight:800; color:#ffffff;
+        background:#0f766e; border:1px solid #115e59; border-radius:999px;
+        padding:2px 8px; margin-right:2px;
+        text-shadow: 0 1px 0 rgba(0,0,0,0.15);
+      }}
+      .mt-stream-wait .status {{ color:#475569; }}
+    </style>
+    <div class="mt-stream-wait">
+      <span class="dots"><span class="dot"></span><span class="dot"></span><span class="dot"></span></span>
+      <span class="node">{safe_node}</span>
+      <span class="label">생각중</span>
+      <span class="status">{safe_status}</span>
+    </div>
+    """
+    try:
+        placeholder.markdown(html_block, unsafe_allow_html=True)
+    except Exception:
+        placeholder.write(f"{safe_node} 생각중 · {safe_status}")
+
+
+def _stream_status_keys(run_id: str | None) -> tuple[str | None, str | None]:
+    if not run_id:
+        return None, None
+    return f"mt_stream_status_{run_id}", f"mt_stream_node_{run_id}"
+
+
+def _get_stream_waiting_status(run_id: str | None) -> tuple[str, str]:
+    status_key, node_key = _stream_status_keys(run_id)
+    status_text = st.session_state.get(status_key or "", "") if status_key else ""
+    node_name = st.session_state.get(node_key or "", "") if node_key else ""
+    return str(status_text or ""), str(node_name or "agent")
+
+
+def sse_node_block_generator_with_idle(
+    stream_url: str,
+    *,
+    run_id: str | None = None,
+    idle_after_sec: float = 1.0,
+) -> Iterator[dict[str, Any]]:
+    """
+    SSE 블록 스트림을 백그라운드 스레드로 소비하고,
+    메인 루프는 큐를 폴링해 1초 이상 이벤트 공백 시 idle 이벤트를 발생시킨다.
+    """
+    out_q: queue.Queue = queue.Queue()
+    worker_done = threading.Event()
+
+    def _worker() -> None:
+        try:
+            for prefix, addition in sse_node_block_generator(stream_url, run_id=run_id):
+                out_q.put({"type": "block", "prefix": prefix, "addition": addition})
+        finally:
+            worker_done.set()
+
+    threading.Thread(target=_worker, daemon=True).start()
+
+    had_block = False
+    last_block_at = time.monotonic()
+    last_idle_emit = 0.0
+
+    while True:
+        if worker_done.is_set() and out_q.empty():
+            break
+        try:
+            item = out_q.get(timeout=0.1)
+            had_block = True
+            last_block_at = time.monotonic()
+            yield item
+            continue
+        except queue.Empty:
+            pass
+
+        now = time.monotonic()
+        if had_block and (now - last_block_at) >= idle_after_sec and (now - last_idle_emit) >= 0.6:
+            status_text, node_name = _get_stream_waiting_status(run_id)
+            yield {"type": "idle", "status_text": status_text, "node_name": node_name}
+            last_idle_emit = now
+
+
 def sse_node_block_generator(stream_url: str, *, run_id: str | None = None) -> Iterator[tuple[str, str]]:
     """
     노드 단위 Replace 스트림.
@@ -342,7 +447,13 @@ def sse_node_block_generator(stream_url: str, *, run_id: str | None = None) -> I
     current_block = ""
     current_node: str | None = None
     thinking_open = False
+    thinking_buffer = ""
     event_name: str | None = None
+    status_key, node_key = _stream_status_keys(run_id)
+    if status_key:
+        st.session_state[status_key] = ""
+    if node_key:
+        st.session_state[node_key] = "agent"
 
     with requests.get(stream_url, stream=True, timeout=300) as response:
         response.raise_for_status()
@@ -380,8 +491,15 @@ def sse_node_block_generator(stream_url: str, *, run_id: str | None = None) -> I
 
                 if ev_type == "NODE_START":
                     thinking_open = False
+                    thinking_buffer = ""
                     current_node = node
+                    if node_key:
+                        st.session_state[node_key] = node
                     addition = "".join(_stream_card_chunks(obj))
+                    if status_key:
+                        message = _humanize_stream_text(obj.get("message") or "")
+                        if message.strip():
+                            st.session_state[status_key] = message[:220]
                     current_block = addition
                     history_buffer.append(addition)
                     yield "", addition
@@ -389,6 +507,8 @@ def sse_node_block_generator(stream_url: str, *, run_id: str | None = None) -> I
 
                 if current_node is None:
                     current_node = node
+                if node_key:
+                    st.session_state[node_key] = node
 
                 if ev_type == "THINKING_TOKEN":
                     token = _humanize_stream_text((obj.get("metadata") or {}).get("token") or "")
@@ -400,23 +520,41 @@ def sse_node_block_generator(stream_url: str, *, run_id: str | None = None) -> I
                         thinking_open = True
                     if token:
                         addition += token
+                        thinking_buffer = (thinking_buffer + token)[-280:]
+                        if status_key and thinking_buffer.strip():
+                            st.session_state[status_key] = thinking_buffer.strip()
                 elif ev_type == "THINKING_DONE":
                     if thinking_open:
                         addition += "  \n\n"
                     thinking_open = False
+                    if status_key and thinking_buffer.strip():
+                        st.session_state[status_key] = thinking_buffer.strip()
+                    thinking_buffer = ""
                 elif ev_type == "THINKING_RETRY":
                     if thinking_open:
                         addition += "  \n\n"
                         thinking_open = False
+                    thinking_buffer = ""
                     if current_block or addition:
                         addition += "\n\n"
                     ts = fmt_dt_korea(obj.get("timestamp")) or "-"
                     addition += f"🔄 **{ts}** · {node} / 재검토  \n"
                     addition += "_판단 결과와 추론 문구 정합성을 다시 맞추는 중..._  \n\n"
+                    if status_key:
+                        retry_msg = _humanize_stream_text(obj.get("message") or "")
+                        if retry_msg.strip():
+                            st.session_state[status_key] = retry_msg[:220]
                 else:
                     if thinking_open:
                         addition += "  \n\n"
                         thinking_open = False
+                    if status_key:
+                        meta = obj.get("metadata") or {}
+                        message = _humanize_stream_text(
+                            (meta.get("reasoning") or obj.get("message") or obj.get("observation") or "")
+                        )
+                        if message.strip():
+                            st.session_state[status_key] = message[:220]
                     if current_block or addition:
                         addition += "\n\n"
                     addition += "".join(_stream_card_chunks(obj))
@@ -431,6 +569,8 @@ def sse_node_block_generator(stream_url: str, *, run_id: str | None = None) -> I
                 addition = _score_breakdown_stream_block(score)
             elif event_name == "completed":
                 final_text = _humanize_stream_text(obj.get("reasonText") or obj.get("summary") or "완료")
+                if status_key:
+                    st.session_state[status_key] = final_text[:220]
                 result = obj.get("result") or {}
                 status = str(result.get("status") or obj.get("status") or "").upper()
                 if status == "HITL_REQUIRED" and run_id:
@@ -439,9 +579,13 @@ def sse_node_block_generator(stream_url: str, *, run_id: str | None = None) -> I
                     st.session_state[_hitl_state_key("open", run_id)] = True
                 addition = f"\n\n**[최종]** {final_text}\n"
             elif event_name == "failed":
+                if status_key:
+                    st.session_state[status_key] = _humanize_stream_text(obj.get("error", "unknown error"))[:220]
                 addition = f"\n\n**[실패]** {_humanize_stream_text(obj.get('error', 'unknown error'))}\n"
             else:
                 detail = obj.get("detail") or obj.get("message") or obj.get("content") or payload
+                if status_key:
+                    st.session_state[status_key] = _humanize_stream_text(str(detail))[:220]
                 addition = f"[{_humanize_stream_text(str(event_name or 'event'))}] {_humanize_stream_text(str(detail))}\n"
 
             if not addition:
@@ -643,7 +787,7 @@ def _pipeline_state_from_events(events: list[dict[str, Any]]) -> tuple[list[str]
     return completed, current
 
 
-def render_timeline_cards(events: list[dict[str, Any]], *, view_mode: str = "business") -> None:
+def render_timeline_cards(events: list[dict[str, Any]], *, view_mode: str = "business", nested_under_expander: bool = False) -> None:
     if not events:
         render_empty_state("표시할 스트림 이벤트가 없습니다.")
         return
@@ -683,74 +827,185 @@ def render_timeline_cards(events: list[dict[str, Any]], *, view_mode: str = "bus
     latest_node = node_order[-1] if node_order else None
     _THINKING_ROW_CSS = """
     <style>
-    .thinking-row { display: flex; align-items: flex-start; gap: 12px; padding: 10px 14px; margin: 6px 0; border-radius: 8px; border-left: 3px solid; }
+    .thinking-row { display: flex; align-items: flex-start; gap: 12px; padding: 10px 14px; margin: 6px 0; border-radius: 8px; border-left: 3px solid; min-width: 0; }
     .thinking-row.thought { background: #0f1a2e; border-color: #3b82f6; }
     .thinking-row.action { background: #0f2a1a; border-color: #22c55e; }
     .thinking-row.observation { background: #1a1500; border-color: #f59e0b; }
     .thinking-icon { font-size: 18px; margin-top: 2px; flex-shrink: 0; }
     .thinking-label { font-size: 10px; font-weight: 700; letter-spacing: 1.2px; text-transform: uppercase; opacity: 0.6; display: block; margin-bottom: 4px; }
-    .thinking-content p { margin: 0; font-size: 14px; line-height: 1.6; color: #e2e8f0; }
+    .thinking-content { flex: 1 1 0; min-width: 0; overflow-wrap: break-word; word-break: break-word; }
+    .thinking-content p { margin: 0; font-size: 14px; line-height: 1.6; color: #e2e8f0; overflow-wrap: break-word; word-break: break-word; max-width: 100%; }
     </style>
     """
     try:
         st.html(_THINKING_ROW_CSS)
     except Exception:
         st.markdown(_THINKING_ROW_CSS, unsafe_allow_html=True)
-    with stylable_container(key="timeline_shell", css_styles="""{background: radial-gradient(circle at 1px 1px, rgba(15,23,42,0.10) 1px, transparent 0); background-size: 14px 14px; background-color:#f8fafc; border:1px dashed #dbe2ea; border-radius:18px; padding:14px;}"""):
+    with stylable_container(key="timeline_shell", css_styles=[
+        # 컨테이너 자체 스타일
+        """{
+            background: radial-gradient(circle at 1px 1px, rgba(15,23,42,0.10) 1px, transparent 0);
+            background-size: 14px 14px;
+            background-color: #f8fafc;
+            border: 1px dashed #dbe2ea;
+            border-radius: 18px;
+            padding: 14px;
+            overflow-x: hidden;
+            max-width: 100%;
+        }""",
+        # stExpanderDetails div 오버라이드로 다크 배경이 덮는 것 방지
+        """[data-testid="stCheckbox"] div {
+            background: transparent !important;
+        }""",
+        # 토글 라벨: 진한 글자 + 포인터
+        """[data-testid="stCheckbox"] label {
+            color: #0f172a !important;
+            font-weight: 600 !important;
+            cursor: pointer !important;
+            padding-left: 0 !important;
+            margin-left: 0 !important;
+        }""",
+        # 호버 시 파란색
+        """[data-testid="stCheckbox"]:hover label {
+            color: #2563eb !important;
+        }""",
+        # 토글 스위치 트랙: OFF 상태
+        """[role="switch"] {
+            background: #cbd5e1 !important;
+            border-color: #94a3b8 !important;
+        }""",
+        # 토글 스위치 트랙: ON 상태
+        """[role="switch"][aria-checked="true"] {
+            background: #2563eb !important;
+            border-color: #2563eb !important;
+        }""",
+        # 토글 왼쪽 여백 제거
+        """[data-testid="stCheckbox"] {
+            padding-left: 0 !important;
+            margin-left: 0 !important;
+        }""",
+        # 토글 첫번째 래퍼 div 패딩 제거
+        """[data-testid="stCheckbox"] > div {
+            padding: 0 !important;
+            margin: 0 !important;
+        }""",
+        # 텍스트 overflow 방지
+        """p, span {
+            overflow-wrap: break-word !important;
+            word-break: break-word !important;
+            max-width: 100% !important;
+        }""",
+    ]):
         for node in node_order:
             node_events = node_groups[node]
             node_label = node_labels_map.get(node, node)
             is_latest = node == latest_node
-            with st.expander(
-                label=f"{'▶ ' if is_latest else '✓ '}{node_label}  ({len(node_events)}개 이벤트)",
-                expanded=is_latest,
-            ):
-                for index, event in enumerate(node_events):
-                    payload = event.get("payload") or {}
-                    meta = payload.get("metadata") or {}
-                    ev_type = str(payload.get("event_type") or "").upper()
-                    icon = EVENT_ICON_MAP.get(ev_type, "🤖")
-                    part2 = f"{payload.get('node') or '-'} / {'추론' if ev_type == 'THINKING_DONE' else _humanize_stream_text(ev_type)}"
-                    tool_frag = _tool_caption_fragment(ev_type, payload.get("tool"), meta.get("tool_description"), html_tooltip=True)
-                    if tool_frag:
-                        part2 = f"{payload.get('node') or '-'} / {tool_frag}"
-                    cap = f"{icon} {fmt_dt_korea(event.get('at') or payload.get('timestamp')) or '-'} · {part2}"
-                    st.caption(cap, unsafe_allow_html=True)
-                    if ev_type == "SCORE_BREAKDOWN":
-                        sb = meta.get("score_breakdown") or meta
-                        policy_score = int(sb.get("policy_score") or sb.get("policy_score_raw") or 0)
-                        evidence_score = int(sb.get("evidence_score") or sb.get("evidence_score_raw") or 0)
-                        final_score = int(sb.get("final_score") or sb.get("score") or 0)
-                        render_score_breakdown_card(policy_score, evidence_score, final_score)
-                    display_message = payload.get("message")
-                    if ev_type == "THINKING_DONE":
-                        display_message = meta.get("reasoning") or display_message
-                    if display_message:
-                        display_message = _humanize_stream_text(str(display_message))
+            node_header = f"{'▶ ' if is_latest else '✓ '}{node_label}  ({len(node_events)}개 이벤트)"
+            if nested_under_expander:
+                # expander 중첩 불가로 노드별 st.toggle 사용: 기본 접힘, 펼치면 내용 표시
+                expanded = st.toggle(
+                    node_header,
+                    value=False,
+                    key=f"tl_nested_{node}",
+                )
+                if expanded:
+                    for index, event in enumerate(node_events):
+                        payload = event.get("payload") or {}
+                        meta = payload.get("metadata") or {}
+                        ev_type = str(payload.get("event_type") or "").upper()
+                        icon = EVENT_ICON_MAP.get(ev_type, "🤖")
+                        part2 = f"{payload.get('node') or '-'} / {'추론' if ev_type == 'THINKING_DONE' else _humanize_stream_text(ev_type)}"
+                        tool_frag = _tool_caption_fragment(ev_type, payload.get("tool"), meta.get("tool_description"), html_tooltip=True)
+                        if tool_frag:
+                            part2 = f"{payload.get('node') or '-'} / {tool_frag}"
+                        cap = f"{icon} {fmt_dt_korea(event.get('at') or payload.get('timestamp')) or '-'} · {part2}"
+                        st.caption(cap, unsafe_allow_html=True)
+                        if ev_type == "SCORE_BREAKDOWN":
+                            sb = meta.get("score_breakdown") or meta
+                            policy_score = int(sb.get("policy_score") or sb.get("policy_score_raw") or 0)
+                            evidence_score = int(sb.get("evidence_score") or sb.get("evidence_score_raw") or 0)
+                            final_score = int(sb.get("final_score") or sb.get("score") or 0)
+                            render_score_breakdown_card(policy_score, evidence_score, final_score)
+                        display_message = payload.get("message")
                         if ev_type == "THINKING_DONE":
-                            _html = _build_thinking_card_html(str(payload.get("node") or "agent"), str(display_message), is_complete=True)
+                            display_message = meta.get("reasoning") or display_message
+                        if display_message:
+                            display_message = _humanize_stream_text(str(display_message))
+                            if ev_type == "THINKING_DONE":
+                                _html = _build_thinking_card_html(str(payload.get("node") or "agent"), str(display_message), is_complete=True)
+                                try:
+                                    st.html(_html)
+                                except Exception:
+                                    st.markdown(_html, unsafe_allow_html=True)
+                            else:
+                                st.write(display_message)
+                        thought = _humanize_stream_text((payload.get("thought") or "").strip())
+                        action = _humanize_stream_text((payload.get("action") or "").strip())
+                        observation = _humanize_stream_text((payload.get("observation") or "").strip())
+                        blocks = []
+                        blocks.append(_thinking_row_html("판단", "🧠", thought, "thought", "#3b82f6"))
+                        blocks.append(_thinking_row_html("실행", "⚡", action, "action", "#22c55e"))
+                        blocks.append(_thinking_row_html("발견", "🔍", observation, "observation", "#f59e0b"))
+                        combined = "".join(blocks)
+                        if combined:
+                            _block_html = _THINKING_ROW_CSS + f'<div class="thinking-block">{combined}</div>'
                             try:
-                                st.html(_html)
+                                st.html(_block_html)
                             except Exception:
-                                st.markdown(_html, unsafe_allow_html=True)
-                        else:
-                            st.write(display_message)
-                    thought = _humanize_stream_text((payload.get("thought") or "").strip())
-                    action = _humanize_stream_text((payload.get("action") or "").strip())
-                    observation = _humanize_stream_text((payload.get("observation") or "").strip())
-                    blocks = []
-                    blocks.append(_thinking_row_html("판단", "🧠", thought, "thought", "#3b82f6"))
-                    blocks.append(_thinking_row_html("실행", "⚡", action, "action", "#22c55e"))
-                    blocks.append(_thinking_row_html("발견", "🔍", observation, "observation", "#f59e0b"))
-                    combined = "".join(blocks)
-                    if combined:
-                        _block_html = _THINKING_ROW_CSS + f'<div class="thinking-block">{combined}</div>'
-                        try:
-                            st.html(_block_html)
-                        except Exception:
-                            st.markdown(_block_html, unsafe_allow_html=True)
-                    if view_mode == "debug":
-                        st.json(payload)
+                                st.markdown(_block_html, unsafe_allow_html=True)
+                        if view_mode == "debug":
+                            st.json(payload)
+            else:
+                with st.expander(
+                    label=node_header,
+                    expanded=is_latest,
+                ):
+                    for index, event in enumerate(node_events):
+                        payload = event.get("payload") or {}
+                        meta = payload.get("metadata") or {}
+                        ev_type = str(payload.get("event_type") or "").upper()
+                        icon = EVENT_ICON_MAP.get(ev_type, "🤖")
+                        part2 = f"{payload.get('node') or '-'} / {'추론' if ev_type == 'THINKING_DONE' else _humanize_stream_text(ev_type)}"
+                        tool_frag = _tool_caption_fragment(ev_type, payload.get("tool"), meta.get("tool_description"), html_tooltip=True)
+                        if tool_frag:
+                            part2 = f"{payload.get('node') or '-'} / {tool_frag}"
+                        cap = f"{icon} {fmt_dt_korea(event.get('at') or payload.get('timestamp')) or '-'} · {part2}"
+                        st.caption(cap, unsafe_allow_html=True)
+                        if ev_type == "SCORE_BREAKDOWN":
+                            sb = meta.get("score_breakdown") or meta
+                            policy_score = int(sb.get("policy_score") or sb.get("policy_score_raw") or 0)
+                            evidence_score = int(sb.get("evidence_score") or sb.get("evidence_score_raw") or 0)
+                            final_score = int(sb.get("final_score") or sb.get("score") or 0)
+                            render_score_breakdown_card(policy_score, evidence_score, final_score)
+                        display_message = payload.get("message")
+                        if ev_type == "THINKING_DONE":
+                            display_message = meta.get("reasoning") or display_message
+                        if display_message:
+                            display_message = _humanize_stream_text(str(display_message))
+                            if ev_type == "THINKING_DONE":
+                                _html = _build_thinking_card_html(str(payload.get("node") or "agent"), str(display_message), is_complete=True)
+                                try:
+                                    st.html(_html)
+                                except Exception:
+                                    st.markdown(_html, unsafe_allow_html=True)
+                            else:
+                                st.write(display_message)
+                        thought = _humanize_stream_text((payload.get("thought") or "").strip())
+                        action = _humanize_stream_text((payload.get("action") or "").strip())
+                        observation = _humanize_stream_text((payload.get("observation") or "").strip())
+                        blocks = []
+                        blocks.append(_thinking_row_html("판단", "🧠", thought, "thought", "#3b82f6"))
+                        blocks.append(_thinking_row_html("실행", "⚡", action, "action", "#22c55e"))
+                        blocks.append(_thinking_row_html("발견", "🔍", observation, "observation", "#f59e0b"))
+                        combined = "".join(blocks)
+                        if combined:
+                            _block_html = _THINKING_ROW_CSS + f'<div class="thinking-block">{combined}</div>'
+                            try:
+                                st.html(_block_html)
+                            except Exception:
+                                st.markdown(_block_html, unsafe_allow_html=True)
+                        if view_mode == "debug":
+                            st.json(payload)
 
 
 # 대표 메시지 선택 우선순위 (docs/work_info/langgraphPlan3.md 추가답변)
@@ -1697,22 +1952,22 @@ def render_workspace_case_queue(items: list[dict[str, Any]], selected_key: str |
     k1, k2, k3, k4 = st.columns(4)
     with k1:
         key = "case_kpi_sel_all" if active_filter == "전체" else "case_kpi_all"
-        if st.button(f"전체 케이스\n{len(items)}", key=key, width="stretch"):
+        if st.button(f"전체 케이스\n{len(items)}", key=key):
             st.session_state["mt_case_filter"] = "전체"
             st.rerun()
     with k2:
         key = "case_kpi_sel_review" if active_filter == "검토 필요" else "case_kpi_review"
-        if st.button(f"검토 필요\n{review_count}", key=key, width="stretch"):
+        if st.button(f"검토 필요\n{review_count}", key=key):
             st.session_state["mt_case_filter"] = "검토 필요"
             st.rerun()
     with k3:
         key = "case_kpi_sel_done" if active_filter == "완료" else "case_kpi_done"
-        if st.button(f"완료\n{completed_count}", key=key, width="stretch"):
+        if st.button(f"완료\n{completed_count}", key=key):
             st.session_state["mt_case_filter"] = "완료"
             st.rerun()
     with k4:
         key = "case_kpi_sel_hitl" if active_filter == "HITL 대기" else "case_kpi_hitl"
-        if st.button(f"HITL 대기\n{hitl_count}", key=key, width="stretch"):
+        if st.button(f"HITL 대기\n{hitl_count}", key=key):
             st.session_state["mt_case_filter"] = "HITL 대기"
             st.rerun()
     # 배지는 st.markdown(HTML) → 시각 레이어 (pointer-events: none)
@@ -1818,7 +2073,6 @@ def render_workspace_case_queue(items: list[dict[str, Any]], selected_key: str |
                 if st.button(
                     btn_label,
                     key=f"select_{active_filter}_{case_key}",
-                    width="stretch",
                 ):
                     st.session_state["mt_selected_voucher"] = case_key
                     st.rerun()
@@ -1874,15 +2128,18 @@ def render_workspace_chat_panel(selected: dict[str, Any], latest_bundle: dict[st
     # </div>
     # """
     # st.markdown(summary_html, unsafe_allow_html=True)
-    # strip_text와 HITL 확인·분석 시작을 동일 라인에 배치, 두 컨트롤 간격 좁게
-    strip_col, cta_hitl_col, cta_btn_col = st.columns([0.52, 0.14, 0.34])
+    # strip_text는 좌측, HITL 확인·분석 시작은 우측 끝에 나란히 정렬
+    # 주의: render_workspace_chat_panel는 상위 컬럼 내부에서 호출되므로 중첩 columns는 1단계까지만 허용됨.
+    strip_col, cta_spacer_col, cta_hitl_col, cta_btn_col = st.columns([0.52, 0.08, 0.14, 0.26])
     pending_stream: dict[str, str] | None = None
     with strip_col:
         st.markdown(f'<div class="mt-workspace-strip-inline">{strip_text}</div>', unsafe_allow_html=True)
+    with cta_spacer_col:
+        st.markdown("&nbsp;", unsafe_allow_html=True)
     with cta_hitl_col:
         enable_hitl = st.checkbox("HITL 확인", key=f"workspace_hitl_check_{vkey}", value=False)
     with cta_btn_col:
-        run_clicked = st.button("분석 시작", key=f"workspace_run_{vkey}", width="stretch", type="primary")
+        run_clicked = st.button("분석 시작", key=f"workspace_run_{vkey}", type="primary")
     if run_clicked:
         # 분석 시작 시 스트림/타임라인 패널을 자동으로 펼침
         st.session_state[f"agent_stream_exp_{vkey}"] = True
@@ -1918,7 +2175,7 @@ def render_workspace_chat_panel(selected: dict[str, Any], latest_bundle: dict[st
                 unsafe_allow_html=True,
             )
         with hitl_btn_col:
-            if st.button("HITL 검토 입력 열기", key=f"workspace_hitl_open_{vkey}", width="stretch"):
+            if st.button("HITL 검토 입력 열기", key=f"workspace_hitl_open_{vkey}"):
                 st.session_state[dismissed_key] = False
                 st.session_state[open_key] = True
                 st.rerun()
@@ -1929,15 +2186,13 @@ def render_workspace_chat_panel(selected: dict[str, Any], latest_bundle: dict[st
                 render_hitl_dialog(latest_bundle)
 
     # 분석 시작 버튼 아래 영역(실시간 스트림/타임라인)을 접었다 펼 수 있도록 expander로 감싼다.
-    # 스트리밍 중에는 기본으로 펼쳐진 상태 유지.
+    # 스트리밍 중에는 기본으로 펼쳐진 상태 유지. (st.expander는 key 미지원·내부에 다른 expander 불가)
     latest_run_id = str(latest_bundle.get("run_id") or "")
     cached_stream_text = st.session_state.get(f"mt_last_stream_content_{latest_run_id}", "") if latest_run_id else ""
     _stream_expanded_default = True if pending_stream else bool(cached_stream_text)
-    _stream_exp_key = f"agent_stream_exp_{vkey}"
     with st.expander(
         "실시간 스트림/타임라인 보기",
-        expanded=bool(st.session_state.get(_stream_exp_key, _stream_expanded_default)),
-        key=_stream_exp_key,
+        expanded=_stream_expanded_default,
     ):
         # 고정 높이 컨테이너 + 테두리 — stylable_container로 안정적으로 적용
         _STREAM_PANEL_HEIGHT = 300
@@ -1966,13 +2221,90 @@ def render_workspace_chat_panel(selected: dict[str, Any], latest_bundle: dict[st
             ],
         ):
             stream_container = st.container(height=_STREAM_PANEL_HEIGHT, border=False)
+        # 스트리밍 시작 전에 자동 스크롤 스크립트를 먼저 주입한다.
+        # (기존에는 스트림 종료 후 주입되어 실시간 타이핑 구간에서 추적이 늦었다)
+        _stream_auto_scroll_script = """
+        <script>
+        (function() {
+            var doc = window.parent && window.parent.document ? window.parent.document : document;
+            var panels = doc.querySelectorAll('[class*="st-key-stream_border_"]');
+            if (!panels || !panels.length) return;
+            var panel = panels[panels.length - 1];
+
+            function isScrollable(el) {
+                if (!el) return false;
+                try {
+                    var s = window.getComputedStyle(el);
+                    var oy = (s && s.overflowY) ? s.overflowY : '';
+                    return (oy === 'auto' || oy === 'scroll');
+                } catch (e) { return false; }
+            }
+
+            function findScrollEl(root) {
+                if (!root) return null;
+                var nodes = [root].concat(Array.from(root.querySelectorAll('*')));
+                for (var i = 0; i < nodes.length; i++) {
+                    var el = nodes[i];
+                    try {
+                        // 1) 실제 스크롤 컨테이너 우선
+                        if (isScrollable(el) && el.clientHeight > 0) {
+                            return el;
+                        }
+                        // 2) overflow 스타일이 없어도 높이 차가 있는 경우(브라우저별 렌더링 차이) 보조 선택
+                        if (el.scrollHeight > el.clientHeight + 2 && el.clientHeight > 0) {
+                            return el;
+                        }
+                    } catch (e) {}
+                }
+                return root;
+            }
+
+            function scrollToBottom() {
+                var scrollEl = findScrollEl(panel);
+                if (!scrollEl) return;
+                var target = Math.max(0, scrollEl.scrollHeight - scrollEl.clientHeight);
+                if (scrollEl.scrollTop !== target) scrollEl.scrollTop = target;
+            }
+
+            scrollToBottom();
+            var obs = new MutationObserver(function() { scrollToBottom(); });
+            obs.observe(panel, { childList: true, subtree: true, characterData: true });
+            var timer = setInterval(scrollToBottom, 120);
+            setTimeout(function() {
+                try { obs.disconnect(); } catch (e) {}
+                try { clearInterval(timer); } catch (e) {}
+            }, 300000);
+        })();
+        </script>
+        """
+        try:
+            import streamlit.components.v1 as components
+            components.html(_stream_auto_scroll_script, height=0)
+        except Exception:
+            pass
         with stream_container:
             stream_placeholder = st.empty()
+            stream_wait_placeholder = st.empty()
             if pending_stream:
                 stream_url = f"{API}{pending_stream['stream_path']}"
                 run_id = pending_stream["run_id"]
-                for prefix, addition in sse_node_block_generator(stream_url, run_id=run_id):
-                    stream_placeholder.write_stream(_prefix_with_typed_append(prefix, addition))
+                for stream_ev in sse_node_block_generator_with_idle(stream_url, run_id=run_id, idle_after_sec=1.0):
+                    ev_type = stream_ev.get("type")
+                    if ev_type == "block":
+                        stream_wait_placeholder.empty()
+                        stream_placeholder.write_stream(
+                            _prefix_with_typed_append(
+                                str(stream_ev.get("prefix") or ""),
+                                str(stream_ev.get("addition") or ""),
+                            )
+                        )
+                    elif ev_type == "idle":
+                        _render_stream_waiting_indicator(
+                            stream_wait_placeholder,
+                            str(stream_ev.get("status_text") or ""),
+                            node_name=str(stream_ev.get("node_name") or "agent"),
+                        )
+                stream_wait_placeholder.empty()
                 latest_bundle = fetch_case_bundle(vkey)
                 result = ((latest_bundle.get("result") or {}).get("result") or {})
                 timeline = latest_bundle.get("timeline") or []
@@ -1986,43 +2318,16 @@ def render_workspace_chat_panel(selected: dict[str, Any], latest_bundle: dict[st
                     st.rerun()
             elif cached_stream_text:
                 stream_placeholder.markdown(cached_stream_text)
+                stream_wait_placeholder.empty()
             else:
                 stream_placeholder.markdown("분석을 시작하면 이 영역에 실시간 스트림이 표시됩니다.")
-
-        # 타이핑 시 스크롤이 자동으로 맨 아래로 따라가도록 스크립트 주입
-        # stylable_container 키로 생성된 class를 통해 스크롤 가능한 내부 div를 탐색
-        _safe_vkey = selected_vkey.replace("-", "").replace("_", "")
-        _stream_auto_scroll_script = f"""
-        <script>
-        (function() {{
-            var doc = window.parent && window.parent.document ? window.parent.document : document;
-            // st-key-stream_border_ 로 시작하는 컨테이너 탐색
-            var panel = doc.querySelector('[class*="st-key-stream_border_"]');
-            if (!panel) return;
-            var scrollEl = panel.querySelector('[style*="overflow-y: auto"]')
-                        || panel.querySelector('[style*="overflow-y:auto"]')
-                        || panel.querySelector('[style*="overflow: auto"]')
-                        || panel;
-            function scrollToBottom() {{
-                if (scrollEl.scrollHeight > scrollEl.clientHeight)
-                    scrollEl.scrollTop = scrollEl.scrollHeight;
-            }}
-            scrollToBottom();
-            var obs = new MutationObserver(function() {{ scrollToBottom(); }});
-            obs.observe(panel, {{ childList: true, subtree: true, characterData: true }});
-        }})();
-        </script>
-        """
-        try:
-            import streamlit.components.v1 as components
-            components.html(_stream_auto_scroll_script, height=0)
-        except Exception:
-            pass
+                stream_wait_placeholder.empty()
 
         ag = [e for e in timeline if e.get("event_type") == "AGENT_EVENT"]
         if ag:
-            with st.expander("이전 타임라인 카드 보기", expanded=False):
-                render_timeline_cards(ag)
+            with st.container():
+                st.caption("이전 타임라인 카드 보기")
+                render_timeline_cards(ag, nested_under_expander=True)
 
 
 def render_workspace_results(latest_bundle: dict[str, Any], debug_mode: bool) -> None:
@@ -2287,7 +2592,7 @@ def render_ai_workspace_page() -> None:
         with stylable_container(key="workspace_case_queue_card", css_styles="""{padding: 18px 20px; border-radius: 20px; border: 1px solid #e5e7eb; background: rgba(255,255,255,0.96); box-shadow: 0 12px 30px rgba(15,23,42,0.05); min-height: 540px;}"""):
             render_workspace_case_queue(items, selected_key)
     with right:
-        with stylable_container(key="workspace_chat_card", css_styles="""{padding: 18px 20px; border-radius: 20px; border: 1px solid #e5e7eb; background: rgba(255,255,255,0.96); box-shadow: 0 12px 30px rgba(15,23,42,0.05); margin-bottom: 12px;}"""):
+        with stylable_container(key="workspace_chat_card", css_styles="""{padding: 18px 20px; border-radius: 20px; border: 1px solid #e5e7eb; background: rgba(255,255,255,0.96); box-shadow: 0 12px 30px rgba(15,23,42,0.05); margin-bottom: 12px; overflow: hidden; max-width: 100%;}"""):
             if not selected_key:
                 render_empty_state("선택된 케이스가 없습니다.")
             else:

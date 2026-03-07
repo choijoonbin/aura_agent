@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from agent.screener import run_screening
 from db.models import AgentCase, FiDocHeader, FiDocItem
+from services.demo_data_service import SCENARIO_PROFILES
 from services.schemas import VoucherRow
 from utils.config import settings
 
@@ -35,6 +36,16 @@ def _case_id_from_voucher(tenant_id: int, bukrs: str, belnr: str, gjahr: str) ->
     return int(hashlib.md5(key.encode()).hexdigest(), 16) % (10 ** 14) + 1
 
 
+def _merchant_name_for_header(header: FiDocHeader) -> str:
+    """DEMO 전표는 시나리오 가맹점명, 그 외는 bktxt/xblnr."""
+    xblnr = header.xblnr or ""
+    if xblnr.startswith("DEMO-"):
+        scenario = xblnr.split("-")[1] if len(xblnr.split("-")) >= 2 else None
+        profile = SCENARIO_PROFILES.get(scenario) if scenario else None
+        return profile["merchant_name"] if profile else (header.bktxt or xblnr)
+    return header.bktxt or header.xblnr or ""
+
+
 def _build_screening_body(header: FiDocHeader, amount: float | None) -> dict:
     """
     Build body for screening — BE DetectBatchService.buildFlattenedBatchItem와 동일한 핵심 필드.
@@ -58,7 +69,7 @@ def _build_screening_body(header: FiDocHeader, amount: float | None) -> dict:
         "budgetExceeded": (header.budget_exceeded_flag or "").upper() == "Y",
         "amount": float(amount) if amount is not None else 0.0,
         "expenseType": header.blart,
-        "merchantName": header.bktxt or header.xblnr,
+        "merchantName": _merchant_name_for_header(header),
     }
 
 
@@ -251,6 +262,11 @@ def list_vouchers(db: Session, queue: str = "all", limit: int = 50) -> list[Vouc
         effective_case_type = case_type or "UNSCREENED"
         effective_case_status = case_status or _fallback_case_status(header)
         effective_severity = severity or "LOW"
+        # DEMO 전표: 전표 제목(demo_name)=bktxt, 가맹점명=시나리오 프로필
+        xblnr = header.xblnr or ""
+        is_demo = xblnr.startswith("DEMO-")
+        demo_name = (header.bktxt or xblnr) if is_demo else None
+        merchant_name = _merchant_name_for_header(header)
         out.append(
             VoucherRow(
                 voucher_key=f"{header.bukrs}-{header.belnr}-{header.gjahr}",
@@ -259,7 +275,8 @@ def list_vouchers(db: Session, queue: str = "all", limit: int = 50) -> list[Vouc
                 gjahr=header.gjahr,
                 amount=float(amount) if amount is not None else None,
                 currency=header.waers,
-                merchant_name=header.bktxt or header.xblnr,
+                demo_name=demo_name,
+                merchant_name=merchant_name,
                 occurred_at=_compose_occurred_at(header.budat, header.cputm),
                 hr_status=header.hr_status,
                 mcc_code=header.mcc_code,
@@ -395,7 +412,7 @@ def build_analysis_payload(db: Session, voucher_key: str) -> dict:
         "occurredAt": occurred_at,
         "amount": float(amount) if amount is not None else None,
         "expenseType": header.blart,
-        "merchantName": header.bktxt or header.xblnr,
+        "merchantName": _merchant_name_for_header(header),
         "hrStatus": header.hr_status,
         "hrStatusRaw": header.hr_status,
         "mccCode": header.mcc_code,
@@ -422,7 +439,7 @@ def build_analysis_payload(db: Session, voucher_key: str) -> dict:
                     "occurredAt": occurred_at,
                     "amount": amount,
                     "expenseType": header.blart,
-                    "merchantName": header.bktxt or header.xblnr,
+                    "merchantName": _merchant_name_for_header(header),
                     "hrStatus": header.hr_status,
                     "mccCode": header.mcc_code,
                 }.items() if value in (None, "")

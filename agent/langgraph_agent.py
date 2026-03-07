@@ -1111,7 +1111,7 @@ async def planner_node(state: AgentState) -> AgentState:
 
     plan: list[dict[str, Any]] = []
     plan_source = "rule"
-    if getattr(settings, "enable_llm_planner", False) and valid_tool_names:
+    if getattr(settings, "enable_llm_planner", True) and valid_tool_names:
         plan = await _invoke_llm_planner(flags, state.get("screening_result") or {}, replan_context, available_tools)
         if plan:
             plan_source = "llm"
@@ -1126,7 +1126,7 @@ async def planner_node(state: AgentState) -> AgentState:
                 plan = base_plan
         else:
             plan = base_plan
-        if getattr(settings, "enable_llm_planner", False):
+        if getattr(settings, "enable_llm_planner", True):
             plan_source = "fallback_rule"
 
     def _build_planner_reasoning() -> str:

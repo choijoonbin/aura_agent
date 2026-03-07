@@ -97,13 +97,36 @@ def inject_css() -> None:
         .mt-page-sub {{ font-size: 0.9rem; color: var(--mt-text-soft); margin-top: 4px; line-height: 1.45; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }}
         .mt-card {{ padding: 18px 20px; border-radius: 20px; border: 1px solid var(--mt-border); background: rgba(255,255,255,0.96); box-shadow: 0 12px 30px rgba(15,23,42,0.05); height: 100%; }}
         .mt-card-quiet {{ padding: 14px 16px; border-radius: 16px; border: 1px solid var(--mt-border); background: #fff; box-shadow: 0 8px 22px rgba(15,23,42,0.04); }}
-        .mt-panel-header {{ display:flex; align-items:flex-start; justify-content:space-between; gap:12px; margin-bottom:14px; }}
+        .mt-panel-header {{ display:flex; align-items:flex-start; justify-content:space-between; gap:12px; margin-bottom:14px; min-width:0; max-width:100%; }}
+        .mt-panel-header > div:first-child {{ min-width:0; flex:1 1 auto; }}
+        .mt-panel-header .mt-panel-sub.mt-panel-trailing {{ white-space:nowrap; flex-shrink:0; text-align:right; font-size:0.8rem; }}
+        /* 에이전트 대화 영역: trailing 텍스트가 카드 경계 안에서만 표시되도록 */
+        [class*="st-key-workspace_chat_card"] {{ overflow: hidden !important; max-width: 100% !important; }}
+        [class*="st-key-workspace_chat_card"] .mt-panel-header {{ overflow: visible !important; flex-wrap: wrap; gap: 4px 10px; align-items:flex-start; }}
+        [class*="st-key-workspace_chat_card"] .mt-panel-sub.mt-panel-trailing {{
+          white-space: normal !important;
+          flex: 0 1 34% !important;
+          max-width: calc(34% - 14px) !important;
+          min-width: 140px !important;
+          text-align: right !important;
+          padding-right: 28px !important;
+          margin-right: 2px !important;
+          box-sizing: border-box !important;
+          overflow: hidden !important;
+          text-overflow: ellipsis !important;
+          line-height: 1.35 !important;
+          font-size: 0.78rem;
+        }}
         .mt-panel-title {{ font-size:1.02rem; font-weight:800; color:#0f172a; letter-spacing:-0.01em; }}
         .mt-panel-sub {{ font-size:0.84rem; color:#64748b; line-height:1.55; margin-top:4px; }}
-        .mt-kpi {{ padding: 18px 20px; border-radius: 18px; border: 1px solid var(--mt-border); background: rgba(255,255,255,0.98); box-shadow: 0 10px 24px rgba(15,23,42,0.05); min-height: 132px; }}
+        .mt-kpi {{ padding: 18px 20px; border-radius: 18px; border: 1px solid var(--mt-border); background: rgba(255,255,255,0.98); box-shadow: 0 10px 24px rgba(15,23,42,0.05); min-height: 132px; overflow: hidden; max-width: 100%; box-sizing: border-box; }}
         .mt-kpi-label {{ font-size: 1.64rem; color: var(--mt-text-soft); font-weight: 800; text-transform: uppercase; letter-spacing: 0.04em; }}
         .mt-kpi-value {{ font-size: 2.15rem; font-weight: 800; color: #0f172a; line-height: 1.1; margin-top: 10px; }}
         .mt-kpi-foot {{ font-size: 0.84rem; color: var(--mt-text-soft); margin-top: 8px; line-height: 1.5; }}
+        /* 규정문서 라이브러리 KPI 영역 4곳: 컨텐츠가 영역 우측을 벗어나지 않도록 */
+        .mt-rag-kpi-card {{ overflow: hidden !important; max-width: 100% !important; box-sizing: border-box !important; }}
+        .mt-rag-kpi-card .mt-rag-kpi-label, .mt-rag-kpi-card .mt-rag-kpi-value, .mt-rag-kpi-card .mt-rag-kpi-foot {{ overflow-wrap: break-word !important; word-break: break-word !important; max-width: 100% !important; min-width: 0 !important; }}
+        .mt-rag-kpi-card > div {{ max-width: 100% !important; min-width: 0 !important; }}
         .mt-section-card {{ padding: 18px 20px; border-radius: 22px; border: 1px solid var(--mt-border); background: rgba(255,255,255,0.96); box-shadow: 0 12px 30px rgba(15,23,42,0.05); }}
         .mt-section-card-tight {{ padding: 14px 16px; border-radius: 18px; border: 1px solid var(--mt-border); background: rgba(255,255,255,0.98); box-shadow: 0 8px 22px rgba(15,23,42,0.04); }}
         .mt-case-title {{ font-size: 1rem; font-weight: 800; color: var(--mt-text-strong); line-height: 1.35; }}
@@ -153,6 +176,30 @@ def inject_css() -> None:
         [data-testid="stExpander"]:has(.pipeline-wrapper) [aria-expanded="true"] * {{ color: #e2e8f0 !important; }}
         [data-testid="stExpander"]:has([class*="st-key-process_story_"]) details[open] summary,
         [data-testid="stExpander"]:has([class*="st-key-process_story_"]) details[open] summary * {{ color: #e2e8f0 !important; }}
+        /* 실시간 스트림/타임라인: 토글 라벨·스위치가 배경과 대비되어 보이도록 (키 기반 선택자로 Streamlit DOM에 확실히 적용) */
+        [class*="st-key-tl_nested_"] label {{ color: #0f172a !important; font-weight: 600 !important; }}
+        [class*="st-key-tl_nested_"] [role="switch"] {{ background: #e2e8f0 !important; border: 1px solid #94a3b8 !important; }}
+        [class*="st-key-tl_nested_"] [role="switch"][aria-checked="true"] {{ background: #2563eb !important; border-color: #2563eb !important; }}
+        [class*="st-key-tl_nested_"] [role="switch"] span {{ background: #fff !important; border: 1px solid #cbd5e1 !important; box-shadow: 0 1px 2px rgba(0,0,0,0.1) !important; }}
+        [class*="st-key-tl_nested_"] [data-testid="stCheckbox"] label {{ color: #0f172a !important; font-weight: 600 !important; }}
+        [class*="st-key-tl_nested_"] [data-testid="stCheckbox"] [role="checkbox"] {{ background: #e2e8f0 !important; border: 1px solid #94a3b8 !important; border-radius: 999px !important; }}
+        /* 8단계 토글 행 앞 빈 공간 제거(Streamlit 내부 div padding/margin) */
+        [class*="st-key-tl_nested_"] {{ padding-left: 0 !important; margin-left: 0 !important; }}
+        [class*="st-key-tl_nested_"] > div {{ padding: 0 2px 0 0 !important; margin: 0 !important; }}
+        [class*="st-key-tl_nested_"] [data-testid="stVerticalBlock"] > div {{ padding-left: 0 !important; margin-left: 0 !important; }}
+        [class*="st-key-tl_nested_"] [data-testid="stCheckbox"], [class*="st-key-tl_nested_"] [role="switch"] {{ padding-left: 0 !important; margin-left: 0 !important; }}
+        /* 8단계 마우스 오버 시 선택된 것처럼 색 강조 */
+        [class*="st-key-tl_nested_"]:hover label {{ color: #2563eb !important; }}
+        [class*="st-key-tl_nested_"] [data-testid="stCheckbox"]:hover label {{ color: #2563eb !important; }}
+        /* timeline_shell 컨테이너 기준 선택자(호환용) */
+        .st-key-timeline_shell label {{ color: #0f172a !important; font-weight: 600 !important; }}
+        .st-key-timeline_shell [role="switch"] {{ background: #e2e8f0 !important; border: 1px solid #94a3b8 !important; margin-left: 0 !important; padding-left: 0 !important; }}
+        .st-key-timeline_shell [data-testid="stCheckbox"] {{ padding-left: 0 !important; margin-left: 0 !important; }}
+        .st-key-timeline_shell [data-testid="stVerticalBlock"] > div {{ padding-left: 0 !important; margin-left: 0 !important; }}
+        .st-key-timeline_shell [data-testid="stCheckbox"]:hover label, .st-key-timeline_shell [data-testid="stVerticalBlock"]:has([data-testid="stCheckbox"]):hover label {{ color: #2563eb !important; }}
+        /* 타임라인·판단/실행/발견 영역 텍스트가 영역 밖으로 나가지 않도록 */
+        .st-key-timeline_shell p, .st-key-timeline_shell div, .st-key-timeline_shell span, .st-key-timeline_shell .thinking-content, .st-key-timeline_shell .thinking-content p {{ overflow-wrap: break-word !important; word-break: break-word !important; max-width: 100% !important; min-width: 0 !important; box-sizing: border-box !important; }}
+        .st-key-timeline_shell .thinking-row .thinking-content {{ flex: 1 1 0; min-width: 0 !important; }}
         [data-testid="stExpander"]:has([class*="st-key-process_story_"]) [aria-expanded="true"],
         [data-testid="stExpander"]:has([class*="st-key-process_story_"]) [aria-expanded="true"] * {{ color: #e2e8f0 !important; }}
         [data-testid="stExpanderDetails"] pre, [data-testid="stExpanderDetails"] code {{ background: #0f172a !important; }}
@@ -440,7 +487,7 @@ def render_page_header(title: str, subtitle: str, right_html: str | None = None)
 
 def render_panel_header(title: str, subtitle: str = "", trailing: str = "") -> None:
     subtitle_html = f'<div class="mt-panel-sub">{subtitle}</div>' if subtitle else ''
-    trailing_html = f'<div class="mt-panel-sub" style="flex-shrink:0;">{trailing}</div>' if trailing else ''
+    trailing_html = f'<div class="mt-panel-sub mt-panel-trailing">{trailing}</div>' if trailing else ''
     st.markdown(
         f'<div class="mt-panel-header"><div><div class="mt-panel-title">{title}</div>{subtitle_html}</div>{trailing_html}</div>',
         unsafe_allow_html=True,
@@ -476,8 +523,11 @@ def render_rag_kpi_card(
     }
     border_color, bg_tint = color_map.get(status, color_map["normal"])
     icon_html = f'<span style="font-size:1.3rem;flex-shrink:0;line-height:1">{icon}</span>' if icon else ""
+    label_esc = html.escape(label)
+    value_esc = html.escape(value)
+    foot_esc = html.escape(foot)
     st.markdown(f"""
-    <div style="
+    <div class="mt-rag-kpi-card" style="
         padding: 18px 20px;
         border-radius: 18px;
         border: 1px solid #e5e7eb;
@@ -485,15 +535,18 @@ def render_rag_kpi_card(
         background: {bg_tint};
         box-shadow: 0 10px 24px rgba(15,23,42,0.05);
         min-height: 132px;
+        overflow: hidden;
+        max-width: 100%;
+        box-sizing: border-box;
     ">
-        <div style="display:flex;align-items:baseline;gap:10px;margin-bottom:4px">
+        <div style="display:flex;align-items:baseline;gap:10px;margin-bottom:4px;min-width:0">
             {icon_html}
-            <div style="display:flex;justify-content:space-between;align-items:baseline;gap:12px;flex:1;min-width:0">
-                <div class="mt-kpi-label" style="margin-bottom:0">{label}</div>
-                <div class="mt-kpi-value" style="color:{border_color};font-size:1.75rem;margin:0;flex-shrink:0">{value}</div>
+            <div style="display:flex;justify-content:space-between;align-items:baseline;gap:12px;flex:1;min-width:0;overflow:hidden">
+                <div class="mt-kpi-label mt-rag-kpi-label" style="margin-bottom:0;overflow-wrap:break-word;word-break:break-word;min-width:0">{label_esc}</div>
+                <div class="mt-kpi-value mt-rag-kpi-value" style="color:{border_color};font-size:1.75rem;margin:0;flex-shrink:0;overflow-wrap:break-word;word-break:break-word">{value_esc}</div>
             </div>
         </div>
-        <div class="mt-kpi-foot">{foot}</div>
+        <div class="mt-kpi-foot mt-rag-kpi-foot">{foot_esc}</div>
     </div>
     """, unsafe_allow_html=True)
 
@@ -765,7 +818,7 @@ def render_graph_image(title: str, image_bytes: bytes | None, fallback_graph: by
     with center:
         png = image_bytes or fallback_graph
         if png:
-            st.image(png, width="stretch")
+            st.image(png, use_container_width=True)
         else:
             st.caption("그래프를 표시할 수 없습니다.")
         st.caption(caption)

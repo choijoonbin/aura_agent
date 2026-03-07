@@ -112,6 +112,16 @@ def list_demo_scenarios() -> list[dict[str, Any]]:
     return out
 
 
+def _eul_reul(label: str) -> str:
+    """한글 조사: 받침 있으면 '을', 없으면 '를'."""
+    if not label or not label.strip():
+        return "을"
+    last = label.strip()[-1]
+    if "\uAC00" <= last <= "\uD7A3":
+        return "을" if (ord(last) - 0xAC00) % 28 != 0 else "를"
+    return "을"
+
+
 def _next_day(mode: str) -> date:
     target = date.today()
     if mode == "weekend":
@@ -177,7 +187,7 @@ def seed_demo_scenarios(db: Session, scenario: str, count: int = 5) -> dict[str,
             ),
             blart=profile["blart"],
             waers="KRW",
-            bktxt=f"POC {profile['merchant_name']} {seq}",
+            bktxt=f"{profile['label']}{_eul_reul(profile['label'])} 위한 테스트 데이터",
             xblnr=f"DEMO-{scenario}-{seq}",
             intended_risk_type=None,  # Raw data: screener_node will classify during analysis
             hr_status=profile["hr_status"],
@@ -256,11 +266,14 @@ def list_seeded_demo_cases(db: Session) -> list[dict[str, Any]]:
         # 스크리닝/분석 후 갱신된 case_type·case_status 반영 (없으면 시나리오 risk_type·신규)
         case_type = ac_case_type if ac_case_type else (header.intended_risk_type or "UNSCREENED")
         case_status = ac_status if ac_status else "NEW"
+        scenario = (header.xblnr or "").replace("DEMO-", "").split("-")[0] if header.xblnr else "-"
+        profile = SCENARIO_PROFILES.get(scenario) if scenario else None
         out.append(
             {
                 "voucher_key": f"{header.bukrs}-{header.belnr}-{header.gjahr}",
-                "scenario": (header.xblnr or "").replace("DEMO-", "").split("-")[0] if header.xblnr else "-",
+                "scenario": scenario,
                 "title": header.bktxt or header.xblnr,
+                "merchant_name": profile["merchant_name"] if profile else (header.bktxt or "-"),
                 "amount": float(amount) if amount is not None else None,
                 "currency": header.waers,
                 "risk_type": header.intended_risk_type,

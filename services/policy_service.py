@@ -263,10 +263,10 @@ def _get_semantic_group_filter(body_evidence: dict[str, Any]) -> list[str] | Non
     """
     case_type = str(body_evidence.get("case_type") or "")
     _CASE_GROUP_HINTS: dict[str, list[str]] = {
-        "HOLIDAY_USAGE": ["제3장", "제4장"],
-        "LIMIT_EXCEED": ["제4장", "제2장"],
-        "PRIVATE_USE_RISK": ["제3장", "제5장"],
-        "UNUSUAL_PATTERN": ["제3장", "제5장"],
+        "HOLIDAY_USAGE": ["제7장", "제8장", "제3장"],
+        "LIMIT_EXCEED": ["제8장", "제3장"],
+        "PRIVATE_USE_RISK": ["제7장", "제8장", "제4장"],
+        "UNUSUAL_PATTERN": ["제8장", "제10장", "제12장"],
     }
     return _CASE_GROUP_HINTS.get(case_type)
 
@@ -486,6 +486,7 @@ def _build_dense_query(body_evidence: dict[str, Any]) -> str:
         "HOLIDAY_USAGE": (
             "주말 또는 공휴일 경비 사용 건으로, {merchant}에서 {amount}을 지출하였다. "
             "{hr_hint}"
+            "{night_hint}"
             "이 지출에 적용되는 휴일 경비 사용 제한 규정과 식대 규정을 찾아야 한다."
         ),
         "LIMIT_EXCEED": (
@@ -813,7 +814,13 @@ def search_policy_chunks(db: Session, body_evidence: dict[str, Any], limit: int 
                 bm25_results.append(r)
                 existing_ids.add(r["chunk_id"])
 
-    dense_results = _search_dense(db, body_evidence, limit=candidate_limit, effective_date=effective_date)
+    dense_results = _search_dense(
+        db,
+        body_evidence,
+        limit=candidate_limit,
+        effective_date=effective_date,
+        use_hyde=getattr(settings, "enable_hyde_query", False),
+    )
 
     if bm25_results and dense_results:
         fused = _reciprocal_rank_fusion(
@@ -844,13 +851,30 @@ def search_policy_chunks(db: Session, body_evidence: dict[str, Any], limit: int 
         reranked_ids = {r.get("chunk_id") for r in reranked if r.get("chunk_id") is not None}
         remaining = [r for r in enriched[RERANK_INPUT_LIMIT:] if r.get("chunk_id") not in reranked_ids]
         enriched = reranked + remaining
+        model_unavailable = bool(reranked) and all(
+            r.get("cross_encoder_available") is False for r in reranked[:1]
+        )
+        if model_unavailable and getattr(settings, "enable_llm_rerank_fallback", True):
+            try:
+                from services.retrieval_quality import rerank_with_llm_fallback
+                reranked_llm = rerank_with_llm_fallback(
+                    rerank_input, rerank_query, body_evidence=body_evidence
+                )
+                llm_ids = {r.get("chunk_id") for r in reranked_llm if r.get("chunk_id") is not None}
+                tail = [r for r in enriched[RERANK_INPUT_LIMIT:] if r.get("chunk_id") not in llm_ids]
+                enriched = reranked_llm + tail
+            except Exception:
+                pass
     except Exception:
         if getattr(settings, "enable_llm_rerank_fallback", True):
             try:
                 from services.retrieval_quality import rerank_with_llm_fallback
-                enriched = rerank_with_llm_fallback(
+                reranked_llm = rerank_with_llm_fallback(
                     rerank_input, rerank_query, body_evidence=body_evidence
-                ) + enriched[RERANK_INPUT_LIMIT:]
+                )
+                llm_ids = {r.get("chunk_id") for r in reranked_llm if r.get("chunk_id") is not None}
+                tail = [r for r in enriched[RERANK_INPUT_LIMIT:] if r.get("chunk_id") not in llm_ids]
+                enriched = reranked_llm + tail
             except Exception:
                 pass
         else:

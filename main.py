@@ -49,6 +49,15 @@ app = FastAPI(title="AuraAgent PoC API", version="0.3.0")
 @app.on_event("startup")
 async def startup() -> None:
     ensure_source_paths()
+    # LangGraph/Checkpointer를 시작 시점에 선초기화해 첫 요청 지연을 줄인다.
+    # postgres checkpointer 초기화 실패/지연 시에도 서비스는 계속 기동(요청 시 lazy 재시도).
+    try:
+        from agent.langgraph_agent import build_agent_graph
+
+        await asyncio.wait_for(asyncio.to_thread(build_agent_graph), timeout=20)
+        logger.info("LangGraph prewarm completed")
+    except Exception as exc:
+        logger.warning("LangGraph prewarm skipped: %s", exc)
 
 
 @app.get("/health")

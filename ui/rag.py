@@ -132,7 +132,6 @@ def render_rag_library_page() -> None:
                     if st.button(
                         label,
                         key=f"doc_{doc_id}",
-                        width="stretch",
                         type="primary" if is_selected else "secondary",
                     ):
                         st.session_state["mt_selected_doc_id"] = doc_id
@@ -431,6 +430,39 @@ def render_rag_library_page() -> None:
             '<div class="mt-panel-title" style="margin-bottom:8px">전략 비교</div>',
             unsafe_allow_html=True,
         )
+        st.markdown(
+            """
+            <style>
+            [class*="st-key-rag_compare_"] {
+              min-width: 0 !important;
+              max-width: 100% !important;
+              overflow: hidden !important;
+              box-sizing: border-box !important;
+            }
+            [class*="st-key-rag_compare_"] * {
+              max-width: 100% !important;
+              box-sizing: border-box !important;
+            }
+            [class*="st-key-rag_compare_"] .rag-compare-title {
+              display: block !important;
+              white-space: normal !important;
+              overflow-wrap: anywhere !important;
+              word-break: break-word !important;
+              line-height: 1.35 !important;
+            }
+            [class*="st-key-rag_compare_"] .rag-compare-desc {
+              margin-top: 8px !important;
+              font-size: 0.78rem !important;
+              color: #64748b !important;
+              line-height: 1.45 !important;
+              white-space: normal !important;
+              overflow-wrap: anywhere !important;
+              word-break: break-word !important;
+            }
+            </style>
+            """,
+            unsafe_allow_html=True,
+        )
 
         STRATEGY_META = {
             "parent_child":    {"label": "🆕 Parent-Child 계층형", "recommend": True,
@@ -468,7 +500,7 @@ def render_rag_library_page() -> None:
                     }}""",
                 ):
                     st.markdown(
-                        f'<div style="font-size:0.78rem;font-weight:700;color:#64748b">'
+                        f'<div class="rag-compare-title" style="font-size:0.78rem;font-weight:700;color:#64748b">'
                         f'{s_meta["label"]}{recommend_badge}</div>',
                         unsafe_allow_html=True,
                     )
@@ -494,7 +526,10 @@ def render_rag_library_page() -> None:
                         </div>""",
                         unsafe_allow_html=True,
                     )
-                    st.caption(s_meta["desc"])
+                    st.markdown(
+                        f'<div class="rag-compare-desc">{s_meta["desc"]}</div>',
+                        unsafe_allow_html=True,
+                    )
 
         st.markdown('<div style="height:14px"></div>', unsafe_allow_html=True)
 

@@ -113,6 +113,7 @@ class ChunkNode:
     page_no: int = 1
     semantic_group: str = ""  # 장(章) 또는 장 > 절(節) 그룹 (예: "제1장 총칙", "제3장 경비 유형별 기준 > 제1절 식대·접대비")
     merged_with: str | None = None  # 병합된 조문 번호 (ARTICLE 병합 시)
+    merged_articles: list[str] = field(default_factory=list)  # 병합에 포함된 원본 조문 번호 목록
     current_section: str = ""  # 절(節) 헤더 (검색/필터용 metadata 저장)
 
 
@@ -173,10 +174,29 @@ def _merge_short_articles(
 ) -> list[dict[str, Any]]:
     """
     길이가 parent_min 미만인 ARTICLE을 바로 다음 ARTICLE과 병합한다.
-    병합 규칙: body 길이 < parent_min이면 다음 조문과 병합; 마지막 조문이 짧으면 이전에 흡수.
+    병합 시 clauses 원소를 (marker, clause_text, source_article) 3-튜플로 정규화해
+    뒤 조문의 항이 앞 조문 번호로 귀속되는 왜곡을 방지한다.
     """
     if not articles:
         return articles
+
+    def _normalize_clauses(raw_clauses: list[Any], source_article: str) -> list[tuple[str, str, str]]:
+        out: list[tuple[str, str, str]] = []
+        for item in raw_clauses or []:
+            if not isinstance(item, tuple):
+                continue
+            if len(item) >= 3:
+                marker = str(item[0] or "")
+                clause_text = str(item[1] or "")
+                src_article = str(item[2] or source_article or "")
+            elif len(item) == 2:
+                marker = str(item[0] or "")
+                clause_text = str(item[1] or "")
+                src_article = source_article
+            else:
+                continue
+            out.append((marker, clause_text, src_article))
+        return out
 
     merged: list[dict[str, Any]] = []
     skip_next = False
@@ -190,13 +210,22 @@ def _merge_short_articles(
         body_len = len(body)
         has_next = i + 1 < len(articles)
 
+        art_article = str(art.get("regulation_article") or "")
+        art_clauses = _normalize_clauses(list(art.get("clauses") or []), art_article)
+
         if body_len < parent_min and has_next:
             next_art = articles[i + 1]
+            next_article = str(next_art.get("regulation_article") or "")
+            next_clauses = _normalize_clauses(list(next_art.get("clauses") or []), next_article)
             merged_title = f"{art.get('full_title') or art.get('regulation_article', '')} ~ {next_art.get('full_title') or next_art.get('regulation_article', '')}"
             merged_body = body + "\n\n" + (next_art.get("body") or "")
-            merged_clauses = list(art.get("clauses") or []) + list(next_art.get("clauses") or [])
+            merged_clauses = art_clauses + next_clauses
+            title_map = {
+                art_article: str(art.get("full_title") or art_article),
+                next_article: str(next_art.get("full_title") or next_article),
+            }
             merged.append({
-                "regulation_article": art.get("regulation_article"),
+                "regulation_article": art_article,
                 "full_title": merged_title,
                 "article_header": merged_title,
                 "body": merged_body,
@@ -206,15 +235,26 @@ def _merge_short_articles(
                 "current_section": art.get("current_section", ""),
                 "semantic_group": art.get("semantic_group", ""),
                 "merged_with": next_art.get("regulation_article"),
+                "merged_articles": [a for a in [art_article, next_article] if a],
+                "source_title_map": title_map,
             })
             skip_next = True
         elif body_len < parent_min and not has_next and merged:
             prev = merged[-1]
             prev["body"] = (prev.get("body") or "") + "\n\n" + body
-            prev["full_title"] = f"{prev.get('full_title', '')} ~ {art.get('full_title') or art.get('regulation_article', '')}"
-            prev["clauses"] = list(prev.get("clauses") or []) + list(art.get("clauses") or [])
+            prev["full_title"] = f"{prev.get('full_title', '')} ~ {art.get('full_title') or art_article}"
+            prev["clauses"] = list(prev.get("clauses") or []) + art_clauses
+            prev["merged_articles"] = list(prev.get("merged_articles") or []) + ([art_article] if art_article else [])
+            source_title_map = dict(prev.get("source_title_map") or {})
+            if art_article:
+                source_title_map[art_article] = str(art.get("full_title") or art_article)
+            prev["source_title_map"] = source_title_map
         else:
-            merged.append(dict(art))
+            entry = dict(art)
+            entry["clauses"] = art_clauses
+            entry["merged_articles"] = [art_article] if art_article else []
+            entry["source_title_map"] = {art_article: str(art.get("full_title") or art_article)} if art_article else {}
+            merged.append(entry)
 
     return merged
 
@@ -299,6 +339,8 @@ def hierarchical_chunk(text: str) -> list[ChunkNode]:
         semantic_group = art.get("semantic_group") or ""
         regulation_article = art.get("regulation_article")
         merged_with = art.get("merged_with")
+        merged_articles = list(art.get("merged_articles") or [])
+        source_title_map = dict(art.get("source_title_map") or {})
         clauses = art.get("clauses") or []
 
         article_full_text = f"{article_header}\n{body}".strip()
@@ -314,21 +356,37 @@ def hierarchical_chunk(text: str) -> list[ChunkNode]:
             chunk_index=chunk_index,
             semantic_group=semantic_group,
             merged_with=merged_with,
+            merged_articles=merged_articles,
             current_section=current_section,
         )
         chunk_index += 1
 
         if len(clauses) >= 2:
-            for marker, clause_text in clauses:
-                clause_chunk_text = f"{contextual_header}{marker} {clause_text}".strip()
+            for clause_item in clauses:
+                if isinstance(clause_item, tuple) and len(clause_item) >= 3:
+                    marker, clause_text, source_article = clause_item[:3]
+                elif isinstance(clause_item, tuple) and len(clause_item) == 2:
+                    marker, clause_text = clause_item
+                    source_article = regulation_article
+                else:
+                    continue
+                src_article = str(source_article or regulation_article or "")
+                source_title = str(source_title_map.get(src_article) or full_title or src_article)
+                source_contextual_header = _build_contextual_header(
+                    src_article,
+                    source_title,
+                    chapter_context=art.get("current_chapter") or "",
+                    section_context=art.get("current_section") or "",
+                )
+                clause_chunk_text = f"{source_contextual_header}{marker} {clause_text}".strip()
                 clause_node = ChunkNode(
                     node_type="CLAUSE",
-                    regulation_article=regulation_article,
+                    regulation_article=src_article or regulation_article,
                     regulation_clause=marker or None,
-                    parent_title=full_title,
+                    parent_title=source_title,
                     chunk_text=clause_chunk_text,
                     search_text=clause_text,
-                    contextual_header=contextual_header,
+                    contextual_header=source_contextual_header,
                     chunk_index=chunk_index,
                     semantic_group=semantic_group,
                     current_section=current_section,
