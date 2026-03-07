@@ -1,3 +1,7 @@
+"""
+에이전트 실행 도구(Tool) 등록 및 LangChain StructuredTool 노출.
+모든 capability는 LangChain tool로 통일
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -9,20 +13,25 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
 from agent.aura_bridge import run_legacy_aura_analysis
-from agent.tool_schemas import SkillContextInput
+from agent.tool_schemas import ToolContextInput
 from services.policy_service import search_policy_chunks
 from utils.config import settings
 
 
-SkillFn = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
+ToolFn = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
+
+
+def _tool_key(r: dict[str, Any]) -> str:
+    """도구 결과 봉투에서 도구 이름 추출 (tool/skill 하위 호환)."""
+    return str(r.get("tool") or r.get("skill") or "")
 
 
 @dataclass(slots=True)
-class AgentSkill:
+class AgentTool:
     name: str
     description: str
-    handler: SkillFn
-    display_summary_ko: str | None = None  # 발표용 한글 요약 (입력/출력 1~2문장). 없으면 자동 생성 fallback
+    handler: ToolFn
+    display_summary_ko: str | None = None  # 발표용 한글 요약
 
 
 async def holiday_compliance_probe(context: dict[str, Any]) -> dict[str, Any]:
@@ -31,7 +40,7 @@ async def holiday_compliance_probe(context: dict[str, Any]) -> dict[str, Any]:
     is_holiday = bool(body.get("isHoliday"))
     hr_status = body.get("hrStatus") or body.get("hrStatusRaw")
     return {
-        "skill": "holiday_compliance_probe",
+        "tool": "holiday_compliance_probe",
         "ok": True,
         "facts": {
             "occurredAt": occurred_at,
@@ -48,7 +57,7 @@ async def budget_risk_probe(context: dict[str, Any]) -> dict[str, Any]:
     amount = body.get("amount") or 0
     exceeded = bool(body.get("budgetExceeded"))
     return {
-        "skill": "budget_risk_probe",
+        "tool": "budget_risk_probe",
         "ok": True,
         "facts": {
             "amount": amount,
@@ -75,7 +84,7 @@ async def merchant_risk_probe(context: dict[str, Any]) -> dict[str, Any]:
 
     prior = context.get("prior_tool_results") or []
     holiday_facts = next(
-        ((result.get("facts") or {}) for result in prior if result.get("skill") == "holiday_compliance_probe"),
+        ((r.get("facts") or {}) for r in prior if _tool_key(r) == "holiday_compliance_probe"),
         {},
     )
     holiday_risk = bool(holiday_facts.get("holidayRisk"))
@@ -90,7 +99,7 @@ async def merchant_risk_probe(context: dict[str, Any]) -> dict[str, Any]:
     else:
         risk = base_risk
     return {
-        "skill": "merchant_risk_probe",
+        "tool": "merchant_risk_probe",
         "ok": True,
         "facts": {
             "mccCode": mcc,
@@ -110,7 +119,7 @@ async def document_evidence_probe(context: dict[str, Any]) -> dict[str, Any]:
     doc = (context["body_evidence"].get("document") or {})
     items = doc.get("items") or []
     return {
-        "skill": "document_evidence_probe",
+        "tool": "document_evidence_probe",
         "ok": True,
         "facts": {
             "lineItemCount": len(items),
@@ -137,13 +146,13 @@ async def policy_rulebook_probe(context: dict[str, Any]) -> dict[str, Any]:
     enriched_body = dict(context["body_evidence"])
 
     for result in prior:
-        skill = result.get("skill", "")
+        tkey = _tool_key(result)
         facts = result.get("facts") or {}
-        if skill == "holiday_compliance_probe" and facts.get("holidayRisk"):
+        if tkey == "holiday_compliance_probe" and facts.get("holidayRisk"):
             enriched_body["_enriched_holidayRisk"] = True
             if facts.get("hrStatus"):
                 enriched_body.setdefault("hrStatus", facts.get("hrStatus"))
-        elif skill == "merchant_risk_probe":
+        elif tkey == "merchant_risk_probe":
             m_risk = str(facts.get("merchantRisk") or "").upper()
             if m_risk in {"CRITICAL", "HIGH"}:
                 enriched_body["_enriched_merchantRisk"] = m_risk
@@ -151,27 +160,25 @@ async def policy_rulebook_probe(context: dict[str, Any]) -> dict[str, Any]:
 
     engine = create_engine(settings.database_url, future=True)
     with Session(engine) as db:
-        # Phase F/8: top-20 후보 확보 후 상위 5건만 채택. candidates는 별도 payload 저장용
         candidates = search_policy_chunks(db, enriched_body, limit=20)
         refs = []
         for r in candidates[:5]:
             ref = dict(r)
             ref["adoption_reason"] = _adoption_reason_for_ref(ref, enriched_body)
             refs.append(ref)
-        # 나머지 candidates도 adoption_reason 붙여서 저장 (후보 표시용)
         candidates_with_reason = []
         for r in candidates:
             ref = dict(r)
             ref.setdefault("adoption_reason", _adoption_reason_for_ref(ref, enriched_body))
             candidates_with_reason.append(ref)
     return {
-        "skill": "policy_rulebook_probe",
+        "tool": "policy_rulebook_probe",
         "ok": True,
         "facts": {
             "policy_refs": refs,
             "ref_count": len(refs),
             "retrieval_candidates": candidates_with_reason,
-            "enriched_from_prior": [r.get("skill") for r in prior],
+            "enriched_from_prior": [_tool_key(r) for r in prior],
         },
         "summary": (
             f"규정집에서 관련 조항 {len(refs)}건을 조회했습니다."
@@ -183,7 +190,7 @@ async def policy_rulebook_probe(context: dict[str, Any]) -> dict[str, Any]:
 async def legacy_aura_deep_audit(context: dict[str, Any]) -> dict[str, Any]:
     if not settings.enable_legacy_aura_specialist:
         return {
-            "skill": "legacy_aura_deep_audit",
+            "tool": "legacy_aura_deep_audit",
             "ok": True,
             "facts": {
                 "disabled": True,
@@ -207,7 +214,7 @@ async def legacy_aura_deep_audit(context: dict[str, Any]) -> dict[str, Any]:
             final_payload = payload
             break
     return {
-        "skill": "legacy_aura_deep_audit",
+        "tool": "legacy_aura_deep_audit",
         "ok": final_payload is not None,
         "facts": final_payload or {},
         "trace": trace,
@@ -215,39 +222,38 @@ async def legacy_aura_deep_audit(context: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-# Transitional: Phase A에서 LangChain tool schema로 승격. Phase C까지 registry direct dispatch 사용 후 ToolNode로 전환. (docs/work_info/phase0-prep.md)
-SKILL_REGISTRY: dict[str, AgentSkill] = {
-    "holiday_compliance_probe": AgentSkill(
+TOOL_REGISTRY: dict[str, AgentTool] = {
+    "holiday_compliance_probe": AgentTool(
         name="holiday_compliance_probe",
         description="휴일/휴무/연차 사용 정황을 검증한다.",
         handler=holiday_compliance_probe,
         display_summary_ko="입력: 전표 발생시각, 금액, 근태 상태. 출력: 휴일 여부, 판정 사유, 적용 규정 후보.",
     ),
-    "budget_risk_probe": AgentSkill(
+    "budget_risk_probe": AgentTool(
         name="budget_risk_probe",
         description="예산 초과 여부와 금액 지표를 검증한다.",
         handler=budget_risk_probe,
         display_summary_ko="입력: 전표 금액·예산 초과 플래그. 출력: 예산 초과 여부, 금액 지표.",
     ),
-    "merchant_risk_probe": AgentSkill(
+    "merchant_risk_probe": AgentTool(
         name="merchant_risk_probe",
         description="거래처와 가맹점 업종 코드(MCC) 기반 위험도를 검증한다.",
         handler=merchant_risk_probe,
         display_summary_ko="입력: 가맹점 업종 코드(MCC), 거래처 정보. 출력: 업종 위험도, 판정 근거.",
     ),
-    "document_evidence_probe": AgentSkill(
+    "document_evidence_probe": AgentTool(
         name="document_evidence_probe",
         description="전표 라인아이템과 문서 증거를 수집한다.",
         handler=document_evidence_probe,
         display_summary_ko="입력: 전표·문서. 출력: 라인 수, 라인아이템 요약.",
     ),
-    "policy_rulebook_probe": AgentSkill(
+    "policy_rulebook_probe": AgentTool(
         name="policy_rulebook_probe",
         description="내부 규정집에서 관련 조항을 조회한다.",
         handler=policy_rulebook_probe,
         display_summary_ko="입력: 케이스·키워드. 출력: 규정 후보, 채택 조항, adoption_reason.",
     ),
-    "legacy_aura_deep_audit": AgentSkill(
+    "legacy_aura_deep_audit": AgentTool(
         name="legacy_aura_deep_audit",
         description="기존 Aura 심층 분석을 전문 감사 툴로 호출한다.",
         handler=legacy_aura_deep_audit,
@@ -256,28 +262,28 @@ SKILL_REGISTRY: dict[str, AgentSkill] = {
 }
 
 
-def _make_langchain_tool(skill_name: str) -> StructuredTool:
-    """Phase A: LangChain StructuredTool로 스킬을 감싼다. 입력/출력 스키마 부여."""
-    skill = SKILL_REGISTRY[skill_name]
+def _make_langchain_tool(tool_name: str) -> StructuredTool:
+    """LangChain StructuredTool로 등록된 도구를 감싼다. 입력/출력 스키마 부여."""
+    entry = TOOL_REGISTRY[tool_name]
 
     async def _invoke(**kwargs: Any) -> dict[str, Any]:
-        inp = SkillContextInput.model_validate(kwargs)
+        inp = ToolContextInput.model_validate(kwargs)
         ctx: dict[str, Any] = {
             "case_id": inp.case_id,
             "body_evidence": inp.body_evidence,
             "intended_risk_type": inp.intended_risk_type,
             "prior_tool_results": inp.prior_tool_results,
         }
-        return await skill.handler(ctx)
+        return await entry.handler(ctx)
 
     return StructuredTool(
-        name=skill.name,
-        description=skill.description,
-        args_schema=SkillContextInput,
+        name=entry.name,
+        description=entry.description,
+        args_schema=ToolContextInput,
         coroutine=_invoke,
     )
 
 
 def get_langchain_tools() -> list[StructuredTool]:
-    """Phase A: 등록된 모든 스킬을 LangChain tool 목록으로 반환. Phase C에서 ToolNode 바인딩용."""
-    return [_make_langchain_tool(name) for name in SKILL_REGISTRY]
+    """등록된 모든 도구를 LangChain tool 목록으로 반환. execute 노드에서 이름으로 조회해 호출."""
+    return [_make_langchain_tool(name) for name in TOOL_REGISTRY]

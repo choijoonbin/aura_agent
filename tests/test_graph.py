@@ -71,22 +71,22 @@ class TestScoreEngine(unittest.TestCase):
     ):
         return [
             {
-                "skill": "holiday_compliance_probe",
+                "tool": "holiday_compliance_probe",
                 "ok": True,
                 "facts": {"holidayRisk": holiday_risk, "isHoliday": holiday_risk},
             },
             {
-                "skill": "merchant_risk_probe",
+                "tool": "merchant_risk_probe",
                 "ok": True,
                 "facts": {"merchantRisk": merchant_risk, "mccCode": "5813"},
             },
             {
-                "skill": "policy_rulebook_probe",
+                "tool": "policy_rulebook_probe",
                 "ok": True,
                 "facts": {"ref_count": ref_count, "policy_refs": [{}] * ref_count},
             },
             {
-                "skill": "document_evidence_probe",
+                "tool": "document_evidence_probe",
                 "ok": True,
                 "facts": {"lineItemCount": line_count},
             },
@@ -228,17 +228,17 @@ class TestVerificationTargets(unittest.TestCase):
             },
             "tool_results": [
                 {
-                    "skill": "holiday_compliance_probe",
+                    "tool": "holiday_compliance_probe",
                     "ok": True,
                     "facts": {"holidayRisk": h_risk, "isHoliday": holiday},
                 },
                 {
-                    "skill": "merchant_risk_probe",
+                    "tool": "merchant_risk_probe",
                     "ok": True,
                     "facts": {"merchantRisk": m_risk, "mccCode": mcc},
                 },
                 {
-                    "skill": "policy_rulebook_probe",
+                    "tool": "policy_rulebook_probe",
                     "ok": True,
                     "facts": {"ref_count": len(refs or []), "policy_refs": refs or []},
                 },
@@ -323,7 +323,7 @@ class TestToolCrossReference(unittest.TestCase):
 
     def _holiday_result(self, holiday_risk=True):
         return {
-            "skill": "holiday_compliance_probe",
+            "tool": "holiday_compliance_probe",
             "ok": True,
             "facts": {"holidayRisk": holiday_risk, "isHoliday": True, "hrStatus": "LEAVE"},
             "summary": "휴일/휴무/연차와 결제 시점을 교차 검증했습니다.",
@@ -331,7 +331,7 @@ class TestToolCrossReference(unittest.TestCase):
 
     def test_merchant_probe_upgrades_to_critical_on_holiday_compound(self):
         import asyncio
-        from agent.skills import merchant_risk_probe
+        from agent.agent_tools import merchant_risk_probe
 
         context = {
             "body_evidence": {"mccCode": "5813", "merchantName": "POC 심야 식대"},
@@ -344,7 +344,7 @@ class TestToolCrossReference(unittest.TestCase):
 
     def test_merchant_probe_no_upgrade_without_holiday(self):
         import asyncio
-        from agent.skills import merchant_risk_probe
+        from agent.agent_tools import merchant_risk_probe
 
         context = {
             "body_evidence": {"mccCode": "5813", "merchantName": "POC 식대"},
@@ -355,7 +355,7 @@ class TestToolCrossReference(unittest.TestCase):
 
     def test_merchant_probe_without_prior_works_normally(self):
         import asyncio
-        from agent.skills import merchant_risk_probe
+        from agent.agent_tools import merchant_risk_probe
 
         context = {
             "body_evidence": {"mccCode": "5813", "merchantName": "POC"},
@@ -364,20 +364,20 @@ class TestToolCrossReference(unittest.TestCase):
         result = asyncio.run(merchant_risk_probe(context))
         self.assertEqual(result["facts"]["merchantRisk"], "HIGH")
 
-    def test_skill_context_input_has_prior_field(self):
-        from agent.tool_schemas import SkillContextInput
+    def test_tool_context_input_has_prior_field(self):
+        from agent.tool_schemas import ToolContextInput
 
-        inp = SkillContextInput(
+        inp = ToolContextInput(
             case_id="C1",
             body_evidence={},
-            prior_tool_results=[{"skill": "test", "ok": True, "facts": {}, "summary": ""}],
+            prior_tool_results=[{"tool": "test", "ok": True, "facts": {}, "summary": ""}],
         )
         self.assertEqual(len(inp.prior_tool_results), 1)
 
-    def test_skill_context_input_prior_defaults_empty(self):
-        from agent.tool_schemas import SkillContextInput
+    def test_tool_context_input_prior_defaults_empty(self):
+        from agent.tool_schemas import ToolContextInput
 
-        inp = SkillContextInput(case_id="C1", body_evidence={})
+        inp = ToolContextInput(case_id="C1", body_evidence={})
         self.assertEqual(inp.prior_tool_results, [])
 
 
@@ -389,8 +389,8 @@ class TestPlanAchievement(unittest.TestCase):
 
         plan = [{"tool": "holiday_compliance_probe"}, {"tool": "merchant_risk_probe"}]
         results = [
-            {"skill": "holiday_compliance_probe", "ok": True, "facts": {}, "summary": ""},
-            {"skill": "merchant_risk_probe", "ok": True, "facts": {}, "summary": ""},
+            {"tool": "holiday_compliance_probe", "ok": True, "facts": {}, "summary": ""},
+            {"tool": "merchant_risk_probe", "ok": True, "facts": {}, "summary": ""},
         ]
         ach = _compute_plan_achievement(plan, results)
         self.assertEqual(ach["achievement_rate"], 1.0)
@@ -402,8 +402,8 @@ class TestPlanAchievement(unittest.TestCase):
 
         plan = [{"tool": "holiday_compliance_probe"}, {"tool": "merchant_risk_probe"}]
         results = [
-            {"skill": "holiday_compliance_probe", "ok": False, "facts": {}, "summary": ""},
-            {"skill": "merchant_risk_probe", "ok": True, "facts": {}, "summary": ""},
+            {"tool": "holiday_compliance_probe", "ok": False, "facts": {}, "summary": ""},
+            {"tool": "merchant_risk_probe", "ok": True, "facts": {}, "summary": ""},
         ]
         ach = _compute_plan_achievement(plan, results)
         self.assertEqual(ach["achievement_rate"], 0.5)
@@ -413,7 +413,7 @@ class TestPlanAchievement(unittest.TestCase):
         from agent.langgraph_agent import _compute_plan_achievement
 
         plan = [{"tool": "holiday_compliance_probe"}, {"tool": "legacy_aura_deep_audit"}]
-        results = [{"skill": "holiday_compliance_probe", "ok": True, "facts": {}, "summary": ""}]
+        results = [{"tool": "holiday_compliance_probe", "ok": True, "facts": {}, "summary": ""}]
         ach = _compute_plan_achievement(plan, results)
         self.assertEqual(ach["skipped"], 1)
 
@@ -430,14 +430,14 @@ class TestPlanAchievement(unittest.TestCase):
         }
 
         failed = [
-            {"skill": "holiday_compliance_probe", "ok": False, "facts": {}, "summary": ""},
-            {"skill": "merchant_risk_probe", "ok": False, "facts": {}, "summary": ""},
-            {"skill": "policy_rulebook_probe", "ok": False, "facts": {"ref_count": 0}, "summary": ""},
+            {"tool": "holiday_compliance_probe", "ok": False, "facts": {}, "summary": ""},
+            {"tool": "merchant_risk_probe", "ok": False, "facts": {}, "summary": ""},
+            {"tool": "policy_rulebook_probe", "ok": False, "facts": {"ref_count": 0}, "summary": ""},
         ]
         ok = [
-            {"skill": "holiday_compliance_probe", "ok": True, "facts": {}, "summary": ""},
-            {"skill": "merchant_risk_probe", "ok": True, "facts": {"merchantRisk": "LOW"}, "summary": ""},
-            {"skill": "policy_rulebook_probe", "ok": True, "facts": {"ref_count": 2}, "summary": ""},
+            {"tool": "holiday_compliance_probe", "ok": True, "facts": {}, "summary": ""},
+            {"tool": "merchant_risk_probe", "ok": True, "facts": {"merchantRisk": "LOW"}, "summary": ""},
+            {"tool": "policy_rulebook_probe", "ok": True, "facts": {"ref_count": 2}, "summary": ""},
         ]
         score_fail = _score(flags, failed)
         score_ok = _score(flags, ok)
@@ -455,10 +455,10 @@ class TestPlanAchievement(unittest.TestCase):
             "hasHitlResponse": False,
         }
         results = [
-            {"skill": "holiday_compliance_probe", "ok": True, "facts": {}, "summary": ""},
-            {"skill": "merchant_risk_probe", "ok": True, "facts": {}, "summary": ""},
-            {"skill": "policy_rulebook_probe", "ok": True, "facts": {"ref_count": 1}, "summary": ""},
-            {"skill": "document_evidence_probe", "ok": True, "facts": {"lineItemCount": 1}, "summary": ""},
+            {"tool": "holiday_compliance_probe", "ok": True, "facts": {}, "summary": ""},
+            {"tool": "merchant_risk_probe", "ok": True, "facts": {}, "summary": ""},
+            {"tool": "policy_rulebook_probe", "ok": True, "facts": {"ref_count": 1}, "summary": ""},
+            {"tool": "document_evidence_probe", "ok": True, "facts": {"lineItemCount": 1}, "summary": ""},
         ]
         result = _score(flags, results)
         self.assertTrue(

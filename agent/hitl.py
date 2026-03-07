@@ -43,7 +43,7 @@ def _label_hr_status(value: Any) -> str:
 
 def _extract_policy_refs(tool_results: list[dict[str, Any]], *, limit: int = 4) -> list[dict[str, Any]]:
     for result in tool_results:
-        if result.get("skill") != "policy_rulebook_probe":
+        if (result.get("tool") or result.get("skill")) != "policy_rulebook_probe":
             continue
         facts = result.get("facts") or {}
         refs = facts.get("policy_refs") or facts.get("retrieval_candidates") or []
@@ -53,7 +53,7 @@ def _extract_policy_refs(tool_results: list[dict[str, Any]], *, limit: int = 4) 
 
 def _extract_document_facts(tool_results: list[dict[str, Any]]) -> dict[str, Any]:
     for result in tool_results:
-        if result.get("skill") == "document_evidence_probe":
+        if (result.get("tool") or result.get("skill")) == "document_evidence_probe":
             return result.get("facts") or {}
     return {}
 

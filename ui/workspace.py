@@ -468,22 +468,26 @@ def fetch_case_bundle(voucher_key: str) -> dict[str, Any]:
     return latest
 
 
+def _tool_name(r: dict[str, Any]) -> str:
+    return str(r.get("tool") or r.get("skill") or "unknown")
+
+
 def summarize_tool_results(tool_results: list[dict[str, Any]]) -> list[dict[str, Any]]:
     cards: list[dict[str, Any]] = []
     for tool in tool_results:
-        skill = tool.get("skill") or "unknown"
+        tname = _tool_name(tool)
         facts = tool.get("facts") or {}
-        entry = {"skill": skill, "detail": tool.get("summary") or "-"}
-        if skill == "policy_rulebook_probe":
+        entry = {"tool": tname, "detail": tool.get("summary") or "-"}
+        if tname == "policy_rulebook_probe":
             refs = facts.get("policy_refs") or []
             entry.update(
                 metric_label="규정 근거",
                 metric_value=f"{len(refs)}건",
                 detail=", ".join(filter(None, [ref.get("article") for ref in refs[:3]])) or "-",
             )
-        elif skill == "document_evidence_probe":
+        elif tname == "document_evidence_probe":
             entry.update(metric_label="전표 라인", metric_value=f"{facts.get('lineItemCount', 0)}건", detail="수집 완료")
-        elif skill == "legacy_aura_deep_audit":
+        elif tname == "legacy_aura_deep_audit":
             entry.update(metric_label="전문감사", metric_value="실행", detail=((facts.get("reasonText") or facts.get("summary") or "-")[:80]))
         else:
             details = [f"{k}={facts.get(k)}" for k in ("holidayRisk", "budgetExceeded", "merchantRisk") if k in facts]
@@ -501,7 +505,7 @@ def render_tool_trace_summary(tool_results: list[dict[str, Any]]) -> None:
     for idx, card in enumerate(cards):
         with cols[idx % len(cols)]:
             with stylable_container(key=f"tool_summary_{idx}", css_styles="""{padding: 16px 18px; border-radius: 16px; border: 1px solid #e5e7eb; background: #fff; box-shadow: 0 8px 22px rgba(15,23,42,0.04); min-height: 158px;}"""):
-                st.caption(card["skill"])
+                st.caption(card["tool"])
                 st.markdown(f"**{card['metric_label']}**")
                 st.subheader(card["metric_value"])
                 st.caption(card["detail"])
@@ -937,7 +941,7 @@ def _extract_workspace_result_context(latest_bundle: dict[str, Any]) -> tuple[di
             screening_meta = payload.get("metadata") or {}
         if payload.get("event_type") == "TOOL_RESULT":
             meta = payload.get("metadata") or {}
-            if meta.get("skill") == "policy_rulebook_probe":
+            if (meta.get("tool") or meta.get("skill")) == "policy_rulebook_probe":
                 derived_policy_refs = ((meta.get("facts") or {}).get("policy_refs") or [])
     if not result.get("severity") and screening_meta.get("severity"):
         result["severity"] = screening_meta.get("severity")
@@ -1555,7 +1559,7 @@ def build_workspace_plan_steps(latest_bundle: dict[str, Any]) -> list[dict[str, 
     meta = {
         "screener": ("전표 분석 / 케이스 분류", "전표 데이터(발생 시각·근태·가맹점 업종 코드(MCC)·예산 등)를 분석해 위반 유형을 식별합니다."),
         "intake": ("입력 해석", "전표 입력값과 위험 지표를 정규화합니다."),
-        "planner": ("조사 계획 수립", "검증할 사실과 사용할 skill 순서를 계획합니다."),
+        "planner": ("조사 계획 수립", "검증할 사실과 사용할 도구 순서를 계획합니다."),
         "execute": ("근거 수집 실행", "휴일/예산/업종/전표/규정 근거를 실제로 조회합니다."),
         "critic": ("비판적 검토", "과잉 주장과 반례 가능성을 다시 점검합니다."),
         "verify": ("검증 및 HITL 판단", "자동 판정 가능 여부와 담당자 검토 필요 여부를 결정합니다."),
@@ -2035,7 +2039,7 @@ def render_workspace_results(latest_bundle: dict[str, Any], debug_mode: bool) ->
             screening_meta = payload.get("metadata") or {}
         if payload.get("event_type") == "TOOL_RESULT":
             meta = payload.get("metadata") or {}
-            if meta.get("skill") == "policy_rulebook_probe":
+            if (meta.get("tool") or meta.get("skill")) == "policy_rulebook_probe":
                 derived_policy_refs = ((meta.get("facts") or {}).get("policy_refs") or [])
 
     if not result.get("severity") and screening_meta.get("severity"):
@@ -2141,7 +2145,7 @@ def render_workspace_evidence_map(latest_bundle: dict[str, Any], debug_mode: boo
                 continue
             if payload.get("event_type") == "TOOL_RESULT":
                 meta = payload.get("metadata") or {}
-                if meta.get("skill") == "policy_rulebook_probe":
+                if (meta.get("tool") or meta.get("skill")) == "policy_rulebook_probe":
                     policy_refs = ((meta.get("facts") or {}).get("policy_refs") or [])
                     break
 

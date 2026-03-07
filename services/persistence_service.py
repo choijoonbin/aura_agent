@@ -20,7 +20,7 @@ def persist_analysis_result(db: Session, *, run_id: str, result_payload: dict[st
 
     rag_refs = []
     for tool in tool_results:
-        if tool.get("skill") == "policy_rulebook_probe":
+        if (tool.get("tool") or tool.get("skill")) == "policy_rulebook_probe":
             for ref in tool.get("facts", {}).get("policy_refs", []) or []:
                 rag_refs.append(ref)
 

@@ -24,8 +24,8 @@ from agent.output_models import (
     VerifierOutput,
 )
 from agent.screener import run_screening
-from agent.skills import get_langchain_tools
-from agent.tool_schemas import SkillContextInput
+from agent.agent_tools import get_langchain_tools
+from agent.tool_schemas import ToolContextInput
 from utils.config import settings
 
 # Phase C: plan 기반 도구 실행은 LangChain tool 호출로만 수행 (registry direct dispatch 제거)
@@ -442,8 +442,13 @@ def _voucher_summary_for_context(body_evidence: dict[str, Any]) -> str:
     return f"거래처 {merchant}, {amount_str}, {occurred}"
 
 
-def _find_tool_result(tool_results: list[dict[str, Any]], skill_name: str) -> dict[str, Any] | None:
-    return next((result for result in tool_results if result.get("skill") == skill_name), None)
+def _tool_result_key(r: dict[str, Any]) -> str:
+    """도구 결과 봉투에서 도구 이름 (tool/skill 하위 호환)."""
+    return str(r.get("tool") or r.get("skill") or "")
+
+
+def _find_tool_result(tool_results: list[dict[str, Any]], tool_name: str) -> dict[str, Any] | None:
+    return next((r for r in tool_results if _tool_result_key(r) == tool_name), None)
 
 
 def _top_policy_refs(tool_results: list[dict[str, Any]], limit: int = 2) -> list[dict[str, Any]]:
@@ -451,7 +456,7 @@ def _top_policy_refs(tool_results: list[dict[str, Any]], limit: int = 2) -> list
     return list(refs[:limit])
 
 
-def _should_skip_skill(step: dict[str, Any], *, state: AgentState, tool_results: list[dict[str, Any]]) -> tuple[bool, str | None]:
+def _should_skip_tool(step: dict[str, Any], *, state: AgentState, tool_results: list[dict[str, Any]]) -> tuple[bool, str | None]:
     tool = step["tool"]
     if tool != "legacy_aura_deep_audit":
         return False, None
@@ -640,7 +645,7 @@ def _compute_plan_achievement(
     tool_results: list[dict[str, Any]],
 ) -> dict[str, Any]:
     """planner 계획 대비 실제 실행 달성도를 계산한다."""
-    executed_map = {r.get("skill"): r for r in tool_results}
+    executed_map = {_tool_result_key(r): r for r in tool_results}
     planned_tools = [step.get("tool", "") for step in plan]
 
     step_results: list[dict[str, Any]] = []
@@ -761,7 +766,7 @@ def _score(flags: dict[str, Any], tool_results: list[dict[str, Any]]) -> dict[st
             reasons.append(f"전표 라인아이템 {line_count}건 확보")
             signals.append(ScoreSignalDetail(signal="lineItems", label=f"전표 라인 {line_count}건", raw_value=line_count, points=delta, category="evidence"))
 
-    if any(r.get("skill") == "legacy_aura_deep_audit" and r.get("facts") for r in tool_results):
+    if any(_tool_result_key(r) == "legacy_aura_deep_audit" and r.get("facts") for r in tool_results):
         tool_evidence_delta += 15.0
         reasons.append("심층 감사 결과 확보")
         signals.append(ScoreSignalDetail(signal="legacyAudit", label="심층 감사 결과", raw_value=True, points=15.0, category="evidence"))
@@ -1089,7 +1094,7 @@ async def execute_node(state: AgentState) -> AgentState:
     ]
     for step in state["plan"]:
         tool_name = step.get("tool", "")
-        skip, reason = _should_skip_skill(step, state=state, tool_results=tool_results)
+        skip, reason = _should_skip_tool(step, state=state, tool_results=tool_results)
         if skip:
             tool_obj = tools_by_name.get(tool_name)
             tool_description = getattr(tool_obj, "description", None) if tool_obj else None
@@ -1112,7 +1117,7 @@ async def execute_node(state: AgentState) -> AgentState:
         tool = tools_by_name.get(tool_name)
         if not tool:
             failed_tools.append(tool_name)
-            tool_results.append({"skill": tool_name, "ok": False, "facts": {}, "summary": f"알 수 없는 도구: {tool_name}"})
+            tool_results.append({"tool": tool_name, "ok": False, "facts": {}, "summary": f"알 수 없는 도구: {tool_name}"})
             continue
         tool_description = getattr(tool, "description", None) or ""
         step_reason = step.get("reason", "")
@@ -1129,7 +1134,7 @@ async def execute_node(state: AgentState) -> AgentState:
                 metadata={"reason": step_reason, "owner": step.get("owner"), "tool_description": tool_description},
             ).to_payload()
         )
-        inp = SkillContextInput(
+        inp = ToolContextInput(
             case_id=state["case_id"],
             body_evidence=state["body_evidence"],
             intended_risk_type=state.get("intended_risk_type"),
@@ -1137,7 +1142,7 @@ async def execute_node(state: AgentState) -> AgentState:
         )
         result = await tool.ainvoke(inp.model_dump())
         if not isinstance(result, dict):
-            result = {"skill": tool_name, "ok": False, "facts": {}, "summary": str(result)}
+            result = {"tool": tool_name, "ok": False, "facts": {}, "summary": str(result)}
         if not bool(result.get("ok")):
             failed_tools.append(tool_name)
         tool_results.append(result)
@@ -1167,7 +1172,7 @@ async def execute_node(state: AgentState) -> AgentState:
         "phase": "execute",
         "metadata": score,
     })
-    executed_tools = [str(result.get("skill") or "") for result in tool_results if result.get("skill")]
+    executed_tools = [_tool_result_key(r) for r in tool_results if _tool_result_key(r)]
     reasoning_parts = [
         f"{len(executed_tools)}개 도구를 실행해 정책점수 {score['policy_score']}점, 근거점수 {score['evidence_score']}점을 산출했다.",
         "수집된 도구 결과를 critic 단계의 반박 가능성 검토 입력으로 전달한다.",
@@ -1342,7 +1347,7 @@ def _build_verification_targets(state: AgentState) -> list[str]:
 
 
 async def critic_node(state: AgentState) -> AgentState:
-    legacy = next((r for r in state.get("tool_results", []) if r.get("skill") == "legacy_aura_deep_audit"), None)
+    legacy = next((r for r in state.get("tool_results", []) if _tool_result_key(r) == "legacy_aura_deep_audit"), None)
     missing = ((state["body_evidence"].get("dataQuality") or {}).get("missingFields") or [])
     critique = {
         "has_legacy_result": bool(legacy and legacy.get("facts")),
@@ -1367,7 +1372,7 @@ async def critic_node(state: AgentState) -> AgentState:
             "critic_feedback": replan_reason,
             "missing_fields": missing,
             "loop_count": loop_count + 1,
-            "previous_tool_results": [r.get("skill") for r in state.get("tool_results", [])],
+            "previous_tool_results": [_tool_result_key(r) for r in state.get("tool_results", [])],
         }
     verification_targets = _build_verification_targets(state)
     critic_output = CriticOutput(

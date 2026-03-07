@@ -7,7 +7,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 # ----- Planner -----
@@ -137,13 +137,12 @@ class ReporterSentence(BaseModel):
 class ReporterOutput(BaseModel):
     """리포터 노드 출력. 요약·판정·문장별 인용."""
 
+    model_config = ConfigDict(extra="allow")
+
     summary: str = Field(description="사용자용 요약")
     verdict: str = Field(default="", description="판정(예: HITL_REQUIRED, READY)")
     sentences: list[ReporterSentence] = Field(default_factory=list, description="문장별 보고 + 인용")
     reasoning: str = Field(default="", description="최종 판단에 이른 추론 과정(스트리밍용)")
-
-    class Config:
-        extra = "allow"
 
 
 # ----- Score Breakdown -----

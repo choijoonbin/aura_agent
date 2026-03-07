@@ -4,11 +4,11 @@ import json
 import streamlit as st
 
 from agent.langgraph_agent import build_agent_graph
-from agent.skills import SKILL_REGISTRY, get_langchain_tools
+from agent.agent_tools import TOOL_REGISTRY, get_langchain_tools
 from ui.api_client import get
 from ui.shared import (
     draw_agent_graph,
-    draw_skill_execution_graph,
+    draw_tool_execution_graph,
     fmt_dt,
     get_tool_display_summary_ko,
     render_empty_state,
@@ -19,7 +19,7 @@ from ui.shared import (
     stylable_container,
 )
 
-# draw_agent_graph / draw_skill_execution_graph 는 이제 PNG bytes를 반환 (graphviz dot 바이너리 불필요)
+# draw_agent_graph / draw_tool_execution_graph 는 이제 PNG bytes를 반환 (graphviz dot 바이너리 불필요)
 # @st.cache_data로 캐싱되므로 최초 1회만 matplotlib 렌더링, 이후 즉시 반환
 
 
@@ -38,7 +38,7 @@ def _get_agent_detail(agent_id: int) -> dict:
 def render_agent_studio_page() -> None:
     # 그래프 PNG를 미리 캐싱 (첫 방문 이후엔 즉시 반환)
     draw_agent_graph()
-    draw_skill_execution_graph()
+    draw_tool_execution_graph()
 
     render_page_header("에이전트 스튜디오", "에이전트 구조, 프롬프트, 런타임 스킬, 연결 지식을 한 화면에서 점검합니다.")
     agents = _get_agents()
@@ -95,18 +95,18 @@ def render_agent_studio_page() -> None:
             render_panel_header("런타임 도구", "실제 runtime graph에서 사용하는 LangChain tool 목록입니다.")
             st.caption("Phase C: execute 노드는 plan 기반으로 이 도구들을 호출합니다.")
             tools = get_langchain_tools()
-            skill_cols = st.columns(2)
+            tool_cols = st.columns(2)
             for idx, tool in enumerate(tools):
-                with skill_cols[idx % 2]:
+                with tool_cols[idx % 2]:
                     with stylable_container(
-                        key=f"skill_card_{getattr(tool, 'name', idx)}",
+                        key=f"tool_card_{getattr(tool, 'name', idx)}",
                         css_styles="""{padding: 14px 16px; border-radius: 16px; border: 1px solid #e5e7eb; background: rgba(255,255,255,0.98); box-shadow: 0 8px 22px rgba(15,23,42,0.04); min-height: 128px; margin-bottom: 0.7rem;}"""
                     ):
                         tool_name = getattr(tool, "name", "-")
                         st.caption("LangChain tool")
                         st.markdown(f"**{tool_name}**")
-                        skill = SKILL_REGISTRY.get(tool_name) if tool_name else None
-                        display_ko = get_tool_display_summary_ko(tool, getattr(skill, "display_summary_ko", None) if skill else None)
+                        tool_entry = TOOL_REGISTRY.get(tool_name) if tool_name else None
+                        display_ko = get_tool_display_summary_ko(tool, getattr(tool_entry, "display_summary_ko", None) if tool_entry else None)
                         st.write(display_ko)
                         with st.expander("원본 스키마 보기", expanded=False):
                             try:
@@ -136,14 +136,14 @@ def render_agent_studio_page() -> None:
                         ("#94a3b8", "상태 전이"),
                     ]
                 )
-                render_graph_image("메인 오케스트레이션 그래프", draw_agent_graph(), None, "상위 오케스트레이션: 전체 노드 흐름. 하위는 '스킬 실행 흐름' 탭에서 execute 노드 내부 도구 순서를 확인할 수 있습니다.")
+                render_graph_image("메인 오케스트레이션 그래프", draw_agent_graph(), None, "상위 오케스트레이션: 전체 노드 흐름. 하위는 '실행 도구 그래프' 탭에서 execute 노드 내부 도구 순서를 확인할 수 있습니다.")
                 st.markdown("""
 **단계별 설명**
 
 1. **START**: 분석 런 시작
 2. **Intake Agent**: 전표 입력과 위험 지표 정규화
 3. **Planner Agent**: 조사 계획과 tool 순서 수립
-4. **Execute Agent**: 실제 skill/tool 호출
+4. **Execute Agent**: 실제 LangChain tool 호출
 5. **Critic Agent**: 과잉 주장과 반례 검토
 6. **Verifier Agent**: 자동 판정 가능 여부 검증
 7. **HITL Review**: 담당자 검토 필요 시 개입
@@ -158,7 +158,7 @@ def render_agent_studio_page() -> None:
                         ("#94a3b8", "실행/집계 흐름"),
                     ]
                 )
-                render_graph_image("실행 스킬 그래프", draw_skill_execution_graph(), None, "하위 실행 스킬 그래프: execute 노드 내부에서 호출되는 런타임 skill 순서입니다.")
+                render_graph_image("실행 도구 그래프", draw_tool_execution_graph(), None, "하위 실행 도구 그래프: execute 노드 내부에서 호출되는 LangChain tool 순서입니다.")
                 st.markdown("""
 **단계별 설명**
 

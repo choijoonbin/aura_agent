@@ -6,28 +6,31 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
-class SkillContextInput(BaseModel):
-    """스킬 호출 시 공통 입력. LangChain tool input schema."""
+class ToolContextInput(BaseModel):
+    """도구 호출 시 공통 입력. LangChain tool input schema."""
 
     case_id: str = Field(description="분석 대상 케이스 ID")
     body_evidence: dict[str, Any] = Field(default_factory=dict, description="전표/입력 증거 (occurredAt, amount, mccCode, document 등)")
     intended_risk_type: str | None = Field(default=None, description="스크리닝된 위험 유형")
     prior_tool_results: list[dict[str, Any]] = Field(
         default_factory=list,
-        description="현재 도구 호출 이전에 완료된 도구 결과 목록 (상호참조용). 각 원소는 {skill, ok, facts, summary} 형태.",
+        description="현재 도구 호출 이전에 완료된 도구 결과 목록 (상호참조용). 각 원소는 {tool, ok, facts, summary} 형태.",
     )
 
 
-class ToolResultEnvelope(BaseModel):
-    """스킬 실행 결과 공통 봉투. LangChain tool result schema."""
+# 하위 호환: 기존 import 유지
+SkillContextInput = ToolContextInput
 
-    skill: str = Field(description="실행된 스킬 이름")
+
+class ToolResultEnvelope(BaseModel):
+    """도구 실행 결과 공통 봉투. LangChain tool result schema."""
+
+    model_config = ConfigDict(populate_by_name=True, extra="allow")
+
+    tool: str = Field(description="실행된 도구 이름", alias="skill")
     ok: bool = Field(description="실행 성공 여부")
     facts: dict[str, Any] = Field(default_factory=dict, description="수집된 사실/증거")
     summary: str = Field(default="", description="한 줄 요약")
-
-    class Config:
-        extra = "allow"  # trace 등 추가 필드 허용

@@ -15,6 +15,7 @@
 - [Langfuse 통합](#-langfuse-통합)
 - [사용 예시](#-사용-예시)
 - [주의사항](#-주의사항)
+- [기초 문서 (docs/Edu)](#-기초-문서-docsedu)
 
 ## 🎯 프로젝트 개요
 
@@ -27,7 +28,7 @@
 3. **에이전트형 오케스트레이션**: LangGraph 기반 자율형 에이전트 런타임
 4. **실시간 이벤트 스트리밍**: SSE로 에이전트 사고/행동/관찰 이벤트 전달
 5. **HITL 통합**: 구조화된 HITL 요청 및 사람 검토 응답 후 재분석(resume) 흐름
-6. **증거 기반 판단**: 규정·전표 기반 근거 수집, 전문 분석 도구(skill) 호출
+6. **증거 기반 판단**: 규정·전표 기반 근거 수집, 전문 분석 도구(tool) 호출
 
 ## ✨ 주요 기능
 
@@ -45,18 +46,18 @@
 **Phase 1 — 심층 분석 (Analysis)**
 - **intake**: 전표 입력 정규화, 스크리닝 결과 기반 데이터 확정
 - **planner**: 케이스 유형별 조사 계획 수립 및 도구 선택
-- **execute**: skill/tool 순차 실행 (policy_rulebook_probe, document_evidence_probe 등)
+- **execute**: LangChain tool 순차 실행 (policy_rulebook_probe, document_evidence_probe 등)
 - **critic**: tool 결과 기반 과잉 주장·반례 검토
 - **verify**: 점수 산정, HITL 필요 여부 판단
 - **hitl_pause** (HITL 시): 사람 검토 대기(interrupt), 응답 후 같은 run으로 resume
 - **reporter**: 최종 설명 문장·요약 생성
-- **finalize**: 최종 결과 생성 및 근거 기반 설명
+- **finalizer**: 최종 결과 생성 및 근거 기반 설명
 
-> 참고: [`agent/screener.py`](agent/screener.py) — 결정론적 스크리닝 엔진  
-> 참고: [`agent/langgraph_agent.py`](agent/langgraph_agent.py) — 메인 그래프 노드 구현  
-> 참고: [docs/work_info/langgraph.md](docs/work_info/langgraph.md) — 오케스트레이션 흐름·노드별 역할 (에이전트 스튜디오 그래프와 동일)
+| 관련 기초 문서 | [Langgraph_Logic.md](docs/Edu/Langgraph_Logic.md) |
+|----------------|---------------------------------------------------|
+| 코드 참고 | [`agent/screener.py`](agent/screener.py), [`agent/langgraph_agent.py`](agent/langgraph_agent.py) |
 
-### 2. Skill 기반 도구 확장
+### 2. Tool 기반 도구 확장 (LangChain StructuredTool)
 - **policy_rulebook_probe**: 내부 규정집 조항 조회, 키워드 후보 수집 → 조항 단위 그룹화 → 문맥 확장
 - **document_evidence_probe**: 전표 증거 수집
 - **holiday_compliance_probe**: 휴일/휴무 리스크 확인
@@ -64,51 +65,46 @@
 - **merchant_risk_probe**: 업종/가맹점 업종 코드(MCC) 위험 확인
 - **legacy_aura_deep_audit**: 기존 Aura 심층 분석 파이프라인 호출 (선택적)
 
-> 참고: [`agent/skills.py`](agent/skills.py#L130) — SKILL_REGISTRY 및 각 skill 구현
+| 관련 기초 문서 | [Langgraph_Logic.md](docs/Edu/Langgraph_Logic.md) §4 |
+|----------------|------------------------------------------------------|
+| 코드 참고 | [`agent/agent_tools.py`](agent/agent_tools.py) |
 
 ### 3. HITL (Human-in-the-Loop)
 - **구조화된 HITL 요청**: `hitl_request`, `reasons`, `questions`, `handoff` 필드
 - **HITL 필수 조건**: 핵심 필드 누락, 증거 부족, 규정 해석 모호, specialist 결과 충돌 시
-- **재분석 흐름**: 사람 검토 응답 제출 후 **같은 run**에서 재평가 및 최종 확정. API 응답의 `resumed_run_id`는 **새 run이 아니라 동일 run_id**를 그대로 반환한다.
+- **재분석 흐름**: 사람 검토 응답 제출 후 **같은 run**에서 재평가 및 최종 확정. `resumed_run_id`는 동일 `run_id`를 반환한다.
 
-> 참고: [`agent/hitl.py`](agent/hitl.py#L6) — HITL 승격 판단, [`main.py`](main.py#L223-L290) — HITL 응답 제출 API
+| 관련 기초 문서 | [HITL Logic.md](docs/Edu/HITL%20Logic.md) |
+|----------------|-------------------------------------------|
+| 코드 참고 | [`agent/hitl.py`](agent/hitl.py), [`main.py`](main.py) — HITL 응답 API |
 
 ### 4. SSE 실시간 이벤트 스트리밍
-- **NODE_START / NODE_END**: 노드 시작·종료
-- **PLAN_READY**: 조사 계획 확정
-- **TOOL_CALL / TOOL_RESULT**: 도구 호출 및 결과
-- **GATE_APPLIED**: 검증 게이트 적용
-- **HITL_REQUESTED**: HITL 승격
+- **NODE_START / NODE_END**, **PLAN_READY**, **TOOL_CALL / TOOL_RESULT**, **GATE_APPLIED**, **HITL_REQUESTED** 등 구조화 이벤트를 스트림으로 전달.
 
-> 참고: [`agent/event_schema.py`](agent/event_schema.py#L9) — AgentEvent 스키마, [`main.py`](main.py#L380-L405) — SSE 스트림 API
+| 코드 참고 | [`agent/event_schema.py`](agent/event_schema.py), [`main.py`](main.py) — SSE 스트림 |
+|-----------|-------------------------------------------------------------------------------------|
 
 ### 5. Streamlit 통합 UI
-- **AI 워크스페이스**: 전표 선택, 분석 실행, 실시간 사고 흐름 탭, HITL 응답
-- **에이전트 스튜디오**: 에이전트 모델/프롬프트/도구/지식 설정. 그래프는 **상위 오케스트레이션 그래프**(메인 노드 흐름)와 **하위 실행 스킬 그래프**(execute 노드 내부 도구 순서)로 구분되어 [docs/work_info/langgraph.md](docs/work_info/langgraph.md)와 동일합니다.
+| 화면 | 설명 |
+|------|------|
+| **AI 워크스페이스** | 전표 선택, 분석 실행, 실시간 사고 흐름, HITL 응답, 결과·근거 확인 |
+| **에이전트 스튜디오** | 오케스트레이션·실행 도구 그래프, 모델/도구 설정 |
+| **규정문서 라이브러리** | RAG 문서 인덱싱, 청킹 실험실, 품질 리포트 |
+| **시연 데이터 제어** | 시나리오별 전표 생성/삭제 |
 
-**발표용 화면 정의 (문서·화면 동기화)**  
-- **에이전트 대화**: 실제 LangGraph 실행 중 공개 가능한 작업 메모 스트림  
-- **사고 과정**: 실행 후 같은 이벤트를 노드 기준으로 구조화한 리뷰 화면  
-- **결과**: 최종 판단 + 규정 근거 + 검증 메모 + run diagnostics
-- **규정문서 라이브러리**: RAG 문서 인덱싱, 품질 리포트, 청크 목록
-- **시연 데이터 제어**: 대표 시나리오 생성/삭제, 시연 전표 관리
+스트림 UI는 이벤트 타입별 아이콘, 노드별 reasoning 표시, 도구 툴팁, KST 날짜 형식을 사용하며, 완료 후 타임라인 재조회로 접기/펼치기가 가능하다.
 
-> 참고: [`app.py`](app.py#L1192) — AI 워크스페이스, [`app.py`](app.py#L1332) — 에이전트 스튜디오, [`app.py`](app.py#L1479) — 규정문서 라이브러리, [`app.py`](app.py#L1607) — 시연 데이터 제어
-
-**에이전트 스트림 UI (아이콘·문구·날짜)**  
-- **아이콘 구분**: 이벤트 타입별 아이콘 매핑(`EVENT_ICON_MAP`)으로 표시합니다. (`NODE_START`=🤖, `TOOL_CALL`=⚡, `TOOL_RESULT`=📊, `SCORE_BREAKDOWN`=📈 등)  
-- **추론 문구**: 각 노드(planner, critic, verifier, reporter 등)의 **실제 추론 결과**(`reasoning` 필드)를 스트림으로 전달합니다. `agent/langgraph_agent.py`에서 `THINKING_TOKEN`(단어 단위)과 `THINKING_DONE` 이벤트로 내보내며, UI(`ui/workspace.py`)에서는 이를 받아 추론 카드에 타이핑 효과로 표시합니다. `agent/reasoning_notes.py`의 `extract_reasoning()`으로 노드 출력에서 reasoning을 추출합니다.
-- **캡션·도구**: TOOL_CALL/TOOL_RESULT/TOOL_SKIPPED는 `노드 / TOOL_CALL: 도구명` 형식으로 표시합니다. 도구명에 마우스를 올리면 `agent/skills.py`의 해당 도구 **description**이 툴팁으로 표시됩니다.
-- **LLM 라벨**: 상단에 1회 표시합니다. 환경변수 **REASONING_LLM_LABEL**(기본 `OpenAI gpt-5`)을 사용합니다.  
-- **날짜 형식**: UI에서는 모두 **한국 시간(KST) yyyy-mm-dd hh:mm:ss**로 표시합니다 (`ui/shared.py`의 `fmt_dt_korea()`).  
-- **스트림 vs 조회 데이터**: 분석 시작 시 SSE 스트림으로 이벤트를 표시하고, 완료 후 같은 화면에서 최신 run 이벤트를 재조회해 노드별 접기/펼치기 타임라인으로 유지합니다(강제 rerun로 인한 화면 단절 없음).  
+| 코드 참고 | [`app.py`](app.py), [`ui/workspace.py`](ui/workspace.py), [`ui/shared.py`](ui/shared.py) |
+|-----------|---------------------------------------------------------------------------------------|
 
 ### 6. RAG 규정집 통합
-- 규정집 계층형 후보 수집 및 조항 재정렬
-- 청킹 실험실: TXT 업로드, 하이브리드/조항 우선/슬라이딩 윈도우 전략
-- 문서메타, 품질 리포트, 청크 목록 조회
+- 규정집 계층형 후보 수집·조항 재정렬·문맥 확장
+- 청킹 실험실: TXT 업로드, 전략별 미리보기(계층/조항/슬라이딩)
+- 문서 메타, 품질 리포트, 청크 목록 조회
 
-> 참고: [`services/policy_service.py`](services/policy_service.py) — 규정집 후보 수집/조항 재정렬, [`services/rag_library_service.py`](services/rag_library_service.py) — RAG 문서 라이브러리, [`services/rag_chunk_lab_service.py`](services/rag_chunk_lab_service.py) — 청킹 실험실
+| 관련 기초 문서 | [Chunk Logic.md](docs/Edu/Chunk%20Logic.md) |
+|----------------|---------------------------------------------|
+| 코드 참고 | [`services/policy_service.py`](services/policy_service.py), [`services/rag_chunk_lab_service.py`](services/rag_chunk_lab_service.py), [`services/chunking_pipeline.py`](services/chunking_pipeline.py) |
 
 ### 7. BE(dwp-backend)·Aura 정합성
 - **케이스 목록 데이터**: 전표(fi_doc_header, fi_doc_item)를 기준으로 조회하고, 배지용 값(상태·심각도·유형)은 agent_case와 LEFT OUTER JOIN으로 가져옵니다. 스크리닝 전에는 case_type/severity가 없어 "미분류/낮음"으로 표시됩니다.
@@ -129,7 +125,7 @@ AuraAgent/
 │   ├── __init__.py
 │   ├── langgraph_agent.py       # LangGraph 기반 주 오케스트레이터
 │   ├── native_agent.py          # LangGraph 미사용 fallback 런타임
-│   ├── skills.py                # skill registry 및 specialist tool 구현
+│   ├── agent_tools.py           # LangChain Tool 등록 및 probe 구현
 │   ├── hitl.py                  # HITL 승격 판단 규칙
 │   ├── aura_bridge.py           # 기존 Aura analysis_pipeline 브리지
 │   └── event_schema.py          # 에이전트 이벤트 스키마
@@ -147,9 +143,10 @@ AuraAgent/
 │   ├── case_service.py          # 전표/분석 payload 조립
 │   ├── demo_data_service.py     # 시연용 데이터 제어
 │   ├── stream_runtime.py        # 메모리 기반 run/timeline/result 저장
-│   ├── policy_service.py        # 규정집 계층형 후보 수집/조항 재정렬/문맥 확장
+│   ├── policy_service.py        # 규정집 검색(BM25/Dense/RRF/Rerank)
 │   ├── rag_library_service.py   # RAG 문서 라이브러리
-│   ├── rag_chunk_lab_service.py # 청킹 실험실
+│   ├── rag_chunk_lab_service.py # 청킹 전략·계층 파싱
+│   ├── chunking_pipeline.py     # 청킹→저장→임베딩 파이프라인
 │   ├── agent_studio_service.py  # 에이전트 스튜디오 API
 │   ├── persistence_service.py   # 분석 결과 영속화
 │   ├── runtime_persistence_service.py
@@ -165,7 +162,7 @@ AuraAgent/
 └── README.md
 ```
 
-> 참고: [`main.py`](main.py) — FastAPI 엔트리, [`app.py`](app.py) — Streamlit 엔트리
+상세 동작·아키텍처는 [기초 문서 (docs/Edu)](#-기초-문서-docsedu)를 참고한다.
 
 ## 🛠 기술 스택
 
@@ -181,14 +178,15 @@ AuraAgent/
 - **Streamlit** (1.42.0+): 웹 UI 프레임워크
 
 ### 기타
-- **Graphviz**: 그래프 시각화
+- **matplotlib/networkx**: 그래프 시각화(서버 내 PNG 렌더)
 - **httpx**: HTTP 클라이언트
 - **python-dotenv**: 환경 변수 로드
 
 ### 데이터베이스
 - **PostgreSQL**: 기존 `dwp_aura` 스키마 재사용
 
-> 참고: [`requirements.txt`](requirements.txt) — Python 의존성 목록
+| 코드 참고 | [`requirements.txt`](requirements.txt) |
+|-----------|---------------------------------------|
 
 ## 🔄 동작 원리
 
@@ -196,45 +194,54 @@ AuraAgent/
 
 ```mermaid
 graph TD
-    Start([시작]) --> Intake[intake: 입력 정규화]
+    Start([시작]) --> Screener[screener: 유형 스크리닝]
+    Screener --> Intake[intake: 입력 정규화]
     Intake --> Planner[planner: 조사 계획 수립]
-    Planner --> Execute[execute: skill/tool 실행]
-    Execute --> Verify[verify: 점수·HITL 판단]
-    Verify --> Finalize[finalize: 최종 결과]
-    Finalize --> End([종료])
-    
-    Verify -->|HITL 필요| HITL[HITL 요청]
-    HITL -->|응답 제출| Resume[재분석]
-    Resume --> Finalize
+    Planner --> Execute[execute: LangChain tool 실행]
+    Execute --> Critic[critic: 반례/과잉 주장 점검]
+    Critic --> Verify[verify: 게이트 + HITL 판단]
+    Verify -->|HITL 필요| HitlPause[hitl_pause: interrupt]
+    HitlPause -->|응답 제출| Resume[Command(resume)]
+    Resume --> Reporter[reporter: 설명/요약]
+    Verify -->|자동 진행| Reporter
+    Reporter --> Finalizer[finalizer: 최종 확정]
+    Finalizer --> End([종료])
     
     style Intake fill:#e1f5ff
     style Planner fill:#e1f5ff
     style Execute fill:#fff4e1
+    style Critic fill:#e8f5e9
     style Verify fill:#e8f5e9
-    style Finalize fill:#f3e5f5
-    style HITL fill:#ffebee
+    style Reporter fill:#f3e5f5
+    style HitlPause fill:#ffebee
 ```
 
-> 참고: [`agent/langgraph_agent.py`](agent/langgraph_agent.py#L346-L363) — `build_agent_graph` 그래프 정의
+| 관련 기초 문서 | [Langgraph_Logic.md](docs/Edu/Langgraph_Logic.md) §2–3 |
+|----------------|--------------------------------------------------------|
 
 ### 2. Agent 노드 상세
 
 | 노드 | 역할 | 출력 |
 |------|------|------|
+| **screener** | 전표 원시 데이터에서 케이스 유형 분류 | `screening_result`, `intended_risk_type` |
 | **intake** | 전표 입력 정규화, flags 추출 | `flags`, `pending_events` |
 | **planner** | 위험 유형별 조사 계획 수립 | `plan`, `pending_events` |
-| **execute** | skill 순차 호출, 점수 산정 | `tool_results`, `score_breakdown`, `pending_events` |
-| **verify** | HITL 필요 여부 판단 | `hitl_request` 또는 null, `verification` |
-| **finalize** | 근거 기반 최종 설명 생성 | `final_result` |
+| **execute** | LangChain tool 순차 호출, 점수 산정 | `tool_results`, `score_breakdown`, `pending_events` |
+| **critic** | 과잉 주장·반례 검토, 재계획 여부 | `critic_output`, `replan_context` |
+| **verify** | 게이트 적용 + HITL 승격 판단 | `hitl_request` 또는 null, `verification` |
+| **hitl_pause** | HITL 시 interrupt, 재개 시 `hitlResponse` 반영 | — |
+| **reporter** | 근거 기반 최종 설명/요약 생성 | `final_result` |
+| **finalizer** | 상태·점수·이력 최종 확정 | `final_result` |
 
-### 3. Skill 선택 흐름
+### 3. Tool 선택 흐름 (plan 기반)
 
 - **휴일/휴무**: `holiday_compliance_probe`
 - **예산 초과**: `budget_risk_probe`
 - **가맹점 업종 코드(MCC)/업종**: `merchant_risk_probe`
 - **공통**: `document_evidence_probe` → `policy_rulebook_probe` → `legacy_aura_deep_audit` (조건부 생략 가능)
 
-> 참고: [`agent/langgraph_agent.py`](agent/langgraph_agent.py#L126-L137) — `_plan_from_flags` 도구 선택 로직
+| 관련 기초 문서 | [Langgraph_Logic.md](docs/Edu/Langgraph_Logic.md) §5 |
+|----------------|--------------------------------------------------------|
 
 ### 4. SSE 이벤트 구조
 
@@ -245,7 +252,8 @@ graph TD
 {"event_type": "HITL_REQUESTED", "node": "verify", "phase": "verify", "metadata": {"hitl_request": {...}}}
 ```
 
-> 참고: [`agent/event_schema.py`](agent/event_schema.py) — 이벤트 페이로드 구조
+| 코드 참고 | [`agent/event_schema.py`](agent/event_schema.py) |
+|-----------|--------------------------------------------------|
 
 ## 🚀 설치 및 실행
 
@@ -267,7 +275,8 @@ pip install -r requirements.txt
 pip install torch sentence-transformers
 ```
 
-> 참고: [`services/retrieval_quality.py`](services/retrieval_quality.py) — `rerank_with_cross_encoder()`, [`services/policy_service.py`](services/policy_service.py) — `search_policy_chunks()` 내 rerank 호출
+| 코드 참고 | [`services/retrieval_quality.py`](services/retrieval_quality.py), [`services/policy_service.py`](services/policy_service.py) |
+|-----------|------------------------------------------------------------------------------------------------------------------------|
 
 ### 2. 환경 변수 설정
 
@@ -302,7 +311,8 @@ Streamlit 앱은 `http://localhost:8502`에서 실행됩니다.
 | Streamlit UI | http://localhost:8502 |
 | FastAPI Swagger | http://localhost:8010/docs |
 
-> 참고: [`main.py`](main.py) — FastAPI 앱, [`app.py`](app.py) — Streamlit 앱
+| 코드 참고 | [`main.py`](main.py), [`app.py`](app.py) |
+|-----------|----------------------------------------|
 
 ### 5. 테스트 실행
 
@@ -312,7 +322,8 @@ Streamlit 앱은 `http://localhost:8502`에서 실행됩니다.
 pytest tests/ -v
 ```
 
-> 참고: [`docs/work_info/langgraph-langchain-comparison.md`](docs/work_info/langgraph-langchain-comparison.md) Section 8.13 테스트 전략, [`tests/`](tests/) — test_graph, test_tool_schema, test_interrupt_resume, test_citation_binding
+| 코드 참고 | [`tests/`](tests/) — test_graph, test_tool_schema, test_interrupt_resume, test_citation_binding |
+|-----------|------------------------------------------------------------------------------------------------|
 
 ## ⚙️ 환경 변수 설정
 
@@ -387,7 +398,8 @@ OPENAI_EMBEDDING_MAX_RETRIES=3
 | `RAG_EMBEDDING_COLUMN` | rag_chunk 임베딩 컬럼 | embedding_az |
 | `RAG_EMBEDDING_CAST_TYPE` | 쿼리/저장 캐스팅 타입(`vector`/`halfvec`) | halfvec |
 
-> 참고: [`.env.example`](.env.example) — 환경 변수 예시, [`utils/config.py`](utils/config.py) — 설정 로드
+| 코드 참고 | [`.env.example`](.env.example), [`utils/config.py`](utils/config.py) |
+|-----------|---------------------------------------------------------------------|
 
 ## 🔍 Langfuse 통합
 
@@ -399,7 +411,8 @@ OPENAI_EMBEDDING_MAX_RETRIES=3
 4. **분석 실행**: AI 워크스페이스에서 분석 실행 시 `run_id`가 세션 ID로 전달되어 대시보드에서 run별로 조회 가능
 5. **비활성화**: `LANGFUSE_ENABLED=false`(기본값)이면 전송하지 않음
 
-> 참고: [`utils/config.py`](utils/config.py) — `get_langfuse_handler`, [`agent/langgraph_agent.py`](agent/langgraph_agent.py) — astream config에 callbacks 전달
+| 코드 참고 | [`utils/config.py`](utils/config.py), [`agent/langgraph_agent.py`](agent/langgraph_agent.py) |
+|-----------|--------------------------------------------------------------------------------------------|
 
 ## 📡 API 엔드포인트
 
@@ -428,7 +441,8 @@ OPENAI_EMBEDDING_MAX_RETRIES=3
 - **POST** `/api/v1/demo/seed?scenario=...&count=10` — 시연 데이터 생성
 - **DELETE** `/api/v1/demo/seed` — 시연 데이터 전체 삭제
 
-> 참고: [`main.py`](main.py#L40) — 헬스 체크, [`main.py`](main.py#L54-L181) — 전표/분석 API, [`main.py`](main.py#L64-L90) — RAG/에이전트 API, [`main.py`](main.py#L407-L428) — 시연 데이터 API
+| 코드 참고 | [`main.py`](main.py) — 전표/분석/RAG/시연 API |
+|-----------|---------------------------------------------|
 
 ## 📝 사용 예시
 
@@ -470,17 +484,26 @@ with requests.get(
 - **HITL resume**: `MemorySaver` 기반이므로 **같은 프로세스/세션**에서만 유효합니다. 서버 재기동 후에는 이전 run의 interrupt 상태가 사라져 해당 run으로의 resume는 불가합니다.
 - **Aura 연동**: `AURA_PLATFORM_PATH`가 설정된 경우에만 legacy Aura 심층 분석 도구 사용 가능
 
-> 참고: [`db/models.py`](db/models.py) — DB 스키마, [`services/stream_runtime.py`](services/stream_runtime.py) — 메모리 기반 런타임, [`agent/aura_bridge.py`](agent/aura_bridge.py) — Aura 연동
+| 코드 참고 | [`db/models.py`](db/models.py), [`services/stream_runtime.py`](services/stream_runtime.py), [`agent/aura_bridge.py`](agent/aura_bridge.py) |
+|-----------|--------------------------------------------------------------------------------------------------------------------------------------|
 
 ## 🧪 다음 고도화 후보
 
 1. DB 영속 저장 기반 run history 정교화
-2. 규정/RAG 인덱스 직접 조회 툴 확장
-3. specialist tool 세분화
+2. 규정/RAG 인덱스 직접 조회 도구 확장
+3. 도구(tool) 세분화 및 planner 기반 동적 선택
 4. 사용자/검토자 협업 히스토리 UI 고도화
 5. shadow 비교 실험용 기능 재도입 (선택)
 
-> 참고: [`services/persistence_service.py`](services/persistence_service.py) — 분석 결과 영속화, [`services/case_service.py`](services/case_service.py) — 전표/케이스 처리
+## 📚 기초 문서 (docs/Edu)
+
+동작·프로세스·아키텍처의 **기준 설명 자료**는 `docs/Edu/`에 있으며, 시연/설명회 및 온보딩 시 README와 함께 참고한다.
+
+| 문서 | 내용 |
+|------|------|
+| [HITL Logic.md](docs/Edu/HITL%20Logic.md) | HITL 라이프사이클, 중단 시 저장 데이터, 재개 시 로드·이어하기, API·UI 흐름 |
+| [Chunk Logic.md](docs/Edu/Chunk%20Logic.md) | 규정집 RAG 청킹 전략, 계층 구조, 파이프라인(저장·임베딩), 검색 연계 |
+| [Langgraph_Logic.md](docs/Edu/Langgraph_Logic.md) | LangGraph 오케스트레이션, 노드·도구·상태, HITL 연계, 자율성 검증 |
 
 ## 🤝 기여
 

@@ -698,9 +698,10 @@ def _draw_graph_png(
 
 @st.cache_data(show_spinner=False)
 def draw_agent_graph() -> bytes:
-    """상위 오케스트레이션 그래프를 PNG 바이트로 반환. 첫 렌더 후 캐싱."""
+    """상위 오케스트레이션 그래프를 PNG 바이트로 반환. build_agent_graph()와 동일한 노드·엣지."""
     nodes = [
         ("start", "START", ""),
+        ("screener", "Screener", ""),
         ("intake", "Intake Agent", ""),
         ("planner", "Planner Agent", ""),
         ("executor", "Execute Agent", ""),
@@ -711,25 +712,25 @@ def draw_agent_graph() -> bytes:
         ("finalizer", "Finalizer", ""),
         ("end", "END", ""),
     ]
-    # 노드 좌→우 일렬 + HITL은 위쪽 분기
-    x_main = [0, 1.9, 3.8, 5.7, 7.6, 9.5, 11.4, 13.3, 15.2]
-    keys_main = ["start", "intake", "planner", "executor", "critic", "verifier", "reporter", "finalizer", "end"]
+    # 노드 좌→우 일렬 (START -> screener -> intake -> ...), HITL은 위쪽 분기
+    x_main = [0, 1.6, 3.2, 4.8, 6.4, 8.0, 9.6, 11.2, 12.8, 14.4, 16.0]
+    keys_main = ["start", "screener", "intake", "planner", "executor", "critic", "verifier", "reporter", "finalizer", "end"]
     pos = {k: (x_main[i], 0.0) for i, k in enumerate(keys_main)}
-    pos["hitl"] = (9.5, 1.2)
+    pos["hitl"] = (9.6, 1.2)
 
     edges = [
-        ("start", "intake", ""), ("intake", "planner", ""), ("planner", "executor", ""),
+        ("start", "screener", ""), ("screener", "intake", ""), ("intake", "planner", ""), ("planner", "executor", ""),
         ("executor", "critic", ""), ("critic", "verifier", ""),
         ("verifier", "hitl", "if needed"), ("verifier", "reporter", "or continue"),
         ("hitl", "reporter", "resume"), ("reporter", "finalizer", ""), ("finalizer", "end", ""),
     ]
-    return _draw_graph_png(nodes, edges, pos, figsize=(16, 3.6), hitl_nodes={"hitl"})
+    return _draw_graph_png(nodes, edges, pos, figsize=(17, 3.6), hitl_nodes={"hitl"})
 
 
 @st.cache_data(show_spinner=False)
-def draw_skill_execution_graph() -> bytes:
-    """하위 실행 스킬 그래프를 PNG 바이트로 반환. 첫 렌더 후 캐싱."""
-    skill_keys = ["holiday", "budget", "merchant", "document", "policy"]
+def draw_tool_execution_graph() -> bytes:
+    """하위 실행 도구 그래프를 PNG 바이트로 반환. 첫 렌더 후 캐싱."""
+    tool_keys = ["holiday", "budget", "merchant", "document", "policy"]
     nodes = [
         ("execute", "execute", ""),
         ("holiday", "holiday_compliance_probe", ""),
@@ -740,21 +741,20 @@ def draw_skill_execution_graph() -> bytes:
         ("legacy", "legacy_aura_deep_audit", ""),
         ("score", "score_breakdown", ""),
     ]
-    # execute 중앙 상단, skills 가로 일렬, legacy 오른쪽 끝, score 하단 중앙
     xs = [-4.5, -2.25, 0, 2.25, 4.5]
     pos: dict[str, tuple[float, float]] = {"execute": (0.0, 2.2), "score": (0.0, -2.2), "legacy": (6.5, 0.0)}
-    for i, k in enumerate(skill_keys):
+    for i, k in enumerate(tool_keys):
         pos[k] = (xs[i], 0.0)
 
-    edges = [(("execute", k, "") for k in skill_keys)] + [("execute", "legacy", "conditional")]
-    edges_flat: list[tuple[str, str, str]] = [("execute", k, "") for k in skill_keys]
+    edges = [(("execute", k, "") for k in tool_keys)] + [("execute", "legacy", "conditional")]
+    edges_flat: list[tuple[str, str, str]] = [("execute", k, "") for k in tool_keys]
     edges_flat.append(("execute", "legacy", "cond."))
-    for k in skill_keys + ["legacy"]:
+    for k in tool_keys + ["legacy"]:
         edges_flat.append((k, "score", ""))
 
     return _draw_graph_png(
         nodes, edges_flat, pos, figsize=(14, 5.5),
-        skill_nodes=set(skill_keys) | {"execute", "legacy", "score"},
+        skill_nodes=set(tool_keys) | {"execute", "legacy", "score"},
     )
 
 
