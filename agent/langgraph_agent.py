@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from datetime import datetime
 import json
@@ -30,6 +31,12 @@ from utils.config import settings
 
 # Phase C: plan 기반 도구 실행은 LangChain tool 호출로만 수행 (registry direct dispatch 제거)
 _TOOLS_BY_NAME: dict[str, Any] = {}
+# prior_tool_results를 활용하는 도구는 병렬 그룹 이후 순차 실행
+_SEQUENTIAL_LAST_TOOLS = frozenset({"policy_rulebook_probe", "legacy_aura_deep_audit"})
+# 병렬 실행 시 의존성이 있는 도구 정의 (의존 도구가 실행/스킵 처리된 뒤 실행)
+_PARALLEL_TOOL_DEPENDENCIES: dict[str, frozenset[str]] = {
+    "merchant_risk_probe": frozenset({"holiday_compliance_probe"}),
+}
 _CHECKPOINTER: Any | None = None
 _COMPILED_GRAPH: Any | None = None
 _MAX_CRITIC_LOOP = 2
@@ -1000,17 +1007,144 @@ async def intake_node(state: AgentState) -> AgentState:
     }
 
 
+def _available_planner_tools() -> list[dict[str, str]]:
+    """LLM Planner에 제공할 도구 목록. 레지스트리와 동기화."""
+    tools_by_name = _get_tools_by_name()
+    templates = [
+        ("holiday_compliance_probe", "isHoliday=True 또는 hrStatus가 LEAVE/OFF/VACATION일 때"),
+        ("budget_risk_probe", "budgetExceeded=True일 때"),
+        ("merchant_risk_probe", "mccCode가 있을 때"),
+        ("document_evidence_probe", "항상 실행 (전표 증거 수집)"),
+        ("policy_rulebook_probe", "항상 실행 (규정 조항 조회)"),
+        ("legacy_aura_deep_audit", "enable_legacy_aura_specialist=True이고 증거가 부족할 때"),
+    ]
+    return [{"name": name, "when": when} for name, when in templates if name in tools_by_name]
+
+
+async def _invoke_llm_planner(
+    flags: dict[str, Any],
+    screening: dict[str, Any],
+    replan_context: dict[str, Any] | None,
+    available_tools: list[dict[str, str]],
+) -> list[dict[str, Any]]:
+    """LLM으로 계획 JSON 생성. 실패 시 빈 리스트 반환."""
+    system_prompt = (
+        "당신은 기업 경비 감사 에이전트의 Planner다.\n"
+        "아래 케이스 정보를 분석하여 최적의 도구 실행 순서를 결정하라.\n"
+        "규칙:\n"
+        "1. 불필요한 도구는 생략해 효율을 높여라.\n"
+        "2. 앞 도구 결과가 뒷 도구에 영향을 준다면 순서를 고려하라.\n"
+        "3. 복합 위험(휴일+고위험 업종 등)이 감지되면 관련 도구를 모두 포함하라.\n"
+        "4. 반드시 JSON 배열로만 응답하라. 각 항목: {\"tool\": string, \"reason\": string}\n"
+        "5. 배열 외 텍스트, 마크다운 금지.\n"
+    )
+    user_prompt = (
+        f"케이스 유형: {screening.get('case_type', 'UNKNOWN')}\n"
+        f"심각도: {screening.get('severity', 'MEDIUM')}\n"
+        f"플래그: isHoliday={flags.get('isHoliday')}, "
+        f"hrStatus={flags.get('hrStatus')}, "
+        f"budgetExceeded={flags.get('budgetExceeded')}, "
+        f"mccCode={flags.get('mccCode')}, "
+        f"isNight={flags.get('isNight')}, "
+        f"amount={flags.get('amount')}\n"
+    )
+    if replan_context:
+        user_prompt += (
+            "\n[재계획 모드]\n"
+            f"이전 실행 도구: {replan_context.get('previous_tool_results', [])}\n"
+            f"Critic 피드백: {replan_context.get('critic_feedback', '')}\n"
+            f"누락 필드: {replan_context.get('missing_fields', [])}\n"
+            "이미 실행된 도구는 꼭 필요한 경우에만 재포함하라."
+        )
+    user_prompt += f"\n\n사용 가능한 도구:\n{json.dumps(available_tools, ensure_ascii=False)}"
+
+    valid_names = {t["name"] for t in available_tools}
+    if not getattr(settings, "openai_api_key", None):
+        return []
+    try:
+        from openai import AsyncAzureOpenAI, AsyncOpenAI
+
+        base_url = (getattr(settings, "openai_base_url") or "").strip()
+        is_azure = ".openai.azure.com" in base_url
+        if is_azure:
+            azure_ep = base_url.rstrip("/")
+            if azure_ep.endswith("/openai/v1"):
+                azure_ep = azure_ep[: -len("/openai/v1")]
+            client = AsyncAzureOpenAI(
+                api_key=settings.openai_api_key,
+                azure_endpoint=azure_ep,
+                api_version=getattr(settings, "openai_api_version", "2024-02-15-preview"),
+            )
+        else:
+            kw: dict[str, Any] = {"api_key": settings.openai_api_key}
+            if base_url:
+                kw["base_url"] = base_url
+            client = AsyncOpenAI(**kw)
+
+        response = await client.chat.completions.create(
+            model=getattr(settings, "reasoning_llm_model", "gpt-4o-mini"),
+            max_tokens=600,
+            response_format={"type": "json_object"},
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+        )
+        raw = (response.choices[0].message.content or "").strip()
+        parsed = json.loads(raw)
+        raw_plan = parsed if isinstance(parsed, list) else (parsed.get("plan") or [])
+        plan = [
+            {"tool": step["tool"], "reason": step.get("reason", ""), "owner": "llm_planner"}
+            for step in raw_plan
+            if isinstance(step, dict) and step.get("tool") in valid_names
+        ]
+        return plan
+    except Exception:
+        return []
+
+
 async def planner_node(state: AgentState) -> AgentState:
     replan_context = state.get("replan_context")
-    if replan_context:
-        already_run = set(replan_context.get("previous_tool_results") or [])
-        base_plan = _plan_from_flags(state["flags"])
-        always_rerun = {"policy_rulebook_probe", "document_evidence_probe"}
-        plan = [step for step in base_plan if step["tool"] not in already_run or step["tool"] in always_rerun]
-        if not plan:
+    flags = state["flags"]
+    available_tools = _available_planner_tools()
+    valid_tool_names = {t["name"] for t in available_tools}
+
+    plan: list[dict[str, Any]] = []
+    plan_source = "rule"
+    if getattr(settings, "enable_llm_planner", False) and valid_tool_names:
+        plan = await _invoke_llm_planner(flags, state.get("screening_result") or {}, replan_context, available_tools)
+        if plan:
+            plan_source = "llm"
+
+    if not plan:
+        base_plan = _plan_from_flags(flags)
+        if replan_context:
+            already_run = set(replan_context.get("previous_tool_results") or [])
+            always_rerun = {"policy_rulebook_probe", "document_evidence_probe"}
+            plan = [step for step in base_plan if step["tool"] not in already_run or step["tool"] in always_rerun]
+            if not plan:
+                plan = base_plan
+        else:
             plan = base_plan
-    else:
-        plan = _plan_from_flags(state["flags"])
+        if getattr(settings, "enable_llm_planner", False):
+            plan_source = "fallback_rule"
+
+    def _build_planner_reasoning() -> str:
+        lines: list[str] = []
+        if plan_source == "llm":
+            lines.append("LLM이 현재 신호와 재계획 문맥을 바탕으로 도구 실행 순서를 구성했습니다.")
+        elif plan_source == "fallback_rule":
+            lines.append("LLM 계획을 사용할 수 없어 규칙 기반 기본 경로로 계획을 구성했습니다.")
+        else:
+            lines.append("규칙 기반 기본 경로로 계획을 구성했습니다.")
+        for idx, step in enumerate(plan, start=1):
+            tool_name = step.get("tool", "unknown_tool")
+            reason = str(step.get("reason") or "핵심 위험 신호 확인을 위해 포함")
+            lines.append(f"{idx}) {tool_name}: {reason}")
+        if replan_context:
+            lines.append("비판 단계 피드백과 이전 실행 결과를 반영해 재계획했습니다.")
+        return " ".join(lines)
+
     steps = [
         PlanStep(
             tool_name=step["tool"],
@@ -1022,16 +1156,12 @@ async def planner_node(state: AgentState) -> AgentState:
         for step in plan
     ]
     tool_sequence = [s["tool"] for s in plan]
-    rationale = "플래그(휴일/예산/가맹점 업종 코드(MCC) 등)와 기본 조사 경로로 도구 순서를 결정했다."
-    reasoning_parts = [rationale]
-    if state["flags"].get("isHoliday") or state["flags"].get("hrStatus") in {"LEAVE", "OFF", "VACATION"}:
-        reasoning_parts.append("isHoliday 또는 hrStatus=LEAVE가 감지되어 휴일 경비 사용 여부를 최우선 검증 경로로 설정했다.")
-    if state["flags"].get("mccCode"):
-        reasoning_parts.append("MCC 업종 코드가 있으므로 merchant_risk_probe를 실행해 업종 위험도를 확인한다.")
-    if not state["flags"].get("budgetExceeded"):
-        reasoning_parts.append("budgetExceeded=False이므로 budget_probe는 생략한다.")
-    reasoning_parts.append(f"선택된 도구 순서: {', '.join(tool_sequence)}.")
-    reasoning_text = " ".join(reasoning_parts)
+    rationale = (
+        "LLM이 도구 실행 순서를 결정했다."
+        if plan_source == "llm"
+        else "위험 신호 기반 규칙으로 도구 실행 순서를 결정했다."
+    )
+    reasoning_text = _build_planner_reasoning()
     planner_output = PlannerOutput(
         objective="위험 유형별 조사 순서에 따라 증거를 수집하고 규정 근거를 확보한다.",
         steps=steps,
@@ -1042,11 +1172,18 @@ async def planner_node(state: AgentState) -> AgentState:
     )
     last_node_summary = f"planner 완료: {reasoning_text[:80]}…" if len(reasoning_text) > 80 else f"planner 완료: {reasoning_text}"
     pending: list[dict[str, Any]] = [
-        AgentEvent(event_type="NODE_START", node="planner", phase="plan", message="조사 계획을 수립합니다.", metadata={"plan": plan}).to_payload(),
+        AgentEvent(
+            event_type="NODE_START",
+            node="planner",
+            phase="plan",
+            message="조사 계획을 수립합니다.",
+            metadata={"plan": plan, "plan_source": plan_source},
+        ).to_payload(),
     ]
     planner_context = {
         "selected_tools": tool_sequence,
         "flags": state.get("flags") or {},
+        "plan_source": plan_source,
         "last_node_summary": state.get("last_node_summary", "없음"),
     }
     reasoning_text, reasoning_events, note_source = await _stream_reasoning_events_with_llm("planner", reasoning_text, context=planner_context)
@@ -1057,7 +1194,7 @@ async def planner_node(state: AgentState) -> AgentState:
             node="planner",
             phase="plan",
             message="조사 계획이 확정되었습니다.",
-            metadata={"plan": plan, "reasoning": reasoning_text, "note_source": note_source},
+            metadata={"plan": plan, "reasoning": reasoning_text, "note_source": note_source, "plan_source": plan_source},
         ).to_payload(),
     )
     pending.append(
@@ -1092,74 +1229,253 @@ async def execute_node(state: AgentState) -> AgentState:
             metadata={"planned_tools": [step.get("tool") for step in state.get("plan") or []]},
         ).to_payload()
     ]
-    for step in state["plan"]:
+    plan = state.get("plan") or []
+    use_parallel = getattr(settings, "enable_parallel_tool_execution", False)
+
+    async def _invoke_one(
+        step: dict[str, Any],
+        prior: list[dict[str, Any]],
+    ) -> dict[str, Any]:
         tool_name = step.get("tool", "")
-        skip, reason = _should_skip_tool(step, state=state, tool_results=tool_results)
-        if skip:
-            tool_obj = tools_by_name.get(tool_name)
-            tool_description = getattr(tool_obj, "description", None) if tool_obj else None
-            msg = reason or "기존 증거가 충분해 생략한다."
-            skipped_tools.append(tool_name)
-            pending_events.append(
-                AgentEvent(
-                    event_type="TOOL_SKIPPED",
-                    node="execute",
-                    phase="execute",
-                    tool=tool_name,
-                    message=msg,
-                    thought=msg,
-                    action="추가 specialist 호출을 생략한다.",
-                    observation=msg,
-                    metadata={"reason": reason, "owner": step.get("owner"), "tool_description": tool_description},
-                ).to_payload()
-            )
-            continue
         tool = tools_by_name.get(tool_name)
         if not tool:
-            failed_tools.append(tool_name)
-            tool_results.append({"tool": tool_name, "ok": False, "facts": {}, "summary": f"알 수 없는 도구: {tool_name}"})
-            continue
-        tool_description = getattr(tool, "description", None) or ""
-        step_reason = step.get("reason", "")
-        pending_events.append(
-            AgentEvent(
-                event_type="TOOL_CALL",
-                node="execute",
-                phase="execute",
-                tool=tool_name,
-                message=f"{step_reason} — {tool_name} 실행.",
-                thought=step_reason,
-                action=f"{tool_name} 실행",
-                observation="도구 실행 중.",
-                metadata={"reason": step_reason, "owner": step.get("owner"), "tool_description": tool_description},
-            ).to_payload()
-        )
+            return {"tool": tool_name, "ok": False, "facts": {}, "summary": f"알 수 없는 도구: {tool_name}"}
         inp = ToolContextInput(
             case_id=state["case_id"],
             body_evidence=state["body_evidence"],
             intended_risk_type=state.get("intended_risk_type"),
-            prior_tool_results=list(tool_results),
+            prior_tool_results=list(prior),
         )
         result = await tool.ainvoke(inp.model_dump())
-        if not isinstance(result, dict):
-            result = {"tool": tool_name, "ok": False, "facts": {}, "summary": str(result)}
-        if not bool(result.get("ok")):
-            failed_tools.append(tool_name)
-        tool_results.append(result)
-        result_summary = result.get("summary") or "도구 결과 수집 완료"
-        pending_events.append(
-            AgentEvent(
-                event_type="TOOL_RESULT",
-                node="execute",
-                phase="execute",
-                tool=tool_name,
-                message=result_summary,
-                thought="수집한 사실을 다음 판단 단계에 반영한다.",
-                action=f"{tool_name} 결과 반영",
-                observation=result_summary,
-                metadata={**result, "tool_description": tool_description},
-            ).to_payload()
-        )
+        return result if isinstance(result, dict) else {"tool": tool_name, "ok": False, "facts": {}, "summary": str(result)}
+
+    if use_parallel:
+        parallel_steps = [s for s in plan if s.get("tool", "") not in _SEQUENTIAL_LAST_TOOLS]
+        sequential_steps = [s for s in plan if s.get("tool", "") in _SEQUENTIAL_LAST_TOOLS]
+        planned_tool_names = {s.get("tool", "") for s in plan if s.get("tool", "")}
+        finished_parallel_tools: set[str] = set()
+        remaining_parallel_steps = list(parallel_steps)
+
+        while remaining_parallel_steps:
+            ready_steps: list[dict[str, Any]] = []
+            blocked_steps: list[dict[str, Any]] = []
+
+            for step in remaining_parallel_steps:
+                tool_name = step.get("tool", "")
+                deps = {
+                    dep for dep in _PARALLEL_TOOL_DEPENDENCIES.get(tool_name, frozenset())
+                    if dep in planned_tool_names
+                }
+                if deps.issubset(finished_parallel_tools):
+                    ready_steps.append(step)
+                else:
+                    blocked_steps.append(step)
+
+            if not ready_steps and blocked_steps:
+                # 방어 로직: 순환 의존/잘못된 의존 정의가 있어도 진행이 멈추지 않도록 1개는 강행
+                ready_steps = [blocked_steps.pop(0)]
+
+            to_run: list[tuple[dict[str, Any], str]] = []
+            for step in ready_steps:
+                tool_name = step.get("tool", "")
+                skip, reason = _should_skip_tool(step, state=state, tool_results=tool_results)
+                if skip:
+                    tool_obj = tools_by_name.get(tool_name)
+                    tool_description = getattr(tool_obj, "description", None) if tool_obj else None
+                    msg = reason or "기존 증거가 충분해 생략한다."
+                    skipped_tools.append(tool_name)
+                    finished_parallel_tools.add(tool_name)
+                    pending_events.append(
+                        AgentEvent(
+                            event_type="TOOL_SKIPPED",
+                            node="execute",
+                            phase="execute",
+                            tool=tool_name,
+                            message=msg,
+                            thought=msg,
+                            action="추가 specialist 호출을 생략한다.",
+                            observation=msg,
+                            metadata={"reason": reason, "owner": step.get("owner"), "tool_description": tool_description},
+                        ).to_payload()
+                    )
+                    continue
+                tool = tools_by_name.get(tool_name)
+                if not tool:
+                    failed_tools.append(tool_name)
+                    finished_parallel_tools.add(tool_name)
+                    tool_results.append({"tool": tool_name, "ok": False, "facts": {}, "summary": f"알 수 없는 도구: {tool_name}"})
+                    continue
+                tool_description = getattr(tool, "description", None) or ""
+                step_reason = step.get("reason", "")
+                pending_events.append(
+                    AgentEvent(
+                        event_type="TOOL_CALL",
+                        node="execute",
+                        phase="execute",
+                        tool=tool_name,
+                        message=f"{step_reason} — {tool_name} 실행.",
+                        thought=step_reason,
+                        action=f"{tool_name} 실행",
+                        observation="도구 실행 중.",
+                        metadata={"reason": step_reason, "owner": step.get("owner"), "tool_description": tool_description},
+                    ).to_payload()
+                )
+                to_run.append((step, tool_description))
+
+            if to_run:
+                parallel_results = await asyncio.gather(
+                    *[_invoke_one(step, tool_results) for step, _ in to_run],
+                    return_exceptions=False,
+                )
+                for (step, tool_description), result in zip(to_run, parallel_results):
+                    tool_name = step.get("tool", "")
+                    if not result.get("ok"):
+                        failed_tools.append(tool_name)
+                    tool_results.append(result)
+                    finished_parallel_tools.add(tool_name)
+                    pending_events.append(
+                        AgentEvent(
+                            event_type="TOOL_RESULT",
+                            node="execute",
+                            phase="execute",
+                            tool=tool_name,
+                            message=result.get("summary") or "도구 결과 수집 완료",
+                            thought="수집한 사실을 다음 판단 단계에 반영한다.",
+                            action=f"{tool_name} 결과 반영",
+                            observation=result.get("summary") or "",
+                            metadata={**result, "tool_description": tool_description},
+                        ).to_payload()
+                    )
+
+            remaining_parallel_steps = blocked_steps
+        for step in sequential_steps:
+            tool_name = step.get("tool", "")
+            skip, reason = _should_skip_tool(step, state=state, tool_results=tool_results)
+            if skip:
+                tool_obj = tools_by_name.get(tool_name)
+                tool_description = getattr(tool_obj, "description", None) if tool_obj else None
+                msg = reason or "기존 증거가 충분해 생략한다."
+                skipped_tools.append(tool_name)
+                pending_events.append(
+                    AgentEvent(
+                        event_type="TOOL_SKIPPED",
+                        node="execute",
+                        phase="execute",
+                        tool=tool_name,
+                        message=msg,
+                        thought=msg,
+                        action="추가 specialist 호출을 생략한다.",
+                        observation=msg,
+                        metadata={"reason": reason, "owner": step.get("owner"), "tool_description": tool_description},
+                    ).to_payload()
+                )
+                continue
+            tool = tools_by_name.get(tool_name)
+            if not tool:
+                failed_tools.append(tool_name)
+                tool_results.append({"tool": tool_name, "ok": False, "facts": {}, "summary": f"알 수 없는 도구: {tool_name}"})
+                continue
+            tool_description = getattr(tool, "description", None) or ""
+            step_reason = step.get("reason", "")
+            pending_events.append(
+                AgentEvent(
+                    event_type="TOOL_CALL",
+                    node="execute",
+                    phase="execute",
+                    tool=tool_name,
+                    message=f"{step_reason} — {tool_name} 실행.",
+                    thought=step_reason,
+                    action=f"{tool_name} 실행",
+                    observation="도구 실행 중.",
+                    metadata={"reason": step_reason, "owner": step.get("owner"), "tool_description": tool_description},
+                ).to_payload()
+            )
+            result = await _invoke_one(step, tool_results)
+            if not result.get("ok"):
+                failed_tools.append(tool_name)
+            tool_results.append(result)
+            pending_events.append(
+                AgentEvent(
+                    event_type="TOOL_RESULT",
+                    node="execute",
+                    phase="execute",
+                    tool=tool_name,
+                    message=result.get("summary") or "도구 결과 수집 완료",
+                    thought="수집한 사실을 다음 판단 단계에 반영한다.",
+                    action=f"{tool_name} 결과 반영",
+                    observation=result.get("summary") or "",
+                    metadata={**result, "tool_description": tool_description},
+                ).to_payload()
+            )
+    else:
+        for step in plan:
+            tool_name = step.get("tool", "")
+            skip, reason = _should_skip_tool(step, state=state, tool_results=tool_results)
+            if skip:
+                tool_obj = tools_by_name.get(tool_name)
+                tool_description = getattr(tool_obj, "description", None) if tool_obj else None
+                msg = reason or "기존 증거가 충분해 생략한다."
+                skipped_tools.append(tool_name)
+                pending_events.append(
+                    AgentEvent(
+                        event_type="TOOL_SKIPPED",
+                        node="execute",
+                        phase="execute",
+                        tool=tool_name,
+                        message=msg,
+                        thought=msg,
+                        action="추가 specialist 호출을 생략한다.",
+                        observation=msg,
+                        metadata={"reason": reason, "owner": step.get("owner"), "tool_description": tool_description},
+                    ).to_payload()
+                )
+                continue
+            tool = tools_by_name.get(tool_name)
+            if not tool:
+                failed_tools.append(tool_name)
+                tool_results.append({"tool": tool_name, "ok": False, "facts": {}, "summary": f"알 수 없는 도구: {tool_name}"})
+                continue
+            tool_description = getattr(tool, "description", None) or ""
+            step_reason = step.get("reason", "")
+            pending_events.append(
+                AgentEvent(
+                    event_type="TOOL_CALL",
+                    node="execute",
+                    phase="execute",
+                    tool=tool_name,
+                    message=f"{step_reason} — {tool_name} 실행.",
+                    thought=step_reason,
+                    action=f"{tool_name} 실행",
+                    observation="도구 실행 중.",
+                    metadata={"reason": step_reason, "owner": step.get("owner"), "tool_description": tool_description},
+                ).to_payload()
+            )
+            inp = ToolContextInput(
+                case_id=state["case_id"],
+                body_evidence=state["body_evidence"],
+                intended_risk_type=state.get("intended_risk_type"),
+                prior_tool_results=list(tool_results),
+            )
+            result = await tool.ainvoke(inp.model_dump())
+            if not isinstance(result, dict):
+                result = {"tool": tool_name, "ok": False, "facts": {}, "summary": str(result)}
+            if not bool(result.get("ok")):
+                failed_tools.append(tool_name)
+            tool_results.append(result)
+            result_summary = result.get("summary") or "도구 결과 수집 완료"
+            pending_events.append(
+                AgentEvent(
+                    event_type="TOOL_RESULT",
+                    node="execute",
+                    phase="execute",
+                    tool=tool_name,
+                    message=result_summary,
+                    thought="수집한 사실을 다음 판단 단계에 반영한다.",
+                    action=f"{tool_name} 결과 반영",
+                    observation=result_summary,
+                    metadata={**result, "tool_description": tool_description},
+                ).to_payload()
+            )
     score = _score(state["flags"], tool_results)
     trace = score.get("calculation_trace", "")
     pending_events.append({
@@ -1349,25 +1665,47 @@ def _build_verification_targets(state: AgentState) -> list[str]:
 async def critic_node(state: AgentState) -> AgentState:
     legacy = next((r for r in state.get("tool_results", []) if _tool_result_key(r) == "legacy_aura_deep_audit"), None)
     missing = ((state["body_evidence"].get("dataQuality") or {}).get("missingFields") or [])
-    critique = {
-        "has_legacy_result": bool(legacy and legacy.get("facts")),
-        "missing_fields": missing,
-        "risk_of_overclaim": bool(missing),
-        "recommend_hold": bool(missing and not state["flags"].get("hasHitlResponse")),
-    }
+    score = state.get("score_breakdown") or {}
+    execute_out = state.get("execute_output") or {}
+    tool_results = state.get("tool_results") or []
+    failed_tools = execute_out.get("failed_tools") or []
+    evidence_score = int(score.get("evidence_score") or 0)
+    final_score = int(score.get("final_score") or 0)
+    high_risk_compound = bool(state["flags"].get("isHoliday")) and bool(state["flags"].get("mccCode"))
+    critical_tool_failed = "policy_rulebook_probe" in failed_tools or "document_evidence_probe" in failed_tools
+    tool_failure_rate = len(failed_tools) / max(len(tool_results), 1)
+    borderline_score = 48 <= final_score <= 62
+    weak_evidence_with_risk = high_risk_compound and evidence_score < 30
+
+    replan_reasons: list[str] = []
+    if missing:
+        replan_reasons.append(f"누락 필드 {missing} — 과잉 주장 위험")
+    if critical_tool_failed:
+        replan_reasons.append(
+            f"핵심 도구 실패: {[t for t in failed_tools if t in {'policy_rulebook_probe', 'document_evidence_probe'}]}"
+        )
+    if tool_failure_rate >= 0.5 and len(tool_results) >= 2:
+        replan_reasons.append(f"도구 실패율 {tool_failure_rate:.0%} — 증거 신뢰성 저하")
+    if borderline_score:
+        replan_reasons.append(f"최종점수 {final_score}점이 MEDIUM/HIGH 경계 ±7점 이내 — 추가 증거 필요")
+    if weak_evidence_with_risk:
+        replan_reasons.append(f"복합 위험(휴일+MCC) 케이스인데 evidence_score={evidence_score} (30점 미만)")
+
     loop_count = state.get("critic_loop_count") or 0
     replan_required = bool(
-        critique["risk_of_overclaim"]
+        replan_reasons
         and not state["flags"].get("hasHitlResponse")
         and loop_count < _MAX_CRITIC_LOOP
     )
-    replan_reason = ""
+    replan_reason = " | ".join(replan_reasons) if replan_reasons else ""
+    critique = {
+        "has_legacy_result": bool(legacy and legacy.get("facts")),
+        "missing_fields": missing,
+        "risk_of_overclaim": bool(missing) or bool(replan_reasons),
+        "recommend_hold": bool(replan_required or (missing and not state["flags"].get("hasHitlResponse"))),
+    }
     replan_context: dict[str, Any] | None = None
     if replan_required:
-        replan_reason = (
-            f"누락 필드 {missing}로 인해 과잉 주장 위험이 감지되었습니다. "
-            "재조사 시 해당 필드를 보완하는 도구를 우선 실행하십시오."
-        )
         replan_context = {
             "critic_feedback": replan_reason,
             "missing_fields": missing,
@@ -1380,7 +1718,7 @@ async def critic_node(state: AgentState) -> AgentState:
         contradictions=[],
         missing_counter_evidence=missing,
         recommend_hold=critique["recommend_hold"],
-        rationale="입력 누락 필드가 있으면 과잉 주장 위험이 있어 보류를 권고한다." if missing else "추가 보류 조건 없이 진행 가능하다.",
+        rationale=replan_reason[:300] if replan_reason else ("입력 누락 필드가 있으면 과잉 주장 위험이 있어 보류를 권고한다." if missing else "추가 보류 조건 없이 진행 가능하다."),
         has_legacy_result=critique["has_legacy_result"],
         verification_targets=verification_targets,
         replan_required=replan_required,
@@ -1439,15 +1777,34 @@ async def critic_node(state: AgentState) -> AgentState:
 
 
 async def verify_node(state: AgentState) -> AgentState:
-    from services.evidence_verification import EVIDENCE_GATE_HOLD, EVIDENCE_GATE_REGENERATE, verify_evidence_coverage_claims
+    from services.evidence_verification import (
+        EVIDENCE_GATE_HOLD,
+        EVIDENCE_GATE_REGENERATE,
+        get_dynamic_coverage_thresholds,
+        verify_evidence_coverage_claims,
+    )
 
     verification = {"needs_hitl": False, "quality_signals": ["OK"]}
     verification_targets = (state.get("critic_output") or {}).get("verification_targets") or []
     probe_facts = (_find_tool_result(state["tool_results"], "policy_rulebook_probe") or {}).get("facts", {}) or {}
     retrieved_chunks = probe_facts.get("retrieval_candidates") or probe_facts.get("policy_refs") or []
     verification_summary: dict[str, Any] = {}
+    score_bd = state.get("score_breakdown") or {}
+    severity = score_bd.get("severity", "MEDIUM")
+    final_score = float(score_bd.get("final_score") or 0)
+    compound_multiplier = float(score_bd.get("compound_multiplier") or 1.0)
+    hold_threshold, caution_threshold = get_dynamic_coverage_thresholds(
+        severity=severity,
+        final_score=final_score,
+        compound_multiplier=compound_multiplier,
+    )
     if verification_targets and retrieved_chunks:
-        verification_summary = verify_evidence_coverage_claims(verification_targets, retrieved_chunks)
+        verification_summary = verify_evidence_coverage_claims(
+            verification_targets,
+            retrieved_chunks,
+            threshold_hold=hold_threshold,
+            threshold_caution=caution_threshold,
+        )
     elif verification_targets:
         verification_summary = {"covered": 0, "total": len(verification_targets), "coverage_ratio": 0.0, "details": [], "gate_policy": EVIDENCE_GATE_HOLD, "missing_citations": verification_targets}
     verification["verification_summary"] = verification_summary
@@ -1791,12 +2148,60 @@ async def finalizer_node(state: AgentState) -> AgentState:
 
 
 def _get_checkpointer():
-    """동일 프로세스 내 run resume를 위해 checkpointer는 싱글톤으로 유지한다."""
+    """동일 프로세스 내 run resume를 위해 checkpointer는 싱글톤으로 유지한다.
+    CHECKPOINTER_BACKEND=postgres 이면 AsyncPostgresSaver 사용, 아니면 MemorySaver.
+    """
     global _CHECKPOINTER
-    if _CHECKPOINTER is None:
+    if _CHECKPOINTER is not None:
+        return _CHECKPOINTER
+
+    backend = getattr(settings, "checkpointer_backend", "memory").lower()
+
+    if backend == "postgres":
+        try:
+            from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+
+            async def _init_postgres_checkpointer() -> Any:
+                cp = await AsyncPostgresSaver.from_conn_string(settings.database_url)
+                await cp.setup()
+                return cp
+
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = None
+            if loop is not None and loop.is_running():
+                import concurrent.futures
+
+                def _run_init() -> Any:
+                    return asyncio.run(_init_postgres_checkpointer())
+
+                with concurrent.futures.ThreadPoolExecutor() as pool:
+                    future = pool.submit(_run_init)
+                    _CHECKPOINTER = future.result(timeout=15)
+            else:
+                _loop = asyncio.new_event_loop()
+                try:
+                    _CHECKPOINTER = _loop.run_until_complete(_init_postgres_checkpointer())
+                finally:
+                    _loop.close()
+        except ImportError:
+            import warnings
+
+            warnings.warn(
+                "langgraph-checkpoint-postgres가 없어 MemorySaver로 fallback합니다. "
+                "pip install langgraph-checkpoint-postgres",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            from langgraph.checkpoint.memory import MemorySaver
+
+            _CHECKPOINTER = MemorySaver()
+    else:
         from langgraph.checkpoint.memory import MemorySaver
 
         _CHECKPOINTER = MemorySaver()
+
     return _CHECKPOINTER
 
 

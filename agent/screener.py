@@ -13,31 +13,12 @@ from __future__ import annotations
 
 from typing import Any
 
-# ---------------------------------------------------------------------------
-# MCC risk category maps
-# ---------------------------------------------------------------------------
-_MCC_HIGH_RISK = {
-    "5813",  # Drinking Places, Bars
-    "7993",  # Video Game Arcades/Establishments
-    "7994",  # Video Games Supply Stores
-    "5912",  # Drug Stores / Pharmacies (high-risk if night)
-}
-_MCC_LEISURE = {
-    "7992",  # Golf Courses/Public
-    "7996",  # Amusement Parks
-    "7997",  # Clubs, Country Clubs, Athletic Clubs
-    "7941",  # Sports Clubs, Athletic Fields
-    "7011",  # Hotels, Motels, Resorts
-}
-_MCC_MEDIUM_RISK = {
-    "5812",  # Eating Places, Restaurants
-    "5811",  # Caterers
-    "5814",  # Fast Food Restaurants
-}
+from utils.config import get_mcc_sets
 
 
 def _extract_signals(body: dict[str, Any]) -> dict[str, Any]:
     """Extract all relevant boolean/categorical signals from body_evidence."""
+    mcc_sets = get_mcc_sets()
     is_holiday = bool(body.get("isHoliday"))
 
     hr_raw = str(body.get("hrStatus") or body.get("hrStatusRaw") or "").upper()
@@ -63,9 +44,9 @@ def _extract_signals(body: dict[str, Any]) -> dict[str, Any]:
         "hour": hour,
         "budget_exceeded": budget_exceeded,
         "mcc_code": mcc,
-        "mcc_high_risk": mcc in _MCC_HIGH_RISK,
-        "mcc_leisure": mcc in _MCC_LEISURE,
-        "mcc_medium_risk": mcc in _MCC_MEDIUM_RISK,
+        "mcc_high_risk": mcc in mcc_sets["high_risk"],
+        "mcc_leisure": mcc in mcc_sets["leisure"],
+        "mcc_medium_risk": mcc in mcc_sets["medium_risk"],
         "amount": amount,
         "hr_status": hr_raw,
     }

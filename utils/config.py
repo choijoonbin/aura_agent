@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -75,8 +77,105 @@ class Settings:
     langfuse_secret_key: str | None = os.getenv("LANGFUSE_SECRET_KEY") or None
     langfuse_host: str | None = os.getenv("LANGFUSE_HOST") or None
 
+    # MCC 위험 분류 (단일 소스: screener.py, agent_tools.py에서 참조)
+    mcc_high_risk: str = os.getenv("MCC_HIGH_RISK", "5813,7993,7994,5912,7992,5999")
+    mcc_leisure: str = os.getenv("MCC_LEISURE", "7996,7997,7941,7011")
+    mcc_medium_risk: str = os.getenv("MCC_MEDIUM_RISK", "5812,5811,5814,4722")
+    mcc_source: str = os.getenv("MCC_SOURCE", "env")  # env | json | db
+    mcc_json_path: str | None = os.getenv("MCC_JSON_PATH") or None
+    mcc_db_table: str = os.getenv("MCC_DB_TABLE", "dwp_aura.mcc_risk_policy")
+
+    enable_llm_planner: bool = os.getenv("ENABLE_LLM_PLANNER", "true").lower() == "true"
+    enable_parallel_tool_execution: bool = os.getenv("ENABLE_PARALLEL_TOOL_EXECUTION", "true").lower() == "true"
+    checkpointer_backend: str = os.getenv("CHECKPOINTER_BACKEND", "memory")
+
+    # RAG: Dense 검색 HyDE (가설 문서 임베딩), Rerank LLM fallback
+    enable_hyde_query: bool = os.getenv("ENABLE_HYDE_QUERY", "false").lower() == "true"
+    enable_llm_rerank_fallback: bool = os.getenv("ENABLE_LLM_RERANK_FALLBACK", "true").lower() == "true"
+
 
 settings = Settings()
+
+
+def _mcc_set(raw: str) -> frozenset[str]:
+    return frozenset(s.strip() for s in (raw or "").split(",") if s.strip())
+
+
+def _parse_mcc_json(path: str) -> dict[str, frozenset[str]]:
+    p = Path(path)
+    payload = json.loads(p.read_text(encoding="utf-8"))
+    high = payload.get("high_risk") or payload.get("highRisk") or []
+    leisure = payload.get("leisure") or []
+    medium = payload.get("medium_risk") or payload.get("mediumRisk") or []
+    return {
+        "high_risk": frozenset(str(v).strip() for v in high if str(v).strip()),
+        "leisure": frozenset(str(v).strip() for v in leisure if str(v).strip()),
+        "medium_risk": frozenset(str(v).strip() for v in medium if str(v).strip()),
+    }
+
+
+def _parse_mcc_db(table_name: str) -> dict[str, frozenset[str]]:
+    # 기대 스키마: (mcc_code text, risk_level text)  risk_level ∈ HIGH/LEISURE/MEDIUM
+    from sqlalchemy import create_engine, text
+
+    engine = create_engine(settings.database_url, future=True)
+    high: set[str] = set()
+    leisure: set[str] = set()
+    medium: set[str] = set()
+    sql = text(f"SELECT mcc_code, risk_level FROM {table_name} WHERE mcc_code IS NOT NULL")
+    with engine.connect() as conn:
+        rows = conn.execute(sql).all()
+    for row in rows:
+        code = str(row[0] or "").strip()
+        level = str(row[1] or "").strip().upper()
+        if not code:
+            continue
+        if level == "HIGH":
+            high.add(code)
+        elif level == "LEISURE":
+            leisure.add(code)
+        elif level == "MEDIUM":
+            medium.add(code)
+    return {
+        "high_risk": frozenset(high),
+        "leisure": frozenset(leisure),
+        "medium_risk": frozenset(medium),
+    }
+
+
+@lru_cache(maxsize=1)
+def get_mcc_sets() -> dict[str, frozenset[str]]:
+    env_sets = {
+        "high_risk": _mcc_set(settings.mcc_high_risk),
+        "leisure": _mcc_set(settings.mcc_leisure),
+        "medium_risk": _mcc_set(settings.mcc_medium_risk),
+    }
+
+    source = (settings.mcc_source or "env").strip().lower()
+    try:
+        if source == "json" and settings.mcc_json_path:
+            loaded = _parse_mcc_json(settings.mcc_json_path)
+            if loaded["high_risk"] or loaded["leisure"] or loaded["medium_risk"]:
+                return loaded
+        if source == "db":
+            loaded = _parse_mcc_db(settings.mcc_db_table)
+            if loaded["high_risk"] or loaded["leisure"] or loaded["medium_risk"]:
+                return loaded
+    except Exception:
+        # 운영 안전성: 외부 소스 실패 시 env 기본값으로 즉시 fallback
+        return env_sets
+
+    return env_sets
+
+
+def refresh_mcc_sets() -> None:
+    get_mcc_sets.cache_clear()
+
+
+# 하위 호환용 상수 (기존 import 경로 유지)
+MCC_HIGH_RISK: frozenset[str] = get_mcc_sets()["high_risk"]
+MCC_LEISURE: frozenset[str] = get_mcc_sets()["leisure"]
+MCC_MEDIUM_RISK: frozenset[str] = get_mcc_sets()["medium_risk"]
 
 
 def get_langfuse_handler(session_id: str | None = None) -> "CallbackHandler | None":

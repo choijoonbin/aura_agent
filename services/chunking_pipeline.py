@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import time
 from typing import Any
 
@@ -24,7 +25,7 @@ if "TRANSFORMERS_SAFE_TENSORS_WEIGHTS_ONLY" not in os.environ:
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from services.rag_chunk_lab_service import ChunkNode, hierarchical_chunk
+from services.rag_chunk_lab_service import ChunkNode, _expand_tokens, hierarchical_chunk
 from utils.config import settings
 
 logger = logging.getLogger(__name__)
@@ -40,6 +41,13 @@ def _embedding_cast_type() -> str:
     if cast_type not in {"vector", "halfvec"}:
         return "halfvec"
     return cast_type
+
+
+def _sql_identifier_or_raise(value: str, *, label: str) -> str:
+    ident = str(value or "").strip()
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", ident):
+        raise RuntimeError(f"유효하지 않은 SQL 식별자({label}): {value!r}")
+    return ident
 
 
 def _embedding_column_exists(db: Session, column_name: str) -> bool:
@@ -153,7 +161,7 @@ def save_hierarchical_chunks(
     4. 임베딩 생성 후 embedding_az(또는 지정 컬럼) 업데이트
     5. tsvector 업데이트 (search_tsv)
     """
-    col = embed_column or _EMBED_COLUMN
+    col = _sql_identifier_or_raise(embed_column or _EMBED_COLUMN, label="embed_column")
     tenant_id = settings.default_tenant_id
 
     db.execute(
@@ -167,26 +175,48 @@ def save_hierarchical_chunks(
     clause_nodes = [n for n in nodes if n.node_type != "ARTICLE"]
 
     article_chunk_id_map: dict[str, int] = {}
+    use_search_tokens = _embedding_column_exists(db, "search_tokens")
 
-    insert_sql = text("""
-        INSERT INTO dwp_aura.rag_chunk (
-            tenant_id, doc_id, chunk_text, search_text,
-            regulation_article, regulation_clause,
-            parent_title, node_type, parent_id, parent_chunk_id,
-            chunk_level, chunk_index, page_no,
-            version, effective_from, effective_to,
-            metadata_json,
-            is_active, created_at
-        ) VALUES (
-            :tenant_id, :doc_id, :chunk_text, :search_text,
-            :regulation_article, :regulation_clause,
-            :parent_title, :node_type, :parent_id, :parent_chunk_id,
-            :chunk_level, :chunk_index, :page_no,
-            :version, :effective_from, :effective_to,
-            CAST(:metadata_json AS jsonb),
-            true, now()
-        ) RETURNING chunk_id
-    """)
+    if use_search_tokens:
+        insert_sql = text("""
+            INSERT INTO dwp_aura.rag_chunk (
+                tenant_id, doc_id, chunk_text, search_text,
+                regulation_article, regulation_clause,
+                parent_title, node_type, parent_id, parent_chunk_id,
+                chunk_level, chunk_index, page_no,
+                version, effective_from, effective_to,
+                metadata_json, search_tokens,
+                is_active, created_at
+            ) VALUES (
+                :tenant_id, :doc_id, :chunk_text, :search_text,
+                :regulation_article, :regulation_clause,
+                :parent_title, :node_type, :parent_id, :parent_chunk_id,
+                :chunk_level, :chunk_index, :page_no,
+                :version, :effective_from, :effective_to,
+                CAST(:metadata_json AS jsonb), :search_tokens,
+                true, now()
+            ) RETURNING chunk_id
+        """)
+    else:
+        insert_sql = text("""
+            INSERT INTO dwp_aura.rag_chunk (
+                tenant_id, doc_id, chunk_text, search_text,
+                regulation_article, regulation_clause,
+                parent_title, node_type, parent_id, parent_chunk_id,
+                chunk_level, chunk_index, page_no,
+                version, effective_from, effective_to,
+                metadata_json,
+                is_active, created_at
+            ) VALUES (
+                :tenant_id, :doc_id, :chunk_text, :search_text,
+                :regulation_article, :regulation_clause,
+                :parent_title, :node_type, :parent_id, :parent_chunk_id,
+                :chunk_level, :chunk_index, :page_no,
+                :version, :effective_from, :effective_to,
+                CAST(:metadata_json AS jsonb),
+                true, now()
+            ) RETURNING chunk_id
+        """)
 
     saved_chunks: list[dict[str, Any]] = []
 
@@ -194,31 +224,32 @@ def save_hierarchical_chunks(
         meta = {
             "semantic_group": getattr(node, "semantic_group", "") or "",
             "regulation_article": node.regulation_article or "",
+            "current_section": getattr(node, "current_section", "") or "",
         }
         if getattr(node, "merged_with", None):
             meta["merged_with"] = node.merged_with
-        row = db.execute(
-            insert_sql,
-            {
-                "tenant_id": tenant_id,
-                "doc_id": doc_id,
-                "chunk_text": node.chunk_text,
-                "search_text": node.search_text,
-                "regulation_article": node.regulation_article,
-                "regulation_clause": node.regulation_clause,
-                "parent_title": node.parent_title,
-                "node_type": "ARTICLE",
-                "parent_id": None,
-                "parent_chunk_id": None,
-                "chunk_level": "root",
-                "chunk_index": node.chunk_index,
-                "page_no": node.page_no,
-                "version": version,
-                "effective_from": effective_from,
-                "effective_to": effective_to,
-                "metadata_json": json.dumps(meta, ensure_ascii=False),
-            },
-        ).fetchone()
+        row_params: dict[str, Any] = {
+            "tenant_id": tenant_id,
+            "doc_id": doc_id,
+            "chunk_text": node.chunk_text,
+            "search_text": node.search_text,
+            "regulation_article": node.regulation_article,
+            "regulation_clause": node.regulation_clause,
+            "parent_title": node.parent_title,
+            "node_type": "ARTICLE",
+            "parent_id": None,
+            "parent_chunk_id": None,
+            "chunk_level": "root",
+            "chunk_index": node.chunk_index,
+            "page_no": node.page_no,
+            "version": version,
+            "effective_from": effective_from,
+            "effective_to": effective_to,
+            "metadata_json": json.dumps(meta, ensure_ascii=False),
+        }
+        if use_search_tokens:
+            row_params["search_tokens"] = _expand_tokens(node.search_text or "")
+        row = db.execute(insert_sql, row_params).fetchone()
         chunk_id = row[0]
         key = node.regulation_article or str(node.chunk_index)
         article_chunk_id_map[key] = chunk_id
@@ -232,29 +263,30 @@ def save_hierarchical_chunks(
             "semantic_group": getattr(node, "semantic_group", "") or "",
             "regulation_article": node.regulation_article or "",
             "parent_article": node.regulation_article or "",
+            "current_section": getattr(node, "current_section", "") or "",
         }
-        row = db.execute(
-            insert_sql,
-            {
-                "tenant_id": tenant_id,
-                "doc_id": doc_id,
-                "chunk_text": node.chunk_text,
-                "search_text": node.search_text,
-                "regulation_article": node.regulation_article,
-                "regulation_clause": node.regulation_clause,
-                "parent_title": node.parent_title,
-                "node_type": "CLAUSE",
-                "parent_id": parent_id,
-                "parent_chunk_id": str(parent_id) if parent_id else None,
-                "chunk_level": "child",
-                "chunk_index": node.chunk_index,
-                "page_no": node.page_no,
-                "version": version,
-                "effective_from": effective_from,
-                "effective_to": effective_to,
-                "metadata_json": json.dumps(meta, ensure_ascii=False),
-            },
-        ).fetchone()
+        clause_params: dict[str, Any] = {
+            "tenant_id": tenant_id,
+            "doc_id": doc_id,
+            "chunk_text": node.chunk_text,
+            "search_text": node.search_text,
+            "regulation_article": node.regulation_article,
+            "regulation_clause": node.regulation_clause,
+            "parent_title": node.parent_title,
+            "node_type": "CLAUSE",
+            "parent_id": parent_id,
+            "parent_chunk_id": str(parent_id) if parent_id else None,
+            "chunk_level": "child",
+            "chunk_index": node.chunk_index,
+            "page_no": node.page_no,
+            "version": version,
+            "effective_from": effective_from,
+            "effective_to": effective_to,
+            "metadata_json": json.dumps(meta, ensure_ascii=False),
+        }
+        if use_search_tokens:
+            clause_params["search_tokens"] = _expand_tokens(node.search_text or "")
+        row = db.execute(insert_sql, clause_params).fetchone()
         chunk_id = row[0]
         saved_chunks.append(
             {"chunk_id": chunk_id, "search_text": node.search_text, "node_type": "CLAUSE"}
@@ -271,26 +303,47 @@ def save_hierarchical_chunks(
 
     if vectors:
         cast_type = _embedding_cast_type()
-        for chunk, vector in zip(saved_chunks, vectors):
-            db.execute(
-                text(
-                    f"UPDATE dwp_aura.rag_chunk SET {col} = CAST(:vec AS {cast_type}) WHERE chunk_id = :cid"
-                ),
-                {"vec": str(vector), "cid": chunk["chunk_id"]},
+        db.execute(
+            text(
+                """
+                CREATE TEMP TABLE IF NOT EXISTS tmp_rag_chunk_embedding (
+                    chunk_id bigint PRIMARY KEY,
+                    vec_text text NOT NULL
+                ) ON COMMIT DROP
+                """
             )
-        logger.info("Embedding saved for %s chunks", len(saved_chunks))
+        )
+        db.execute(text("TRUNCATE tmp_rag_chunk_embedding"))
+        db.execute(
+            text("INSERT INTO tmp_rag_chunk_embedding (chunk_id, vec_text) VALUES (:chunk_id, :vec_text)"),
+            [{"chunk_id": c["chunk_id"], "vec_text": str(v)} for c, v in zip(saved_chunks, vectors)],
+        )
+        db.execute(
+            text(
+                f"""
+                UPDATE dwp_aura.rag_chunk rc
+                SET {col} = CAST(tmp.vec_text AS {cast_type})
+                FROM tmp_rag_chunk_embedding tmp
+                WHERE rc.chunk_id = tmp.chunk_id
+                """
+            )
+        )
+        logger.info("Embedding saved for %s chunks (bulk)", len(saved_chunks))
     else:
         reason = _last_embedding_error or "model unavailable"
         logger.warning("Embedding skipped: %s", reason)
 
-    for chunk in saved_chunks:
+    chunk_ids = [int(c["chunk_id"]) for c in saved_chunks]
+    if chunk_ids:
         db.execute(
-            text("""
+            text(
+                """
                 UPDATE dwp_aura.rag_chunk
                 SET search_tsv = to_tsvector('simple', coalesce(search_text, chunk_text, ''))
-                WHERE chunk_id = :cid
-            """),
-            {"cid": chunk["chunk_id"]},
+                WHERE chunk_id = ANY(:chunk_ids)
+                """
+            ),
+            {"chunk_ids": chunk_ids},
         )
 
     db.commit()

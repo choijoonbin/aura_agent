@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 from agent.aura_bridge import run_legacy_aura_analysis
 from agent.tool_schemas import ToolContextInput
 from services.policy_service import search_policy_chunks
-from utils.config import settings
+from utils.config import get_mcc_sets, settings
 
 
 ToolFn = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
@@ -71,13 +71,12 @@ async def merchant_risk_probe(context: dict[str, Any]) -> dict[str, Any]:
     body = context["body_evidence"]
     mcc = body.get("mccCode")
     merchant = body.get("merchantName")
+    mcc_sets = get_mcc_sets()
 
-    high_mcc = {"5813", "7992", "5912", "7997", "5999"}
-    medium_mcc = {"5812", "5814", "7011", "4722"}
     mcc_str = str(mcc or "")
-    if mcc_str in high_mcc:
+    if mcc_str in mcc_sets["high_risk"]:
         base_risk = "HIGH"
-    elif mcc_str in medium_mcc or mcc_str:
+    elif mcc_str in mcc_sets["leisure"] or mcc_str in mcc_sets["medium_risk"] or mcc_str:
         base_risk = "MEDIUM"
     else:
         base_risk = "UNKNOWN"

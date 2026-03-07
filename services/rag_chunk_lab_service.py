@@ -7,7 +7,6 @@ from typing import Any
 
 # 계층적 청킹용 패턴
 _ARTICLE_PATTERN = re.compile(r"^(제\s*\d+\s*조(?:\s*\([^)]+\))?)\s*(.*)$", re.MULTILINE)
-_CLAUSE_PATTERN = re.compile(r"^[①②③④⑤⑥⑦⑧⑨⑩]|^\d+\.\s|^[가-힣]\.\s", re.MULTILINE)
 _CHAPTER_PATTERN = re.compile(r"^(제\s*\d+\s*장[^\n]*)", re.MULTILINE)
 _SECTION_PATTERN = re.compile(r"^(제\s*\d+\s*절[^\n]*)", re.MULTILINE)
 
@@ -46,6 +45,52 @@ def load_rulebook_text(path: str) -> str:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# 동의어/토큰 확장 (BM25·search_tokens용)
+# ─────────────────────────────────────────────────────────────────────────────
+
+_SYNONYM_MAP: dict[str, list[str]] = {
+    "식대": ["식비", "식사비", "음식비", "식음료비"],
+    "심야": ["야간", "야심", "23시", "22시", "자정"],
+    "휴일": ["주말", "공휴일", "토요일", "일요일", "휴무일"],
+    "한도": ["기준한도", "상한", "한도액", "허용한도", "초과"],
+    "접대비": ["접대", "업무추진비", "외부 미팅비"],
+    "교통비": ["출장비", "이동비", "택시비", "대중교통"],
+    "승인": ["결재", "허가", "인가", "사전승인"],
+    "증빙": ["영수증", "청구서", "카드전표"],
+    "사적": ["개인적", "사적 사용", "업무 외"],
+    "고위험": ["제한업종", "주류", "유흥", "도박"],
+}
+
+_JOSA_PATTERNS = ["은", "는", "이", "가", "을", "를", "의", "에", "에서", "으로", "로", "와", "과"]
+
+
+def _expand_tokens(text: str) -> str:
+    """
+    텍스트에서 동의어 확장 + 조사 제거한 토큰 문자열 생성.
+    search_tokens 컬럼 저장 및 BM25 확장 매칭용.
+    """
+    if not text or not text.strip():
+        return ""
+    tokens = set(re.findall(r"[가-힣A-Za-z0-9]{2,}", text))
+    expanded = set(tokens)
+    for canonical, synonyms in _SYNONYM_MAP.items():
+        if canonical in tokens:
+            expanded.update(synonyms)
+        for syn in synonyms:
+            if syn in tokens or any(syn in t for t in tokens):
+                expanded.add(canonical)
+    for token in list(tokens):
+        for josa in _JOSA_PATTERNS:
+            if token.endswith(josa) and len(token) > len(josa) + 1:
+                expanded.add(token[: -len(josa)])
+                break
+    for canonical, synonyms in _SYNONYM_MAP.items():
+        if canonical in expanded:
+            expanded.update(synonyms)
+    return " ".join(sorted(expanded))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # 계층적 청킹 (Parent-Child): hierarchical_parent_child 전략
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -66,8 +111,9 @@ class ChunkNode:
     children: list["ChunkNode"] = field(default_factory=list)
     chunk_index: int = 0
     page_no: int = 1
-    semantic_group: str = ""  # 장(章) 단위 그룹 (예: "제1장 총칙")
+    semantic_group: str = ""  # 장(章) 또는 장 > 절(節) 그룹 (예: "제1장 총칙", "제3장 경비 유형별 기준 > 제1절 식대·접대비")
     merged_with: str | None = None  # 병합된 조문 번호 (ARTICLE 병합 시)
+    current_section: str = ""  # 절(節) 헤더 (검색/필터용 metadata 저장)
 
 
 def _extract_article_title(header_line: str) -> tuple[str, str]:
@@ -100,11 +146,18 @@ def _split_into_clauses(article_body: str) -> list[tuple[str, str]]:
     return clauses
 
 
-def _build_contextual_header(article: str, title: str, chapter_context: str = "") -> str:
+def _build_contextual_header(
+    article: str,
+    title: str,
+    chapter_context: str = "",
+    section_context: str = "",
+) -> str:
     """Contextual RAG: 각 청크 앞에 붙는 조문 맥락 요약."""
     parts = []
     if chapter_context:
         parts.append(chapter_context)
+    if section_context:
+        parts.append(section_context)
     if article:
         parts.append(article)
     if title:
@@ -150,6 +203,8 @@ def _merge_short_articles(
                 "clauses": merged_clauses,
                 "contextual_header": art.get("contextual_header", ""),
                 "current_chapter": art.get("current_chapter", ""),
+                "current_section": art.get("current_section", ""),
+                "semantic_group": art.get("semantic_group", ""),
                 "merged_with": next_art.get("regulation_article"),
             })
             skip_next = True
@@ -171,54 +226,64 @@ def hierarchical_chunk(text: str) -> list[ChunkNode]:
     초단편( body < PARENT_MIN ) ARTICLE은 다음 조문과 병합 후 노드 생성.
     """
     articles: list[dict[str, Any]] = []
+
+    # 장/절 컨텍스트를 유지한 블록으로 먼저 분할한 뒤, 블록 내부에서 조문을 추출한다.
+    blocks: list[tuple[str, str, str]] = []
     current_chapter = ""
-
-    chapter_splits = _CHAPTER_PATTERN.split(text)
-
-    for part in chapter_splits:
-        if part.strip() and _CHAPTER_PATTERN.fullmatch(part.strip()):
-            current_chapter = part.strip()
+    current_section = ""
+    buffer: list[str] = []
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if line and _CHAPTER_PATTERN.fullmatch(line):
+            if buffer:
+                blocks.append((current_chapter, current_section, "\n".join(buffer).strip()))
+                buffer = []
+            current_chapter = line
+            current_section = ""
             continue
+        if line and _SECTION_PATTERN.fullmatch(line):
+            if buffer:
+                blocks.append((current_chapter, current_section, "\n".join(buffer).strip()))
+                buffer = []
+            current_section = line
+            continue
+        buffer.append(raw_line)
+    if buffer:
+        blocks.append((current_chapter, current_section, "\n".join(buffer).strip()))
 
-        article_splits = _ARTICLE_PATTERN.split(part)
-        i = 0
-        while i < len(article_splits):
-            segment = article_splits[i].strip()
-            if not segment:
-                i += 1
-                continue
+    for chapter_ctx, section_ctx, block_text in blocks:
+        if not block_text:
+            continue
+        matches = list(_ARTICLE_PATTERN.finditer(block_text))
+        if not matches:
+            continue
+        semantic_group = " > ".join([x for x in [chapter_ctx, section_ctx] if x]).strip()
+        for idx, match in enumerate(matches):
+            article_header = f"{match.group(1)} {match.group(2) or ''}".strip()
+            body_start = match.end()
+            body_end = matches[idx + 1].start() if idx + 1 < len(matches) else len(block_text)
+            article_body = block_text[body_start:body_end].strip()
 
-            if _ARTICLE_PATTERN.fullmatch(segment):
-                article_header = segment
-                i += 1
-                body_parts = []
-                while i < len(article_splits):
-                    seg = article_splits[i].strip()
-                    if not seg:
-                        i += 1
-                        continue
-                    if _ARTICLE_PATTERN.fullmatch(seg):
-                        break
-                    body_parts.append(seg)
-                    i += 1
-                article_body = "\n".join(body_parts)
-
-                article_num, article_title = _extract_article_title(article_header)
-                full_title = f"{article_num} {article_title}".strip()
-                contextual_header = _build_contextual_header(article_num, article_title, current_chapter)
-                clauses = _split_into_clauses(article_body)
-
-                articles.append({
-                    "regulation_article": article_num,
-                    "full_title": full_title,
-                    "article_header": article_header,
-                    "body": article_body,
-                    "contextual_header": contextual_header,
-                    "current_chapter": current_chapter,
-                    "clauses": clauses,
-                })
-            else:
-                i += 1
+            article_num, article_title = _extract_article_title(article_header)
+            full_title = f"{article_num} {article_title}".strip()
+            contextual_header = _build_contextual_header(
+                article_num,
+                article_title,
+                chapter_context=chapter_ctx,
+                section_context=section_ctx,
+            )
+            clauses = _split_into_clauses(article_body)
+            articles.append({
+                "regulation_article": article_num,
+                "full_title": full_title,
+                "article_header": article_header,
+                "body": article_body,
+                "contextual_header": contextual_header,
+                "current_chapter": chapter_ctx,
+                "current_section": section_ctx,
+                "semantic_group": semantic_group,
+                "clauses": clauses,
+            })
 
     # 초단편 ARTICLE 병합
     articles = _merge_short_articles(articles, parent_min=PARENT_MIN)
@@ -231,12 +296,13 @@ def hierarchical_chunk(text: str) -> list[ChunkNode]:
         body = art.get("body") or ""
         article_header = art.get("article_header") or full_title
         contextual_header = art.get("contextual_header") or ""
-        current_chapter = art.get("current_chapter") or ""
+        semantic_group = art.get("semantic_group") or ""
         regulation_article = art.get("regulation_article")
         merged_with = art.get("merged_with")
         clauses = art.get("clauses") or []
 
         article_full_text = f"{article_header}\n{body}".strip()
+        current_section = art.get("current_section") or ""
         article_node = ChunkNode(
             node_type="ARTICLE",
             regulation_article=regulation_article,
@@ -246,8 +312,9 @@ def hierarchical_chunk(text: str) -> list[ChunkNode]:
             search_text=body,
             contextual_header=contextual_header,
             chunk_index=chunk_index,
-            semantic_group=current_chapter,
+            semantic_group=semantic_group,
             merged_with=merged_with,
+            current_section=current_section,
         )
         chunk_index += 1
 
@@ -263,7 +330,8 @@ def hierarchical_chunk(text: str) -> list[ChunkNode]:
                     search_text=clause_text,
                     contextual_header=contextual_header,
                     chunk_index=chunk_index,
-                    semantic_group=current_chapter,
+                    semantic_group=semantic_group,
+                    current_section=current_section,
                 )
                 chunk_index += 1
                 article_node.children.append(clause_node)

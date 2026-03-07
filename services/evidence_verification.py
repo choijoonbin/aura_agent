@@ -17,6 +17,34 @@ EVIDENCE_GATE_REGENERATE = "regenerate_citations"
 DEFAULT_COVERAGE_THRESHOLD_HOLD = 0.5
 DEFAULT_COVERAGE_THRESHOLD_CAUTION = 0.7
 
+
+def get_dynamic_coverage_thresholds(
+    severity: str,
+    final_score: float,
+    compound_multiplier: float = 1.0,
+) -> tuple[float, float]:
+    """
+    케이스 심각도와 점수에 따라 동적으로 coverage 임계값을 반환한다.
+    반환: (hold_threshold, caution_threshold)
+    CRITICAL/HIGH 케이스는 임계값 상향, 복합 위험 승수 >= 1.3 시 추가 상향.
+    """
+    sev = str(severity or "").upper()
+    base_hold = DEFAULT_COVERAGE_THRESHOLD_HOLD
+    base_caution = DEFAULT_COVERAGE_THRESHOLD_CAUTION
+    severity_delta = {
+        "CRITICAL": 0.25,
+        "HIGH": 0.15,
+        "MEDIUM": 0.05,
+        "LOW": 0.0,
+    }.get(sev, 0.0)
+    score_delta = 0.1 if final_score >= 80 else (0.05 if final_score >= 65 else 0.0)
+    compound_delta = 0.1 if compound_multiplier >= 1.3 else 0.0
+    total_delta = severity_delta + score_delta + compound_delta
+    hold_threshold = min(0.9, base_hold + total_delta)
+    caution_threshold = min(0.95, base_caution + total_delta)
+    return hold_threshold, caution_threshold
+
+
 _WORD_RE = re.compile(r"[0-9A-Za-z가-힣]{2,}")
 
 

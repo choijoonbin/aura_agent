@@ -7,6 +7,7 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from services.chunking_pipeline import _embedding_column_exists
 from utils.config import settings
 
 
@@ -92,6 +93,18 @@ def build_policy_keywords(body_evidence: dict[str, Any]) -> list[str]:
         token = str(kw).strip()
         if token and token not in keywords:
             keywords.append(token)
+
+    try:
+        from services.rag_chunk_lab_service import _SYNONYM_MAP
+        for kw in list(keywords):
+            for canonical, synonyms in _SYNONYM_MAP.items():
+                if kw == canonical or kw in synonyms:
+                    for s in [canonical] + synonyms:
+                        if s not in keywords:
+                            keywords.append(s)
+                    break
+    except ImportError:
+        pass
 
     return keywords
 
@@ -213,6 +226,51 @@ def _expand_group_context(db: Session, doc_id: int, article: str | None, parent_
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+def _get_rrf_weights(body_evidence: dict[str, Any]) -> tuple[float, float]:
+    """
+    케이스 유형에 따라 BM25/Dense RRF 가중치 동적 결정.
+    반환: (bm25_weight, dense_weight)
+    """
+    case_type = str(
+        body_evidence.get("case_type") or body_evidence.get("intended_risk_type") or ""
+    )
+    _CASE_WEIGHTS: dict[str, tuple[float, float]] = {
+        "HOLIDAY_USAGE": (0.65, 0.35),
+        "LIMIT_EXCEED": (0.45, 0.55),
+        "PRIVATE_USE_RISK": (0.50, 0.50),
+        "UNUSUAL_PATTERN": (0.35, 0.65),
+    }
+    bm25_w, dense_w = _CASE_WEIGHTS.get(case_type, (0.50, 0.50))
+    if body_evidence.get("_regulation_article_hint"):
+        bm25_w = min(0.80, bm25_w + 0.15)
+        dense_w = 1.0 - bm25_w
+    occurred_at = str(body_evidence.get("occurredAt") or "")
+    try:
+        if len(occurred_at) >= 13:
+            hour = int(occurred_at[11:13])
+            if hour >= 22 or hour < 6:
+                dense_w = min(0.70, dense_w + 0.10)
+                bm25_w = 1.0 - dense_w
+    except Exception:
+        pass
+    return round(bm25_w, 2), round(dense_w, 2)
+
+
+def _get_semantic_group_filter(body_evidence: dict[str, Any]) -> list[str] | None:
+    """
+    케이스 유형에 따라 검색할 장(章) semantic_group 패턴 목록 반환.
+    None이면 전체 검색.
+    """
+    case_type = str(body_evidence.get("case_type") or "")
+    _CASE_GROUP_HINTS: dict[str, list[str]] = {
+        "HOLIDAY_USAGE": ["제3장", "제4장"],
+        "LIMIT_EXCEED": ["제4장", "제2장"],
+        "PRIVATE_USE_RISK": ["제3장", "제5장"],
+        "UNUSUAL_PATTERN": ["제3장", "제5장"],
+    }
+    return _CASE_GROUP_HINTS.get(case_type)
+
+
 def _search_bm25(
     db: Session,
     body_evidence: dict[str, Any],
@@ -247,22 +305,44 @@ def _search_bm25(
         return []
     ts_query = " | ".join(ts_terms[:30])
 
-    sql = text("""
-        SELECT
-            chunk_id, doc_id, regulation_article, regulation_clause,
-            parent_title, chunk_text, search_text, node_type, parent_id,
-            version, effective_from, effective_to, page_no, chunk_index,
-            ts_rank_cd(search_tsv, query) AS bm25_score
-        FROM dwp_aura.rag_chunk,
-             to_tsquery('simple', :ts_query) AS query
-        WHERE tenant_id = :tenant_id
-          AND is_active = true
-          AND search_tsv @@ query
-          AND (:effective_date IS NULL OR coalesce(effective_from, :effective_date) <= :effective_date)
-          AND (:effective_date IS NULL OR coalesce(effective_to, :effective_date) >= :effective_date)
-        ORDER BY bm25_score DESC
-        LIMIT :limit
-    """)
+    use_search_tokens = _embedding_column_exists(db, "search_tokens")
+    if use_search_tokens:
+        sql = text("""
+            SELECT
+                chunk_id, doc_id, regulation_article, regulation_clause,
+                parent_title, chunk_text, search_text, node_type, parent_id,
+                version, effective_from, effective_to, page_no, chunk_index,
+                ts_rank_cd(
+                    setweight(search_tsv, 'A') || setweight(to_tsvector('simple', coalesce(search_tokens, '')), 'B'),
+                    query
+                ) AS bm25_score
+            FROM dwp_aura.rag_chunk,
+                 to_tsquery('simple', :ts_query) AS query
+            WHERE tenant_id = :tenant_id
+              AND is_active = true
+              AND (search_tsv @@ query OR to_tsvector('simple', coalesce(search_tokens, '')) @@ query)
+              AND (:effective_date IS NULL OR coalesce(effective_from, :effective_date) <= :effective_date)
+              AND (:effective_date IS NULL OR coalesce(effective_to, :effective_date) >= :effective_date)
+            ORDER BY bm25_score DESC
+            LIMIT :limit
+        """)
+    else:
+        sql = text("""
+            SELECT
+                chunk_id, doc_id, regulation_article, regulation_clause,
+                parent_title, chunk_text, search_text, node_type, parent_id,
+                version, effective_from, effective_to, page_no, chunk_index,
+                ts_rank_cd(search_tsv, query) AS bm25_score
+            FROM dwp_aura.rag_chunk,
+                 to_tsquery('simple', :ts_query) AS query
+            WHERE tenant_id = :tenant_id
+              AND is_active = true
+              AND search_tsv @@ query
+              AND (:effective_date IS NULL OR coalesce(effective_from, :effective_date) <= :effective_date)
+              AND (:effective_date IS NULL OR coalesce(effective_to, :effective_date) >= :effective_date)
+            ORDER BY bm25_score DESC
+            LIMIT :limit
+        """)
     rows = db.execute(
         sql,
         {
@@ -275,6 +355,236 @@ def _search_bm25(
     return [dict(row) for row in rows]
 
 
+def _search_bm25_with_group_filter(
+    db: Session,
+    body_evidence: dict[str, Any],
+    *,
+    limit: int = 20,
+    effective_date: Any = None,
+    group_filter: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    """BM25 검색 + semantic_group 필터(장/절). group_filter가 있으면 해당 패턴 내에서만 검색."""
+    keywords = build_policy_keywords(body_evidence)
+    if not keywords:
+        return []
+
+    TSQUERY_OPERATORS = set("&|!():*")
+    ts_terms = []
+    seen = set()
+    for kw in keywords[:20]:
+        if not kw or not str(kw).strip():
+            continue
+        for part in str(kw).strip().split():
+            token = part.strip()
+            if len(token) < 2 or any(c in token for c in TSQUERY_OPERATORS):
+                continue
+            safe = token.replace("'", "''")
+            if safe in seen:
+                continue
+            seen.add(safe)
+            ts_terms.append(f"{safe}:*")
+    if not ts_terms:
+        return []
+    ts_query = " | ".join(ts_terms[:30])
+
+    group_filter_sql = ""
+    group_params: dict[str, str] = {}
+    if group_filter:
+        conditions = [
+            f"(metadata_json->>'semantic_group' LIKE :grp{i})"
+            for i in range(len(group_filter))
+        ]
+        group_filter_sql = " AND (" + " OR ".join(conditions) + ")"
+        for i, grp in enumerate(group_filter):
+            group_params[f"grp{i}"] = f"{grp}%"
+
+    use_search_tokens = _embedding_column_exists(db, "search_tokens")
+    if use_search_tokens:
+        rank_expr = "ts_rank_cd(setweight(search_tsv, 'A') || setweight(to_tsvector('simple', coalesce(search_tokens, '')), 'B'), query)"
+        where_match = "(search_tsv @@ query OR to_tsvector('simple', coalesce(search_tokens, '')) @@ query)"
+    else:
+        rank_expr = "ts_rank_cd(search_tsv, query)"
+        where_match = "search_tsv @@ query"
+
+    sql = text(
+        """
+        SELECT
+            chunk_id, doc_id, regulation_article, regulation_clause,
+            parent_title, chunk_text, search_text, node_type, parent_id,
+            version, effective_from, effective_to, page_no, chunk_index,
+            metadata_json,
+            """
+        + rank_expr
+        + """ AS bm25_score
+        FROM dwp_aura.rag_chunk,
+             to_tsquery('simple', :ts_query) AS query
+        WHERE tenant_id = :tenant_id
+          AND is_active = true
+          AND """
+        + where_match
+        + """
+          AND (:effective_date IS NULL OR coalesce(effective_from, :effective_date) <= :effective_date)
+          AND (:effective_date IS NULL OR coalesce(effective_to, :effective_date) >= :effective_date)
+        """
+        + group_filter_sql
+        + """
+        ORDER BY bm25_score DESC
+        LIMIT :limit
+        """
+    )
+    params = {
+        "tenant_id": settings.default_tenant_id,
+        "ts_query": ts_query,
+        "effective_date": effective_date,
+        "limit": limit,
+        **group_params,
+    }
+    rows = db.execute(sql, params).mappings().all()
+    return [dict(row) for row in rows]
+
+
+def _build_dense_query(body_evidence: dict[str, Any]) -> str:
+    """
+    Dense 검색용 자연어 쿼리 문장 생성.
+    케이스 유형별 템플릿 + 전표 사실(시간, 금액, MCC, 근태) 삽입. 내부 코드(HOLIDAY_USAGE 등) 제외.
+    """
+    case_type = str(
+        body_evidence.get("case_type") or body_evidence.get("intended_risk_type") or ""
+    ).strip()
+    merchant = body_evidence.get("merchantName") or "거래처 미상"
+    amount = body_evidence.get("amount")
+    amount_str = f"{int(amount):,}원" if amount is not None else "금액 미상"
+    is_holiday = bool(body_evidence.get("isHoliday"))
+    hr_status = str(body_evidence.get("hrStatus") or "").upper()
+    mcc_code = body_evidence.get("mccCode") or ""
+    mcc_name = body_evidence.get("mccName") or ""
+    occurred_at = str(body_evidence.get("occurredAt") or "")
+    hour = None
+    try:
+        if len(occurred_at) >= 13:
+            hour = int(occurred_at[11:13])
+    except Exception:
+        pass
+    is_night = hour is not None and (hour >= 22 or hour < 6)
+
+    hr_hint = ""
+    if hr_status in {"LEAVE", "OFF", "VACATION"}:
+        hr_label = {"LEAVE": "휴가·결근", "OFF": "휴무", "VACATION": "휴가"}.get(
+            hr_status, hr_status
+        )
+        hr_hint = f"해당 일자 근태 상태는 {hr_label}({hr_status})이다. "
+
+    night_hint = ""
+    if is_night and hour is not None:
+        night_hint = f"결제 시각은 {hour:02d}시로 심야 시간대에 해당한다. "
+
+    mcc_display = (
+        f"{mcc_name}({mcc_code})" if (mcc_name and mcc_code) else (mcc_code or "")
+    )
+
+    _CASE_TEMPLATES: dict[str, str] = {
+        "HOLIDAY_USAGE": (
+            "주말 또는 공휴일 경비 사용 건으로, {merchant}에서 {amount}을 지출하였다. "
+            "{hr_hint}"
+            "이 지출에 적용되는 휴일 경비 사용 제한 규정과 식대 규정을 찾아야 한다."
+        ),
+        "LIMIT_EXCEED": (
+            "{merchant}에서 {amount}을 지출하였으며, 예산 한도를 초과한 것으로 확인되었다. "
+            "금액 구간별 승인 기준과 예산 초과 처리 절차 규정을 찾아야 한다."
+        ),
+        "PRIVATE_USE_RISK": (
+            "{merchant}(MCC: {mcc})에서 {amount}을 사용하였으나 사적 사용 여부가 불명확하다. "
+            "업무 관련성 증빙 기준과 사적 사용 금지 규정을 찾아야 한다."
+        ),
+        "UNUSUAL_PATTERN": (
+            "{merchant}에서 {amount}을 지출하였으며 비정상 패턴이 감지되었다. "
+            "{night_hint}"
+            "관련 경비 지출 규정과 심야 시간대 지출 기준을 찾아야 한다."
+        ),
+    }
+
+    template = _CASE_TEMPLATES.get(
+        case_type,
+        (
+            "{merchant}에서 {amount}을 지출한 건에 대해 적용 가능한 사내 경비 지출 규정을 찾아야 한다. "
+            "{hr_hint}{night_hint}"
+        ),
+    )
+
+    query = template.format(
+        merchant=merchant,
+        amount=amount_str,
+        hr_hint=hr_hint,
+        night_hint=night_hint,
+        mcc=mcc_display,
+    ).strip()
+
+    if is_holiday and "공휴일" not in query and "휴일" not in query:
+        query += " 해당 날은 공휴일 또는 주말이다."
+
+    return query
+
+
+def _build_dense_query_with_hyde(
+    body_evidence: dict[str, Any],
+    *,
+    llm_client: Any = None,
+) -> str:
+    """
+    HyDE 적용 시 LLM으로 가설 규정 문장 생성 후 쿼리와 결합.
+    LLM 미설정 또는 실패 시 _build_dense_query()로 fallback.
+    """
+    base_query = _build_dense_query(body_evidence)
+    if not getattr(settings, "enable_hyde_query", False):
+        return base_query
+    client = llm_client
+    if client is None and settings.openai_api_key:
+        try:
+            from openai import AsyncOpenAI, OpenAI
+
+            base_url = (settings.openai_base_url or "").strip()
+            if ".openai.azure.com" in base_url:
+                azure_ep = base_url.rstrip("/")
+                if azure_ep.endswith("/openai/v1"):
+                    azure_ep = azure_ep[: -len("/openai/v1")]
+                client = OpenAI(
+                    api_key=settings.openai_api_key,
+                    azure_endpoint=azure_ep,
+                    api_version=getattr(
+                        settings, "openai_api_version", "2024-12-01-preview"
+                    ),
+                )
+            else:
+                kw: dict[str, Any] = {"api_key": settings.openai_api_key}
+                if base_url:
+                    kw["base_url"] = base_url
+                client = OpenAI(**kw)
+        except Exception:
+            client = None
+    if client is None:
+        return base_query
+    try:
+        system_prompt = (
+            "당신은 한국 기업의 사내 경비 지출 관리 규정 전문가다.\n"
+            "아래 전표 상황에 대해 실제 사내 규정집에 나올 법한 조문 형태의 문장을 1~2문장 작성하라.\n"
+            "반드시 '제N조' 형식의 조문 번호, '①②③' 형식의 항 번호를 포함하라.\n"
+            "실제 규정집 문체와 유사하게 작성할 것. JSON, 코드블록 사용 금지."
+        )
+        user_prompt = f"전표 상황:\n{base_query}\n\n이 상황에 적용될 가설 규정 문장:"
+        response = client.chat.completions.create(
+            model=getattr(settings, "reasoning_llm_model", "gpt-4o-mini"),
+            max_tokens=150,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+        )
+        hyde_text = (response.choices[0].message.content or "").strip()
+        return f"{base_query}\n\n[가설 규정 문장] {hyde_text}"
+    except Exception:
+        return base_query
+
+
 def _search_dense(
     db: Session,
     body_evidence: dict[str, Any],
@@ -282,8 +592,10 @@ def _search_dense(
     limit: int = 20,
     effective_date: Any = None,
     embed_column: str = settings.rag_embedding_column,
+    use_hyde: bool = False,
+    llm_client: Any = None,
 ) -> list[dict[str, Any]]:
-    """Dense 벡터 검색: pgvector <=> (cosine distance)."""
+    """Dense 벡터 검색. 자연어 쿼리 사용, 선택 시 HyDE 적용."""
     if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", str(embed_column or "")):
         return []
     cast_type = str(settings.rag_embedding_cast_type or "halfvec").strip().lower()
@@ -294,11 +606,11 @@ def _search_dense(
     except ImportError:
         return []
 
-    keywords = build_policy_keywords(body_evidence)
-    case_type = body_evidence.get("case_type") or ""
-    merchant = body_evidence.get("merchantName") or ""
-    query_text = f"{case_type} {merchant} {' '.join(keywords[:10])}".strip()
-    if not query_text:
+    if use_hyde:
+        query_text = _build_dense_query_with_hyde(body_evidence, llm_client=llm_client)
+    else:
+        query_text = _build_dense_query(body_evidence)
+    if not query_text or not query_text.strip():
         return []
 
     vectors = embed_texts([query_text])
@@ -484,12 +796,32 @@ def search_policy_chunks(db: Session, body_evidence: dict[str, Any], limit: int 
             pass
 
     candidate_limit = max(limit * 6, 20)
+    bm25_weight, dense_weight = _get_rrf_weights(body_evidence)
+    group_filter = _get_semantic_group_filter(body_evidence)
 
-    bm25_results = _search_bm25(db, body_evidence, limit=candidate_limit, effective_date=effective_date)
+    bm25_results = _search_bm25_with_group_filter(
+        db, body_evidence,
+        limit=candidate_limit,
+        effective_date=effective_date,
+        group_filter=group_filter,
+    )
+    if group_filter and len(bm25_results) < limit:
+        bm25_fallback = _search_bm25(db, body_evidence, limit=candidate_limit, effective_date=effective_date)
+        existing_ids = {r["chunk_id"] for r in bm25_results}
+        for r in bm25_fallback:
+            if r.get("chunk_id") not in existing_ids:
+                bm25_results.append(r)
+                existing_ids.add(r["chunk_id"])
+
     dense_results = _search_dense(db, body_evidence, limit=candidate_limit, effective_date=effective_date)
 
     if bm25_results and dense_results:
-        fused = _reciprocal_rank_fusion(bm25_results, dense_results, k=60)
+        fused = _reciprocal_rank_fusion(
+            bm25_results, dense_results,
+            k=60,
+            bm25_weight=bm25_weight,
+            dense_weight=dense_weight,
+        )
     elif bm25_results:
         fused = [dict(r, rrf_score=r.get("bm25_score", 0)) for r in bm25_results]
         fused.sort(key=lambda x: x.get("rrf_score", 0), reverse=True)
@@ -503,13 +835,26 @@ def search_policy_chunks(db: Session, body_evidence: dict[str, Any], limit: int 
 
     enriched = _enrich_with_parent_context(db, fused[:candidate_limit])
 
-    keywords = build_policy_keywords(body_evidence)
-    query_str = " ".join(keywords[:12])
+    rerank_query = _build_dense_query(body_evidence)
+    RERANK_INPUT_LIMIT = min(len(enriched), 25)
+    rerank_input = enriched[:RERANK_INPUT_LIMIT]
     try:
         from services.retrieval_quality import rerank_with_cross_encoder
-        enriched = rerank_with_cross_encoder(enriched, query_str)
+        reranked = rerank_with_cross_encoder(rerank_input, rerank_query)
+        reranked_ids = {r.get("chunk_id") for r in reranked if r.get("chunk_id") is not None}
+        remaining = [r for r in enriched[RERANK_INPUT_LIMIT:] if r.get("chunk_id") not in reranked_ids]
+        enriched = reranked + remaining
     except Exception:
-        pass
+        if getattr(settings, "enable_llm_rerank_fallback", True):
+            try:
+                from services.retrieval_quality import rerank_with_llm_fallback
+                enriched = rerank_with_llm_fallback(
+                    rerank_input, rerank_query, body_evidence=body_evidence
+                ) + enriched[RERANK_INPUT_LIMIT:]
+            except Exception:
+                pass
+        else:
+            pass
 
     results = []
     for item in enriched[:limit]:

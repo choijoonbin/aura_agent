@@ -227,6 +227,11 @@ sequenceDiagram
 > 참고: [`ui/rag.py`](ui/rag.py) — 규정문서 라이브러리, 청킹 실험실 탭
 
 ---
+청킹 전략/미리보기: rag_chunk_lab_service.py
+저장/임베딩/tsvector: chunking_pipeline.py
+검색 파이프라인: policy_service.py
+rerank: retrieval_quality.py
+API 재청킹: main.py
 
 ## 8. 설명회 요약 포인트
 
