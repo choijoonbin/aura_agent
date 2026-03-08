@@ -3,6 +3,7 @@ from __future__ import annotations
 import html
 import json
 import queue
+import re
 import threading
 import time
 from collections import defaultdict
@@ -12,7 +13,7 @@ import requests
 import streamlit as st
 from ui.shared import stylable_container
 
-from ui.api_client import API, get, post
+from ui.api_client import API, get, post, post_multipart
 from utils.config import settings
 from ui.shared import (
     budget_exceeded_display,
@@ -84,7 +85,7 @@ STREAM_TERM_MAP: dict[str, str] = {
     "document_evidence_probe": "증빙 점검 도구",
     "budget_risk_probe": "예산 초과 점검 도구",
     "legacy_aura_deep_audit": "심층 감사 도구",
-    "MCC": "가맹점 업종 코드(MCC)",
+    "MCC": "가맹점 업종 코드",
     "HITL": "담당자 검토(HITL)",
     "REVIEW_REQUIRED": "검토 필요(REVIEW_REQUIRED)",
     "finalizer": "최종 판정 단계",
@@ -266,6 +267,9 @@ def sse_text_stream(stream_url: str, *, run_id: str | None = None) -> Iterator[s
                         yield retry_body
                         first_event = False
                     else:
+                        if ev_type == "PLAN_READY":
+                            first_event = False
+                            continue
                         if thinking_node is not None:
                             done_sep = "  \n\n---  \n\n"
                             stream_buffer.append(done_sep)
@@ -385,10 +389,29 @@ def _stream_status_keys(run_id: str | None) -> tuple[str | None, str | None]:
     return f"mt_stream_status_{run_id}", f"mt_stream_node_{run_id}"
 
 
+# idle(생각중) 표시 시 마지막 완료 노드가 아닌 다음 단계 문구를 보여주기 위한 메타
+_STREAM_NEXT_FOR_IDLE: dict[str, tuple[str, str]] = {
+    "screener": ("입력 해석", "전표 입력값과 위험 지표를 정규화합니다."),
+    "intake": ("조사 계획 수립", "검증할 사실과 사용할 도구 순서를 계획합니다."),
+    "planner": ("근거 수집 실행", "휴일/예산/업종/규정 근거를 조회합니다."),
+    "execute": ("비판적 검토", "과잉 주장과 반례 가능성을 점검합니다."),
+    "critic": ("검증 및 HITL 판단", "자동 판정 가능 여부를 결정합니다."),
+    "verify": ("HITL 대기 / 보고", "담당자 검토 또는 보고 문장 생성으로 이어갑니다."),
+    "hitl_pause": ("보고 문장 생성", "근거 중심 설명 문장을 만듭니다."),
+    "reporter": ("결과 확정", "상태·점수·이력을 최종 확정합니다."),
+    "finalizer": ("완료", "분석을 마쳤습니다."),
+}
+
+
 def _get_stream_waiting_status(run_id: str | None) -> tuple[str, str]:
+    """idle 시 표시할 (status 문구, 노드 라벨). 방금 끝난 단계가 아닌 다음 단계 문구를 써서 오해를 줄인다."""
     status_key, node_key = _stream_status_keys(run_id)
     status_text = st.session_state.get(status_key or "", "") if status_key else ""
-    node_name = st.session_state.get(node_key or "", "") if node_key else ""
+    node_name = str(st.session_state.get(node_key or "", "") or "agent").strip().lower()
+    next_info = _STREAM_NEXT_FOR_IDLE.get(node_name)
+    if next_info:
+        next_label, next_phrase = next_info
+        return next_phrase, next_label
     return str(status_text or ""), str(node_name or "agent")
 
 
@@ -412,7 +435,22 @@ def sse_node_block_generator_with_idle(
         finally:
             worker_done.set()
 
-    threading.Thread(target=_worker, daemon=True).start()
+    worker = threading.Thread(target=_worker, daemon=True, name="workspace-sse-worker")
+    # Streamlit 스레드 컨텍스트를 전달하지 않으면 worker에서 st.session_state 접근 시
+    # "missing ScriptRunContext" 경고가 반복된다.
+    try:
+        from streamlit.runtime.scriptrunner import add_script_run_ctx, get_script_run_ctx
+
+        ctx = get_script_run_ctx()
+        if ctx is not None:
+            try:
+                add_script_run_ctx(worker, ctx)
+            except TypeError:
+                # 일부 버전은 add_script_run_ctx(thread) 시그니처만 제공
+                add_script_run_ctx(worker)
+    except Exception:
+        pass
+    worker.start()
 
     had_block = False
     last_block_at = time.monotonic()
@@ -545,6 +583,8 @@ def sse_node_block_generator(stream_url: str, *, run_id: str | None = None) -> I
                         if retry_msg.strip():
                             st.session_state[status_key] = retry_msg[:220]
                 else:
+                    if ev_type == "PLAN_READY":
+                        continue
                     if thinking_open:
                         addition += "  \n\n"
                         thinking_open = False
@@ -913,6 +953,9 @@ def render_timeline_cards(events: list[dict[str, Any]], *, view_mode: str = "bus
                         payload = event.get("payload") or {}
                         meta = payload.get("metadata") or {}
                         ev_type = str(payload.get("event_type") or "").upper()
+                        # planner: PLAN_READY는 추론(THINKING_DONE)과 동일 내용이라 중복 표시 제거
+                        if ev_type == "PLAN_READY":
+                            continue
                         icon = EVENT_ICON_MAP.get(ev_type, "🤖")
                         part2 = f"{payload.get('node') or '-'} / {'추론' if ev_type == 'THINKING_DONE' else _humanize_stream_text(ev_type)}"
                         tool_frag = _tool_caption_fragment(ev_type, payload.get("tool"), meta.get("tool_description"), html_tooltip=True)
@@ -964,6 +1007,8 @@ def render_timeline_cards(events: list[dict[str, Any]], *, view_mode: str = "bus
                         payload = event.get("payload") or {}
                         meta = payload.get("metadata") or {}
                         ev_type = str(payload.get("event_type") or "").upper()
+                        if ev_type == "PLAN_READY":
+                            continue
                         icon = EVENT_ICON_MAP.get(ev_type, "🤖")
                         part2 = f"{payload.get('node') or '-'} / {'추론' if ev_type == 'THINKING_DONE' else _humanize_stream_text(ev_type)}"
                         tool_frag = _tool_caption_fragment(ev_type, payload.get("tool"), meta.get("tool_description"), html_tooltip=True)
@@ -1013,8 +1058,14 @@ _REPR_MSG_PRIORITY = ["NODE_END", "GATE_APPLIED", "TOOL_RESULT", "PLAN_READY", "
 
 
 def _pick_representative_message(bucket: dict[str, Any]) -> str:
-    """우선순위에 따라 대표 메시지 1개 선택. NODE_END.message > GATE_APPLIED.message > TOOL_RESULT.observation > PLAN_READY.message > NODE_START.message"""
+    """우선순위에 따라 대표 메시지 1개 선택. planner 노드는 계획 내용(PLAN_READY)을 우선 표시."""
     by_type = bucket.get("by_type") or {}
+    node = (bucket.get("node") or "").lower()
+    # planner: 조사 계획 수립된 내용을 보여주기 위해 PLAN_READY 우선
+    if node == "planner":
+        plan_msg = by_type.get("PLAN_READY")
+        if plan_msg and str(plan_msg).strip():
+            return str(plan_msg).strip()
     for ev in _REPR_MSG_PRIORITY:
         v = by_type.get(ev)
         if v and str(v).strip():
@@ -1231,6 +1282,8 @@ def _hitl_state_key(kind: str, run_id: str | None) -> str:
 
 def _prime_hitl_form_state(run_id: str, latest_bundle: dict[str, Any]) -> dict[str, str]:
     draft = latest_bundle.get("hitl_draft") or latest_bundle.get("hitl_response") or {}
+    extra_facts = draft.get("extra_facts") or {}
+    required_inputs = (latest_bundle.get("hitl_request") or {}).get("required_inputs") or []
     defaults = {
         "reviewer": draft.get("reviewer") or "FINANCE_REVIEWER",
         "business_purpose": draft.get("business_purpose") or "",
@@ -1245,10 +1298,62 @@ def _prime_hitl_form_state(run_id: str, latest_bundle: dict[str, Any]) -> dict[s
         "comment": _hitl_state_key("comment", run_id),
         "decision": _hitl_state_key("decision", run_id),
     }
+    for req in required_inputs:
+        field = (req.get("field") or "").strip()
+        if field and field not in state_keys:
+            state_keys[f"extra_{field}"] = _hitl_state_key(f"extra_{field}", run_id)
+            if state_keys[f"extra_{field}"] not in st.session_state:
+                st.session_state[state_keys[f"extra_{field}"]] = extra_facts.get(field, "")
     for field, key in state_keys.items():
-        if key not in st.session_state:
+        if key not in st.session_state and field in defaults:
             st.session_state[key] = defaults[field]
     return state_keys
+
+
+def _format_covered_shortage(covered: int, total: int) -> str:
+    """검증 대상 N개 중 M개 연결, K개 부족 문장 반환."""
+    if total <= 0:
+        return "규정 근거 연결이 기준보다 부족해 자동 확정을 보류했습니다. 담당자 검토가 필요합니다."
+    shortage = total - covered
+    return (
+        f"검증 대상 {total}개 중 {covered}개만 규정 근거와 연결되어, "
+        f"{shortage}개가 부족해 자동 확정을 보류했습니다. 담당자 검토가 필요합니다."
+    )
+
+
+def _plain_stop_reason(text: str, verification_summary: dict[str, Any] | None = None) -> str:
+    """자동 확정 중단 이유를 사용자 이해하기 쉬운 문장으로 풀어서 반환."""
+    t = (text or "").strip()
+    if not t:
+        return text
+    # N개 중 M개 연결, K개 부족 형식으로 구체화 (verification_summary 또는 문장 내 숫자 사용)
+    vs = verification_summary or {}
+    covered = vs.get("covered")
+    total = vs.get("total")
+    if "근거 연결률이" in t and "자동 확정 기준에 미달" in t:
+        # 백엔드 문장 "근거 연결률이 3/4 (75.0%)로 ..." 에서 숫자 추출
+        m = re.search(r"근거 연결률이\s*(\d+)/(\d+)\s*", t)
+        if m:
+            c, tot = int(m.group(1)), int(m.group(2))
+            return _format_covered_shortage(c, tot)
+        if isinstance(covered, int) and isinstance(total, int):
+            return _format_covered_shortage(covered, total)
+        return t
+    if "검증 게이트가 hold 상태로" in t or "검증 게이트 판정: hold" in t:
+        if isinstance(covered, int) and isinstance(total, int):
+            return _format_covered_shortage(covered, total)
+        return "규정 근거 연결이 기준보다 부족해 자동 확정을 보류했습니다. 담당자 검토가 필요합니다."
+    if "검증 게이트가 caution 상태로" in t or "검증 게이트 판정: caution" in t:
+        if isinstance(covered, int) and isinstance(total, int):
+            return _format_covered_shortage(covered, total)
+        return "규정 근거 연결이 다소 부족해 주의 검토가 필요합니다."
+    if "검증 게이트가 regenerate_citations 상태로" in t or "검증 게이트 판정: regenerate_citations" in t:
+        return "일부 주장에 대한 규정 인용을 보완한 뒤 다시 검증하는 것이 좋습니다."
+    if t.startswith("검증 신호:") or t.startswith("품질 신호:"):
+        if "OK" in t:
+            return "자동 판정을 할 수 없어 담당자 검토를 요청한 상태입니다."
+        return "시스템 검증 결과상 담당자 검토가 필요한 상태입니다."
+    return text
 
 
 def _fallback_hitl_request(latest_bundle: dict[str, Any]) -> dict[str, Any]:
@@ -1259,10 +1364,15 @@ def _fallback_hitl_request(latest_bundle: dict[str, Any]) -> dict[str, Any]:
         reasons.append(str(screening_meta.get("reasonText")))
     gate_policy = verification_summary.get("gate_policy")
     if gate_policy:
-        reasons.append(f"검증 게이트 판정: {gate_policy}")
+        covered = verification_summary.get("covered")
+        total = verification_summary.get("total")
+        if isinstance(covered, int) and isinstance(total, int) and total > 0:
+            reasons.append(_format_covered_shortage(covered, total))
+        else:
+            reasons.append(_plain_stop_reason(f"검증 게이트 판정: {gate_policy}"))
     quality_codes = result.get("quality_gate_codes") or []
     if quality_codes:
-        reasons.append(f"품질 신호: {', '.join(str(x) for x in quality_codes)}")
+        reasons.append(_plain_stop_reason(f"품질 신호: {', '.join(str(x) for x in quality_codes)}"))
     if not reasons:
         reasons.append("HITL payload가 생성되지 않았지만 현재 run 상태상 담당자 검토가 필요한 것으로 표시되었습니다.")
     return {
@@ -1293,25 +1403,40 @@ def _build_hitl_summary_sections(latest_bundle: dict[str, Any]) -> dict[str, lis
         elif screening_meta.get("reasonText"):
             review_reasons = [str(screening_meta.get("reasonText"))]
         else:
-            review_reasons = ["검토 필요 사유 데이터가 비어 있습니다."]
+            # 자동 확정 중단 이유가 있으면 같은 맥락으로 검토 필요 사유로 사용 (기존 run 호환)
+            stop_raw = hitl_request.get("auto_finalize_blockers") or []
+            if stop_raw:
+                review_reasons = [_plain_stop_reason(str(s), verification_summary) for s in stop_raw if s]
+            if not review_reasons:
+                review_reasons = ["검토 필요 사유 데이터가 비어 있습니다."]
 
-    stop_reasons: list[str] = [str(x) for x in (hitl_request.get("auto_finalize_blockers") or []) if x]
-    if not stop_reasons:
+    raw_stop: list[str] = [str(x) for x in (hitl_request.get("auto_finalize_blockers") or []) if x]
+    if not raw_stop:
         gate_policy = verification_summary.get("gate_policy")
+        covered = verification_summary.get("covered")
+        total = verification_summary.get("total")
         if gate_policy:
-            stop_reasons.append(f"검증 게이트 판정: {gate_policy}")
+            # N개 중 M개, K개 부족 구체 수치가 있으면 그 문구로 추가
+            if isinstance(covered, int) and isinstance(total, int) and total > 0:
+                raw_stop.append(_format_covered_shortage(covered, total))
+            else:
+                raw_stop.append(f"검증 게이트 판정: {gate_policy}")
         quality_codes = result.get("quality_gate_codes") or []
-        if quality_codes:
-            stop_reasons.append(f"검증 신호: {', '.join(str(x) for x in quality_codes)}")
-        if not stop_reasons and hitl_request.get("blocking_reason"):
-            stop_reasons.append(str(hitl_request.get("blocking_reason")))
-    if not stop_reasons:
-        stop_reasons = ["자동 확정 중단 사유 데이터가 비어 있습니다."]
+        # gate_policy만으로 이미 설명되면 "검증 신호: OK"는 생략 (중복 방지)
+        if quality_codes and not (gate_policy and quality_codes == ["OK"]):
+            raw_stop.append(f"검증 신호: {', '.join(str(x) for x in quality_codes)}")
+        if not raw_stop and hitl_request.get("blocking_reason"):
+            raw_stop.append(str(hitl_request.get("blocking_reason")))
+    stop_reasons = [_plain_stop_reason(s, verification_summary) for s in raw_stop] if raw_stop else ["자동 확정 중단 사유 데이터가 비어 있습니다."]
 
     questions = [str(x) for x in (hitl_request.get("review_questions") or hitl_request.get("questions") or []) if x]
     if not questions:
         required_inputs = hitl_request.get("required_inputs") or []
         questions = [f"{item.get('field')}: {item.get('reason')}" for item in required_inputs if item.get("field") and item.get("reason")]
+    if not questions and hitl_request.get("why_hitl"):
+        questions = [f"다음 사유가 해소되었는지 검토해 주세요: {(str(hitl_request.get('why_hitl')) or '')[:200]}"]
+    if not questions and hitl_request.get("blocking_reason"):
+        questions = [f"다음 사유 검토 후 판단해 주세요: {(str(hitl_request.get('blocking_reason')) or '')[:200]}"]
     if not questions:
         questions = ["검토자가 답해야 할 질문 데이터가 비어 있습니다."]
 
@@ -1335,7 +1460,7 @@ def _build_hitl_summary_sections(latest_bundle: dict[str, Any]) -> dict[str, lis
         if verification_summary:
             covered = verification_summary.get("covered", 0)
             total = verification_summary.get("total", 0)
-            evidence_lines.append(f"검증 대상 문장: {covered}/{total}건 근거 연결")
+            evidence_lines.append(f"검증 주장 근거 연결: {covered}/{total}건")
         if policy_refs:
             ref_preview = [f"{ref.get('article') or '-'} / {ref.get('parent_title') or '-'}" for ref in policy_refs[:3]]
             evidence_lines.append("연결 규정: " + " | ".join(ref_preview))
@@ -1357,11 +1482,72 @@ def _build_hitl_summary_sections(latest_bundle: dict[str, Any]) -> dict[str, lis
     }
 
 
-def render_hitl_panel(latest_bundle: dict[str, Any]) -> None:
+def _render_evidence_upload_section(
+    latest_bundle: dict[str, Any],
+    run_id: str,
+    vkey: str,
+    current_status: str,
+    *,
+    inside_popup: bool = False,
+) -> tuple[bool, Any]:
+    """
+    증빙 비교 결과 표시 + (팝업이 아닐 때만) 완료 반영/재업로드 버튼 + 파일 업로더.
+    inside_popup=True이면 버튼 없이 표시만 하고, 업로더는 반환용으로 둠.
+    Returns: (has_evidence_result: bool, uploaded_file_or_none).
+    """
+    evidence_result = latest_bundle.get("evidence_document_result")
+    is_rejected = str(current_status or "").upper() == "EVIDENCE_REJECTED"
+    if is_rejected:
+        st.caption("증빙 불일치로 반려된 케이스입니다. 새 증빙을 업로드하면 다시 검증하며, 일치 시 기존 분석에 이어 완료 처리됩니다.")
+    if evidence_result is not None:
+        passed = evidence_result.get("passed") is True
+        st.caption("증빙 비교 결과")
+        if passed:
+            st.success("증빙 검증 통과. 아래 통합 버튼으로 반영 후 케이스가 완료 처리됩니다.")
+        else:
+            reasons = evidence_result.get("reasons") or []
+            st.warning("증빙 불일치: " + ("; ".join(reasons[:5]) if reasons else "항목 확인 필요"))
+            if not is_rejected:
+                st.caption("불일치인 경우에도 아래 통합 버튼으로 '증빙 반려' 확정 후 케이스를 마감할 수 있습니다.")
+        if not inside_popup and st.button("완료 반영 (재분석 확정)", key=f"hitl_evidence_resume_{vkey}"):
+            try:
+                resp = post(f"/api/v1/analysis-runs/{run_id}/evidence-resume")
+                new_status = (resp or {}).get("status") or ("COMPLETED_AFTER_EVIDENCE" if passed else "EVIDENCE_REJECTED")
+                st.session_state["mt_evidence_resume_done"] = {"vkey": vkey, "status": new_status, "passed": passed}
+                st.rerun()
+            except Exception as e:
+                st.error(f"반영 실패: {e}")
+    uploaded = None
+    if is_rejected or evidence_result is None:
+        ev_upload_key = f"hitl_evidence_file_{vkey}"
+        uploaded = st.file_uploader(
+            "증빙 문서 (PDF/이미지 등)" + (" — 재업로드" if is_rejected else ""),
+            type=["pdf", "png", "jpg", "jpeg"],
+            key=ev_upload_key,
+        )
+        if not inside_popup and st.button("증빙 업로드 후 재분석", key=f"hitl_evidence_upload_btn_{vkey}"):
+            if not uploaded:
+                st.warning("파일을 선택한 뒤 버튼을 눌러 주세요.")
+            else:
+                try:
+                    file_bytes = uploaded.getvalue()
+                    post_multipart(f"/api/v1/analysis-runs/{run_id}/evidence-upload", uploaded.name or "upload", file_bytes)
+                    post(f"/api/v1/analysis-runs/{run_id}/evidence-resume")
+                    st.success("증빙 업로드 및 재분석 반영이 완료되었습니다.")
+                    st.rerun()
+                except Exception as e:
+                    st.error(str(e))
+    return (evidence_result is not None, uploaded)
+
+
+def render_hitl_panel(latest_bundle: dict[str, Any], *, vkey: str | None = None) -> None:
     run_id = latest_bundle.get("run_id")
-    hitl_request = latest_bundle.get("hitl_request") or _fallback_hitl_request(latest_bundle)
-    if not run_id or not _has_pending_hitl(latest_bundle):
+    result_inner = (latest_bundle.get("result") or {}).get("result") or {}
+    current_status = str(result_inner.get("status") or "").upper()
+    if not run_id:
         return
+    # 검토 상태일 때 분기 없이 HITL·증빙 전체를 한 팝업에 표시
+    hitl_request = latest_bundle.get("hitl_request") or _fallback_hitl_request(latest_bundle)
     form_keys = _prime_hitl_form_state(run_id, latest_bundle)
     st.markdown(
         """
@@ -1375,24 +1561,59 @@ def render_hitl_panel(latest_bundle: dict[str, Any]) -> None:
           width: min(94vw, 1520px) !important;
           max-width: 1520px !important;
           max-height: 90vh !important;
-          overflow: hidden !important;
+          overflow-x: hidden !important;
+          overflow-y: visible !important;
           background: #ffffff !important;
         }
         div[data-testid="stDialog"] div[role="dialog"] > div {
           width: 100% !important;
-          max-width: 1520px !important;
-          max-height: 90vh !important;
+          max-width: 100% !important;
+          min-width: 0 !important;
+          max-height: calc(90vh - 3.5rem) !important;
+          overflow-x: hidden !important;
           overflow-y: auto !important;
           background: #ffffff !important;
+          box-sizing: border-box !important;
         }
         div[data-testid="stDialog"] [data-testid="stVerticalBlock"] {
           max-width: 100% !important;
+          min-width: 0 !important;
+        }
+        /* 마크다운(KPI 그리드 등)이 상위 overflow에 잘리지 않도록: min-width 0으로 수축 허용, 클립 제거 */
+        div[data-testid="stDialog"] [data-testid="stMarkdown"] {
+          max-width: 100% !important;
+          min-width: 0 !important;
+          overflow-wrap: break-word !important;
+        }
+        div[data-testid="stDialog"] [data-testid="stMarkdown"] > div {
+          max-width: 100% !important;
+          min-width: 0 !important;
+          overflow: visible !important;
+        }
+        /* 검토 의견 text area 영역이 우측에서 잘리지 않도록 */
+        div[data-testid="stDialog"] [data-testid="stTextArea"],
+        div[data-testid="stDialog"] [data-testid="stTextArea"] > div {
+          max-width: 100% !important;
+          min-width: 0 !important;
+        }
+        div[data-testid="stDialog"] [data-testid="stTextArea"] textarea {
+          max-width: 100% !important;
+          box-sizing: border-box !important;
+        }
+        /* HITL 팝업 본문 내 제목+라디오 행이 박스 우측을 넘지 않도록 */
+        div[data-testid="stDialog"] div[role="dialog"] > div:last-child [data-testid="stHorizontalBlock"]:first-of-type {
+          max-width: 100% !important;
+          min-width: 0 !important;
+        }
+        div[data-testid="stDialog"] div[role="dialog"] > div:last-child [data-testid="stHorizontalBlock"]:first-of-type > div:last-child {
+          max-width: 27% !important;
+          min-width: 0 !important;
         }
         div[data-testid="stDialog"] [data-testid="stVerticalBlock"] > div:first-child {
           margin-top: 0 !important;
           padding-top: 0 !important;
         }
-        /* 제목과 본문 사이 간격 축소 */
+        /* 제목과 본문 사이 간격 축소 — HITL 팝업 제목 밑 여백 최소화 */
         div[data-testid="stDialog"] [data-testid="stDialogHeader"],
         div[data-testid="stDialog"] div[role="dialog"] > div:first-child {
           margin-bottom: 0 !important;
@@ -1400,7 +1621,15 @@ def render_hitl_panel(latest_bundle: dict[str, Any]) -> None:
         }
         div[data-testid="stDialog"] div[role="dialog"] > div:last-child {
           margin-top: 0 !important;
-          padding-top: 0.125rem !important;
+          padding-top: 0.25rem !important;
+        }
+        div[data-testid="stDialog"] div[role="dialog"] > div:last-child > div {
+          margin-top: 0 !important;
+          padding-top: 0 !important;
+        }
+        div[data-testid="stDialog"] [data-testid="stVerticalBlock"] {
+          padding-top: 0 !important;
+          margin-top: 0.125rem !important;
         }
         div[data-testid="stDialog"] button[aria-label="Close"] {
           color: #0f172a !important;
@@ -1430,13 +1659,38 @@ def render_hitl_panel(latest_bundle: dict[str, Any]) -> None:
         div[data-testid="stDialog"] small {
           color: #0f172a !important;
         }
-        /* 검토 요청 원본 보기: 배경 흰색, 텍스트 검정 */
-        div[data-testid="stDialog"] details,
+        /* 검토 요청 원본 보기: 배경 흰색, 텍스트 검정 + 아래 여백 최소화(증빙 업로드 위 빈 공간 제거) */
+        div[data-testid="stDialog"] details {
+          margin-bottom: 0.1rem !important;
+          background: #ffffff !important;
+          color: #0f172a !important;
+        }
         div[data-testid="stDialog"] details summary,
         div[data-testid="stDialog"] [data-testid="stExpanderDetails"],
         div[data-testid="stDialog"] [data-testid="stExpanderDetails"] * {
           background: #ffffff !important;
           color: #0f172a !important;
+        }
+        /* 구분선·증빙 업로드 제목 위아래 여백 최소화 */
+        div[data-testid="stDialog"] hr {
+          margin: 0.15rem 0 !important;
+        }
+        div[data-testid="stDialog"] h4 {
+          margin-top: 0.15rem !important;
+          margin-bottom: 0.2rem !important;
+        }
+        /* 증빙 업로드 위 빈 공간 축소: 폼 내 세로 블록 간격 */
+        div[data-testid="stDialog"] [data-testid="stForm"] [data-testid="stVerticalBlock"] {
+          row-gap: 0.2rem !important;
+        }
+        /* 파일 업로더가 다이얼로그 우측 밖으로 나가지 않도록 */
+        div[data-testid="stDialog"] [data-testid="stFileUploader"],
+        div[data-testid="stDialog"] [data-testid="stFileUploader"] > div,
+        div[data-testid="stDialog"] [data-testid="stFileUploaderDropzone"],
+        div[data-testid="stDialog"] [data-testid="stFileUploaderDropzone"] * {
+          max-width: 100% !important;
+          min-width: 0 !important;
+          box-sizing: border-box !important;
         }
         div[data-testid="stDialog"] [data-testid="stJson"],
         div[data-testid="stDialog"] [data-testid="stJson"] *,
@@ -1472,6 +1726,67 @@ def render_hitl_panel(latest_bundle: dict[str, Any]) -> None:
           background: rgba(255,255,255,0.98);
           padding: 6px 16px 10px 16px;
           box-shadow: 0 8px 22px rgba(15,23,42,0.05);
+          width: 100%;
+          max-width: 100%;
+          min-width: 0;
+          box-sizing: border-box;
+          overflow-x: hidden;
+          overflow-y: visible;
+        }
+        [data-testid="stHorizontalBlock"],
+        [data-testid="stHorizontalBlock"] > div,
+        [data-testid="stVerticalBlock"] {
+          max-width: 100% !important;
+          min-width: 0 !important;
+          box-sizing: border-box !important;
+        }
+        [data-testid="stHorizontalBlock"]:first-of-type {
+          width: 100% !important;
+          max-width: 100% !important;
+          min-width: 0 !important;
+        }
+        [data-testid="stHorizontalBlock"]:first-of-type > div:first-child {
+          flex: 0 0 auto !important;
+          min-width: 0 !important;
+          max-width: 36% !important;
+        }
+        [data-testid="stHorizontalBlock"]:first-of-type > div:nth-child(2) {
+          flex: 1 1 auto !important;
+          min-width: 0 !important;
+          display: flex !important;
+          justify-content: flex-end !important;
+          align-items: center !important;
+        }
+        [data-testid="stHorizontalBlock"]:first-of-type > div:nth-child(2) > div {
+          display: flex !important;
+          justify-content: flex-end !important;
+          width: 100% !important;
+        }
+        [data-testid="stHorizontalBlock"]:first-of-type > div:last-child {
+          flex: 0 0 auto !important;
+          min-width: 0 !important;
+          max-width: 27% !important;
+          display: flex !important;
+          justify-content: flex-end !important;
+          align-items: center !important;
+        }
+        [data-testid="stHorizontalBlock"]:first-of-type > div:last-child > div {
+          display: flex !important;
+          justify-content: flex-end !important;
+          width: 100% !important;
+        }
+        [data-testid="stHorizontalBlock"]:first-of-type [role="radiogroup"] {
+          justify-content: flex-end !important;
+          max-width: 100% !important;
+        }
+        /* 증빙 파일 업로더: 박스 안에만 표시 */
+        [data-testid="stFileUploader"],
+        [data-testid="stFileUploader"] > div,
+        [data-testid="stFileUploaderDropzone"],
+        [data-testid="stFileUploaderDropzone"] * {
+          max-width: 100% !important;
+          min-width: 0 !important;
+          box-sizing: border-box !important;
         }
         .mt-hitl-note {
           margin: 0 0 4px 0;
@@ -1482,22 +1797,32 @@ def render_hitl_panel(latest_bundle: dict[str, Any]) -> None:
           color: #1e3a8a;
           font-size: 0.89rem;
           line-height: 1.35;
+          max-width: 100%;
+          box-sizing: border-box;
+          overflow-wrap: break-word;
         }
         .mt-hitl-grid {
           display: grid;
           grid-template-columns: repeat(4, minmax(0, 1fr));
           gap: 10px;
           margin: 4px 0 10px 0;
+          width: 100%;
+          max-width: 100%;
+          min-width: 0;
+          box-sizing: border-box;
         }
         .mt-hitl-box {
           border: 1px solid #e5e7eb;
           border-radius: 16px;
           background: #ffffff;
           padding: 12px 13px;
-          height: 300px;
-          min-height: 300px;
+          height: 210px;
+          min-height: 210px;
           display: flex;
           flex-direction: column;
+          min-width: 0;
+          max-width: 100%;
+          overflow: hidden;
         }
         .mt-hitl-box--reason {
           border-color: #fecaca;
@@ -1523,6 +1848,8 @@ def render_hitl_panel(latest_bundle: dict[str, Any]) -> None:
           display: flex;
           align-items: center;
           gap: 6px;
+          min-width: 0;
+          overflow: hidden;
         }
         .mt-hitl-icon {
           width: 22px;
@@ -1554,13 +1881,19 @@ def render_hitl_panel(latest_bundle: dict[str, Any]) -> None:
         .mt-hitl-list {
           margin: 0;
           padding-left: 16px;
+          padding-right: 8px;
           color: #334155;
           line-height: 1.45;
           font-size: 0.88rem;
           flex: 1 1 auto;
           min-height: 0;
           overflow-y: auto;
-          padding-right: 4px;
+          overflow-x: hidden;
+          word-break: break-word;
+          overflow-wrap: break-word;
+          width: 100%;
+          max-width: 100%;
+          box-sizing: border-box;
         }
         .mt-hitl-list li + li {
           margin-top: 4px;
@@ -1702,12 +2035,30 @@ def render_hitl_panel(latest_bundle: dict[str, Any]) -> None:
         }
         """,
     ):
+        # HITL 영역: 항상 표시 (대기 중이 아니면 fallback 요약으로 표시)
         summary = _build_hitl_summary_sections(latest_bundle)
         lead_message = (
             hitl_request.get("why_hitl")
             or hitl_request.get("blocking_reason")
             or "담당자 검토가 필요한 상태입니다."
         )
+        title_col, radio_col, btn_col = st.columns([0.35, 0.40, 0.25])
+        with title_col:
+            st.markdown("#### 담당자 검토 (HITL)")
+        with radio_col:
+            st.radio(
+                "판단 선택",
+                options=["보류/추가 검토", "승인 가능"],
+                horizontal=True,
+                label_visibility="collapsed",
+                key=form_keys["decision"],
+            )
+        with btn_col:
+            submit_clicked = st.button(
+                "검토 반영 후 분석 이어가기",
+                type="primary",
+                key=f"hitl_review_submit_{vkey or run_id}",
+            )
         st.markdown(
             f'<div class="mt-hitl-note"><strong>담당자 검토가 필요한 상태입니다.</strong> {lead_message}</div>',
             unsafe_allow_html=True,
@@ -1751,61 +2102,117 @@ def render_hitl_panel(latest_bundle: dict[str, Any]) -> None:
             + '</div>',
             unsafe_allow_html=True,
         )
-        with st.form(key=f"hitl_form_{run_id}"):
-            decision = st.radio(
-                "판단 선택",
-                options=["보류/추가 검토", "승인 가능"],
-                horizontal=True,
-                label_visibility="collapsed",
-                key=form_keys["decision"],
-            )
-            info_cols = st.columns(3)
-            with info_cols[0]:
-                reviewer = st.text_input("검토자", key=form_keys["reviewer"])
-            with info_cols[1]:
-                business_purpose = st.text_input("업무 목적", key=form_keys["business_purpose"], placeholder="예: 주말 장애 대응 회의")
-            with info_cols[2]:
-                attendees_raw = st.text_input("참석자(쉼표 구분)", key=form_keys["attendees"], placeholder="예: 홍길동, 김민수, 외부 파트너 1명")
-            comment = st.text_area(
-                "검토 의견",
-                height=96,
-                key=form_keys["comment"],
-                placeholder="왜 승인 또는 보류로 판단했는지 핵심 근거를 적습니다.\n예: 주말 대응 프로젝트로 야간 회의 후 식대 사용. 사전 승인 메일 확인됨.",
-            )
-            approved = decision == "승인 가능"
-            row_cols = st.columns([1, 0.22])
-            with row_cols[0]:
-                with st.expander("검토 요청 원본 보기", expanded=False):
-                    st.json(summary["debug"])
-            with row_cols[1]:
-                submitted = st.form_submit_button("검토 응답 제출 후 재분석")
-    if submitted:
-        response = post(
-            f"/api/v1/analysis-runs/{run_id}/hitl",
-            json_body={
-                "reviewer": reviewer,
-                "comment": comment,
-                "approved": approved,
-                "business_purpose": business_purpose,
-                "attendees": [p.strip() for p in attendees_raw.split(",") if p.strip()],
-            },
+        info_cols = st.columns(3)
+        with info_cols[0]:
+            st.text_input("검토자", key=form_keys["reviewer"])
+        with info_cols[1]:
+            st.text_input("업무 목적", key=form_keys["business_purpose"], placeholder="예: 주말 장애 대응 회의")
+        with info_cols[2]:
+            st.text_input("참석자(쉼표 구분)", key=form_keys["attendees"], placeholder="예: 홍길동, 김민수, 외부 파트너 1명")
+        required_inputs = (latest_bundle.get("hitl_request") or {}).get("required_inputs") or []
+        for req in required_inputs:
+            field = (req.get("field") or "").strip()
+            if not field or field in ("business_purpose", "attendees"):
+                continue
+            label = (req.get("guide") or req.get("reason") or field).strip()
+            key = form_keys.get(f"extra_{field}")
+            if key:
+                st.text_input(label, key=key, placeholder=f"규정 요구 항목: {label[:50]}")
+        # 검토 의견 placeholder: LLM/규정에서 요구한 항목을 동적으로 안내
+        must_fill: list[str] = []
+        for q in (hitl_request.get("review_questions") or hitl_request.get("questions") or []):
+            s = str(q or "").strip()
+            if s:
+                must_fill.append(s[:120])
+        for req in required_inputs:
+            label = (req.get("guide") or req.get("reason") or req.get("field") or "").strip()
+            if label and label[:80] not in [m[:80] for m in must_fill]:
+                must_fill.append(label[:120])
+        if must_fill:
+            comment_placeholder = "반드시 작성할 내용:\n" + "\n".join(f"• {m}" for m in must_fill[:8]) + "\n\n왜 승인 또는 보류로 판단했는지 핵심 근거를 적습니다."
+        else:
+            comment_placeholder = "왜 승인 또는 보류로 판단했는지 핵심 근거를 적습니다.\n예: 주말 대응 프로젝트로 야간 회의 후 식대 사용. 사전 승인 메일 확인됨."
+        st.text_area(
+            "검토 의견",
+            height=96,
+            key=form_keys["comment"],
+            placeholder=comment_placeholder,
         )
-        resumed_id = response.get("resumed_run_id") or response.get("run_id") or run_id
-        st.session_state.pop(_hitl_state_key("dismissed", run_id), None)
-        st.session_state.pop(_hitl_state_key("open", run_id), None)
-        st.session_state.pop(_hitl_state_key("shown", run_id), None)
-        st.session_state["mt_resume_stream"] = {
-            "run_id": resumed_id,
-            "stream_path": response.get("stream_path"),
-            "voucher_key": latest_bundle.get("voucher_key"),
-        }
-        st.success(f"HITL 응답 저장 완료: run_id={resumed_id}")
-        st.rerun()
+        with st.expander("검토 요청 원본 보기", expanded=False):
+            st.json(summary["debug"])
+
+        # 증빙 영역: 항상 표시 (팝업 내에서는 통합 버튼만 사용)
+        st.markdown("---")
+        st.markdown("#### 증빙 업로드")
+        has_evidence_result, uploaded_file = _render_evidence_upload_section(
+            latest_bundle, run_id, vkey or run_id or "ev", current_status, inside_popup=True
+        )
+
+        # 통합 제출: 버튼은 상단(담당자 검토 라인 우측)에 있음
+        if submit_clicked:
+            extra_facts = {}
+            for k, form_key in form_keys.items():
+                if k.startswith("extra_") and form_key in st.session_state:
+                    extra_facts[k.replace("extra_", "", 1)] = str(st.session_state.get(form_key, "") or "").strip()
+            reviewer = str(st.session_state.get(form_keys["reviewer"], "") or "").strip()
+            comment = str(st.session_state.get(form_keys["comment"], "") or "").strip()
+            business_purpose = str(st.session_state.get(form_keys["business_purpose"], "") or "").strip()
+            attendees_raw = str(st.session_state.get(form_keys["attendees"], "") or "")
+            decision_val = st.session_state.get(form_keys["decision"], "보류/추가 검토")
+            approved = decision_val == "승인 가능"
+            hitl_response = {
+                "reviewer": reviewer or "FINANCE_REVIEWER",
+                "comment": comment or None,
+                "business_purpose": business_purpose or None,
+                "attendees": [p.strip() for p in attendees_raw.split(",") if p.strip()],
+                "approved": approved,
+                "extra_facts": extra_facts,
+            }
+            evidence_uploaded = has_evidence_result
+            if uploaded_file is not None and getattr(uploaded_file, "getvalue", None):
+                try:
+                    file_bytes = uploaded_file.getvalue()
+                    post_multipart(
+                        f"/api/v1/analysis-runs/{run_id}/evidence-upload",
+                        uploaded_file.name or "upload",
+                        file_bytes,
+                    )
+                    evidence_uploaded = True
+                except Exception as e:
+                    st.error(f"증빙 업로드 실패: {e}")
+                    evidence_uploaded = evidence_uploaded or False
+            if not evidence_uploaded and not _has_pending_hitl(latest_bundle):
+                st.warning("증빙이 필요한 경우 파일을 선택한 뒤 다시 눌러 주세요.")
+            else:
+                try:
+                    from services.schemas import HitlSubmitRequest
+                    payload_review = {
+                        "hitl_response": HitlSubmitRequest(**hitl_response).model_dump() if _has_pending_hitl(latest_bundle) else None,
+                        "evidence_uploaded": evidence_uploaded,
+                    }
+                    response = post(
+                        f"/api/v1/analysis-runs/{run_id}/review-submit",
+                        json_body=payload_review,
+                    )
+                    st.session_state.pop(_hitl_state_key("dismissed", run_id), None)
+                    st.session_state.pop(_hitl_state_key("open", run_id), None)
+                    st.session_state.pop(_hitl_state_key("shown", run_id), None)
+                    stream_path = response.get("stream_path")
+                    if stream_path:
+                        st.session_state["mt_resume_stream"] = {
+                            "run_id": run_id,
+                            "stream_path": stream_path,
+                            "voucher_key": latest_bundle.get("voucher_key"),
+                        }
+                    st.success("검토 반영이 제출되었습니다. 분석을 이어갑니다.")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"제출 실패: {e}")
 
 
-@st.dialog("HITL 검토 요청", width="large")
-def render_hitl_dialog(latest_bundle: dict[str, Any]) -> None:
-    render_hitl_panel(latest_bundle)
+@st.dialog("HITL 팝업", width="large")
+def render_hitl_dialog(latest_bundle: dict[str, Any], *, vkey: str | None = None) -> None:
+    render_hitl_panel(latest_bundle, vkey=vkey)
 
 
 def build_workspace_plan_steps(latest_bundle: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1869,13 +2276,13 @@ def build_workspace_execution_logs(latest_bundle: dict[str, Any]) -> list[dict[s
 def render_workspace_case_queue(items: list[dict[str, Any]], selected_key: str | None) -> None:
     render_panel_header("케이스", "분석할 전표를 선택합니다. 좌측은 선택, 우측은 실시간 실행과 판단 리뷰에 집중합니다.")
     # 4개 KPI: items는 /api/v1/vouchers 응답(각 item.case_status = AgentCase.status). run 종료 시 백엔드에서 AgentCase.status 동기화.
-    # 검토 필요: 신규·검토중·검토필요만 (HITL_REQUIRED는 HITL 대기로만 집계)
+    # 검토 필요: 신규·검토중·검토필요·증빙불일치 (HITL_REQUIRED는 HITL 대기로만 집계)
     review_count = len(
-        [item for item in items if str(item.get("case_status") or "").upper() in {"NEW", "IN_REVIEW", "REVIEW_REQUIRED"}]
+        [item for item in items if str(item.get("case_status") or "").upper() in {"NEW", "IN_REVIEW", "REVIEW_REQUIRED", "EVIDENCE_REJECTED"}]
     )
     # 완료: 최종 완료/해결
     completed_count = len(
-        [item for item in items if str(item.get("case_status") or "").upper() in {"COMPLETED", "COMPLETED_AFTER_HITL", "RESOLVED", "OK"}]
+        [item for item in items if str(item.get("case_status") or "").upper() in {"COMPLETED", "COMPLETED_AFTER_HITL", "COMPLETED_AFTER_EVIDENCE", "RESOLVED", "OK"}]
     )
     # HITL 대기: 담당자 검토 대기·재개·보류
     hitl_count = len(
@@ -1884,8 +2291,8 @@ def render_workspace_case_queue(items: list[dict[str, Any]], selected_key: str |
     # 상단 KPI(클릭) → 목록 필터 상태
     grouped = {
         "전체": items,
-        "검토 필요": [item for item in items if str(item.get("case_status") or "").upper() in {"NEW", "IN_REVIEW", "REVIEW_REQUIRED"}],
-        "완료": [item for item in items if str(item.get("case_status") or "").upper() in {"COMPLETED", "COMPLETED_AFTER_HITL", "RESOLVED", "OK"}],
+        "검토 필요": [item for item in items if str(item.get("case_status") or "").upper() in {"NEW", "IN_REVIEW", "REVIEW_REQUIRED", "EVIDENCE_REJECTED"}],
+        "완료": [item for item in items if str(item.get("case_status") or "").upper() in {"COMPLETED", "COMPLETED_AFTER_HITL", "COMPLETED_AFTER_EVIDENCE", "RESOLVED", "OK"}],
         "HITL 대기": [item for item in items if str(item.get("case_status") or "").upper() in {"HITL_REQUIRED", "REVIEW_AFTER_HITL", "HOLD_AFTER_HITL"}],
     }
     active_filter = str(st.session_state.get("mt_case_filter") or "전체")
@@ -1895,28 +2302,74 @@ def render_workspace_case_queue(items: list[dict[str, Any]], selected_key: str |
     st.markdown(
         """
         <style>
-        /* 헤더- KPI 간격 축소 */
+        /* 헤더·설명 텍스트와 KPI 행 사이 여백 (겹침 방지) */
         [class*="st-key-workspace_case_queue_card"] .mt-panel-header {
           margin-bottom: 4px !important;
         }
         [class*="st-key-workspace_case_queue_card"] .mt-panel-sub {
           margin-top: 1px !important;
+          margin-bottom: 12px !important;
           line-height: 1.35 !important;
         }
         [class*="st-key-workspace_case_queue_card"] [data-testid="stElementContainer"]:has(.mt-panel-header) {
-          margin-bottom: 4px !important;
+          margin-bottom: 10px !important;
         }
 
+        /* ── KPI 4개 영역 동일 width (전체 케이스·검토 필요·완료·HITL 대기) ─────────────────────────────────────────────────── */
+        /* 1) KPI가 들어 있는 수평 블록: 4열 동일 분할 */
+        [data-testid="stHorizontalBlock"]:has([class*="st-key-case_kpi_"]) {
+          align-items: stretch !important;
+          margin-bottom: 0.5rem !important;
+          display: flex !important;
+        }
+        /* 2) KPI 행의 4개 stColumn: 동일 비율(1:1:1:1) */
+        [data-testid="stHorizontalBlock"]:has([class*="st-key-case_kpi_"]) [data-testid="stColumn"] {
+          flex: 1 1 0% !important;
+          min-width: 0 !important;
+          max-width: none !important;
+          min-height: 0 !important;
+          height: auto !important;
+        }
+        /* 3) KPI 각 셀 내부 VerticalBlock: 열 전체 채우기 */
+        [data-testid="stVerticalBlock"]:has([class*="st-key-case_kpi_"]) {
+          min-height: 0 !important;
+          height: auto !important;
+          flex: 1 1 0% !important;
+          min-width: 0 !important;
+          width: 100% !important;
+          row-gap: 0 !important;
+          gap: 0 !important;
+        }
+        /* 4) st-key-case_kpi_* 자체(Streamlit이 width=fit-content 넣는 그 요소): 100%로 덮어써 4열 동일 너비 */
+        div[class*="st-key-case_kpi_"] {
+          width: 100% !important;
+          max-width: 100% !important;
+          min-width: 0 !important;
+          margin: 0 !important;
+          padding: 0 !important;
+          box-sizing: border-box !important;
+        }
+        [data-testid="element-container"]:has([class*="st-key-case_kpi_"]),
+        [data-testid="stElementContainer"]:has([class*="st-key-case_kpi_"]) {
+          width: 100% !important;
+          max-width: 100% !important;
+          min-width: 0 !important;
+          min-height: 0 !important;
+          height: auto !important;
+          margin: 0 !important;
+          padding: 0 !important;
+          box-sizing: border-box !important;
+        }
         /* KPI 카드 버튼 스타일 (tabs 제거, KPI 클릭으로 필터) */
         [class*="st-key-case_kpi_"] [data-testid="stButton"] > button {
           width: 100% !important;
           text-align: center !important;
-          padding: 12px 14px !important;
+          padding: 8px 10px !important;
           border-radius: 14px !important;
           border: 1px solid #e5e7eb !important;
           background: rgba(255,255,255,0.98) !important;
           box-shadow: 0 10px 24px rgba(15,23,42,0.05) !important;
-          min-height: 72px !important;
+          min-height: 52px !important;
           white-space: pre-line !important;
           font-size: 1.75rem !important; /* count */
           font-weight: 900 !important;
@@ -2164,18 +2617,30 @@ def render_workspace_chat_panel(selected: dict[str, Any], latest_bundle: dict[st
         st.success(f"HITL 응답 반영 후 재개: run_id={run_id}")
         pending_stream = {"run_id": run_id, "stream_path": stream_path}
 
-    if _has_pending_hitl(latest_bundle):
+    # HITL 대기 또는 증빙 필요(REVIEW_REQUIRED/EVIDENCE_REJECTED) 시 통합 검토 배너 + 단일 다이얼로그
+    _need_hitl = _has_pending_hitl(latest_bundle)
+    _need_evidence = (
+        str(current_status or "").upper() in ("REVIEW_REQUIRED", "EVIDENCE_REJECTED")
+        and bool(latest_bundle.get("run_id"))
+    )
+    if _need_hitl or _need_evidence:
         hitl_msg_col, hitl_btn_col = st.columns([0.66, 0.34])
         run_id = latest_bundle.get("run_id")
         open_key = _hitl_state_key("open", run_id)
         dismissed_key = _hitl_state_key("dismissed", run_id)
         with hitl_msg_col:
+            hitl_req = latest_bundle.get("hitl_request") or {}
+            why = (hitl_req.get("why_hitl") or hitl_req.get("blocking_reason") or "").strip()
+            if why and _need_hitl:
+                banner_text = f"검토 필요: {why[:100]}{'…' if len(why) > 100 else ''} 확인 후 이어서 진행하세요."
+            else:
+                banner_text = "검토 필요 상태입니다. 확인 후 이어서 진행하세요."
             st.markdown(
-                '<div class="mt-hitl-banner">이 분석은 담당자 검토가 필요합니다. 검토 의견을 입력하면 같은 run으로 재개됩니다.</div>',
+                f'<div class="mt-hitl-banner">{banner_text}</div>',
                 unsafe_allow_html=True,
             )
         with hitl_btn_col:
-            if st.button("HITL 검토 입력 열기", key=f"workspace_hitl_open_{vkey}"):
+            if st.button("HITL 팝업 열기", key=f"workspace_hitl_open_{vkey}"):
                 st.session_state[dismissed_key] = False
                 st.session_state[open_key] = True
                 st.rerun()
@@ -2183,7 +2648,15 @@ def render_workspace_chat_panel(selected: dict[str, Any], latest_bundle: dict[st
             st.session_state.setdefault(dismissed_key, False)
             if st.session_state.get(open_key):
                 st.session_state[open_key] = False
-                render_hitl_dialog(latest_bundle)
+                render_hitl_dialog(latest_bundle, vkey=vkey)
+
+    # 증빙 확정(완료 반영) 직후 rerun 시 성공 메시지 표시
+    evidence_done = st.session_state.pop("mt_evidence_resume_done", None)
+    if evidence_done and evidence_done.get("vkey") == selected_vkey:
+        status_label = "증빙 검증 통과로 완료" if evidence_done.get("passed") else "증빙 불일치로 반려"
+        st.success(f"증빙 확정이 반영되었습니다. 케이스가 **{status_label}** 처리되었습니다.")
+
+    # 증빙 업로드·완료 반영은 위 통합 배너에서 "HITL 팝업 열기"로 열리는 다이얼로그 내에서만 표시
 
     # 분석 시작 버튼 아래 영역(실시간 스트림/타임라인)을 접었다 펼 수 있도록 expander로 감싼다.
     # 스트리밍 중에는 기본으로 펼쳐진 상태 유지. (st.expander는 key 미지원·내부에 다른 expander 불가)
@@ -2310,12 +2783,12 @@ def render_workspace_chat_panel(selected: dict[str, Any], latest_bundle: dict[st
                 timeline = latest_bundle.get("timeline") or []
                 latest_run_id = str(latest_bundle.get("run_id") or "")
                 cached_stream_text = st.session_state.get(f"mt_last_stream_content_{latest_run_id}", "") if latest_run_id else ""
-                # 스트림 종료 후 HITL 대기 상태면 rerun 후 팝업 자동 오픈(팝업은 상단 _has_pending_hitl 블록에서 처리)
+                # 스트림 종료 후 항상 rerun하여 판단요약·근거맵·실행내역 등 탭이 최신 결과로 갱신되도록 함
                 if _has_pending_hitl(latest_bundle) and latest_bundle.get("run_id"):
                     _rid = latest_bundle.get("run_id")
                     st.session_state[_hitl_state_key("dismissed", _rid)] = False
                     st.session_state[_hitl_state_key("open", _rid)] = True
-                    st.rerun()
+                st.rerun()
             elif cached_stream_text:
                 stream_placeholder.markdown(cached_stream_text)
                 stream_wait_placeholder.empty()
@@ -2427,7 +2900,7 @@ def render_workspace_results(latest_bundle: dict[str, Any], debug_mode: bool) ->
         verification_summary = result.get("verification_summary") or {}
         summary_text = (
             f"게이트 판정 {verification_summary.get('gate_policy') or '-'} · "
-            f"근거 연결 {verification_summary.get('covered', 0)}/{verification_summary.get('total', 0)}"
+            f"검증 주장 근거 연결 {verification_summary.get('covered', 0)}/{verification_summary.get('total', 0)}"
         )
         st.markdown(
             f'<div class="mt-section-inline"><span class="mt-section-inline-title">검증 요약</span> <span class="mt-section-inline-content">{summary_text}</span></div>',
@@ -2479,17 +2952,35 @@ def render_workspace_evidence_map(latest_bundle: dict[str, Any], debug_mode: boo
     verification_summary = result.get("verification_summary") or {}
     if verification_summary:
         st.markdown("#### 검증 현황")
+        st.caption("검증 대상 주장(문장) 중 규정 청크와 연결된 비율입니다. **높을수록** 자동 확정 가능, 낮으면 담당자 검토가 필요합니다.")
         v1, v2, v3 = st.columns(3)
         with v1:
             ratio = verification_summary.get("coverage_ratio")
-            st.metric("근거 연결률", f"{(ratio or 0) * 100:.0f}%" if ratio is not None else "-", f"{verification_summary.get('covered', 0)}/{verification_summary.get('total', 0)}")
+            covered = verification_summary.get("covered", 0)
+            total = verification_summary.get("total", 0)
+            st.metric("검증 주장 근거 연결률", f"{(ratio or 0) * 100:.0f}%" if ratio is not None else "-", f"{covered}/{total}건 연결")
         with v2:
             missing = verification_summary.get("missing_citations") or []
-            st.metric("누락 citation", str(len(missing)))
+            st.metric("근거 미연결 주장 수", str(len(missing)))
         with v3:
-            st.metric("게이트 판정", str(verification_summary.get("gate_policy") or "-"))
+            gate = verification_summary.get("gate_policy") or "-"
+            gate_label = {"hold": "보류", "caution": "주의", "regenerate_citations": "인용 보완 유도"}.get(str(gate).lower(), str(gate))
+            st.metric("자동 확정 여부", gate_label, "담당자 검토 필요" if str(gate).lower() == "hold" else ("주의 검토" if str(gate).lower() == "caution" else None))
+        # 검증 대상별 연결 여부: 4개 중 어떤 것이 연결/미연결인지 내용으로 설명
+        details = verification_summary.get("details") or []
+        if details:
+            with st.expander(f"검증 대상별 연결 여부 ({total}개 중 {covered}개 연결)", expanded=False):
+                st.caption("아래는 Verifier가 검증한 주장 문장입니다. ✅ = 규정 청크로 뒷받침됨, ❌ = 근거 미연결.")
+                for d in details:
+                    idx = d.get("index", 0) + 1
+                    preview = (d.get("sentence_preview") or "").strip()
+                    if len(preview) >= 80:
+                        preview = preview + "…"
+                    is_covered = bool(d.get("covered"))
+                    icon = "✅ 연결됨" if is_covered else "❌ 미연결"
+                    st.markdown(f"**{idx}. {icon}**  \n{preview}")
         if verification_summary.get("missing_citations"):
-            with st.expander("누락된 검증 대상 문장", expanded=False):
+            with st.expander("근거 미연결 검증 주장", expanded=False):
                 for i, s in enumerate(verification_summary["missing_citations"], 1):
                     st.caption(f"{i}. {(s or '')[:160]}{'…' if len(str(s or '')) > 160 else ''}")
 

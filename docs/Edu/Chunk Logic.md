@@ -122,9 +122,15 @@
 
 각 청크에 대해 `doc_id`, `article`, `clause`, `parent_title`, `chunk_text`, `chunk_ids`, `context_chunk_ids`, `retrieval_score`, `score_detail`(bm25/dense/rrf/cross_encoder) 등이 반환되며, 에이전트는 이를 규정 근거로 활용한다.
 
+### 5.3 동일 조문 중복 채택 방지
+
+- **원인**: 한 조문(예: 제23조 식대)은 계층 청킹 시 **ARTICLE 1개 + CLAUSE N개**(항 ①②③④ 등)로 저장된다. 검색 시 동일 조문의 ARTICLE 청크와 CLAUSE 청크가 둘 다 상위에 올라오면, **채택 인용 목록에 제23조가 C3·C4처럼 두 번** 나올 수 있다.
+- **대응**: policy_rulebook_probe에서 **채택 인용(policy_refs)** 을 만들 때 **조문(article) 단위로 중복 제거**한다. 후보를 점수 순으로 보되, 이미 채택한 `regulation_article`은 건너뛰고 **서로 다른 조문만 최대 5건** 채택한다. 따라서 화면에는 제23조가 한 번만 표시된다.
+- **그 외 근거(제39조, 제38조, 제12조 등)**: 서로 다른 조문이므로 각각 1건씩 유지되며, 청킹·검색이 정상이면 의도대로 노출된다.
+
 > 참고: [`services/policy_service.py`](services/policy_service.py) — `search_policy_chunks()`, `_search_bm25()`, `_search_dense()`, `_reciprocal_rank_fusion()`, `_enrich_with_parent_context()`  
 > 참고: [`services/retrieval_quality.py`](services/retrieval_quality.py) — `rerank_with_cross_encoder()`  
-> 참고: [`agent/agent_tools.py`](agent/agent_tools.py) — policy_rulebook_probe에서 `search_policy_chunks` 호출
+> 참고: [`agent/agent_tools.py`](agent/agent_tools.py) — policy_rulebook_probe에서 `search_policy_chunks` 호출 및 조문별 1건 채택
 
 ---
 

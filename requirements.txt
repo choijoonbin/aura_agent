@@ -25,3 +25,7 @@ langfuse>=2.0.0
 # torch 2.6 미만 환경에서는 jhgan/ko-sbert-sts 사용 (safetensors).
 sentence-transformers>=2.2,<3.3
 safetensors>=0.4.0
+
+# 증빙 이미지 OCR (optional). 미설치 시 증빙 추출은 스텁.
+Pillow>=10.0.0
+pytesseract>=0.3.10

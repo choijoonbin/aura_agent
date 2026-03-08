@@ -49,6 +49,10 @@ def _dedupe_keep_order(values: list[str]) -> list[str]:
 def build_policy_keywords(body_evidence: dict[str, Any]) -> list[str]:
     case_type = str(body_evidence.get("case_type") or body_evidence.get("intended_risk_type") or "")
     keywords = list(KEYWORD_HINTS.get(case_type, []))
+    # 규정 제14조: 모든 경비 지출은 증빙 구비 의무. case_type 무관하게 공통 증빙 관련 조항 검색에 포함.
+    for kw in ["증빙", "공통", "제14조", "필수 증빙"]:
+        if kw not in keywords:
+            keywords.append(kw)
 
     merchant = str(body_evidence.get("merchantName") or "").strip()
     expense_type = str(body_evidence.get("expenseType") or "").strip()
@@ -522,6 +526,10 @@ def _build_dense_query(body_evidence: dict[str, Any]) -> str:
 
     if is_holiday and "공휴일" not in query and "휴일" not in query:
         query += " 해당 날은 공휴일 또는 주말이다."
+
+    # 규정 제14조: 모든 전표에 공통 적용되는 증빙 의무 조항 포함 검색
+    if "증빙" not in query and "공통" not in query:
+        query += " 모든 경비 지출에 공통 적용되는 증빙 의무(제14조 공통 증빙) 규정을 포함해야 한다."
 
     return query
 

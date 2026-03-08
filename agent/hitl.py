@@ -66,6 +66,7 @@ def build_hitl_request(
     verification_summary: dict[str, Any] | None = None,
     screening_result: dict[str, Any] | None = None,
     score_breakdown: dict[str, Any] | None = None,
+    regulation_driven: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     critique = critique or {}
     verification_summary = verification_summary or {}
@@ -117,6 +118,14 @@ def build_hitl_request(
         for item in critique.get("missing_counter_evidence", [])[:5]:
             missing_evidence.append(str(item))
 
+    # 규정 위반·심각도 높은 케이스는 담당자 검토(HITL) 필요. 증빙 업로드가 아닌 통과/미통과 판단이 목적.
+    _POLICY_RISK_TYPES = {"HOLIDAY_USAGE", "LIMIT_EXCEED", "PRIVATE_USE_RISK", "UNUSUAL_PATTERN"}
+    _HIGH_SEVERITY = {"MEDIUM", "HIGH", "CRITICAL"}
+    if case_type and str(case_type).upper() in _POLICY_RISK_TYPES:
+        sev = str(severity or "").upper()
+        if sev in _HIGH_SEVERITY:
+            blocking_reasons.append("규정 위반 가능성이 있어 담당자 검토(통과/미통과 판단)가 필요합니다.")
+
     if missing_fields:
         missing_evidence.extend([f"입력 필드 누락: {field}" for field in missing_fields])
         required_inputs.append({"field": "missing_fields", "reason": "누락된 전표 입력값 보완이 필요합니다."})
@@ -125,22 +134,14 @@ def build_hitl_request(
         missing_evidence.append("전표 라인아이템이 없어 거래 상세 증빙 확인이 불가합니다.")
         required_inputs.append({"field": "document_items", "reason": "라인아이템 또는 적요 등 거래 상세 근거가 필요합니다."})
 
-    if body_evidence.get("isHoliday"):
-        required_inputs.append({"field": "business_purpose", "reason": "휴일 사용의 업무상 필요성 판단이 필요합니다."})
-        required_inputs.append({"field": "attendees", "reason": "식대/접대비 성격이면 참석자 정보 확인이 필요합니다."})
-        review_questions.append("휴일 사용이 업무상 예외 사유에 해당하는지 확인해 주세요.")
-    if body_evidence.get("hrStatus") in {"VACATION", "LEAVE", "OFF"}:
-        review_questions.append(f"근태 상태가 {_label_hr_status(body_evidence.get('hrStatus'))}인 시점의 거래가 정당한지 확인해 주세요.")
-    if body_evidence.get("budgetExceeded"):
-        review_questions.append("예산 초과 사유와 승인 여부를 확인해 주세요.")
-
-    if not review_questions:
-        review_questions.extend(
-            [
-                "자동 확정을 막은 핵심 사유가 해소되었는지 검토해 주세요.",
-                "추가 증빙 없이 최종 확정 가능한지 판단해 주세요.",
-            ]
-        )
+    # 규정 기반 동적 HITL: 에이전트가 규정 본문에서 추출한 필수 입력/검토 질문을 사용. 하드코딩 규칙 대체.
+    reg = regulation_driven or {}
+    reg_required = reg.get("required_inputs") or []
+    reg_questions = reg.get("review_questions") or []
+    if reg_required or reg_questions:
+        required_inputs.extend(reg_required)
+        review_questions.extend(reg_questions)
+    # review_questions는 규정 기반(regulation_driven) 또는 verify_node에서 LLM이 생성한 값만 사용. 하드코딩/폴백 없음.
 
     if case_type:
         evidence_snapshot.append({"type": "risk", "label": "위험 유형", "value": _label_case_type(case_type)})
@@ -161,8 +162,13 @@ def build_hitl_request(
         parent_title = ref.get("parent_title") or ref.get("title") or "-"
         evidence_snapshot.append({"type": "policy_ref", "label": "연결 규정", "value": f"{article} / {parent_title}"})
 
+    # 검토 필요(REVIEW_REQUIRED)인데 HITL 요청이 없으면 UI에 담당자 검토 패널이 안 뜸.
+    # 규정 적용·위험 유형이 있으면 최소한의 hitl_request를 만들어 run이 hitl_pause에서 멈추도록 함.
     if not blocking_reasons and not unresolved_claims and not missing_evidence:
-        return None
+        if policy_refs and (case_type or severity or reg_required or reg_questions):
+            blocking_reasons.append("규정 적용 건으로 담당자 검토(통과/미통과 판단)가 필요합니다.")
+        else:
+            return None
 
     why_parts = []
     if blocking_reasons:

@@ -9,7 +9,7 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from fastapi import Body, Depends, FastAPI, HTTPException, Query
+from fastapi import Body, Depends, File, FastAPI, HTTPException, Query, UploadFile
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
@@ -18,11 +18,14 @@ from db.session import get_db
 from services.agent_studio_service import get_agent_detail, list_agents
 from services.case_service import (
     build_analysis_payload,
+    get_agent_case_status,
     list_vouchers,
     run_case_screening,
     update_agent_case_status_from_run,
     upsert_agent_case_from_screening_result,
 )
+from services.evidence_compare_service import compare_evidence_to_voucher
+from services.evidence_extraction import extract_from_bytes
 from services.demo_data_service import clear_demo_data, list_demo_scenarios, list_seeded_demo_cases, seed_demo_scenarios
 from services.persistence_service import persist_analysis_result
 from services.chunking_pipeline import run_chunking_pipeline
@@ -36,7 +39,14 @@ from services.runtime_persistence_service import (
     list_run_ids_by_case,
     log_run_event,
 )
-from services.schemas import AnalysisStartRequest, AnalysisStartResponse, HitlDraftRequest, HitlSubmitRequest, HitlSubmitResponse
+from services.schemas import (
+    AnalysisStartRequest,
+    AnalysisStartResponse,
+    HitlDraftRequest,
+    HitlSubmitRequest,
+    HitlSubmitResponse,
+    ReviewSubmitRequest,
+)
 from services.stream_runtime import runtime
 from utils.config import ensure_source_paths, settings
 
@@ -238,6 +248,14 @@ async def _run_analysis_task(
             except Exception:
                 pass
             if ev_type == "completed":
+                if data.get("status") == "HITL_REQUIRED":
+                    # HITL_REQUESTED 이벤트로 이미 전체 payload(reasons, review_questions 등)가 설정된 경우 유지.
+                    # interrupt() value는 축약/직렬화된 형태일 수 있어 덮어쓰지 않음.
+                    full_hitl = runtime.get_hitl_request(run_id)
+                    if full_hitl:
+                        data = {**data, "hitl_request": full_hitl}
+                    elif not full_hitl:
+                        runtime.set_hitl_request(run_id, data.get("hitl_request") or data)
                 last_payload = {
                     "run_id": run_id,
                     "case_id": case_id,
@@ -245,8 +263,6 @@ async def _run_analysis_task(
                     "result": data,
                     "completed_at": datetime.now(timezone.utc).isoformat(),
                 }
-                if data.get("status") == "HITL_REQUIRED":
-                    runtime.set_hitl_request(run_id, data.get("hitl_request") or data)
             elif str(ev_type).upper() == "HITL_REQUIRED":
                 # 일부 실행 경로는 terminal event로 'completed' 대신 'HITL_REQUIRED'를 방출함.
                 # 이 경우에도 result/status를 저장해야 UI/목록(case_status) 집계가 일관되게 동작한다.
@@ -341,8 +357,9 @@ async def _run_analysis_task(
                         )
             except Exception as e:
                 logger.warning("diagnostics snapshot persist failed run_id=%s case_id=%s error=%s", run_id, case_id, e)
-        # HITL_REQUIRED면 같은 run으로 재개 가능하므로 close 하지 않음
-        if last_payload is None or last_payload.get("result", {}).get("status") != "HITL_REQUIRED":
+        # 분석이 끝나면 스트림에 "done"을 보내 클라이언트가 대기에서 빠지도록 항상 close 호출.
+        # close()는 큐에 "done"만 넣고 큐/run 컨텍스트는 유지하므로, HITL/증빙 재개 시 같은 run_id로 이어서 사용 가능.
+        if last_payload is not None:
             await runtime.close(run_id)
 
 
@@ -502,6 +519,265 @@ async def save_hitl_draft(run_id: str, request: HitlDraftRequest, db: Session = 
     return {"accepted": True, "run_id": run_id, "hitl_draft": hitl_draft}
 
 
+@app.post("/api/v1/analysis-runs/{run_id}/evidence-upload")
+async def evidence_upload(
+    run_id: str,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """
+    Phase 1–2: REVIEW_REQUIRED인 run에 대해 증빙 파일 업로드 → 저장·추출·전표 비교 후
+    evidence_document_result를 agent_activity_log에 기록. 이후 evidence-resume으로 완료 처리.
+    """
+    lineage = runtime.get_lineage(run_id)
+    aux = get_run_aux_state(db, run_id=run_id)
+    if not lineage and not aux.get("lineage"):
+        raise HTTPException(status_code=404, detail="source run not found")
+    lineage = lineage or aux.get("lineage") or {}
+    case_id = lineage.get("case_id")
+    voucher_key = (case_id or "").replace("POC-", "")
+    if not voucher_key:
+        raise HTTPException(status_code=400, detail="voucher_key not found for run")
+    current_status = get_agent_case_status(db, voucher_key)
+    if current_status not in ("REVIEW_REQUIRED", "EVIDENCE_REJECTED"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"evidence upload only when case status is REVIEW_REQUIRED or EVIDENCE_REJECTED (current: {current_status})",
+        )
+    try:
+        payload = build_analysis_payload(db, voucher_key)
+    except Exception as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    body_evidence = payload.get("body_evidence") or {}
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="empty file")
+    extracted, sha256_hex, _ = extract_from_bytes(content, run_id, file.filename or "upload")
+    comparison = compare_evidence_to_voucher(extracted, body_evidence)
+    evidence_document_result = {
+        "passed": comparison.passed,
+        "confidence": comparison.confidence,
+        "reasons": comparison.reasons,
+        "extracted_fields": comparison.extracted_fields,
+        "comparison_detail": comparison.comparison_detail,
+        "mismatches": comparison.mismatches,
+        "file_sha256": sha256_hex,
+        "filename": file.filename,
+    }
+    try:
+        log_run_event(
+            db,
+            run_id=run_id,
+            case_id=case_id,
+            voucher_key=voucher_key,
+            stage="evidence",
+            event_type="EVIDENCE_UPLOADED",
+            metadata={
+                "stored_event_type": "EVIDENCE_UPLOADED",
+                "evidence_document_result": evidence_document_result,
+            },
+        )
+    except Exception:
+        pass
+    return {
+        "accepted": True,
+        "run_id": run_id,
+        "evidence_document_result": evidence_document_result,
+    }
+
+
+@app.post("/api/v1/analysis-runs/{run_id}/evidence-resume")
+async def evidence_resume(run_id: str, db: Session = Depends(get_db)) -> dict[str, Any]:
+    """
+    Phase 3: 업로드·비교된 evidence_document_result를 기준으로 최종 결과 확정.
+    - 증빙 불일치: 기존 분석에 따른 추가 분석 없이 EVIDENCE_REJECTED로 종료.
+    - 증빙 일치: 기존 에이전트 분석 결과(score_breakdown, tool_results, policy_refs 등)를 유지한 채
+      status=COMPLETED_AFTER_EVIDENCE, evidenceDocumentResult만 반영해 이어서 확정.
+    """
+    lineage = runtime.get_lineage(run_id)
+    aux = get_run_aux_state(db, run_id=run_id)
+    if not lineage and not aux.get("lineage"):
+        raise HTTPException(status_code=404, detail="source run not found")
+    lineage = lineage or aux.get("lineage") or {}
+    case_id = lineage.get("case_id")
+    voucher_key = (case_id or "").replace("POC-", "")
+    evidence_result = aux.get("evidence_document_result")
+    if not evidence_result:
+        raise HTTPException(status_code=400, detail="no evidence upload result for this run; upload evidence first")
+    passed = evidence_result.get("passed") is True
+    status = "COMPLETED_AFTER_EVIDENCE" if passed else "EVIDENCE_REJECTED"
+    reasons = evidence_result.get("reasons") or []
+    reason_text_evidence = "; ".join(reasons) if reasons else ("증빙 검증 통과" if passed else "증빙 불일치")
+
+    # 기존 run 결과(에이전트 분석)가 있으면 유지.
+    # 증빙 불일치: 추가 분석 없이 status만 EVIDENCE_REJECTED로 확정(기존 분석 내용은 유지).
+    # 증빙 일치: 기존 분석에 이어서 status=COMPLETED_AFTER_EVIDENCE, evidenceDocumentResult 반영.
+    existing = runtime.get_result(run_id) or aux.get("result_payload")
+    base_result = (existing or {}).get("result") if isinstance(existing, dict) else {}
+    if base_result and (base_result.get("tool_results") or base_result.get("score_breakdown")):
+        new_result = dict(base_result)
+        new_result["status"] = status
+        new_result["evidenceDocumentResult"] = evidence_result
+        new_result["reasonText"] = (str(new_result.get("reasonText") or "").strip() + " " + reason_text_evidence).strip()
+        new_result.setdefault("score_breakdown", new_result.get("score_breakdown") or {})
+        new_result.setdefault("tool_results", new_result.get("tool_results") or [])
+        result_payload = {"result": new_result}
+    else:
+        result_payload = {
+            "result": {
+                "status": status,
+                "reasonText": reason_text_evidence,
+                "severity": "LOW" if passed else "MEDIUM",
+                "score": 100 if passed else 50,
+                "score_breakdown": {},
+                "tool_results": [],
+                "quality_gate_codes": [],
+                "evidenceDocumentResult": evidence_result,
+            },
+        }
+    try:
+        log_run_event(
+            db,
+            run_id=run_id,
+            case_id=case_id,
+            voucher_key=voucher_key,
+            stage="evidence",
+            event_type="RUN_COMPLETED",
+            metadata={"stored_event_type": "RUN_COMPLETED", "result": result_payload},
+        )
+        persist_analysis_result(db, run_id=run_id, result_payload=result_payload)
+        update_agent_case_status_from_run(db, voucher_key, status)
+        runtime.set_result(run_id, result_payload)
+    except Exception as e:
+        logger.exception("evidence_resume persist failed run_id=%s", run_id)
+        raise HTTPException(status_code=500, detail=str(e)) from e
+    return {
+        "accepted": True,
+        "run_id": run_id,
+        "status": status,
+        "result": result_payload.get("result"),
+    }
+
+
+@app.post("/api/v1/analysis-runs/{run_id}/review-submit")
+async def review_submit(
+    run_id: str,
+    request: ReviewSubmitRequest,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """
+    HITL 팝업 통합 제출. 팝업의 모든 내용(HITL 응답 + 증빙 업로드 여부)을 받아
+    에이전트가 필수 항목·조건을 판단한 뒤 분석을 이어가거나 증빙만 확정한다.
+    """
+    lineage = runtime.get_lineage(run_id)
+    aux = get_run_aux_state(db, run_id=run_id)
+    if not lineage and not aux.get("lineage"):
+        raise HTTPException(status_code=404, detail="source run not found")
+    lineage = lineage or aux.get("lineage") or {}
+    case_id = lineage["case_id"]
+    voucher_key = case_id.replace("POC-", "")
+    hitl_request = runtime.get_hitl_request(run_id) or aux.get("hitl_request")
+    evidence_result = aux.get("evidence_document_result") if request.evidence_uploaded else None
+
+    if hitl_request and request.hitl_response is not None:
+        hitl_payload = request.hitl_response.model_dump()
+        runtime.set_hitl_response(run_id, hitl_payload)
+        try:
+            log_run_event(
+                db,
+                run_id=run_id,
+                case_id=case_id,
+                voucher_key=voucher_key,
+                stage="hitl",
+                event_type="HITL_RESPONSE",
+                metadata={"stored_event_type": "HITL_RESPONSE", "hitl_response": hitl_payload},
+            )
+        except Exception:
+            pass
+        if not runtime.get_hitl_request(run_id):
+            runtime.set_hitl_request(run_id, hitl_request)
+        try:
+            payload = build_analysis_payload(db, voucher_key)
+        except Exception as e:
+            raise HTTPException(status_code=404, detail=str(e)) from e
+        body_evidence = dict(payload.get("body_evidence") or {})
+        if evidence_result:
+            body_evidence["evidenceDocumentResult"] = evidence_result
+        asyncio.create_task(
+            _run_analysis_task(
+                run_id=run_id,
+                case_id=case_id,
+                body_evidence=body_evidence,
+                intended_risk_type=payload.get("intended_risk_type"),
+                resume_value=hitl_payload,
+            )
+        )
+        return {
+            "accepted": True,
+            "source_run_id": run_id,
+            "resumed_run_id": run_id,
+            "stream_path": f"/api/v1/analysis-runs/{run_id}/stream",
+        }
+
+    if not hitl_request and evidence_result:
+        passed = evidence_result.get("passed") is True
+        status = "COMPLETED_AFTER_EVIDENCE" if passed else "EVIDENCE_REJECTED"
+        reasons = evidence_result.get("reasons") or []
+        reason_text_evidence = "; ".join(reasons) if reasons else ("증빙 검증 통과" if passed else "증빙 불일치")
+        existing = runtime.get_result(run_id) or aux.get("result_payload")
+        base_result = (existing or {}).get("result") if isinstance(existing, dict) else {}
+        if base_result and (base_result.get("tool_results") or base_result.get("score_breakdown")):
+            new_result = dict(base_result)
+            new_result["status"] = status
+            new_result["evidenceDocumentResult"] = evidence_result
+            new_result["reasonText"] = (str(new_result.get("reasonText") or "").strip() + " " + reason_text_evidence).strip()
+            new_result.setdefault("score_breakdown", new_result.get("score_breakdown") or {})
+            new_result.setdefault("tool_results", new_result.get("tool_results") or [])
+            result_payload = {"result": new_result}
+        else:
+            result_payload = {
+                "result": {
+                    "status": status,
+                    "reasonText": reason_text_evidence,
+                    "severity": "LOW" if passed else "MEDIUM",
+                    "score": 100 if passed else 50,
+                    "score_breakdown": {},
+                    "tool_results": [],
+                    "quality_gate_codes": [],
+                    "evidenceDocumentResult": evidence_result,
+                },
+            }
+        try:
+            log_run_event(
+                db,
+                run_id=run_id,
+                case_id=case_id,
+                voucher_key=voucher_key,
+                stage="evidence",
+                event_type="RUN_COMPLETED",
+                metadata={"stored_event_type": "RUN_COMPLETED", "result": result_payload},
+            )
+            persist_analysis_result(db, run_id=run_id, result_payload=result_payload)
+            update_agent_case_status_from_run(db, voucher_key, status)
+            runtime.set_result(run_id, result_payload)
+        except Exception as e:
+            logger.exception("review_submit evidence_resume persist failed run_id=%s", run_id)
+            raise HTTPException(status_code=500, detail=str(e)) from e
+        return {
+            "accepted": True,
+            "run_id": run_id,
+            "status": status,
+            "stream_path": f"/api/v1/analysis-runs/{run_id}/stream",
+        }
+
+    if hitl_request:
+        raise HTTPException(status_code=400, detail="hitl_response required when HITL is pending")
+    raise HTTPException(
+        status_code=400,
+        detail="no evidence upload for this run; upload evidence or submit HITL response",
+    )
+
+
 @app.get("/api/v1/cases/{voucher_key}/analysis/latest")
 def get_latest_analysis(voucher_key: str, db: Session = Depends(get_db)) -> dict[str, Any]:
     try:
@@ -547,6 +823,7 @@ def get_latest_analysis(voucher_key: str, db: Session = Depends(get_db)) -> dict
         "hitl_draft": runtime.get_hitl_draft(run_id) or aux.get("hitl_draft"),
         "hitl_response": runtime.get_hitl_response(run_id) or aux.get("hitl_response"),
         "lineage": runtime.get_lineage(run_id) or aux.get("lineage"),
+        "evidence_document_result": aux.get("evidence_document_result"),
     }
 
 
@@ -587,6 +864,7 @@ def get_run_events(run_id: str) -> dict[str, Any]:
     hitl_draft = runtime.get_hitl_draft(run_id)
     hitl_response = runtime.get_hitl_response(run_id)
     lineage = runtime.get_lineage(run_id)
+    evidence_document_result = None
     if not events or result is None or lineage is None:
         with SessionLocal() as db:
             if not events:
@@ -598,6 +876,11 @@ def get_run_events(run_id: str) -> dict[str, Any]:
             hitl_draft = hitl_draft or aux.get("hitl_draft")
             hitl_response = hitl_response or aux.get("hitl_response")
             lineage = lineage or aux.get("lineage")
+            evidence_document_result = aux.get("evidence_document_result")
+    else:
+        with SessionLocal() as db:
+            aux = get_run_aux_state(db, run_id=run_id)
+            evidence_document_result = aux.get("evidence_document_result")
     return {
         "run_id": run_id,
         "events": events,
@@ -607,6 +890,7 @@ def get_run_events(run_id: str) -> dict[str, Any]:
         "hitl_draft": hitl_draft,
         "hitl_response": hitl_response,
         "lineage": lineage,
+        "evidence_document_result": evidence_document_result,
     }
 
 

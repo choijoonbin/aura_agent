@@ -26,6 +26,17 @@ def post(
     return response.json()
 
 
+def post_multipart(path: str, file_name: str, file_bytes: bytes, timeout: int = 60) -> dict[str, Any]:
+    """POST multipart/form-data with a single file (e.g. evidence upload)."""
+    response = requests.post(
+        f"{API}{path}",
+        files={"file": (file_name or "upload", file_bytes)},
+        timeout=timeout,
+    )
+    response.raise_for_status()
+    return response.json()
+
+
 def delete(path: str) -> dict[str, Any]:
     response = requests.delete(f"{API}{path}", timeout=30)
     response.raise_for_status()

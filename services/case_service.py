@@ -290,6 +290,24 @@ def list_vouchers(db: Session, queue: str = "all", limit: int = 50) -> list[Vouc
     return out
 
 
+def get_agent_case_status(db: Session, voucher_key: str) -> str | None:
+    """voucher_key(bukrs-belnr-gjahr)에 해당하는 AgentCase.status 반환. 없으면 None."""
+    parts = voucher_key.split("-")
+    if len(parts) < 3:
+        return None
+    bukrs, belnr, gjahr = parts[0], parts[1], parts[2]
+    tenant_id = settings.default_tenant_id
+    agent_case = db.scalar(
+        select(AgentCase.status).where(
+            AgentCase.tenant_id == tenant_id,
+            AgentCase.bukrs == bukrs,
+            AgentCase.belnr == belnr,
+            AgentCase.gjahr == gjahr,
+        )
+    )
+    return agent_case
+
+
 def update_agent_case_status_from_run(db: Session, voucher_key: str, run_status: str | None) -> None:
     """
     Run 결과 상태를 AgentCase.status에 반영해 케이스 목록/KPI 집계가 올바르게 나오도록 함.
@@ -298,12 +316,13 @@ def update_agent_case_status_from_run(db: Session, voucher_key: str, run_status:
     if not run_status or not isinstance(run_status, str):
         return
     status = str(run_status).strip().upper()
-    # dwp_aura.agent_case.status는 enum일 수 있어, 런타임 전용 상태(HITL_REQUIRED 등)는 DB에 직접 저장하지 않는다.
-    # DB에는 "검토중" 계열로 최소 반영하고, UI 표시/집계용 HITL 상태는 API 응답에서 파생한다.
+    # dwp_aura.agent_case.status는 String(30). 런타임 전용 상태(HITL_REQUIRED 등)는 IN_REVIEW 등으로 매핑.
+    # 증빙 재분석: COMPLETED_AFTER_EVIDENCE는 그대로 저장(완료), EVIDENCE_REJECTED는 IN_REVIEW(보류).
     status_map = {
         "HITL_REQUIRED": "IN_REVIEW",
         "REVIEW_AFTER_HITL": "IN_REVIEW",
         "HOLD_AFTER_HITL": "IN_REVIEW",
+        "EVIDENCE_REJECTED": "IN_REVIEW",
     }
     status = status_map.get(status, status)
     parts = voucher_key.split("-")

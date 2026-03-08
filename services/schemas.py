@@ -58,3 +58,10 @@ class HitlSubmitResponse(BaseModel):
     source_run_id: str
     resumed_run_id: str
     stream_path: str
+
+
+class ReviewSubmitRequest(BaseModel):
+    """HITL 팝업 통합 제출: 담당자 검토 응답 + 증빙 업로드 여부. 에이전트가 필수 항목·조건을 판단 후 분석 이어가기."""
+
+    hitl_response: HitlSubmitRequest | None = None
+    evidence_uploaded: bool = False

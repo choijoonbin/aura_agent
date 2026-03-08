@@ -463,6 +463,72 @@ def _top_policy_refs(tool_results: list[dict[str, Any]], limit: int = 2) -> list
     return list(refs[:limit])
 
 
+async def _select_policy_refs_by_relevance(
+    state: AgentState,
+    refs: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """
+    LLM에게 케이스 유형·업종에 맞는 규정만 골라 인용하도록 요청한다.
+    로직 강제가 아니라 LLM 판단으로, retrieval 결과 중 이 케이스에 적용 가능한 조문만 남긴다.
+    """
+    if not refs or not settings.openai_api_key:
+        return refs
+    body = state.get("body_evidence") or {}
+    case_type = str(body.get("case_type") or state.get("intended_risk_type") or "").strip()
+    merchant = str(body.get("merchantName") or "").strip() or "거래처 미상"
+    mcc = str(body.get("mccCode") or body.get("mccName") or "").strip()
+    ref_lines = []
+    for i, r in enumerate(refs):
+        art = str(r.get("article") or r.get("regulation_article") or "").strip()
+        title = str(r.get("parent_title") or "").strip()
+        ref_lines.append(f"[{i}] {art} {title}")
+    ref_block = "\n".join(ref_lines)
+    system = (
+        "당신은 감사 보고서에 인용할 규정을 선택하는 역할이다. "
+        "주어진 케이스 유형·업종(가맹점, MCC)에 실제로 적용 가능한 규정 조문만 골라야 한다. "
+        "예: 휴일·식대 건이면 휴일/식대/심야 관련 조문만 채택하고, 차량유지비·차량 관련 조문은 이 케이스에 해당하지 않으면 제외한다. "
+        "JSON만 출력: {\"applicable_indices\": [0, 1, ...]} (해당하는 인덱스만 나열). 하나도 해당 없으면 빈 배열."
+    )
+    user = (
+        f"케이스 유형: {case_type or '미분류'}\n가맹점: {merchant}\nMCC/업종: {mcc or '-'}\n\n"
+        f"규정 후보:\n{ref_block}\n\n"
+        "이 케이스에 적용 가능한 규정의 인덱스만 applicable_indices 배열로 출력하라."
+    )
+    try:
+        from openai import AsyncAzureOpenAI, AsyncOpenAI
+
+        base_url = (getattr(settings, "openai_base_url", None) or "").strip()
+        is_azure = ".openai.azure.com" in base_url
+        if is_azure:
+            azure_ep = base_url.rstrip("/")
+            if azure_ep.endswith("/openai/v1"):
+                azure_ep = azure_ep[: -len("/openai/v1")]
+            client = AsyncAzureOpenAI(
+                api_key=settings.openai_api_key,
+                azure_endpoint=azure_ep,
+                api_version=getattr(settings, "openai_api_version", "2024-02-15-preview"),
+            )
+        else:
+            client = AsyncOpenAI(api_key=settings.openai_api_key, base_url=base_url or None)
+        response = await client.chat.completions.create(
+            model=getattr(settings, "reasoning_llm_model", "gpt-4o-mini"),
+            max_tokens=300,
+            response_format={"type": "json_object"},
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+        )
+        raw = (response.choices[0].message.content or "").strip()
+        parsed = json.loads(raw)
+        indices = parsed.get("applicable_indices")
+        if isinstance(indices, list) and indices:
+            return [refs[i] for i in indices if 0 <= i < len(refs)]
+        return refs
+    except Exception:
+        return refs
+
+
 def _should_skip_tool(step: dict[str, Any], *, state: AgentState, tool_results: list[dict[str, Any]]) -> tuple[bool, str | None]:
     tool = step["tool"]
     if tool != "legacy_aura_deep_audit":
@@ -522,14 +588,34 @@ def _build_grounded_reason(state: AgentState) -> tuple[str, str]:
     body = state["body_evidence"]
     occurred_at = _format_occurred_at(body.get("occurredAt"))
     merchant = body.get("merchantName") or "거래처 미상"
-    refs = _top_policy_refs(state.get("tool_results", []), limit=2)
+    refs = _top_policy_refs(state.get("tool_results", []), limit=5)
+    _article_in_merged_re = re.compile(r"제\s*\d+\s*조")
+    # 병합 조문(parent_title에 " ~ ")에 등장하는 모든 조번: 단일 ref로 중복 표시하지 않음
+    articles_in_merged: set[str] = set()
+    for ref in refs:
+        pt = (ref.get("parent_title") or "").strip()
+        if " ~ " in pt:
+            for m in _article_in_merged_re.finditer(pt):
+                articles_in_merged.add(m.group(0).strip())
     ref_labels: list[str] = []
     for ref in refs:
-        article = ref.get("article") or "조항 미상"
-        parent_title = ref.get("parent_title")
-        label = article
-        if parent_title:
-            label = f"{label} ({parent_title})"
+        article = ref.get("article") or ref.get("regulation_article") or "조항 미상"
+        parent_title = (ref.get("parent_title") or "").strip()
+        art_stripped = (article or "").strip()
+        # 병합 라벨에 이미 포함된 조문의 단일 ref는 생략 (제39조가 "제38조 ~ 제39조"에 있으면 단일 "제39조" 제외)
+        if art_stripped and art_stripped in articles_in_merged and " ~ " not in parent_title:
+            continue
+        if not parent_title:
+            label = article
+        else:
+            if art_stripped and (
+                parent_title == art_stripped
+                or parent_title.startswith(art_stripped + " ")
+                or parent_title.startswith(art_stripped + "(")
+            ):
+                label = parent_title
+            else:
+                label = f"{article} ({parent_title})"
         ref_labels.append(label)
 
     intro = f"전표는 {occurred_at} 시점 {merchant} 사용 건으로 분석되었습니다. "
@@ -1032,9 +1118,9 @@ async def _invoke_llm_planner(
         "당신은 기업 경비 감사 에이전트의 Planner다.\n"
         "아래 케이스 정보를 분석하여 최적의 도구 실행 순서를 결정하라.\n"
         "규칙:\n"
-        "1. 불필요한 도구는 생략해 효율을 높여라.\n"
-        "2. 앞 도구 결과가 뒷 도구에 영향을 준다면 순서를 고려하라.\n"
-        "3. 복합 위험(휴일+고위험 업종 등)이 감지되면 관련 도구를 모두 포함하라.\n"
+        "1. 공통 사항: 규정상 모든 전표는 증빙이 필요하므로 document_evidence_probe(전표 증거 수집)와 policy_rulebook_probe(규정 조항 조회)는 반드시 계획에 포함하라.\n"
+        "2. 케이스 유형(휴일/한도/업종 등)에 따라 holiday_compliance_probe, budget_risk_probe, merchant_risk_probe 등을 추가로 포함하라.\n"
+        "3. 앞 도구 결과가 뒷 도구에 영향을 준다면 순서를 고려하라.\n"
         "4. 반드시 JSON 배열로만 응답하라. 각 항목: {\"tool\": string, \"reason\": string}\n"
         "5. 배열 외 텍스트, 마크다운 금지.\n"
     )
@@ -1129,6 +1215,13 @@ async def planner_node(state: AgentState) -> AgentState:
         if getattr(settings, "enable_llm_planner", True):
             plan_source = "fallback_rule"
 
+    # 규정집 공통: 모든 전표는 증빙 필요(제14조). case_type 유무와 무관하게 항상 증빙 수집·규정 조회 포함.
+    plan_tools = {step.get("tool") for step in plan}
+    if "document_evidence_probe" not in plan_tools:
+        plan.append({"tool": "document_evidence_probe", "reason": "공통: 전표 증빙(라인/항목) 수집", "owner": "common"})
+    if "policy_rulebook_probe" not in plan_tools:
+        plan.append({"tool": "policy_rulebook_probe", "reason": "공통: 규정 조항(증빙 의무 포함) 조회", "owner": "common"})
+
     def _build_planner_reasoning() -> str:
         lines: list[str] = []
         if plan_source == "llm":
@@ -1193,7 +1286,7 @@ async def planner_node(state: AgentState) -> AgentState:
             event_type="PLAN_READY",
             node="planner",
             phase="plan",
-            message="조사 계획이 확정되었습니다.",
+            message=reasoning_text or "조사 계획이 확정되었습니다.",
             metadata={"plan": plan, "reasoning": reasoning_text, "note_source": note_source, "plan_source": plan_source},
         ).to_payload(),
     )
@@ -1776,6 +1869,280 @@ async def critic_node(state: AgentState) -> AgentState:
     }
 
 
+async def _derive_hitl_from_regulation(state: AgentState) -> dict[str, Any]:
+    """
+    규정 본문(chunk_text)을 바탕으로 에이전트가 필수 입력/증빙과 검토 질문을 추출한다.
+    하드코딩된 케이스별 규칙이 아니라, 적용 규정의 '필수 입력/증빙' 등 문구를 읽어 HITL 요청 내용을 만든다.
+    """
+    refs = (_find_tool_result(state.get("tool_results", []), "policy_rulebook_probe") or {}).get("facts", {}).get("policy_refs") or []
+    body = state.get("body_evidence") or {}
+    regulation_texts: list[str] = []
+    for ref in refs[:5]:
+        chunk_text = (ref.get("chunk_text") or "").strip()
+        article = ref.get("article") or ref.get("regulation_article") or ""
+        parent_title = ref.get("parent_title") or ""
+        if chunk_text:
+            regulation_texts.append(f"[{article} {parent_title}]\n{chunk_text}")
+    if not regulation_texts:
+        return {}
+
+    case_summary = (
+        f"발생시각: {body.get('occurredAt')} / 가맹점: {body.get('merchantName')} / "
+        f"휴일여부: {body.get('isHoliday')} / 근태: {body.get('hrStatus')} / 예산초과: {body.get('budgetExceeded')}"
+    )
+    system_prompt = (
+        "당신은 경비 규정을 적용하는 감사 에이전트다. 아래 '적용 규정 조문'에 적힌 내용만을 근거로, "
+        "담당자 검토(HITL) 시 요구할 **필수 입력/증빙** 항목과 **검토 시 확인할 질문**을 추출하라.\n"
+        "규칙:\n"
+        "1. 규정에 '필수 입력', '필수 증빙', '② 필수' 등으로 열거된 항목을 required_inputs로 나열하라. "
+        "각 항목은 {\"field\": \"영문식별자\", \"reason\": \"규정에서 요구하는 이유 한 줄\", \"guide\": \"사용자에게 보여줄 가이드 문구\"} 형태로.\n"
+        "2. 규정에서 예외·승인·검토 시 확인하라고 한 내용을 review_questions로 짧은 질문 문장으로 나열하라.\n"
+        "3. 현재 케이스(휴일/심야/접대 등)에 실제로 해당하는 조문만 사용하라. 해당 없으면 빈 배열을 반환하라.\n"
+        "4. 반드시 JSON만 응답하라: {\"required_inputs\": [...], \"review_questions\": [...]}\n"
+    )
+    user_prompt = f"현재 케이스 요약: {case_summary}\n\n적용 규정 조문:\n\n" + "\n\n---\n\n".join(regulation_texts)
+
+    if not getattr(settings, "openai_api_key", None):
+        return {}
+    try:
+        from openai import AsyncAzureOpenAI, AsyncOpenAI
+
+        base_url = (getattr(settings, "openai_base_url") or "").strip()
+        is_azure = ".openai.azure.com" in base_url
+        if is_azure:
+            azure_ep = base_url.rstrip("/")
+            if azure_ep.endswith("/openai/v1"):
+                azure_ep = azure_ep[: -len("/openai/v1")]
+            client = AsyncAzureOpenAI(
+                api_key=settings.openai_api_key,
+                azure_endpoint=azure_ep,
+                api_version=getattr(settings, "openai_api_version", "2024-02-15-preview"),
+            )
+        else:
+            client = AsyncOpenAI(api_key=settings.openai_api_key, base_url=base_url or None)
+
+        response = await client.chat.completions.create(
+            model=getattr(settings, "reasoning_llm_model", "gpt-4o-mini"),
+            max_tokens=800,
+            response_format={"type": "json_object"},
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+        )
+        raw = (response.choices[0].message.content or "").strip()
+        parsed = json.loads(raw)
+        required_inputs = parsed.get("required_inputs") or []
+        review_questions = parsed.get("review_questions") or []
+        if not isinstance(required_inputs, list):
+            required_inputs = []
+        if not isinstance(review_questions, list):
+            review_questions = []
+        required_inputs = [
+            {"field": str(x.get("field", "")), "reason": str(x.get("reason", "")), "guide": str(x.get("guide", ""))}
+            for x in required_inputs if isinstance(x, dict)
+        ]
+        review_questions = [str(q).strip() for q in review_questions if str(q).strip()]
+        return {"required_inputs": required_inputs, "review_questions": review_questions}
+    except Exception:
+        return {}
+
+
+async def _generate_hitl_review_content(
+    hitl_request: dict[str, Any],
+    verification_summary: dict[str, Any],
+    claim_results: list[dict[str, Any]],
+    reasoning_text: str,
+) -> dict[str, Any]:
+    """
+    담당자 검토가 필요하다고 판단된 맥락을 바탕으로, LLM이 검토 필요 사유와 검토자가 답해야 할 질문을 생성한다.
+    반환: {"review_reasons": list[str], "review_questions": list[str]} (각 1개 이상 보장)
+    """
+    why = (hitl_request.get("why_hitl") or "").strip()
+    blockers = hitl_request.get("reasons") or hitl_request.get("auto_finalize_blockers") or []
+    missing = hitl_request.get("missing_citations") or []
+    covered = verification_summary.get("covered")
+    total = verification_summary.get("total")
+    coverage_note = f"검증 대상 {total}개 중 {covered}개만 규정 근거와 연결됨." if (total and total > 0) else ""
+
+    claim_lines: list[str] = []
+    for r in (claim_results or [])[:6]:
+        c = r.get("claim") or ""
+        cov = r.get("covered")
+        gap = (r.get("gap") or "").strip()
+        if c:
+            claim_lines.append(f"- {c[:120]}{'…' if len(c) > 120 else ''} | 연결: {'예' if cov else '아니오'}{f' | 부족: {gap}' if gap else ''}")
+
+    system_prompt = (
+        "당신은 경비 감사 에이전트다. 이 전표는 담당자 검토(HITL)가 필요한 것으로 판정되었다. "
+        "아래 맥락(분석 과정에서 나온 근거)만을 사용하여 다음 두 가지를 반드시 생성하라.\n"
+        "1. review_reasons: 검토가 필요한 이유를 담당자가 이해할 수 있는 문장 1~5개. 분석 결과 기반으로 명확히.\n"
+        "2. review_questions: 검토자가 검토의견에 작성해야 할 질문 1~5개. 이 답변은 이어서 분석할 때 재분석·마무리 또는 재검토 요청에 활용되므로, 분석 결과와 연결된 구체적 질문으로 작성. 예: '휴일 사용 사전 승인 여부를 확인했는가?'\n"
+        "반드시 JSON만 응답: {\"review_reasons\": [\"...\", ...], \"review_questions\": [\"...\", ...]}\n"
+        "review_reasons와 review_questions는 각각 최소 1개 이상 필수."
+    )
+    user_parts = [f"검증 판단 요약: {reasoning_text[:500]}" if reasoning_text else ""]
+    if why:
+        user_parts.append(f"자동 확정 중단 이유: {why}")
+    if blockers:
+        user_parts.append("자동 확정 차단 사유: " + "; ".join(str(b) for b in blockers[:5]))
+    if coverage_note:
+        user_parts.append(coverage_note)
+    if missing:
+        user_parts.append("근거 미연결 주장: " + " | ".join((m or "")[:80] for m in missing[:3]))
+    if claim_lines:
+        user_parts.append("주장별 검증 결과:\n" + "\n".join(claim_lines))
+    user_prompt = "\n\n".join(p for p in user_parts if p).strip() or "검토 필요로 판정됨. 사유와 질문을 생성하라."
+
+    if not getattr(settings, "openai_api_key", None):
+        return {}
+    try:
+        from openai import AsyncAzureOpenAI, AsyncOpenAI
+
+        base_url = (getattr(settings, "openai_base_url") or "").strip()
+        is_azure = ".openai.azure.com" in base_url
+        if is_azure:
+            azure_ep = base_url.rstrip("/")
+            if azure_ep.endswith("/openai/v1"):
+                azure_ep = azure_ep[: -len("/openai/v1")]
+            client = AsyncAzureOpenAI(
+                api_key=settings.openai_api_key,
+                azure_endpoint=azure_ep,
+                api_version=getattr(settings, "openai_api_version", "2024-02-15-preview"),
+            )
+        else:
+            client = AsyncOpenAI(api_key=settings.openai_api_key, base_url=base_url or None)
+
+        response = await client.chat.completions.create(
+            model=getattr(settings, "reasoning_llm_model", "gpt-4o-mini"),
+            max_tokens=600,
+            response_format={"type": "json_object"},
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+        )
+        raw = (response.choices[0].message.content or "").strip()
+        parsed = json.loads(raw)
+        reasons = parsed.get("review_reasons") or []
+        questions = parsed.get("review_questions") or []
+        if not isinstance(reasons, list):
+            reasons = [str(reasons)] if reasons else []
+        if not isinstance(questions, list):
+            questions = [str(questions)] if questions else []
+        reasons = [str(s).strip() for s in reasons if str(s).strip()][:5]
+        questions = [str(q).strip() for q in questions if str(q).strip()][:5]
+        if not reasons and why:
+            reasons = [why]
+        if not questions and why:
+            questions = [f"다음 사유가 해소되었는지 검토해 주세요: {(why[:180])}{'…' if len(why) > 180 else ''}"]
+        return {"review_reasons": reasons, "review_questions": questions}
+    except Exception:
+        return {}
+
+
+async def _retry_fill_hitl_review_when_empty(
+    hitl_request: dict[str, Any],
+    verification_summary: dict[str, Any],
+    claim_results: list[dict[str, Any]],
+    reasoning_text: str,
+    *,
+    empty_reasons: bool,
+    empty_questions: bool,
+) -> dict[str, Any]:
+    """
+    검토 필요로 판정했는데 검토 필요 사유 또는 검토 시 답해야 할 질문이 비어 있을 때,
+    LLM에게 분석 결과를 바탕으로 반드시 두 항목을 채우라고 재지시한다.
+    """
+    why = (hitl_request.get("why_hitl") or "").strip()
+    blockers = hitl_request.get("reasons") or hitl_request.get("auto_finalize_blockers") or []
+    covered = verification_summary.get("covered")
+    total = verification_summary.get("total")
+    coverage_note = f"검증 대상 {total}개 중 {covered}개만 규정 근거와 연결됨." if (total and total > 0) else ""
+
+    claim_lines: list[str] = []
+    for r in (claim_results or [])[:6]:
+        c = r.get("claim") or ""
+        cov = r.get("covered")
+        gap = (r.get("gap") or "").strip()
+        if c:
+            claim_lines.append(f"- {c[:120]}{'…' if len(c) > 120 else ''} | 연결: {'예' if cov else '아니오'}{f' | 부족: {gap}' if gap else ''}")
+
+    missing_what = []
+    if empty_reasons:
+        missing_what.append("검토 필요 사유")
+    if empty_questions:
+        missing_what.append("검토 시 답해야 할 질문")
+    missing_str = ", ".join(missing_what)
+
+    system_prompt = (
+        "당신은 경비 감사 에이전트다. 이 전표는 '검토 필요'로 이미 판정된 건이다. "
+        f"그런데 현재 {missing_str} 항목이 비어 있다. "
+        "아래 분석 결과(검증 판단 요약, 자동 확정 차단 사유, 주장별 검증 결과 등)를 **근거**로 다음을 반드시 수행하라.\n"
+        "1. review_reasons: 검토가 필요한 이유를 담당자가 이해할 수 있는 문장 1~5개. 분석 과정에서 나온 근거 기반으로 작성.\n"
+        "2. review_questions: 검토자가 검토의견에 반드시 답해야 할 질문 1~5개. 이어서 분석할 때 이 답변을 활용하므로, 분석 결과와 연결된 구체적 질문으로 작성.\n"
+        "3. empty_explanation: (선택) 위 두 항목이 비어 있었을 수 있는 이유를 한 줄로.\n"
+        "반드시 JSON만 응답: {\"review_reasons\": [\"...\"], \"review_questions\": [\"...\"], \"empty_explanation\": \"...\"}\n"
+        "review_reasons와 review_questions는 각각 최소 1개 이상 필수."
+    )
+    user_parts = [f"검증 판단 요약: {reasoning_text[:600]}" if reasoning_text else ""]
+    if why:
+        user_parts.append(f"자동 확정 중단 이유: {why}")
+    if blockers:
+        user_parts.append("자동 확정 차단 사유: " + "; ".join(str(b) for b in blockers[:5]))
+    if coverage_note:
+        user_parts.append(coverage_note)
+    if claim_lines:
+        user_parts.append("주장별 검증 결과:\n" + "\n".join(claim_lines))
+    user_prompt = "\n\n".join(p for p in user_parts if p).strip() or "분석 결과를 바탕으로 검토 필요 사유와 검토 시 답해야 할 질문을 생성하라."
+
+    if not getattr(settings, "openai_api_key", None):
+        return {}
+    try:
+        from openai import AsyncAzureOpenAI, AsyncOpenAI
+
+        base_url = (getattr(settings, "openai_base_url") or "").strip()
+        is_azure = ".openai.azure.com" in base_url
+        if is_azure:
+            azure_ep = base_url.rstrip("/")
+            if azure_ep.endswith("/openai/v1"):
+                azure_ep = azure_ep[: -len("/openai/v1")]
+            client = AsyncAzureOpenAI(
+                api_key=settings.openai_api_key,
+                azure_endpoint=azure_ep,
+                api_version=getattr(settings, "openai_api_version", "2024-02-15-preview"),
+            )
+        else:
+            client = AsyncOpenAI(api_key=settings.openai_api_key, base_url=base_url or None)
+
+        response = await client.chat.completions.create(
+            model=getattr(settings, "reasoning_llm_model", "gpt-4o-mini"),
+            max_tokens=700,
+            response_format={"type": "json_object"},
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+        )
+        raw = (response.choices[0].message.content or "").strip()
+        parsed = json.loads(raw)
+        reasons = parsed.get("review_reasons") or []
+        questions = parsed.get("review_questions") or []
+        if not isinstance(reasons, list):
+            reasons = [str(reasons)] if reasons else []
+        if not isinstance(questions, list):
+            questions = [str(questions)] if questions else []
+        reasons = [str(s).strip() for s in reasons if str(s).strip()][:5]
+        questions = [str(q).strip() for q in questions if str(q).strip()][:5]
+        if not reasons and why:
+            reasons = [why]
+        if not questions and why:
+            questions = [f"다음 사유가 해소되었는지 검토해 주세요: {(why[:180])}{'…' if len(why) > 180 else ''}"]
+        return {"review_reasons": reasons, "review_questions": questions}
+    except Exception:
+        return {}
+
+
 async def verify_node(state: AgentState) -> AgentState:
     from services.evidence_verification import (
         EVIDENCE_GATE_HOLD,
@@ -1808,6 +2175,7 @@ async def verify_node(state: AgentState) -> AgentState:
     elif verification_targets:
         verification_summary = {"covered": 0, "total": len(verification_targets), "coverage_ratio": 0.0, "details": [], "gate_policy": EVIDENCE_GATE_HOLD, "missing_citations": verification_targets}
     verification["verification_summary"] = verification_summary
+    regulation_driven = await _derive_hitl_from_regulation(state)
     hitl_request = build_hitl_request(
         state["body_evidence"],
         state["tool_results"],
@@ -1815,6 +2183,7 @@ async def verify_node(state: AgentState) -> AgentState:
         verification_summary=verification_summary,
         screening_result=state.get("screening_result"),
         score_breakdown=state.get("score_breakdown"),
+        regulation_driven=regulation_driven,
     )
     if state["flags"].get("hasHitlResponse"):
         hitl_request = None
@@ -1896,6 +2265,58 @@ async def verify_node(state: AgentState) -> AgentState:
     reasoning_text, reasoning_events, note_source = await _stream_reasoning_events_with_llm("verify", reasoning_text, context=verify_context)
     verifier_output_dict = verifier_output.model_dump()
     verifier_output_dict["reasoning"] = reasoning_text
+
+    # HITL 필요 시 LLM이 검토 필요 사유와 검토자가 답해야 할 질문을 생성해 hitl_request를 보강
+    if hitl_request:
+        claim_results_dicts = [c.model_dump() if hasattr(c, "model_dump") else c for c in claim_results]
+        llm_review = await _generate_hitl_review_content(
+            hitl_request,
+            verification_summary,
+            claim_results_dicts,
+            reasoning_text,
+        )
+        if llm_review.get("review_reasons"):
+            hitl_request["unresolved_claims"] = llm_review["review_reasons"]
+        if llm_review.get("review_questions"):
+            hitl_request["review_questions"] = llm_review["review_questions"]
+            hitl_request["questions"] = llm_review["review_questions"]
+        # LLM이 비웠거나 실패한 경우, 이미 계산된 reasons/why_hitl/required_inputs로 검토 사유·질문 보강 (하드코딩 없음)
+        if not hitl_request.get("unresolved_claims"):
+            hitl_request["unresolved_claims"] = (
+                hitl_request.get("reasons")
+                or ([hitl_request.get("why_hitl")] if hitl_request.get("why_hitl") else [])
+            )
+        if not hitl_request.get("review_questions") and not hitl_request.get("questions"):
+            from_inputs = [
+                (r.get("guide") or r.get("reason") or f"{r.get('field', '')}: {r.get('reason', '')}").strip()
+                for r in (hitl_request.get("required_inputs") or [])
+                if (r.get("guide") or r.get("reason") or r.get("field"))
+            ]
+            if from_inputs:
+                hitl_request["review_questions"] = from_inputs
+                hitl_request["questions"] = from_inputs
+            elif hitl_request.get("why_hitl"):
+                q = f"다음 사유가 해소되었는지 검토해 주세요: {(hitl_request['why_hitl'] or '')[:200]}"
+                hitl_request["review_questions"] = [q]
+                hitl_request["questions"] = [q]
+        # 검토 필요로 판정 시 두 항목이 비어 있으면 안 됨. 비어 있으면 LLM에게 재지시하여 분석 결과 기반으로 반드시 채우기
+        need_reasons = not (hitl_request.get("unresolved_claims"))
+        need_questions = not (hitl_request.get("review_questions") or hitl_request.get("questions"))
+        if need_reasons or need_questions:
+            retry_result = await _retry_fill_hitl_review_when_empty(
+                hitl_request,
+                verification_summary,
+                claim_results_dicts,
+                reasoning_text,
+                empty_reasons=need_reasons,
+                empty_questions=need_questions,
+            )
+            if retry_result.get("review_reasons"):
+                hitl_request["unresolved_claims"] = retry_result["review_reasons"]
+            if retry_result.get("review_questions"):
+                hitl_request["review_questions"] = retry_result["review_questions"]
+                hitl_request["questions"] = retry_result["review_questions"]
+
     events: list[dict[str, Any]] = [
         AgentEvent(event_type="NODE_START", node="verify", phase="verify", message="근거 정합성과 추가 검토 필요 여부를 확인합니다.", metadata={}).to_payload(),
     ]
@@ -1966,8 +2387,69 @@ def _route_after_verify(state: AgentState) -> str:
     return "reporter"
 
 
+def _get_hitl_response_value(hitl_response: dict[str, Any], field: str) -> Any:
+    """HITL 응답에서 필드값 추출. 상위 키 또는 extra_facts[field] 확인."""
+    v = hitl_response.get(field)
+    if v is not None and (not isinstance(v, str) or v.strip()):
+        return v
+    extra = hitl_response.get("extra_facts") or {}
+    v = extra.get(field) if isinstance(extra, dict) else None
+    if v is not None and (not isinstance(v, str) or v.strip()):
+        return v
+    return None
+
+
+async def hitl_validate_node(state: AgentState) -> AgentState:
+    """
+    재분석 시: 사용자가 입력한 HITL 응답이 규정에서 요구한 필수 항목을 채웠는지 에이전트가 판단.
+    누락이 있으면 해당 항목만 담은 새 HITL 요청을 만들어 hitl_pause로 돌려 추가 입력을 받는다.
+    """
+    hitl_request = state.get("hitl_request") or {}
+    hitl_response = (state.get("body_evidence") or {}).get("hitlResponse") or {}
+    required_inputs = hitl_request.get("required_inputs") or []
+    if not required_inputs:
+        return {"hitl_request": None}
+
+    missing: list[dict[str, str]] = []
+    for req in required_inputs:
+        field = (req.get("field") or "").strip()
+        if not field:
+            continue
+        val = _get_hitl_response_value(hitl_response, field)
+        if val is None:
+            missing.append(req)
+            continue
+        if isinstance(val, list):
+            if not val:
+                missing.append(req)
+            continue
+        if isinstance(val, str) and not val.strip():
+            missing.append(req)
+
+    if not missing:
+        return {"hitl_request": None}
+
+    # 누락 항목만으로 재요청 (가이드 문구로 사용자에게 안내)
+    new_request = dict(hitl_request)
+    new_request["required_inputs"] = missing
+    new_request["why_hitl"] = "규정에서 요구한 필수 입력/증빙 항목 중 아래 항목이 비어 있어 추가 입력이 필요합니다."
+    new_request["reasons"] = [f"필수 항목 미기입: {m.get('field', '')} — {m.get('reason', '')}" for m in missing[:5]]
+    new_request["review_questions"] = [m.get("guide", m.get("reason", "")) for m in missing if m.get("guide") or m.get("reason")]
+    if not new_request.get("review_questions"):
+        new_request["review_questions"] = [f"{m.get('field')}: {m.get('reason')}" for m in missing]
+    new_request["questions"] = new_request["review_questions"]
+    return {"hitl_request": new_request}
+
+
+def _route_after_hitl_validate(state: AgentState) -> str:
+    """hitl_validate 후: 재요청이 있으면 hitl_pause, 없으면 reporter."""
+    if state.get("hitl_request"):
+        return "hitl_pause"
+    return "reporter"
+
+
 async def hitl_pause_node(state: AgentState) -> AgentState:
-    """Phase D: HITL 필요 시 interrupt()로 중단. resume 시 hitl_response를 body_evidence에 반영하고 reporter로 이어짐."""
+    """Phase D: HITL 필요 시 interrupt()로 중단. resume 시 hitl_response를 body_evidence에 반영하고, hitl_validate를 거쳐 reporter 또는 재요청으로 간다."""
     hitl_request = state.get("hitl_request") or {}
     # interrupt()로 일시정지; 재개 시 호출자가 Command(resume=payload)로 넘긴 값이 여기로 반환됨
     hitl_response = interrupt(hitl_request)
@@ -2001,6 +2483,7 @@ async def reporter_node(state: AgentState) -> AgentState:
         summary += " 현재 수집된 증거 기준으로 추가 검토 우선순위가 높습니다."
         verdict = "READY"
     refs = _top_policy_refs(state.get("tool_results", []), limit=5)
+    refs = await _select_policy_refs_by_relevance(state, refs)
     citations_list = []
     for ref in refs:
         cids = ref.get("chunk_ids") or []
@@ -2220,6 +2703,7 @@ def build_agent_graph():
     workflow.add_node("critic", critic_node)
     workflow.add_node("verify", verify_node)
     workflow.add_node("hitl_pause", hitl_pause_node)  # Phase D: HITL 시 run 조기 종료
+    workflow.add_node("hitl_validate", hitl_validate_node)  # 재분석 시 필수 항목 채움 여부 검사, 미충족 시 재 HITL
     workflow.add_node("reporter", reporter_node)
     workflow.add_node("finalizer", finalizer_node)
     workflow.add_edge(START, "screener")
@@ -2229,7 +2713,8 @@ def build_agent_graph():
     workflow.add_edge("execute", "critic")
     workflow.add_conditional_edges("critic", _route_after_critic, {"planner": "planner", "verify": "verify"})
     workflow.add_conditional_edges("verify", _route_after_verify, {"hitl_pause": "hitl_pause", "reporter": "reporter"})
-    workflow.add_edge("hitl_pause", "reporter")  # resume 후 reporter로 이어짐
+    workflow.add_edge("hitl_pause", "hitl_validate")  # resume 후 검증 → 충족 시 reporter, 미충족 시 hitl_pause 재요청
+    workflow.add_conditional_edges("hitl_validate", _route_after_hitl_validate, {"hitl_pause": "hitl_pause", "reporter": "reporter"})
     workflow.add_edge("reporter", "finalizer")
     workflow.add_edge("finalizer", END)
     _COMPILED_GRAPH = workflow.compile(checkpointer=_get_checkpointer())

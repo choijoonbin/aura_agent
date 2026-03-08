@@ -317,9 +317,11 @@ def status_badge(status: str | None) -> str:
         return '<span class="mt-badge mt-badge-amber">보류</span>'
     if value in {"HITL_REQUIRED", "FAILED"}:
         return '<span class="mt-badge mt-badge-red">주의</span>'
-    if value in {"RESOLVED", "COMPLETED", "OK", "COMPLETED_AFTER_HITL"}:
+    if value in {"RESOLVED", "COMPLETED", "OK", "COMPLETED_AFTER_HITL", "COMPLETED_AFTER_EVIDENCE"}:
         return '<span class="mt-badge mt-badge-green">완료</span>'
-    return f'<span class="mt-badge">{value}</span>'
+    if value == "EVIDENCE_REJECTED":
+        return '<span class="mt-badge mt-badge-amber">증빙 불일치</span>'
+    return f'<span class="mt-badge">{status_display_name(status) or value}</span>'
 
 
 def severity_badge(severity: str | None) -> str:
@@ -409,8 +411,11 @@ def status_display_name(status: str | None) -> str:
         "REVIEW_AFTER_HITL": "검토 재개",
         "HITL_REQUIRED": "담당자 검토 필요",
         "HOLD_AFTER_HITL": "보류",
+        "EVIDENCE_PENDING": "증빙 제출 대기",
+        "EVIDENCE_REJECTED": "증빙 불일치",
         "COMPLETED": "완료",
         "COMPLETED_AFTER_HITL": "검토 후 완료",
+        "COMPLETED_AFTER_EVIDENCE": "증빙 검증 완료",
         "RESOLVED": "해결",
     }
     return labels.get(str(status).upper(), status)

@@ -143,6 +143,11 @@ def _adoption_reason_for_ref(ref: dict[str, Any], body_evidence: dict[str, Any])
 async def policy_rulebook_probe(context: dict[str, Any]) -> dict[str, Any]:
     prior = context.get("prior_tool_results") or []
     enriched_body = dict(context["body_evidence"])
+    # 스크리너가 판단한 케이스 유형을 규정 검색에 반영(휴일식대 vs 차량유지비 등 도메인별 적절한 조항만 검색)
+    intended = context.get("intended_risk_type") or enriched_body.get("case_type") or enriched_body.get("intended_risk_type")
+    if intended:
+        enriched_body["case_type"] = intended
+        enriched_body["intended_risk_type"] = intended
 
     for result in prior:
         tkey = _tool_key(result)
@@ -160,8 +165,16 @@ async def policy_rulebook_probe(context: dict[str, Any]) -> dict[str, Any]:
     engine = create_engine(settings.database_url, future=True)
     with Session(engine) as db:
         candidates = search_policy_chunks(db, enriched_body, limit=20)
+        # 채택 인용은 조문(article) 단위로 하나만 노출: 동일 제23조가 ARTICLE+CLAUSE 등 여러 청크로 검색되면 중복 표시되므로, 조문별 최고점 청크 1개만 채택
+        seen_articles: set[str] = set()
         refs = []
-        for r in candidates[:5]:
+        for r in candidates:
+            if len(refs) >= 5:
+                break
+            article_key = str(r.get("article") or r.get("regulation_article") or "").strip()
+            if not article_key or article_key in seen_articles:
+                continue
+            seen_articles.add(article_key)
             ref = dict(r)
             ref["adoption_reason"] = _adoption_reason_for_ref(ref, enriched_body)
             refs.append(ref)
