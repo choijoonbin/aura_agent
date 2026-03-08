@@ -600,11 +600,12 @@ def _search_dense(
     *,
     limit: int = 20,
     effective_date: Any = None,
+    group_filter: list[str] | None = None,
     embed_column: str = settings.rag_embedding_column,
     use_hyde: bool = False,
     llm_client: Any = None,
 ) -> list[dict[str, Any]]:
-    """Dense 벡터 검색. 자연어 쿼리 사용, 선택 시 HyDE 적용."""
+    """Dense 벡터 검색. 자연어 쿼리 사용, 선택 시 HyDE 적용. group_filter 있으면 해당 장(章) 내에서만 검색."""
     if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", str(embed_column or "")):
         return []
     cast_type = str(settings.rag_embedding_cast_type or "halfvec").strip().lower()
@@ -627,7 +628,19 @@ def _search_dense(
         return []
     query_vector = vectors[0]
 
-    sql = text(f"""
+    group_filter_sql = ""
+    group_params: dict[str, str] = {}
+    if group_filter:
+        conditions = [
+            f"(metadata_json->>'semantic_group' LIKE :dense_grp{i})"
+            for i in range(len(group_filter))
+        ]
+        group_filter_sql = " AND (" + " OR ".join(conditions) + ")"
+        for i, grp in enumerate(group_filter):
+            group_params[f"dense_grp{i}"] = f"{grp}%"
+
+    sql = text(
+        f"""
         SELECT
             chunk_id, doc_id, regulation_article, regulation_clause,
             parent_title, chunk_text, search_text, node_type, parent_id,
@@ -639,18 +652,21 @@ def _search_dense(
           AND {embed_column} IS NOT NULL
           AND (:effective_date IS NULL OR coalesce(effective_from, :effective_date) <= :effective_date)
           AND (:effective_date IS NULL OR coalesce(effective_to, :effective_date) >= :effective_date)
+        """
+        + group_filter_sql
+        + f"""
         ORDER BY {embed_column} <=> CAST(:query_vec AS {cast_type})
         LIMIT :limit
-    """)
-    rows = db.execute(
-        sql,
-        {
-            "tenant_id": settings.default_tenant_id,
-            "query_vec": str(query_vector),
-            "effective_date": effective_date,
-            "limit": limit,
-        },
-    ).mappings().all()
+        """
+    )
+    params: dict[str, Any] = {
+        "tenant_id": settings.default_tenant_id,
+        "query_vec": str(query_vector),
+        "effective_date": effective_date,
+        "limit": limit,
+        **group_params,
+    }
+    rows = db.execute(sql, params).mappings().all()
     return [dict(row) for row in rows]
 
 
@@ -827,8 +843,23 @@ def search_policy_chunks(db: Session, body_evidence: dict[str, Any], limit: int 
         body_evidence,
         limit=candidate_limit,
         effective_date=effective_date,
+        group_filter=group_filter,
         use_hyde=getattr(settings, "enable_hyde_query", False),
     )
+    if group_filter and len(dense_results) < limit:
+        dense_fallback = _search_dense(
+            db,
+            body_evidence,
+            limit=candidate_limit,
+            effective_date=effective_date,
+            group_filter=None,
+            use_hyde=getattr(settings, "enable_hyde_query", False),
+        )
+        existing_ids = {r["chunk_id"] for r in dense_results}
+        for r in dense_fallback:
+            if r.get("chunk_id") not in existing_ids:
+                dense_results.append(r)
+                existing_ids.add(r["chunk_id"])
 
     if bm25_results and dense_results:
         fused = _reciprocal_rank_fusion(

@@ -701,15 +701,24 @@ async def review_submit(
         except Exception as e:
             raise HTTPException(status_code=404, detail=str(e)) from e
         body_evidence = dict(payload.get("body_evidence") or {})
+        # REVIEW_REQUIRED 경로는 interrupt(resume) 대상 run이 아닐 수 있으므로,
+        # body_evidence에 HITL 응답을 명시적으로 주입해 재분석 입력으로 항상 전달한다.
+        body_evidence["hitlResponse"] = hitl_payload
         if evidence_result:
             body_evidence["evidenceDocumentResult"] = evidence_result
+        # HITL_REQUIRED(실제 interrupt 대기)에서만 Command(resume=...)로 재개.
+        # REVIEW_REQUIRED 등 비-interrupt 경로는 새 입력 재실행으로 처리해야 상태가 정상 전이된다.
+        base_result_payload = runtime.get_result(run_id) or aux.get("result_payload") or {}
+        base_result = base_result_payload.get("result") if isinstance(base_result_payload, dict) else {}
+        base_status = str((base_result or {}).get("status") or "").upper()
+        use_resume_value = hitl_payload if base_status == "HITL_REQUIRED" else None
         asyncio.create_task(
             _run_analysis_task(
                 run_id=run_id,
                 case_id=case_id,
                 body_evidence=body_evidence,
                 intended_risk_type=payload.get("intended_risk_type"),
-                resume_value=hitl_payload,
+                resume_value=use_resume_value,
             )
         )
         return {

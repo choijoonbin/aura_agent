@@ -37,6 +37,15 @@ _SEQUENTIAL_LAST_TOOLS = frozenset({"policy_rulebook_probe", "legacy_aura_deep_a
 _PARALLEL_TOOL_DEPENDENCIES: dict[str, frozenset[str]] = {
     "merchant_risk_probe": frozenset({"holiday_compliance_probe"}),
 }
+# 스트림/타임라인 표시용 짧은 문구 (반복적인 "— 도구 실행" 대신)
+_TOOL_CALL_SHORT_MESSAGE: dict[str, str] = {
+    "holiday_compliance_probe": "휴일·근태 적격성 확인 중",
+    "merchant_risk_probe": "가맹점 업종 위험 점검 중",
+    "policy_rulebook_probe": "규정 조항 조회 중",
+    "document_evidence_probe": "전표·증빙 수집 중",
+    "budget_risk_probe": "예산 초과 점검 중",
+    "legacy_aura_deep_audit": "심층 감사 실행 중",
+}
 _CHECKPOINTER: Any | None = None
 _COMPILED_GRAPH: Any | None = None
 _MAX_CRITIC_LOOP = 2
@@ -580,6 +589,45 @@ def _score_with_hitl_adjustment(score: dict[str, Any], flags: dict[str, Any]) ->
         f"{float(adjusted.get('final_score', 0)):.1f} [compound×{float(adjusted.get('compound_multiplier', 1.0)):.2f}, amount×{float(adjusted.get('amount_weight', 1.0)):.2f}]"
     )
     return adjusted
+
+
+def _build_system_auto_finalize_blockers(
+    verification_summary: dict[str, Any],
+    *,
+    quality_signals: list[str] | None = None,
+    fallback_reason: str = "",
+) -> list[str]:
+    """자동확정 중단 사유(시스템 관점)를 구성한다."""
+    out: list[str] = []
+    gate_policy = str(verification_summary.get("gate_policy") or "").strip()
+    covered = verification_summary.get("covered")
+    total = verification_summary.get("total")
+    if gate_policy:
+        out.append(f"검증 게이트 판정: {gate_policy}")
+    if isinstance(covered, int) and isinstance(total, int) and total > 0:
+        ratio = verification_summary.get("coverage_ratio")
+        if isinstance(ratio, (int, float)):
+            out.append(f"근거 연결률: {covered}/{total} ({float(ratio)*100:.1f}%)")
+        else:
+            out.append(f"근거 연결률: {covered}/{total}")
+    missing_citations = verification_summary.get("missing_citations") or []
+    if isinstance(missing_citations, list) and missing_citations:
+        out.append(f"미연결 주장 수: {len(missing_citations)}건")
+    for s in (quality_signals or []):
+        t = str(s or "").strip()
+        if t:
+            out.append(f"검증 신호: {t}")
+    if not out and fallback_reason:
+        out.append(str(fallback_reason).strip())
+    dedup: list[str] = []
+    seen: set[str] = set()
+    for s in out:
+        k = s.strip()
+        if not k or k in seen:
+            continue
+        seen.add(k)
+        dedup.append(k)
+    return dedup
 
 
 def _build_grounded_reason(state: AgentState) -> tuple[str, str]:
@@ -1400,13 +1448,14 @@ async def execute_node(state: AgentState) -> AgentState:
                     continue
                 tool_description = getattr(tool, "description", None) or ""
                 step_reason = step.get("reason", "")
+                short_msg = _TOOL_CALL_SHORT_MESSAGE.get(tool_name) or f"{step_reason} — {tool_name} 실행."
                 pending_events.append(
                     AgentEvent(
                         event_type="TOOL_CALL",
                         node="execute",
                         phase="execute",
                         tool=tool_name,
-                        message=f"{step_reason} — {tool_name} 실행.",
+                        message=short_msg,
                         thought=step_reason,
                         action=f"{tool_name} 실행",
                         observation="도구 실행 중.",
@@ -1470,13 +1519,14 @@ async def execute_node(state: AgentState) -> AgentState:
                 continue
             tool_description = getattr(tool, "description", None) or ""
             step_reason = step.get("reason", "")
+            short_msg = _TOOL_CALL_SHORT_MESSAGE.get(tool_name) or f"{step_reason} — {tool_name} 실행."
             pending_events.append(
                 AgentEvent(
                     event_type="TOOL_CALL",
                     node="execute",
                     phase="execute",
                     tool=tool_name,
-                    message=f"{step_reason} — {tool_name} 실행.",
+                    message=short_msg,
                     thought=step_reason,
                     action=f"{tool_name} 실행",
                     observation="도구 실행 중.",
@@ -1530,13 +1580,14 @@ async def execute_node(state: AgentState) -> AgentState:
                 continue
             tool_description = getattr(tool, "description", None) or ""
             step_reason = step.get("reason", "")
+            short_msg = _TOOL_CALL_SHORT_MESSAGE.get(tool_name) or f"{step_reason} — {tool_name} 실행."
             pending_events.append(
                 AgentEvent(
                     event_type="TOOL_CALL",
                     node="execute",
                     phase="execute",
                     tool=tool_name,
-                    message=f"{step_reason} — {tool_name} 실행.",
+                    message=short_msg,
                     thought=step_reason,
                     action=f"{tool_name} 실행",
                     observation="도구 실행 중.",
@@ -1994,8 +2045,62 @@ async def _generate_hitl_review_content(
         user_parts.append("주장별 검증 결과:\n" + "\n".join(claim_lines))
     user_prompt = "\n\n".join(p for p in user_parts if p).strip() or "검토 필요로 판정됨. 사유와 질문을 생성하라."
 
+    # 1) 분석 결과 기반 기본안(항상 생성)
+    base_reasons: list[str] = []
+    base_questions: list[str] = []
+    for s in (hitl_request.get("unresolved_claims") or []):
+        t = str(s or "").strip()
+        if t:
+            base_reasons.append(t)
+    if why:
+        base_reasons.append(why)
+    for s in (hitl_request.get("review_questions") or hitl_request.get("questions") or []):
+        t = str(s or "").strip()
+        if t:
+            base_questions.append(t)
+    for req in (hitl_request.get("required_inputs") or []):
+        q = str(req.get("guide") or req.get("reason") or "").strip()
+        if q:
+            base_questions.append(q)
+    for r in (claim_results or [])[:4]:
+        claim = str(r.get("claim") or "").strip()
+        covered_flag = bool(r.get("covered"))
+        gap = str(r.get("gap") or "").strip()
+        if not covered_flag and claim:
+            if gap:
+                base_reasons.append(f"미검증 주장: {claim[:120]}{'…' if len(claim) > 120 else ''} ({gap[:100]})")
+            else:
+                base_reasons.append(f"미검증 주장: {claim[:120]}{'…' if len(claim) > 120 else ''}")
+            base_questions.append(f"다음 주장에 대한 근거를 확인할 수 있는가: {claim[:110]}{'…' if len(claim) > 110 else ''}")
+    # 중복 제거
+    dedup_reasons: list[str] = []
+    seen_r: set[str] = set()
+    for s in base_reasons:
+        k = s.strip()
+        if not k or k in seen_r:
+            continue
+        seen_r.add(k)
+        dedup_reasons.append(k)
+    dedup_questions: list[str] = []
+    seen_q: set[str] = set()
+    for s in base_questions:
+        k = s.strip()
+        if not k or k in seen_q:
+            continue
+        seen_q.add(k)
+        dedup_questions.append(k)
+    if not dedup_reasons:
+        dedup_reasons = ["자동 판정을 보류한 근거를 담당자 확인이 필요합니다."]
+    if not dedup_questions:
+        if why:
+            dedup_questions = [f"자동 판정 보류 사유를 해소할 근거를 확인할 수 있는가: {why[:180]}{'…' if len(why) > 180 else ''}"]
+        else:
+            dedup_questions = ["검토 보류 사유를 해소할 추가 근거를 제출할 수 있는가?"]
+
+    baseline = {"review_reasons": dedup_reasons[:5], "review_questions": dedup_questions[:5]}
+
     if not getattr(settings, "openai_api_key", None):
-        return {}
+        return baseline
     try:
         from openai import AsyncAzureOpenAI, AsyncOpenAI
 
@@ -2030,15 +2135,14 @@ async def _generate_hitl_review_content(
             reasons = [str(reasons)] if reasons else []
         if not isinstance(questions, list):
             questions = [str(questions)] if questions else []
-        reasons = [str(s).strip() for s in reasons if str(s).strip()][:5]
-        questions = [str(q).strip() for q in questions if str(q).strip()][:5]
-        if not reasons and why:
-            reasons = [why]
-        if not questions and why:
-            questions = [f"다음 사유가 해소되었는지 검토해 주세요: {(why[:180])}{'…' if len(why) > 180 else ''}"]
-        return {"review_reasons": reasons, "review_questions": questions}
+        reasons = [str(s).strip() for s in reasons if str(s).strip()]
+        questions = [str(q).strip() for q in questions if str(q).strip()]
+        # 2) LLM 결과가 비거나 일부만 있으면 baseline으로 보강(실패/빈값 방지)
+        merged_reasons = reasons + [s for s in baseline["review_reasons"] if s not in set(reasons)]
+        merged_questions = questions + [s for s in baseline["review_questions"] if s not in set(questions)]
+        return {"review_reasons": merged_reasons[:5], "review_questions": merged_questions[:5]}
     except Exception:
-        return {}
+        return baseline
 
 
 async def _retry_fill_hitl_review_when_empty(
@@ -2097,7 +2201,7 @@ async def _retry_fill_hitl_review_when_empty(
     user_prompt = "\n\n".join(p for p in user_parts if p).strip() or "분석 결과를 바탕으로 검토 필요 사유와 검토 시 답해야 할 질문을 생성하라."
 
     if not getattr(settings, "openai_api_key", None):
-        return {}
+        return {"review_reasons": [], "review_questions": []}
     try:
         from openai import AsyncAzureOpenAI, AsyncOpenAI
 
@@ -2134,13 +2238,9 @@ async def _retry_fill_hitl_review_when_empty(
             questions = [str(questions)] if questions else []
         reasons = [str(s).strip() for s in reasons if str(s).strip()][:5]
         questions = [str(q).strip() for q in questions if str(q).strip()][:5]
-        if not reasons and why:
-            reasons = [why]
-        if not questions and why:
-            questions = [f"다음 사유가 해소되었는지 검토해 주세요: {(why[:180])}{'…' if len(why) > 180 else ''}"]
         return {"review_reasons": reasons, "review_questions": questions}
     except Exception:
-        return {}
+        return {"review_reasons": [], "review_questions": []}
 
 
 async def verify_node(state: AgentState) -> AgentState:
@@ -2267,6 +2367,7 @@ async def verify_node(state: AgentState) -> AgentState:
     verifier_output_dict["reasoning"] = reasoning_text
 
     # HITL 필요 시 LLM이 검토 필요 사유와 검토자가 답해야 할 질문을 생성해 hitl_request를 보강
+    # 정책: fallback 템플릿/하드코딩 질문 금지. 두 항목이 비면 run 실패 처리.
     if hitl_request:
         claim_results_dicts = [c.model_dump() if hasattr(c, "model_dump") else c for c in claim_results]
         llm_review = await _generate_hitl_review_content(
@@ -2280,26 +2381,7 @@ async def verify_node(state: AgentState) -> AgentState:
         if llm_review.get("review_questions"):
             hitl_request["review_questions"] = llm_review["review_questions"]
             hitl_request["questions"] = llm_review["review_questions"]
-        # LLM이 비웠거나 실패한 경우, 이미 계산된 reasons/why_hitl/required_inputs로 검토 사유·질문 보강 (하드코딩 없음)
-        if not hitl_request.get("unresolved_claims"):
-            hitl_request["unresolved_claims"] = (
-                hitl_request.get("reasons")
-                or ([hitl_request.get("why_hitl")] if hitl_request.get("why_hitl") else [])
-            )
-        if not hitl_request.get("review_questions") and not hitl_request.get("questions"):
-            from_inputs = [
-                (r.get("guide") or r.get("reason") or f"{r.get('field', '')}: {r.get('reason', '')}").strip()
-                for r in (hitl_request.get("required_inputs") or [])
-                if (r.get("guide") or r.get("reason") or r.get("field"))
-            ]
-            if from_inputs:
-                hitl_request["review_questions"] = from_inputs
-                hitl_request["questions"] = from_inputs
-            elif hitl_request.get("why_hitl"):
-                q = f"다음 사유가 해소되었는지 검토해 주세요: {(hitl_request['why_hitl'] or '')[:200]}"
-                hitl_request["review_questions"] = [q]
-                hitl_request["questions"] = [q]
-        # 검토 필요로 판정 시 두 항목이 비어 있으면 안 됨. 비어 있으면 LLM에게 재지시하여 분석 결과 기반으로 반드시 채우기
+        # 검토 필요로 판정 시 두 항목을 채운다. (생성 함수가 baseline+LLM 결합으로 비지 않게 보장)
         need_reasons = not (hitl_request.get("unresolved_claims"))
         need_questions = not (hitl_request.get("review_questions") or hitl_request.get("questions"))
         if need_reasons or need_questions:
@@ -2316,6 +2398,11 @@ async def verify_node(state: AgentState) -> AgentState:
             if retry_result.get("review_questions"):
                 hitl_request["review_questions"] = retry_result["review_questions"]
                 hitl_request["questions"] = retry_result["review_questions"]
+        final_reasons = [str(x).strip() for x in (hitl_request.get("unresolved_claims") or []) if str(x).strip()]
+        final_questions = [str(x).strip() for x in (hitl_request.get("review_questions") or hitl_request.get("questions") or []) if str(x).strip()]
+        hitl_request["unresolved_claims"] = final_reasons[:5]
+        hitl_request["review_questions"] = final_questions[:5]
+        hitl_request["questions"] = final_questions[:5]
 
     events: list[dict[str, Any]] = [
         AgentEvent(event_type="NODE_START", node="verify", phase="verify", message="근거 정합성과 추가 검토 필요 여부를 확인합니다.", metadata={}).to_payload(),
@@ -2548,6 +2635,63 @@ async def finalizer_node(state: AgentState) -> AgentState:
         "last_node_summary": state.get("last_node_summary", "없음"),
     }
     final_reasoning, final_reasoning_events, note_source = await _stream_reasoning_events_with_llm("finalizer", final_reasoning, context=finalizer_context)
+    # REVIEW_REQUIRED 경로도 공통 검토 팝업에서 사유/질문을 사용하므로 반드시 생성·저장한다.
+    if status == "REVIEW_REQUIRED" and not hitl_request:
+        verification_summary = (state.get("verification") or {}).get("verification_summary") or {}
+        verifier_output = state.get("verifier_output") or {}
+        claim_results = verifier_output.get("claim_results") or []
+        stop_reasons = _build_system_auto_finalize_blockers(
+            verification_summary,
+            quality_signals=(state.get("verification") or {}).get("quality_signals") or [],
+            fallback_reason=reason,
+        )
+        seed_request = {
+            "required": True,
+            "handoff": "FINANCE_REVIEWER",
+            "why_hitl": reason,
+            "blocking_gate": "REVIEW_REQUIRED",
+            "blocking_reason": reason,
+            "reasons": stop_reasons,
+            "auto_finalize_blockers": stop_reasons,
+            "required_inputs": [],
+            "evidence_snapshot": [],
+        }
+        llm_review = await _generate_hitl_review_content(
+            seed_request,
+            verification_summary,
+            claim_results if isinstance(claim_results, list) else [],
+            final_reasoning,
+        )
+        review_reasons = [str(x).strip() for x in (llm_review.get("review_reasons") or []) if str(x).strip()]
+        review_questions = [str(x).strip() for x in (llm_review.get("review_questions") or []) if str(x).strip()]
+        if not review_reasons or not review_questions:
+            retry_result = await _retry_fill_hitl_review_when_empty(
+                seed_request,
+                verification_summary,
+                claim_results if isinstance(claim_results, list) else [],
+                final_reasoning,
+                empty_reasons=not review_reasons,
+                empty_questions=not review_questions,
+            )
+            if not review_reasons:
+                review_reasons = [str(x).strip() for x in (retry_result.get("review_reasons") or []) if str(x).strip()]
+            if not review_questions:
+                review_questions = [str(x).strip() for x in (retry_result.get("review_questions") or []) if str(x).strip()]
+        if not review_reasons:
+            review_reasons = [str(reason or "검토가 필요한 근거를 확인해 주세요.").strip()]
+        if not review_questions:
+            review_questions = [f"다음 판단 사유를 해소할 근거를 확인할 수 있는가: {str(reason or '')[:180]}"]
+        hitl_request = {
+            **seed_request,
+            "why_hitl": review_reasons[0],
+            "blocking_reason": review_reasons[0],
+            "reasons": review_reasons,
+            "auto_finalize_blockers": stop_reasons,
+            "unresolved_claims": review_reasons,
+            "review_questions": review_questions,
+            "questions": review_questions,
+        }
+
     probe_facts = (_find_tool_result(state["tool_results"], "policy_rulebook_probe") or {}).get("facts", {}) or {}
     policy_refs = probe_facts.get("policy_refs") or []
     reporter_out = state.get("reporter_output") or {}

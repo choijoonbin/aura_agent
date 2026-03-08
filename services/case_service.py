@@ -316,15 +316,28 @@ def update_agent_case_status_from_run(db: Session, voucher_key: str, run_status:
     if not run_status or not isinstance(run_status, str):
         return
     status = str(run_status).strip().upper()
-    # dwp_aura.agent_case.status는 String(30). 런타임 전용 상태(HITL_REQUIRED 등)는 IN_REVIEW 등으로 매핑.
-    # 증빙 재분석: COMPLETED_AFTER_EVIDENCE는 그대로 저장(완료), EVIDENCE_REJECTED는 IN_REVIEW(보류).
+    # 런타임/도메인 상태를 DB agent_case.status(enum)로 정규화한다.
+    # 완료 계열은 RESOLVED, 검토/보류 계열은 IN_REVIEW로 수렴해 enum 제약 오류를 방지한다.
     status_map = {
+        "COMPLETED": "RESOLVED",
+        "COMPLETED_AFTER_HITL": "RESOLVED",
+        "COMPLETED_AFTER_EVIDENCE": "RESOLVED",
+        "OK": "RESOLVED",
         "HITL_REQUIRED": "IN_REVIEW",
+        "REVIEW_REQUIRED": "IN_REVIEW",
         "REVIEW_AFTER_HITL": "IN_REVIEW",
         "HOLD_AFTER_HITL": "IN_REVIEW",
+        "FAILED": "IN_REVIEW",
         "EVIDENCE_REJECTED": "IN_REVIEW",
     }
     status = status_map.get(status, status)
+    allowed_db_statuses = {
+        "OPEN", "IN_REVIEW", "APPROVED", "REJECTED", "ACTIONED",
+        "CLOSED", "TRIAGED", "IN_PROGRESS", "RESOLVED", "DISMISSED",
+        "NEW",
+    }
+    if status not in allowed_db_statuses:
+        status = "IN_REVIEW"
     parts = voucher_key.split("-")
     if len(parts) < 3:
         return
