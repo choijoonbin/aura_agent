@@ -4,8 +4,11 @@ import asyncio
 from dataclasses import dataclass
 from datetime import datetime
 import json
+import logging
 import re
 from typing import Any, TypedDict
+
+logger = logging.getLogger(__name__)
 
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
@@ -630,10 +633,203 @@ def _build_system_auto_finalize_blockers(
     return dedup
 
 
+def _assess_hitl_resolution_requirements(
+    *,
+    hitl_request: dict[str, Any],
+    hitl_response: dict[str, Any],
+    evidence_result: dict[str, Any] | None,
+) -> tuple[bool, list[str], list[str]]:
+    """
+    HITL 응답이 최종 확정을 할 만큼 충분한지 검사한다.
+    반환: (is_sufficient, blockers, followup_questions)
+    담당자가 승인만 체크하고 근거/의견을 비워둔 경우에도 충분한 것으로 보고 reporter가 판단요약을 내도록 함.
+    """
+    approved = hitl_response.get("approved") is True
+    if not approved:
+        return False, [], []
+
+    blockers: list[str] = []
+    followup: list[str] = []
+
+    comment = str(hitl_response.get("comment") or "").strip()
+    # 담당자 승인만 체크·근거/의견 없이 제출한 경우에도 통과 — reporter가 기존 증거·규정 기준으로 판단요약 생성
+
+    required_inputs = hitl_request.get("required_inputs") or []
+    missing_required: list[dict[str, str]] = []
+    extra = hitl_response.get("extra_facts") or {}
+    attendees = hitl_response.get("attendees") or []
+    for req in required_inputs:
+        field = str(req.get("field") or "").strip()
+        if not field:
+            continue
+        if field == "attendees":
+            val = attendees
+        else:
+            val = hitl_response.get(field)
+            if (val is None or (isinstance(val, str) and not val.strip())) and isinstance(extra, dict):
+                val = extra.get(field)
+        if val is None or (isinstance(val, str) and not val.strip()) or (isinstance(val, list) and not val):
+            missing_required.append(req)
+    if missing_required:
+        blockers.append(f"필수 입력/증빙 항목 {len(missing_required)}개가 누락되었습니다.")
+        for m in missing_required[:5]:
+            q = str(m.get("guide") or m.get("reason") or m.get("field") or "").strip()
+            if q:
+                followup.append(q)
+
+    # 승인만 한 경우(의견/질문 답변 없음)는 블로커 없이 통과 — 판단요약은 LLM이 기존 증거로 생성
+    # review_questions 미답변 블로커 제거
+
+    evidence_passed = None
+    if isinstance(evidence_result, dict) and evidence_result:
+        evidence_passed = evidence_result.get("passed") is True
+        if evidence_passed is False:
+            blockers.append("첨부 증빙 검증 결과가 불일치(passed=false)입니다.")
+            reasons = evidence_result.get("reasons") or []
+            for r in reasons[:3]:
+                t = str(r or "").strip()
+                if t:
+                    followup.append(f"증빙 불일치 사유 해소: {t}")
+
+    # 승인만 한 경우 미해결 주장 블로커 없음 — 담당자 책임 하 승인으로 reporter가 판단요약 생성
+    # unresolved_claims 근거 부족 블로커 제거
+
+    # 중복 제거
+    dedup_blockers: list[str] = []
+    seen_b: set[str] = set()
+    for s in blockers:
+        k = s.strip()
+        if not k or k in seen_b:
+            continue
+        seen_b.add(k)
+        dedup_blockers.append(k)
+    dedup_followup: list[str] = []
+    seen_q: set[str] = set()
+    for s in followup:
+        k = s.strip()
+        if not k or k in seen_q:
+            continue
+        seen_q.add(k)
+        dedup_followup.append(k)
+
+    return (len(dedup_blockers) == 0), dedup_blockers, dedup_followup[:8]
+
+
+async def _llm_decide_hitl_verdict(
+    *,
+    hitl_request: dict[str, Any],
+    hitl_response: dict[str, Any],
+    evidence_result: dict[str, Any] | None,
+) -> tuple[str, str]:
+    """
+    담당자 검토(HITL) 응답에 대해 확정 vs 재검토를 룰이 아닌 LLM 판단으로 결정한다.
+    검토 필요로 올라온 건에 대해 필요한 답변/근거 없이 승인만 온 경우 재검토가 나와야 정상이지만,
+    그 판단은 LLM이 맥락을 보고 하도록 함. 하드코딩/룰베이스 금지.
+    반환: (verdict, reason) — verdict는 COMPLETED_AFTER_HITL 또는 REVIEW_REQUIRED.
+    """
+    why = str(hitl_request.get("why_hitl") or hitl_request.get("blocking_reason") or "").strip()
+    reasons = hitl_request.get("reasons") or hitl_request.get("auto_finalize_blockers") or []
+    questions = hitl_request.get("review_questions") or hitl_request.get("questions") or []
+    required_inputs = hitl_request.get("required_inputs") or []
+    comment = str(hitl_response.get("comment") or "").strip()
+    approved = hitl_response.get("approved") is True
+    extra = hitl_response.get("extra_facts") or {}
+    evidence_passed = None
+    if isinstance(evidence_result, dict) and evidence_result:
+        evidence_passed = evidence_result.get("passed") is True
+
+    context = {
+        "why_hitl": why,
+        "reasons": reasons[:10],
+        "review_questions": questions[:5],
+        "required_inputs": [r.get("field") for r in required_inputs[:5] if r.get("field")],
+        "reviewer_approved": approved,
+        "reviewer_comment_length": len(comment),
+        "reviewer_comment_preview": (comment[:200] + "…") if len(comment) > 200 else comment,
+        "reviewer_extra_facts_keys": list(extra.keys())[:10] if isinstance(extra, dict) else [],
+        "evidence_upload_passed": evidence_passed,
+    }
+    system = (
+        "당신은 엔터프라이즈 감사 에이전트의 판단자다. "
+        "담당자 검토(HITL)가 필요했던 전표에 대해 담당자가 응답을 제출했다. "
+        "이 응답만 보고 '최종 확정(COMPLETED_AFTER_HITL)' vs '재검토 필요(REVIEW_REQUIRED)' 중 하나를 판단하라. "
+        "필요한 답변·근거 없이 승인만 한 경우 정상적으로는 재검토가 나와야 한다. "
+        "단, 규정·업무 맥락상 담당자 승인만으로 충분한 경우도 있다. 맥락을 보고 판단하라. "
+        "룰이나 키워드로 치지 말고, 제시된 검토 요청 사유·질문·필수 항목과 담당자 응답 내용을 비교해 판단하라. "
+        "JSON만 출력한다. 키: verdict(반드시 COMPLETED_AFTER_HITL 또는 REVIEW_REQUIRED), reason(한 문장 이유, 한국어)."
+    )
+    user = (
+        "[검토 요청 맥락]\n"
+        f"검토 필요 사유: {why or '(없음)'}\n"
+        f"요청 사유 목록: {json.dumps(reasons, ensure_ascii=False)}\n"
+        f"검토 시 확인할 질문: {json.dumps(questions, ensure_ascii=False)}\n"
+        f"필수 입력 항목: {context['required_inputs']}\n\n"
+        "[담당자 응답]\n"
+        f"승인 여부: {approved}\n"
+        f"검토 의견 길이: {len(comment)}자\n"
+        f"의견 미리보기: {context['reviewer_comment_preview'] or '(없음)'}\n"
+        f"추가 사실 키: {context['reviewer_extra_facts_keys']}\n"
+        f"증빙 업로드 검증 통과: {evidence_passed}\n\n"
+        "위 맥락을 바탕으로 verdict와 reason을 JSON으로 출력하라."
+    )
+    try:
+        from openai import AsyncAzureOpenAI, AsyncOpenAI
+
+        base_url = (getattr(settings, "openai_base_url") or "").strip()
+        is_azure = ".openai.azure.com" in base_url
+        if is_azure:
+            azure_ep = base_url.rstrip("/")
+            if azure_ep.endswith("/openai/v1"):
+                azure_ep = azure_ep[: -len("/openai/v1")]
+            client = AsyncAzureOpenAI(
+                api_key=settings.openai_api_key,
+                azure_endpoint=azure_ep,
+                api_version=getattr(settings, "openai_api_version", "2024-02-15-preview"),
+            )
+        else:
+            client = AsyncOpenAI(api_key=settings.openai_api_key, base_url=base_url or None)
+        response = await client.chat.completions.create(
+            model=getattr(settings, "reasoning_llm_model", "gpt-4o-mini"),
+            max_tokens=400,
+            response_format={"type": "json_object"},
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+        )
+        raw = (response.choices[0].message.content or "").strip()
+        parsed = json.loads(raw)
+        v = str(parsed.get("verdict") or "").upper()
+        if v not in ("COMPLETED_AFTER_HITL", "REVIEW_REQUIRED"):
+            v = "REVIEW_REQUIRED"
+        reason = str(parsed.get("reason") or "").strip() or "담당자 검토 응답을 기준으로 판단함."
+        return (v, reason)
+    except Exception as e:
+        logger.warning("_llm_decide_hitl_verdict LLM 호출 실패: %s — REVIEW_REQUIRED로 fallback", e)
+        return ("REVIEW_REQUIRED", "판단 LLM 호출 실패로 재검토 필요 처리.")
+
+
+def _pick_llm_review_reason(hitl_request: dict[str, Any]) -> str:
+    """사용자 노출용 재검토 사유는 hitl_request의 LLM 생성 문구를 우선 사용한다."""
+    for key in ("unresolved_claims", "reasons", "review_questions", "questions"):
+        vals = hitl_request.get(key) or []
+        if isinstance(vals, list):
+            for v in vals:
+                t = str(v or "").strip()
+                if t:
+                    return t
+    for key in ("why_hitl", "blocking_reason"):
+        t = str(hitl_request.get(key) or "").strip()
+        if t:
+            return t
+    return ""
+
+
 def _build_grounded_reason(state: AgentState) -> tuple[str, str]:
     score = _score_with_hitl_adjustment(state["score_breakdown"], state["flags"])
     hitl_request = state.get("hitl_request")
     body = state["body_evidence"]
+    prior_hitl_request = (body.get("hitlRequest") or {}) if isinstance(body.get("hitlRequest"), dict) else {}
     occurred_at = _format_occurred_at(body.get("occurredAt"))
     merchant = body.get("merchantName") or "거래처 미상"
     refs = _top_policy_refs(state.get("tool_results", []), limit=5)
@@ -679,8 +875,14 @@ def _build_grounded_reason(state: AgentState) -> tuple[str, str]:
     else:
         if state["flags"].get("hasHitlResponse"):
             if state["flags"].get("hitlApproved") is True:
-                status = "COMPLETED_AFTER_HITL"
-                tail = "담당자 검토 결과 승인 가능으로 확인되어 최종 판단을 확정했습니다."
+                # reporter가 LLM으로 판단한 verdict를 그대로 사용 (룰/하드코딩 대신 일관된 LLM 판단)
+                reporter_verdict = (state.get("reporter_output") or {}).get("verdict")
+                if reporter_verdict in ("COMPLETED_AFTER_HITL", "REVIEW_REQUIRED"):
+                    status = reporter_verdict
+                    tail = "담당자 검토 결과 승인 가능으로 확인되어 최종 판단을 확정했습니다." if status == "COMPLETED_AFTER_HITL" else "담당자 검토 기준 미충족으로 재검토가 필요합니다."
+                else:
+                    status = "REVIEW_REQUIRED"
+                    tail = "담당자 검토 기준 미충족으로 재검토가 필요합니다."
             else:
                 status = "HOLD_AFTER_HITL"
                 tail = "담당자 검토 결과 보류/추가 검토가 필요해 자동 확정을 중단합니다."
@@ -2561,8 +2763,19 @@ async def reporter_node(state: AgentState) -> AgentState:
         summary += " 담당자 검토가 필요한 상태입니다."
         verdict = "HITL_REQUIRED"
     elif state["flags"].get("hasHitlResponse") and hitl_approved is True:
-        summary += " 담당자 검토 결과 승인 가능으로 판단되어 최종 확정 후보로 전환되었습니다."
-        verdict = "COMPLETED_AFTER_HITL"
+        prior_hitl_request = (body.get("hitlRequest") or {}) if isinstance(body.get("hitlRequest"), dict) else {}
+        check_req = hitl_request or prior_hitl_request or {}
+        evidence_result = body.get("evidenceDocumentResult") if isinstance(body.get("evidenceDocumentResult"), dict) else None
+        # 확정 vs 재검토는 룰/하드코딩이 아닌 LLM 판단으로 결정 (필요 답변 없이 승인만 온 경우 재검토가 나오는지 LLM이 맥락으로 판단)
+        verdict, hitl_verdict_reason = await _llm_decide_hitl_verdict(
+            hitl_request=check_req,
+            hitl_response=hitl_response,
+            evidence_result=evidence_result,
+        )
+        if verdict == "COMPLETED_AFTER_HITL":
+            summary += " 담당자 검토 결과 승인 가능으로 판단되어 최종 확정 후보로 전환되었습니다."
+        else:
+            summary += f" {hitl_verdict_reason}" if hitl_verdict_reason else " 담당자 검토 기준 미충족으로 재검토가 필요합니다."
     elif state["flags"].get("hasHitlResponse") and hitl_approved is False:
         summary += " 담당자 검토 결과 보류/추가 검토 의견이 있어 자동 확정을 중단합니다."
         verdict = "HOLD_AFTER_HITL"
@@ -2898,6 +3111,7 @@ async def run_langgraph_agentic_analysis(
     async def _yield_updates(chunks):
         async for chunk in chunks:
             if chunk.get("__interrupt__"):
+                logger.info("[agent] graph __interrupt__ (HITL pause) — stream will end until review-submit resume")
                 # HITL: interrupt()로 일시정지. 호출자에게 HITL_REQUIRED 전달 후 같은 run_id로 재개 대기
                 interrupt_list = chunk["__interrupt__"]
                 hitl_payload = interrupt_list[0].value if interrupt_list else {}
@@ -2918,6 +3132,7 @@ async def run_langgraph_agentic_analysis(
             for _node, update in chunk.items():
                 if _node == "__interrupt__":
                     continue
+                logger.info("[agent] graph node update run_id=%s node=%s", run_id, _node)
                 for ev in (update.get("pending_events") or []) or []:
                     if ev.get("event_type") == "SCORE_BREAKDOWN":
                         yield "confidence", {
@@ -2933,17 +3148,28 @@ async def run_langgraph_agentic_analysis(
 
     # 1차: checkpoint 기반 resume 시도
     if resume_value is not None:
+        logger.info("[agent] run_langgraph resume_value present run_id=%s — attempting checkpoint resume (hitl_validate→reporter→finalizer)", run_id)
         try:
             async for ev in _yield_updates(_stream_from_graph(Command(resume=resume_value))):
                 yield ev
+            logger.info("[agent] run_langgraph checkpoint resume completed run_id=%s", run_id)
             return
         except KeyError as e:
             # 체크포인트가 없거나 깨진 경우: 'body_evidence' KeyError를 만나면 동일 run_id로 새 입력으로 재시작
             if str(e) != "'body_evidence'":
                 raise
+            # 체크포인트 미존재(예: MemorySaver + 다른 워커) 시 처음부터 재실행됨. postgres 사용 시 HITL 직후 노드부터만 재개됨.
+            logger.warning(
+                "resume checkpoint not found for run_id=%s (checkpointer=%s); re-running from screener with hitlResponse. "
+                "Set CHECKPOINTER_BACKEND=postgres for true resume-from-HITL.",
+                run_id,
+                getattr(settings, "checkpointer_backend", "memory"),
+            )
             # fallthrough to fresh run with hitlResponse 주입
 
     # 2차: 새 입력으로 실행 (resume 없음 또는 resume 실패)
+    if resume_value is not None:
+        logger.info("[agent] run_langgraph 2차 경로: full run from screener with hitlResponse run_id=%s", run_id)
     body_with_hitl = dict(body_evidence or {})
     if resume_value is not None:
         body_with_hitl["hitlResponse"] = resume_value

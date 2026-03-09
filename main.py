@@ -90,7 +90,11 @@ def get_vouchers(
     limit: int = Query(50, ge=1, le=200),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    rows = list_vouchers(db, queue=queue, limit=limit)
+    try:
+        rows = list_vouchers(db, queue=queue, limit=limit)
+    except Exception as e:
+        logger.exception("list_vouchers failed: %s", e)
+        raise HTTPException(status_code=500, detail=f"voucher list failed: {e!s}") from e
     # UI 집계(case_status)는 AgentCase.status만으로는 HITL 대기 상태를 표현할 수 없으므로,
     # 최신 run의 hitl_request/response를 확인해 "HITL_REQUIRED"를 파생해 내려준다.
     out = [r.model_dump() for r in rows]
@@ -108,7 +112,8 @@ def get_vouchers(
             hitl_res = runtime.get_hitl_response(run_id) or aux.get("hitl_response")
             if hitl_req and not hitl_res:
                 item["case_status"] = "HITL_REQUIRED"
-        except Exception:
+        except Exception as e:
+            logger.debug("voucher run_id/aux check failed for %s: %s", item.get("voucher_key"), e)
             continue
     return {"items": out, "total": len(out)}
 
@@ -186,6 +191,14 @@ async def _run_analysis_task(
 ) -> None:
     last_payload: dict[str, Any] | None = None
     voucher_key = case_id.replace("POC-", "")
+    is_resume = resume_value is not None
+    logger.info(
+        "[analysis] _run_analysis_task run_id=%s case_id=%s resume=%s (resume_value keys=%s)",
+        run_id,
+        case_id,
+        is_resume,
+        list(resume_value.keys()) if isinstance(resume_value, dict) else None,
+    )
     try:
         async for ev_type, ev_payload in run_agent_analysis(
             case_id,
@@ -248,7 +261,9 @@ async def _run_analysis_task(
             except Exception:
                 pass
             if ev_type == "completed":
+                logger.info("[analysis] task ev_type=completed run_id=%s status=%s", run_id, data.get("status"))
                 if data.get("status") == "HITL_REQUIRED":
+                    logger.info("[analysis] HITL_REQUIRED run_id=%s — stream will pause, waiting for review-submit", run_id)
                     # HITL_REQUESTED 이벤트로 이미 전체 payload(reasons, review_questions 등)가 설정된 경우 유지.
                     # interrupt() value는 축약/직렬화된 형태일 수 있어 덮어쓰지 않음.
                     full_hitl = runtime.get_hitl_request(run_id)
@@ -360,6 +375,8 @@ async def _run_analysis_task(
         # 분석이 끝나면 스트림에 "done"을 보내 클라이언트가 대기에서 빠지도록 항상 close 호출.
         # close()는 큐에 "done"만 넣고 큐/run 컨텍스트는 유지하므로, HITL/증빙 재개 시 같은 run_id로 이어서 사용 가능.
         if last_payload is not None:
+            final_status = (last_payload.get("result") or {}).get("status")
+            logger.info("[analysis] task done run_id=%s final_status=%s — closing stream (done)", run_id, final_status)
             await runtime.close(run_id)
 
 
@@ -392,6 +409,7 @@ async def start_analysis(
     run_id = str(uuid.uuid4())
     case_id = payload["case_id"]
     enable_hitl = body.enable_hitl if body is not None else True
+    logger.info("[analysis] start_analysis voucher_key=%s run_id=%s case_id=%s enable_hitl=%s", voucher_key, run_id, case_id, enable_hitl)
     runtime.create_run(case_id=case_id, run_id=run_id, mode="primary")
     try:
         create_analysis_run_row(
@@ -474,11 +492,13 @@ async def submit_hitl(run_id: str, request: HitlSubmitRequest, db: Session = Dep
         pass
 
     # 정식 HITL: 같은 run_id(thread_id)로 재개. 새 run 생성 없음.
+    body_evidence = dict(payload["body_evidence"] or {})
+    body_evidence["hitlRequest"] = hitl_request
     asyncio.create_task(
         _run_analysis_task(
             run_id=run_id,
             case_id=case_id,
-            body_evidence=payload["body_evidence"],
+            body_evidence=body_evidence,
             intended_risk_type=payload.get("intended_risk_type"),
             resume_value=hitl_payload,
         )
@@ -676,8 +696,24 @@ async def review_submit(
     lineage = lineage or aux.get("lineage") or {}
     case_id = lineage["case_id"]
     voucher_key = case_id.replace("POC-", "")
-    hitl_request = runtime.get_hitl_request(run_id) or aux.get("hitl_request")
+    # runtime/aux에 HITL_REQUESTED 이벤트가 없어도, 완료 결과(result_payload)에 hitl_request가 있으면 사용(팝업 제출 400 방지)
+    base_result_payload = runtime.get_result(run_id) or aux.get("result_payload") or {}
+    base_result = (
+        base_result_payload.get("result")
+        if isinstance(base_result_payload, dict) and isinstance(base_result_payload.get("result"), dict)
+        else (base_result_payload if isinstance(base_result_payload, dict) else {})
+    )
+    hitl_request = (
+        runtime.get_hitl_request(run_id)
+        or aux.get("hitl_request")
+        or (base_result.get("hitl_request") if isinstance(base_result.get("hitl_request"), dict) else None)
+    )
     evidence_result = aux.get("evidence_document_result") if request.evidence_uploaded else None
+
+    # hitl_request가 있는데 body에 hitl_response가 없으면 최소 payload로 진행(400 방지). 판단은 이후 LLM이 수행.
+    if hitl_request and request.hitl_response is None:
+        from services.schemas import HitlSubmitRequest
+        request = request.model_copy(update={"hitl_response": HitlSubmitRequest(approved=True, comment="")})
 
     if hitl_request and request.hitl_response is not None:
         hitl_payload = request.hitl_response.model_dump()
@@ -704,14 +740,21 @@ async def review_submit(
         # REVIEW_REQUIRED 경로는 interrupt(resume) 대상 run이 아닐 수 있으므로,
         # body_evidence에 HITL 응답을 명시적으로 주입해 재분석 입력으로 항상 전달한다.
         body_evidence["hitlResponse"] = hitl_payload
+        body_evidence["hitlRequest"] = hitl_request
         if evidence_result:
             body_evidence["evidenceDocumentResult"] = evidence_result
         # HITL_REQUIRED(실제 interrupt 대기)에서만 Command(resume=...)로 재개.
         # REVIEW_REQUIRED 등 비-interrupt 경로는 새 입력 재실행으로 처리해야 상태가 정상 전이된다.
-        base_result_payload = runtime.get_result(run_id) or aux.get("result_payload") or {}
-        base_result = base_result_payload.get("result") if isinstance(base_result_payload, dict) else {}
         base_status = str((base_result or {}).get("status") or "").upper()
         use_resume_value = hitl_payload if base_status == "HITL_REQUIRED" else None
+        logger.info(
+            "[analysis] review_submit run_id=%s base_status=%s use_resume_value=%s (will resume from checkpoint=%s)",
+            run_id,
+            base_status,
+            "yes" if use_resume_value else "no",
+            use_resume_value is not None,
+        )
+        runtime.drain_queue_before_resume(run_id)
         asyncio.create_task(
             _run_analysis_task(
                 run_id=run_id,
@@ -721,6 +764,7 @@ async def review_submit(
                 resume_value=use_resume_value,
             )
         )
+        await asyncio.sleep(0)
         return {
             "accepted": True,
             "source_run_id": run_id,

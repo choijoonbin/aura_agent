@@ -9,6 +9,11 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+
+try:
+    from asyncio import QueueEmpty
+except ImportError:
+    QueueEmpty = Exception
 from datetime import datetime, timezone
 from typing import Any
 
@@ -107,6 +112,22 @@ class StreamRuntime:
         if q is None:
             return
         await q.put(("done", {"runId": run_id}))
+
+    def drain_queue_before_resume(self, run_id: str) -> None:
+        """
+        HITL 재개 전에 큐에 남아 있는 이전 run의 'done' 등 메시지를 비워 둠.
+        재개 후 새 스트림 연결이 재개 태스크의 이벤트만 받도록 함.
+        """
+        q = self._queues.get(run_id)
+        if q is None:
+            return
+        while True:
+            try:
+                ev_type, _ = q.get_nowait()
+                if ev_type == "done":
+                    break
+            except QueueEmpty:
+                break
 
 
 runtime = StreamRuntime()

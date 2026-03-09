@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import html
 import json
+import logging
 import queue
 import re
 import threading
@@ -10,6 +11,8 @@ from collections import defaultdict
 from typing import Any, Iterator
 
 import requests
+
+logger = logging.getLogger(__name__)
 import streamlit as st
 from ui.shared import stylable_container
 
@@ -572,6 +575,9 @@ def sse_node_block_generator(stream_url: str, *, run_id: str | None = None) -> I
                 yield prefix, raw_line
                 continue
 
+            if event_name == "started":
+                continue
+
             addition = ""
             if event_name == "AGENT_EVENT":
                 ev_type = str(obj.get("event_type") or "").upper()
@@ -694,6 +700,7 @@ def sse_node_block_generator(stream_url: str, *, run_id: str | None = None) -> I
 def fetch_case_bundle(voucher_key: str) -> dict[str, Any]:
     latest = get(f"/api/v1/cases/{voucher_key}/analysis/latest")
     history = get(f"/api/v1/cases/{voucher_key}/analysis/history")
+    latest["voucher_key"] = voucher_key
     if latest.get("run_id"):
         events = get(f"/api/v1/analysis-runs/{latest['run_id']}/events")
         latest["timeline"] = events.get("events") or []
@@ -2263,26 +2270,21 @@ def render_hitl_panel(latest_bundle: dict[str, Any], *, vkey: str | None = None)
             else:
                 try:
                     from services.schemas import HitlSubmitRequest
-                    has_hitl_request = bool(_resolve_hitl_request(latest_bundle))
+                    # hitl_request 미로드 시에도 폼에서 입력한 hitl_response를 항상 전송. 백엔드는 runtime/aux에서 hitl_request를 채우므로 400을 피함.
                     payload_review = {
-                        "hitl_response": HitlSubmitRequest(**hitl_response).model_dump() if has_hitl_request else None,
+                        "hitl_response": HitlSubmitRequest(**hitl_response).model_dump(),
                         "evidence_uploaded": evidence_uploaded,
                     }
-                    response = post(
-                        f"/api/v1/analysis-runs/{run_id}/review-submit",
-                        json_body=payload_review,
-                    )
+                    st.session_state["mt_pending_review_submit"] = {
+                        "run_id": run_id,
+                        "voucher_key": latest_bundle.get("voucher_key") or vkey,
+                        "payload": payload_review,
+                    }
+                    logger.info("[ui] HITL 팝업에서 분석 이어가기 클릭 run_id=%s — mt_pending_review_submit 설정, open=False, st.rerun()", run_id)
                     st.session_state.pop(_hitl_state_key("dismissed", run_id), None)
                     st.session_state.pop(_hitl_state_key("open", run_id), None)
+                    st.session_state[_hitl_state_key("open", run_id)] = False
                     st.session_state.pop(_hitl_state_key("shown", run_id), None)
-                    stream_path = response.get("stream_path")
-                    if stream_path:
-                        st.session_state["mt_resume_stream"] = {
-                            "run_id": run_id,
-                            "stream_path": stream_path,
-                            "voucher_key": latest_bundle.get("voucher_key"),
-                        }
-                    st.success("검토 반영이 제출되었습니다. 분석을 이어갑니다.")
                     st.rerun()
                 except Exception as e:
                     st.error(f"제출 실패: {e}")
@@ -2670,7 +2672,7 @@ def render_workspace_chat_panel(selected: dict[str, Any], latest_bundle: dict[st
     resume_stream = st.session_state.get("mt_resume_stream")
     if (
         resume_stream
-        and resume_stream.get("voucher_key") == selected_vkey
+        and (resume_stream.get("voucher_key") in {None, "", selected_vkey})
         and resume_stream.get("stream_path")
         and resume_stream.get("run_id")
     ):
@@ -2679,6 +2681,41 @@ def render_workspace_chat_panel(selected: dict[str, Any], latest_bundle: dict[st
         st.session_state.pop("mt_resume_stream", None)
         st.success(f"HITL 응답 반영 후 재개: run_id={run_id}")
         pending_stream = {"run_id": run_id, "stream_path": stream_path}
+
+    # HITL 팝업에서 "분석 이어가기" 제출 직후: 팝업을 닫고(open=False 유지), API 호출 후 스트림 재개.
+    # armed 이중 rerun 제거 — 제출한 run에서 바로 API 호출해 한 번의 rerun으로 팝업 닫힘 + 스트림 시작.
+    pending_review_submit = st.session_state.get("mt_pending_review_submit")
+    if pending_review_submit and pending_review_submit.get("voucher_key") in {None, "", selected_vkey}:
+        _run_id = str(pending_review_submit.get("run_id") or "")
+        logger.info("[ui] 분석 이어가기 제출 처리: run_id=%s open=False, skip_dialog_run_id=%s 설정", _run_id, _run_id)
+        st.session_state[_hitl_state_key("open", _run_id)] = False
+        st.session_state["mt_skip_hitl_dialog_run_id"] = _run_id
+        try:
+            _payload = pending_review_submit.get("payload") or {}
+            response = post(f"/api/v1/analysis-runs/{_run_id}/review-submit", json_body=_payload)
+            stream_path = response.get("stream_path")
+            if stream_path:
+                st.session_state["mt_resume_stream"] = {
+                    "run_id": _run_id,
+                    "stream_path": stream_path,
+                    "voucher_key": selected_vkey,
+                }
+                logger.info("[ui] review-submit 성공 run_id=%s stream_path=%s — mt_resume_stream 설정, 팝업 비노출 예정", _run_id, stream_path)
+                st.success(f"HITL 응답 반영 후 재개: run_id={_run_id}")
+                pending_stream = {"run_id": _run_id, "stream_path": str(stream_path)}
+            else:
+                logger.info("[ui] review-submit 응답에 stream_path 없음 run_id=%s", _run_id)
+                st.success("검토 반영이 제출되었습니다.")
+        except Exception as e:
+            logger.exception("[ui] review-submit API 실패 run_id=%s — open 다시 True", _run_id)
+            st.error(f"제출 실패: {e}")
+            st.session_state[_hitl_state_key("open", _run_id)] = True
+        finally:
+            st.session_state.pop("mt_pending_review_submit", None)
+
+    skip_dialog_run_id = st.session_state.pop("mt_skip_hitl_dialog_run_id", None)
+    if skip_dialog_run_id is not None:
+        logger.info("[ui] skip_dialog_run_id popped = %s (이 run_id에 대해서는 HITL 다이얼로그 미렌더)", skip_dialog_run_id)
 
     # HITL 확인 체크 해제 시: 해당 run은 검토 팝업/배너를 자동 노출하지 않는다.
     ui_run_id = str(latest_bundle.get("run_id") or "")
@@ -2710,11 +2747,16 @@ def render_workspace_chat_panel(selected: dict[str, Any], latest_bundle: dict[st
                 st.session_state[dismissed_key] = False
                 st.session_state[open_key] = True
                 st.rerun()
-        if run_id:
+        if run_id and str(run_id) != str(skip_dialog_run_id):
             st.session_state.setdefault(dismissed_key, False)
             if st.session_state.get(open_key):
                 st.session_state[open_key] = False
+                logger.info("[ui] HITL 다이얼로그 렌더 run_id=%s (open_key=True였음 → False로 바꾸고 다이얼로그 표시)", run_id)
                 render_hitl_dialog(latest_bundle, vkey=vkey)
+            else:
+                logger.debug("[ui] HITL 다이얼로그 미렌더 run_id=%s open_key=False", run_id)
+        elif run_id and str(run_id) == str(skip_dialog_run_id):
+            logger.info("[ui] HITL 다이얼로그 스킵 run_id=%s (skip_dialog_run_id와 동일 — 분석 이어가기 직후)", run_id)
 
     # 증빙 확정(완료 반영) 직후 rerun 시 성공 메시지 표시
     evidence_done = st.session_state.pop("mt_evidence_resume_done", None)
@@ -2827,6 +2869,7 @@ def render_workspace_chat_panel(selected: dict[str, Any], latest_bundle: dict[st
             if pending_stream:
                 stream_url = f"{API}{pending_stream['stream_path']}"
                 run_id = pending_stream["run_id"]
+                logger.info("[ui] 스트림 구독 시작 vkey=%s run_id=%s url=%s", vkey, run_id, stream_url)
                 for stream_ev in sse_node_block_generator_with_idle(stream_url, run_id=run_id, idle_after_sec=1.0):
                     ev_type = stream_ev.get("type")
                     if ev_type == "block":
@@ -2844,16 +2887,35 @@ def render_workspace_chat_panel(selected: dict[str, Any], latest_bundle: dict[st
                             node_name=str(stream_ev.get("node_name") or "agent"),
                         )
                 stream_wait_placeholder.empty()
-                latest_bundle = fetch_case_bundle(vkey)
-                result = ((latest_bundle.get("result") or {}).get("result") or {})
-                timeline = latest_bundle.get("timeline") or []
-                latest_run_id = str(latest_bundle.get("run_id") or "")
-                cached_stream_text = st.session_state.get(f"mt_last_stream_content_{latest_run_id}", "") if latest_run_id else ""
-                # 스트림 종료 후 항상 rerun하여 판단요약·근거맵·실행내역 등 탭이 최신 결과로 갱신되도록 함
-                if _has_pending_hitl(latest_bundle) and latest_bundle.get("run_id"):
-                    _rid = latest_bundle.get("run_id")
-                    st.session_state[_hitl_state_key("dismissed", _rid)] = False
-                st.rerun()
+                logger.info("[ui] 스트림 for 루프 종료 vkey=%s — fetch_case_bundle 후 mt_post_stream_bundle 저장 및 st.rerun() 예정", vkey)
+                try:
+                    latest_bundle = fetch_case_bundle(vkey)
+                    result = ((latest_bundle.get("result") or {}).get("result") or {})
+                    timeline = latest_bundle.get("timeline") or []
+                    latest_run_id = str(latest_bundle.get("run_id") or "")
+                    has_result = bool((latest_bundle.get("result") or {}).get("result"))
+                    logger.info(
+                        "[ui] fetch_case_bundle 완료 vkey=%s run_id=%s has_result=%s result.status=%s",
+                        vkey,
+                        latest_run_id,
+                        has_result,
+                        result.get("status"),
+                    )
+                    cached_stream_text = st.session_state.get(f"mt_last_stream_content_{latest_run_id}", "") if latest_run_id else ""
+                    # 스트림 종료 직후 가져온 번들을 rerun 후 판단요약 탭이 반드시 그 데이터로 그려지도록 세션에 보관
+                    st.session_state["mt_post_stream_bundle"] = {"voucher_key": vkey, "bundle": latest_bundle}
+                    logger.info("[ui] mt_post_stream_bundle 저장 vkey=%s — rerun 시 판단요약 탭이 이 번들로 그려짐", vkey)
+                    if _has_pending_hitl(latest_bundle) and latest_bundle.get("run_id"):
+                        _rid = latest_bundle.get("run_id")
+                        st.session_state[_hitl_state_key("dismissed", _rid)] = False
+                except Exception as e:
+                    # fetch 실패 시에도 rerun은 수행해 기존 화면을 갱신
+                    logger.exception("[ui] fetch_case_bundle 실패 vkey=%s — mt_post_stream_bundle 미저장, rerun만 수행", vkey)
+                    st.session_state.pop("mt_post_stream_bundle", None)
+                finally:
+                    # 스트림 종료 후 항상 rerun하여 판단요약·근거맵·실행내역 등 탭이 최신 결과로 갱신되도록 함
+                    logger.info("[ui] 스트림 종료 후 st.rerun() 호출 직전 vkey=%s", vkey)
+                    st.rerun()
             elif cached_stream_text:
                 stream_placeholder.markdown(cached_stream_text)
                 stream_wait_placeholder.empty()
@@ -3119,7 +3181,23 @@ def render_ai_workspace_page() -> None:
     items = get("/api/v1/vouchers?queue=all&limit=50").get("items") or []
     debug_mode = bool(st.session_state.get("mt_debug_mode", False))
     selected_key = st.session_state.get("mt_selected_voucher") or (items[0]["voucher_key"] if items else None)
-    latest_bundle = fetch_case_bundle(selected_key) if selected_key else {"timeline": [], "history": []}
+    # 스트림 종료 직후 rerun인 경우, 그때 가져둔 번들로 판단요약 등 하단 탭을 즉시 갱신
+    post_stream = st.session_state.pop("mt_post_stream_bundle", None)
+    if selected_key and post_stream and post_stream.get("voucher_key") == selected_key:
+        latest_bundle = post_stream.get("bundle") or fetch_case_bundle(selected_key)
+        logger.info(
+            "[ui] render_ai_workspace_page mt_post_stream_bundle 사용 selected_key=%s run_id=%s — 하단 탭(판단요약 등) 이 번들로 렌더",
+            selected_key,
+            (latest_bundle or {}).get("run_id"),
+        )
+    else:
+        latest_bundle = fetch_case_bundle(selected_key) if selected_key else {"timeline": [], "history": []}
+        if post_stream is not None:
+            logger.info(
+                "[ui] render_ai_workspace_page mt_post_stream_bundle 있으나 voucher 불일치 또는 selected_key 없음 — fetch_case_bundle 사용 post_stream.voucher_key=%s selected_key=%s",
+                post_stream.get("voucher_key"),
+                selected_key,
+            )
     # 우측(최신 run 결과)과 좌측(목록 case_status) 간 표기/집계가 어긋나는 것을 방지: 선택 케이스는 최신 run status로 즉시 동기화
     if selected_key:
         latest_result = (latest_bundle.get("result") or {}).get("result") or {}

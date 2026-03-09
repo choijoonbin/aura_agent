@@ -73,6 +73,9 @@
 - **구조화된 HITL 요청**: `hitl_request`, `reasons`, `questions`, `handoff` 필드
 - **HITL 필수 조건**: 핵심 필드 누락, 증거 부족, 규정 해석 모호, specialist 결과 충돌 시
 - **재분석 흐름**: 사람 검토 응답 제출 후 **같은 run**에서 재평가 및 최종 확정. `resumed_run_id`는 동일 `run_id`를 반환한다.
+- **「분석 이어하기」 재개 시점**: 설계상 **hitl_pause 노드 직후**부터 이어서 **hitl_validate → reporter → finalizer**만 실행한다.  
+  단, 체크포인트를 찾지 못하면(single-worker가 아니거나 `CHECKPOINTER_BACKEND=memory`인 경우) **screener부터 전부 재실행**된다.  
+  **HITL 직후 노드부터만 재개**하려면 `CHECKPOINTER_BACKEND=postgres`로 두고, `langgraph-checkpoint-postgres` 설치 후 DB에 체크포인트를 저장해 두어야 한다.
 
 | 관련 기초 문서 | [HITL Logic.md](docs/Edu/HITL%20Logic.md) |
 |----------------|-------------------------------------------|
@@ -397,6 +400,7 @@ OPENAI_EMBEDDING_MAX_RETRIES=3
 | `OPENAI_EMBEDDING_DIM` | 임베딩 차원 | 3072 |
 | `RAG_EMBEDDING_COLUMN` | rag_chunk 임베딩 컬럼 | embedding_az |
 | `RAG_EMBEDDING_CAST_TYPE` | 쿼리/저장 캐스팅 타입(`vector`/`halfvec`) | halfvec |
+| `CHECKPOINTER_BACKEND` | LangGraph 체크포인트 저장소. `memory`(기본)=프로세스 메모리(단일 워커에서만 HITL 재개 시 이어서 실행). `postgres`=DB 저장(다중 워커·재시작 후에도 「분석 이어하기」 시 hitl_pause 직후부터만 재개) | memory |
 
 | 코드 참고 | [`.env.example`](.env.example), [`utils/config.py`](utils/config.py) |
 |-----------|---------------------------------------------------------------------|
