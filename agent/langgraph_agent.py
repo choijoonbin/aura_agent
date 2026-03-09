@@ -2999,7 +2999,7 @@ def _get_checkpointer():
 
     if backend == "postgres":
         try:
-            from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+            from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver  # type: ignore[import-untyped]
 
             async def _init_postgres_checkpointer() -> Any:
                 cp = await AsyncPostgresSaver.from_conn_string(settings.database_url)
