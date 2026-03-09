@@ -92,7 +92,10 @@ def render_demo_control_page() -> None:
                     '<div class="mt-demo-section-sub" style="margin-bottom:10px;">저장된 시연 데이터 현황 및 일괄 삭제</div>',
                     unsafe_allow_html=True,
                 )
-                st.caption("모든 시연 데이터는 `DEMO-*` 키로 저장됩니다.")
+                st.markdown(
+                    '모든 시연 데이터는 <span class="mt-badge mt-badge-blue" style="margin:0 4px;">DEMO-*</span> 키로 저장됩니다.',
+                    unsafe_allow_html=True,
+                )
                 st.metric("저장된 시연 전표", len(seeded_data))
                 grouped: dict[str, int] = {}
                 for row in seeded_data:
@@ -102,7 +105,15 @@ def render_demo_control_page() -> None:
                     st.caption(f"{k}: {v}건")
                 if st.button("시연 데이터 전체 삭제", key="demo_delete_all"):
                     out = delete("/api/v1/demo/seed")
-                    st.warning(f"삭제 완료: {out.get('deleted', 0)}건")
+                    st.warning(
+                        "삭제 완료: "
+                        f"전표 {out.get('fi_doc_header_deleted', out.get('deleted', 0))}건 / "
+                        f"품목 {out.get('fi_doc_item_deleted', 0)}건 / "
+                        f"케이스 {out.get('agent_case_deleted', 0)}건 / "
+                        f"분석run {out.get('case_analysis_run_deleted', 0)}건 / "
+                        f"결과 {out.get('case_analysis_result_deleted', 0)}건 / "
+                        f"활동로그 {out.get('agent_activity_log_deleted', 0)}건"
+                    )
                     st.rerun()
 
     # ----- 섹션 2: 생성된 시연 전표 -----

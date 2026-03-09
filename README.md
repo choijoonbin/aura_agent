@@ -317,6 +317,13 @@ Streamlit 앱은 `http://localhost:8502`에서 실행됩니다.
 | 코드 참고 | [`main.py`](main.py), [`app.py`](app.py) |
 |-----------|----------------------------------------|
 
+### 로그 확인 (HITL / 분석 이어가기 추적)
+
+- **FastAPI(uvicorn) 터미널**: `[RESUME_TRACE]`, `[analysis]` — review-submit 경로(checkpoint 재개 vs 스크리닝부터 재실행), 에이전트 재개 시도/실패
+- **Streamlit 터미널**: `[HITL_CLOSE]`, `[RESUME_TRACE]` — 팝업 닫기 단계, UI에서 review-submit 호출
+- 브라우저 개발자 도구 콘솔에는 위 로그가 나오지 않으며, `Unrecognized feature` 등은 Streamlit/브라우저 경고로 무시해도 됨
+- **스트림이 처음부터 다시 시작하는 경우**: FastAPI 터미널에서 `[RESUME_TRACE] review_submit → 경로: 처음부터 재실행 (base_status=XXX != HITL_REQUIRED)` 가 나오면, 해당 run의 마지막 결과 상태가 HITL_REQUIRED(실제 interrupt)가 아니라서 checkpoint 재개가 아닌 전체 재실행으로 간 것입니다. 실제로 interrupt된 run(HITL_REQUIRED)에서 "분석 이어하기"를 눌렀을 때만 checkpoint 재개가 시도됩니다.
+
 ### 5. 테스트 실행
 
 그래프·도구 스키마·HITL·citation 관련 단위 테스트:

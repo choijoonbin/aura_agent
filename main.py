@@ -50,6 +50,11 @@ from services.schemas import (
 from services.stream_runtime import runtime
 from utils.config import ensure_source_paths, settings
 
+# 터미널에서 [RESUME_TRACE]/[HITL_CLOSE]/[analysis] 등 INFO 로그 확인용 (uvicorn 실행 터미널에 출력)
+try:
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s", datefmt="%H:%M:%S", force=True)
+except TypeError:
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s", datefmt="%H:%M:%S")
 
 logger = logging.getLogger(__name__)
 
@@ -116,8 +121,8 @@ def get_vouchers(
     except Exception as e:
         logger.exception("list_vouchers failed: %s", e)
         raise HTTPException(status_code=500, detail=f"voucher list failed: {e!s}") from e
-    # UI 집계(case_status)는 AgentCase.status만으로는 HITL 대기 상태를 표현할 수 없으므로,
-    # 최신 run의 hitl_request/response를 확인해 "HITL_REQUIRED"를 파생해 내려준다.
+    # 목록/KPI 초깃값이 우측 상세(run 최신 결과)와 어긋나지 않도록,
+    # 최신 run 상태를 우선 반영하고 필요 시 HITL 대기만 파생한다.
     out = [r.model_dump() for r in rows]
     for item in out:
         try:
@@ -131,8 +136,17 @@ def get_vouchers(
             aux = get_run_aux_state(db, run_id=run_id)
             hitl_req = runtime.get_hitl_request(run_id) or aux.get("hitl_request")
             hitl_res = runtime.get_hitl_response(run_id) or aux.get("hitl_response")
-            if hitl_req and not hitl_res:
-                item["case_status"] = "HITL_REQUIRED"
+            result = runtime.get_result(run_id)
+            if result is None and aux.get("result_payload") is not None:
+                result = {"result": aux.get("result_payload")}
+
+            derived_status = None
+            if isinstance(result, dict) and isinstance(result.get("result"), dict):
+                derived_status = (result.get("result") or {}).get("status")
+            if not derived_status and hitl_req and not hitl_res:
+                derived_status = "HITL_REQUIRED"
+            if derived_status:
+                item["case_status"] = str(derived_status).strip().upper()
         except Exception as e:
             logger.debug("voucher run_id/aux check failed for %s: %s", item.get("voucher_key"), e)
             continue
@@ -220,6 +234,16 @@ async def _run_analysis_task(
         is_resume,
         list(resume_value.keys()) if isinstance(resume_value, dict) else None,
     )
+    if is_resume:
+        logger.info(
+            "[RESUME_TRACE] _run_analysis_task run_id=%s → 에이전트에 resume_value 전달, checkpoint 재개 시도 예정",
+            run_id,
+        )
+    else:
+        logger.info(
+            "[RESUME_TRACE] _run_analysis_task run_id=%s → resume_value 없음, 스크리닝부터 전체 재실행",
+            run_id,
+        )
     try:
         async for ev_type, ev_payload in run_agent_analysis(
             case_id,
@@ -767,9 +791,10 @@ async def review_submit(
         if evidence_result:
             body_evidence["evidenceDocumentResult"] = evidence_result
         # HITL_REQUIRED(실제 interrupt 대기)에서만 Command(resume=...)로 재개.
-        # REVIEW_REQUIRED 등 비-interrupt 경로는 새 입력 재실행으로 처리해야 상태가 정상 전이된다.
+        # base_result.status가 HITL_REQUIRED가 아니어도 runtime에 hitl_request가 있으면 재개 시도(체크포인트 없으면 2차 경로로 fallback).
         base_status = str((base_result or {}).get("status") or "").upper()
-        use_resume_value = hitl_payload if base_status == "HITL_REQUIRED" else None
+        has_runtime_hitl = bool(runtime.get_hitl_request(run_id))
+        use_resume_value = hitl_payload if (base_status == "HITL_REQUIRED" or has_runtime_hitl) else None
         logger.info(
             "[analysis] review_submit run_id=%s base_status=%s use_resume_value=%s (will resume from checkpoint=%s)",
             run_id,
@@ -777,6 +802,20 @@ async def review_submit(
             "yes" if use_resume_value else "no",
             use_resume_value is not None,
         )
+        if use_resume_value is not None:
+            logger.info(
+                "[RESUME_TRACE] review_submit run_id=%s → 경로: checkpoint 재개 시도 (base_status=%s, has_runtime_hitl=%s, Command(resume=...) 사용)",
+                run_id,
+                base_status,
+                has_runtime_hitl,
+            )
+        else:
+            logger.info(
+                "[RESUME_TRACE] review_submit run_id=%s → 경로: 처음부터 재실행 (base_status=%s, has_runtime_hitl=%s → body_evidence에 hitlResponse만 주입)",
+                run_id,
+                base_status,
+                has_runtime_hitl,
+            )
         runtime.drain_queue_before_resume(run_id)
         asyncio.create_task(
             _run_analysis_task(
@@ -890,6 +929,13 @@ def get_latest_analysis(voucher_key: str, db: Session = Depends(get_db)) -> dict
         update_agent_case_status_from_run(db, voucher_key, derived_status)
     except Exception:
         pass
+    # UI에서 result.result.status가 None이면 오류 방지: 내부 result에 status가 없으면 derived_status 또는 IN_PROGRESS 보정
+    if isinstance(result, dict) and isinstance(result.get("result"), dict):
+        inner = result.get("result") or {}
+        if inner.get("status") is None:
+            result = dict(result)
+            result["result"] = dict(inner)
+            result["result"]["status"] = derived_status or "IN_PROGRESS"
     return {
         "case_id": case_id,
         "run_id": run_id,

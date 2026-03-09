@@ -254,6 +254,10 @@ def inject_css() -> None:
         .mt-stream-note {{ margin-top:8px; font-size:0.78rem; color:#64748b; }}
         .mt-section-note {{ font-size:0.82rem; color:#64748b; line-height:1.55; margin-bottom:12px; }}
         .mt-hitl-banner {{ width:100%; background:#fef9c3; border:1px solid #fde68a; color:#92400e; font-weight:700; border-radius:12px; padding:10px 12px; line-height:1.35; box-sizing:border-box; }}
+        /* 에이전트 대화: 분석 시작 / HITL 팝업 열기 / 분석 이어가기 실행 버튼을 오른쪽 끝으로 정렬 (상위 column CSS 덮어씀) */
+        [class*="st-key-workspace_cta_right"] {{ display: flex !important; justify-content: flex-end !important; align-items: center !important; width: 100% !important; min-width: 0 !important; }}
+        [class*="st-key-workspace_cta_right"] .stButton {{ width: auto !important; max-width: 100% !important; min-width: 0 !important; }}
+        [class*="st-key-workspace_cta_right"] .stButton > button {{ width: auto !important; max-width: 100% !important; min-width: fit-content !important; }}
         .mt-section-inline {{ display:flex; align-items:center; flex-wrap:wrap; gap:8px 12px; margin-bottom:12px; }}
         .mt-section-inline-title {{ font-size:0.95rem; font-weight:800; color:#0f172a; flex-shrink:0; }}
         .mt-section-inline-content {{ font-size:0.84rem; color:#64748b; line-height:1.5; }}
@@ -405,6 +409,7 @@ def status_display_name(status: str | None) -> str:
         return "-"
     labels = {
         "NEW": "신규",
+        "IN_PROGRESS": "진행 중",
         "PENDING_EXPLANATION": "소명 대기",
         "IN_REVIEW": "검토 중",
         "REVIEW_REQUIRED": "검토 필요",

@@ -1377,6 +1377,23 @@ def _has_pending_hitl(latest_bundle: dict[str, Any]) -> bool:
     return False
 
 
+def _normalize_case_status_for_kpi(status: str | None) -> str | None:
+    """
+    UI KPI/목록 집계용 상태 버킷 정규화.
+    - HOLD/REVIEW 계열은 모두 IN_REVIEW
+    - 완료 계열은 RESOLVED
+    - 실제 HITL 대기만 HITL_REQUIRED 유지
+    """
+    if not status:
+        return status
+    s = str(status).strip().upper()
+    if s in {"COMPLETED", "COMPLETED_AFTER_HITL", "COMPLETED_AFTER_EVIDENCE", "OK", "RESOLVED"}:
+        return "RESOLVED"
+    if s in {"REVIEW_REQUIRED", "REVIEW_AFTER_HITL", "HOLD_AFTER_HITL", "EVIDENCE_REJECTED", "FAILED"}:
+        return "IN_REVIEW"
+    return s
+
+
 def _hitl_state_key(kind: str, run_id: str | None) -> str:
     return f"mt_hitl_{kind}_{run_id or 'unknown'}"
 
@@ -2309,7 +2326,7 @@ def render_hitl_panel(latest_bundle: dict[str, Any], *, vkey: str | None = None)
                         "voucher_key": latest_bundle.get("voucher_key") or vkey,
                         "payload": payload_review,
                     }
-                    logger.info("[ui] HITL 팝업에서 분석 이어가기 클릭 run_id=%s — mt_pending_review_submit 설정, open=False, st.rerun()", run_id)
+                    logger.info("[HITL_CLOSE] 버튼 클릭: run_id=%s — mt_pending_review_submit 설정, open=False, st.rerun()", run_id)
                     st.session_state.pop(_hitl_state_key("dismissed", run_id), None)
                     st.session_state.pop(_hitl_state_key("open", run_id), None)
                     st.session_state[_hitl_state_key("open", run_id)] = False
@@ -2384,25 +2401,27 @@ def build_workspace_execution_logs(latest_bundle: dict[str, Any]) -> list[dict[s
 
 def render_workspace_case_queue(items: list[dict[str, Any]], selected_key: str | None) -> None:
     render_panel_header("케이스", "분석할 전표를 선택합니다. 좌측은 선택, 우측은 실시간 실행과 판단 리뷰에 집중합니다.")
-    # 4개 KPI: items는 /api/v1/vouchers 응답(각 item.case_status = AgentCase.status). run 종료 시 백엔드에서 AgentCase.status 동기화.
-    # 검토 필요: 신규·검토중·검토필요·증빙불일치 (HITL_REQUIRED는 HITL 대기로만 집계)
+    # 4개 KPI: items는 /api/v1/vouchers 응답(각 item.case_status = AgentCase.status).
+    # 정책: HITL 대기 = 실제 사람 입력 대기(HITL_REQUIRED)만 집계.
+    review_statuses = {"NEW", "IN_REVIEW", "REVIEW_REQUIRED", "EVIDENCE_REJECTED", "REVIEW_AFTER_HITL", "HOLD_AFTER_HITL"}
+    completed_statuses = {"COMPLETED", "COMPLETED_AFTER_HITL", "COMPLETED_AFTER_EVIDENCE", "RESOLVED", "OK"}
+    hitl_wait_statuses = {"HITL_REQUIRED"}
+
     review_count = len(
-        [item for item in items if str(item.get("case_status") or "").upper() in {"NEW", "IN_REVIEW", "REVIEW_REQUIRED", "EVIDENCE_REJECTED"}]
+        [item for item in items if str(item.get("case_status") or "").upper() in review_statuses]
     )
-    # 완료: 최종 완료/해결
     completed_count = len(
-        [item for item in items if str(item.get("case_status") or "").upper() in {"COMPLETED", "COMPLETED_AFTER_HITL", "COMPLETED_AFTER_EVIDENCE", "RESOLVED", "OK"}]
+        [item for item in items if str(item.get("case_status") or "").upper() in completed_statuses]
     )
-    # HITL 대기: 담당자 검토 대기·재개·보류
     hitl_count = len(
-        [item for item in items if str(item.get("case_status") or "").upper() in {"HITL_REQUIRED", "REVIEW_AFTER_HITL", "HOLD_AFTER_HITL"}]
+        [item for item in items if str(item.get("case_status") or "").upper() in hitl_wait_statuses]
     )
     # 상단 KPI(클릭) → 목록 필터 상태
     grouped = {
         "전체": items,
-        "검토 필요": [item for item in items if str(item.get("case_status") or "").upper() in {"NEW", "IN_REVIEW", "REVIEW_REQUIRED", "EVIDENCE_REJECTED"}],
-        "완료": [item for item in items if str(item.get("case_status") or "").upper() in {"COMPLETED", "COMPLETED_AFTER_HITL", "COMPLETED_AFTER_EVIDENCE", "RESOLVED", "OK"}],
-        "HITL 대기": [item for item in items if str(item.get("case_status") or "").upper() in {"HITL_REQUIRED", "REVIEW_AFTER_HITL", "HOLD_AFTER_HITL"}],
+        "검토 필요": [item for item in items if str(item.get("case_status") or "").upper() in review_statuses],
+        "완료": [item for item in items if str(item.get("case_status") or "").upper() in completed_statuses],
+        "HITL 대기": [item for item in items if str(item.get("case_status") or "").upper() in hitl_wait_statuses],
     }
     active_filter = str(st.session_state.get("mt_case_filter") or "전체")
     if active_filter not in grouped:
@@ -2674,7 +2693,7 @@ def render_workspace_chat_panel(selected: dict[str, Any], latest_bundle: dict[st
     # st.markdown(summary_html, unsafe_allow_html=True)
     # strip_text는 좌측, HITL 확인·분석 시작은 우측 끝에 나란히 정렬
     # 주의: render_workspace_chat_panel는 상위 컬럼 내부에서 호출되므로 중첩 columns는 1단계까지만 허용됨.
-    strip_col, cta_spacer_col, cta_hitl_col, cta_btn_col = st.columns([0.52, 0.08, 0.14, 0.26])
+    strip_col, cta_spacer_col, cta_hitl_col, cta_btn_col = st.columns([0.50, 0.08, 0.14, 0.28])
     pending_stream: dict[str, str] | None = None
     with strip_col:
         st.markdown(f'<div class="mt-workspace-strip-inline">{strip_text}</div>', unsafe_allow_html=True)
@@ -2683,7 +2702,8 @@ def render_workspace_chat_panel(selected: dict[str, Any], latest_bundle: dict[st
     with cta_hitl_col:
         enable_hitl = st.checkbox("HITL 확인", key=f"workspace_hitl_check_{vkey}", value=False)
     with cta_btn_col:
-        run_clicked = st.button("분석 시작", key=f"workspace_run_{vkey}", type="primary")
+        with stylable_container(key="workspace_cta_right_1", css_styles=["{}"]):
+            run_clicked = st.button("분석 시작", key=f"workspace_run_{vkey}", type="primary")
     if run_clicked:
         # 분석 시작 시 스트림/타임라인 패널을 자동으로 펼침
         st.session_state[f"agent_stream_exp_{vkey}"] = True
@@ -2698,6 +2718,25 @@ def render_workspace_chat_panel(selected: dict[str, Any], latest_bundle: dict[st
         st.success(f"분석 시작: run_id={response['run_id']}")
         pending_stream = {"run_id": str(run_id), "stream_path": str(response["stream_path"])}
 
+    # 모달 닫힘을 먼저 반영하기 위한 2-step 재개:
+    # review-submit 성공 직후에는 queued 키에 저장하고 rerun,
+    # 다음 run에서 resume_stream으로 승격 후 다시 rerun하여 그 다음 run에서 SSE를 시작한다.
+    queued_resume = st.session_state.get("mt_resume_stream_queued")
+    if (
+        queued_resume
+        and (queued_resume.get("voucher_key") in {None, "", selected_vkey})
+        and queued_resume.get("stream_path")
+        and queued_resume.get("run_id")
+    ):
+        st.session_state["mt_resume_stream"] = {
+            "run_id": str(queued_resume["run_id"]),
+            "stream_path": str(queued_resume["stream_path"]),
+            "voucher_key": queued_resume.get("voucher_key"),
+        }
+        st.session_state.pop("mt_resume_stream_queued", None)
+        logger.info("[ui] queued resume 승격 run_id=%s — 모달 닫힘 반영 후 다음 rerun에서 SSE 시작", queued_resume.get("run_id"))
+        st.rerun()
+
     resume_stream = st.session_state.get("mt_resume_stream")
     if (
         resume_stream
@@ -2711,40 +2750,58 @@ def render_workspace_chat_panel(selected: dict[str, Any], latest_bundle: dict[st
         st.success(f"HITL 응답 반영 후 재개: run_id={run_id}")
         pending_stream = {"run_id": run_id, "stream_path": stream_path}
 
-    # HITL 팝업에서 "분석 이어가기" 제출 직후: 팝업을 닫고(open=False 유지), API 호출 후 스트림 재개.
-    # armed 이중 rerun 제거 — 제출한 run에서 바로 API 호출해 한 번의 rerun으로 팝업 닫힘 + 스트림 시작.
+    # HITL 팝업에서 "분석 이어가기" 제출 직후 — 2단계로 분리해 팝업을 즉시 닫음:
+    # 1) mt_pending_review_submit이 있으면 API 호출 없이 open=False, skip 설정만 하고 rerun 하지 않음
+    #    → 이 run이 끝까지 실행되어 "다이얼로그 미호출" 한 프레임이 그려져야 st.dialog 모달이 실제로 닫힘
+    # 2) 다이얼로그 블록 직후 mt_review_submit_api_pending이 있으면 그때 st.rerun() 해서 다음 run에서 API 호출
+    # 3) 다음 run에서 review-submit API 호출 → queued 저장 후 rerun
+    # 4) queued -> resume 승격 rerun, 그 다음 run에서 SSE 시작
+    logger.info("[HITL_CLOSE] run 시작: mt_pending_review_submit=%s mt_review_submit_api_pending=%s", bool(st.session_state.get("mt_pending_review_submit")), bool(st.session_state.get("mt_review_submit_api_pending")))
     pending_review_submit = st.session_state.get("mt_pending_review_submit")
+    just_set_api_pending = False
     if pending_review_submit and pending_review_submit.get("voucher_key") in {None, "", selected_vkey}:
         _run_id = str(pending_review_submit.get("run_id") or "")
-        logger.info("[ui] 분석 이어가기 제출 처리: run_id=%s open=False, skip_dialog_run_id=%s 설정", _run_id, _run_id)
+        logger.info("[HITL_CLOSE] 1단계 진입: run_id=%s open=False, skip 설정 (이 run에서 한 프레임 그린 뒤 다이얼로그 블록 뒤에서 rerun)", _run_id)
         st.session_state[_hitl_state_key("open", _run_id)] = False
         st.session_state["mt_skip_hitl_dialog_run_id"] = _run_id
+        st.session_state["mt_review_submit_api_pending"] = dict(pending_review_submit)
+        st.session_state.pop("mt_pending_review_submit", None)
+        just_set_api_pending = True
+
+    # 2단계: 팝업이 닫힌 다음 run에서만 review-submit API 호출 (같은 run에서 1단계로 세팅한 직후에는 호출하면 안 됨)
+    api_pending = st.session_state.get("mt_review_submit_api_pending")
+    if api_pending and not just_set_api_pending and api_pending.get("voucher_key") in {None, "", selected_vkey}:
+        _run_id = str(api_pending.get("run_id") or "")
+        logger.info("[HITL_CLOSE] 2단계 진입: run_id=%s review-submit API 호출", _run_id)
+        _payload = api_pending.get("payload") or {}
+        logger.info(
+            "[RESUME_TRACE] UI → review-submit run_id=%s payload_keys=%s (백엔드에서 base_status=HITL_REQUIRED면 checkpoint 재개, 아니면 스크리닝부터 재실행)",
+            _run_id,
+            list(_payload.keys()) if isinstance(_payload, dict) else [],
+        )
+        st.session_state.pop("mt_review_submit_api_pending", None)
         try:
-            _payload = pending_review_submit.get("payload") or {}
             response = post(f"/api/v1/analysis-runs/{_run_id}/review-submit", json_body=_payload)
             stream_path = response.get("stream_path")
             if stream_path:
-                st.session_state["mt_resume_stream"] = {
+                st.session_state["mt_resume_stream_queued"] = {
                     "run_id": _run_id,
                     "stream_path": stream_path,
                     "voucher_key": selected_vkey,
                 }
-                logger.info("[ui] review-submit 성공 run_id=%s stream_path=%s — mt_resume_stream 설정, 팝업 비노출 예정", _run_id, stream_path)
-                st.success(f"HITL 응답 반영 후 재개: run_id={_run_id}")
-                pending_stream = {"run_id": _run_id, "stream_path": str(stream_path)}
+                logger.info("[ui] review-submit 성공 run_id=%s stream_path=%s — queued 저장 후 rerun", _run_id, stream_path)
+                st.rerun()
             else:
                 logger.info("[ui] review-submit 응답에 stream_path 없음 run_id=%s", _run_id)
                 st.success("검토 반영이 제출되었습니다.")
         except Exception as e:
-            logger.exception("[ui] review-submit API 실패 run_id=%s — open 다시 True", _run_id)
+            logger.exception("[ui] review-submit API 실패 run_id=%s", _run_id)
             st.error(f"제출 실패: {e}")
             st.session_state[_hitl_state_key("open", _run_id)] = True
-        finally:
-            st.session_state.pop("mt_pending_review_submit", None)
 
     skip_dialog_run_id = st.session_state.pop("mt_skip_hitl_dialog_run_id", None)
     if skip_dialog_run_id is not None:
-        logger.info("[ui] skip_dialog_run_id popped = %s (이 run_id에 대해서는 HITL 다이얼로그 미렌더)", skip_dialog_run_id)
+        logger.info("[HITL_CLOSE] skip_dialog_run_id popped = %s (이 run_id에 대해서는 다이얼로그 미렌더)", skip_dialog_run_id)
 
     # HITL 확인 체크 해제 시: 해당 run은 검토 팝업/배너를 자동 노출하지 않는다.
     ui_run_id = str(latest_bundle.get("run_id") or "")
@@ -2756,7 +2813,7 @@ def render_workspace_chat_panel(selected: dict[str, Any], latest_bundle: dict[st
     _need_hitl = _has_pending_hitl(latest_bundle)
     _need_review_ui = _is_review_state and bool(latest_bundle.get("run_id"))
     if _need_review_ui or (hitl_ui_enabled and _need_hitl):
-        hitl_msg_col, hitl_btn_col = st.columns([0.66, 0.34])
+        hitl_msg_col, hitl_btn_col = st.columns([0.72, 0.28])
         run_id = latest_bundle.get("run_id")
         open_key = _hitl_state_key("open", run_id)
         dismissed_key = _hitl_state_key("dismissed", run_id)
@@ -2772,20 +2829,40 @@ def render_workspace_chat_panel(selected: dict[str, Any], latest_bundle: dict[st
                 unsafe_allow_html=True,
             )
         with hitl_btn_col:
-            if st.button("HITL 팝업 열기", key=f"workspace_hitl_open_{vkey}"):
-                st.session_state[dismissed_key] = False
-                st.session_state[open_key] = True
-                st.rerun()
+            with stylable_container(key="workspace_cta_right_2", css_styles=["{}"]):
+                if st.button("HITL 팝업 열기", key=f"workspace_hitl_open_{vkey}"):
+                    st.session_state[dismissed_key] = False
+                    st.session_state[open_key] = True
+                    st.rerun()
         if run_id and str(run_id) != str(skip_dialog_run_id):
             st.session_state.setdefault(dismissed_key, False)
-            if st.session_state.get(open_key):
+            open_val = st.session_state.get(open_key)
+            logger.info("[HITL_CLOSE] 다이얼로그 분기: run_id=%s skip_dialog_run_id=%s open_key=%s", run_id, skip_dialog_run_id, open_val)
+            if open_val:
                 st.session_state[open_key] = False
-                logger.info("[ui] HITL 다이얼로그 렌더 run_id=%s (open_key=True였음 → False로 바꾸고 다이얼로그 표시)", run_id)
+                logger.info("[HITL_CLOSE] 다이얼로그 렌더 함 run_id=%s", run_id)
                 render_hitl_dialog(latest_bundle, vkey=vkey)
             else:
-                logger.debug("[ui] HITL 다이얼로그 미렌더 run_id=%s open_key=False", run_id)
+                logger.info("[HITL_CLOSE] 다이얼로그 미렌더 run_id=%s (open_key=False)", run_id)
         elif run_id and str(run_id) == str(skip_dialog_run_id):
-            logger.info("[ui] HITL 다이얼로그 스킵 run_id=%s (skip_dialog_run_id와 동일 — 분석 이어가기 직후)", run_id)
+            logger.info("[HITL_CLOSE] 다이얼로그 스킵 run_id=%s (skip과 동일 — 분석 이어가기 직후)", run_id)
+
+    # 1단계 직후: "다이얼로그 미호출" 한 프레임을 브라우저에 보냈으면 rerun 하지 않음(just_set_api_pending).
+    # api_pending만 있고 방금 세팅한 run이 아니면 rerun.
+    if st.session_state.get("mt_review_submit_api_pending") and not just_set_api_pending:
+        logger.info("[HITL_CLOSE] api_pending 있음 → st.rerun() (다음 run에서 2단계 API 호출)")
+        st.rerun()
+
+    # 팝업 방금 닫은 run(just_set_api_pending): fragment 대신 "한 번 더 클릭"으로 2단계 트리거 (fragment 제거 시 run_every 오류 무한 반복 방지)
+    if st.session_state.get("mt_review_submit_api_pending"):
+        _pending_run_id = (st.session_state.get("mt_review_submit_api_pending") or {}).get("run_id") or ""
+        _msg_col, _btn_col = st.columns([0.72, 0.28])
+        with _msg_col:
+            st.info("검토가 반영되었습니다. 오른쪽 버튼을 눌러 분석을 이어가세요.")
+        with _btn_col:
+            with stylable_container(key="workspace_cta_right_3", css_styles=["{}"]):
+                if st.button("분석 이어가기 실행", key=f"hitl_resume_trigger_{_pending_run_id}_{selected_vkey or ''}"):
+                    st.rerun()
 
     # 증빙 확정(완료 반영) 직후 rerun 시 성공 메시지 표시
     evidence_done = st.session_state.pop("mt_evidence_resume_done", None)
@@ -3231,14 +3308,16 @@ def render_ai_workspace_page() -> None:
                 post_stream.get("voucher_key"),
                 selected_key,
             )
-    # 우측(최신 run 결과)과 좌측(목록 case_status) 간 표기/집계가 어긋나는 것을 방지: 선택 케이스는 최신 run status로 즉시 동기화
+    # 우측(최신 run 결과)과 좌측(목록 case_status) 간 표기 어긋남을 줄이되,
+    # KPI가 흔들리지 않도록 버킷 상태로 정규화해 동기화한다.
     if selected_key:
         latest_result = (latest_bundle.get("result") or {}).get("result") or {}
         run_status = latest_result.get("status")
         if run_status:
+            normalized_status = _normalize_case_status_for_kpi(run_status)
             for item in items:
                 if item.get("voucher_key") == selected_key:
-                    item["case_status"] = run_status
+                    item["case_status"] = normalized_status
                     break
 
     # review_count = len([i for i in items if str(i.get("case_status") or "").upper() in {"NEW", "IN_REVIEW", "REVIEW_REQUIRED", "HITL_REQUIRED"}])

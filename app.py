@@ -1,6 +1,13 @@
 from __future__ import annotations
 
+import logging
 import streamlit as st
+
+# 터미널에서 [HITL_CLOSE]/[RESUME_TRACE] 등 INFO 로그 확인용 (streamlit run 실행 터미널에 출력)
+try:
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s", datefmt="%H:%M:%S", force=True)
+except TypeError:
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s", datefmt="%H:%M:%S")
 
 from ui.dashboard import render_dashboard_page
 from ui.demo import render_demo_control_page

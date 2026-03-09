@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import hashlib
 import random
 from datetime import date, datetime, time, timezone
 from typing import Any
 
-from sqlalchemy import and_, func, select
+from sqlalchemy import and_, delete, func, select, text
 from sqlalchemy.orm import Session
 
 from db.models import AgentCase, FiDocHeader, FiDocItem
@@ -133,6 +134,12 @@ def _next_day(mode: str) -> date:
     return target
 
 
+def _case_id_from_voucher(tenant_id: int, bukrs: str, belnr: str, gjahr: str) -> int:
+    """Deterministic case_id for PoC — must match services.case_service."""
+    key = f"{tenant_id}:{bukrs}:{belnr}:{gjahr}"
+    return int(hashlib.md5(key.encode()).hexdigest(), 16) % (10 ** 14) + 1
+
+
 def seed_demo_scenarios(db: Session, scenario: str, count: int = 5) -> dict[str, Any]:
     tenant_id = settings.default_tenant_id
     user_id = settings.default_user_id
@@ -216,6 +223,17 @@ def seed_demo_scenarios(db: Session, scenario: str, count: int = 5) -> dict[str,
         keys.append(f"1000-{belnr}-{gjahr_str}")
 
     db.commit()
+
+    # 테스트 데이터 생성 시점에 스크리닝까지 백엔드에서 수행해 두면, 분석 시작 시 스크리닝 로직을 다시 실행하지 않음
+    from services.case_service import run_case_screening
+    for vkey in keys:
+        try:
+            run_case_screening(db, vkey)
+        except Exception:
+            pass
+    if keys:
+        db.commit()
+
     return {"scenario": scenario, "inserted": inserted, "voucher_keys": keys}
 
 
@@ -296,19 +314,221 @@ def clear_demo_data(db: Session) -> dict[str, Any]:
             FiDocHeader.xblnr.like("DEMO-%"),
         )
     ).all()
-    count = 0
+
+    if not headers:
+        return {
+            "deleted": 0,
+            "fi_doc_header_deleted": 0,
+            "fi_doc_item_deleted": 0,
+            "agent_case_deleted": 0,
+            "agent_activity_log_deleted": 0,
+            "case_analysis_result_deleted": 0,
+            "case_analysis_run_deleted": 0,
+            "thought_chain_log_deleted": 0,
+            "case_action_proposal_deleted": 0,
+            "case_action_execution_deleted": 0,
+            "run_count": 0,
+        }
+
+    voucher_keys: list[str] = []
+    case_ids_int: set[int] = set()
+    case_ids_str: set[str] = set()
     for h in headers:
-        items = db.scalars(
-            select(FiDocItem).where(
+        vkey = f"{h.bukrs}-{h.belnr}-{h.gjahr}"
+        voucher_keys.append(vkey)
+        case_ids_str.add(f"POC-{vkey}")
+        case_ids_int.add(_case_id_from_voucher(tenant_id, h.bukrs, h.belnr, h.gjahr))
+
+    run_ids: set[str] = set()
+    for case_id_int in case_ids_int:
+        rows = db.execute(
+            text(
+                """
+                select run_id::text
+                from dwp_aura.case_analysis_run
+                where tenant_id = :tenant_id
+                  and case_id = :case_id
+                """
+            ),
+            {"tenant_id": tenant_id, "case_id": case_id_int},
+        ).scalars().all()
+        run_ids.update(str(r) for r in rows if r)
+
+    for case_id in case_ids_str:
+        rows = db.execute(
+            text(
+                """
+                select distinct resource_id
+                from dwp_aura.agent_activity_log
+                where tenant_id = :tenant_id
+                  and resource_type = 'analysis_run'
+                  and metadata_json ->> 'case_id' = :case_id
+                """
+            ),
+            {"tenant_id": tenant_id, "case_id": case_id},
+        ).scalars().all()
+        run_ids.update(str(r) for r in rows if r)
+
+    for voucher_key in voucher_keys:
+        rows = db.execute(
+            text(
+                """
+                select distinct resource_id
+                from dwp_aura.agent_activity_log
+                where tenant_id = :tenant_id
+                  and resource_type = 'analysis_run'
+                  and metadata_json ->> 'voucher_key' = :voucher_key
+                """
+            ),
+            {"tenant_id": tenant_id, "voucher_key": voucher_key},
+        ).scalars().all()
+        run_ids.update(str(r) for r in rows if r)
+
+    deleted = {
+        "fi_doc_header_deleted": 0,
+        "fi_doc_item_deleted": 0,
+        "agent_case_deleted": 0,
+        "agent_activity_log_deleted": 0,
+        "case_analysis_result_deleted": 0,
+        "case_analysis_run_deleted": 0,
+        "thought_chain_log_deleted": 0,
+        "case_action_proposal_deleted": 0,
+        "case_action_execution_deleted": 0,
+    }
+
+    def _table_exists(table_name: str) -> bool:
+        row = db.execute(
+            text(
+                """
+                select 1
+                from information_schema.tables
+                where table_schema = 'dwp_aura'
+                  and table_name = :table_name
+                limit 1
+                """
+            ),
+            {"table_name": table_name},
+        ).scalar_one_or_none()
+        return row is not None
+
+    def _table_has_run_id_column(table_name: str) -> bool:
+        row = db.execute(
+            text(
+                """
+                select 1
+                from information_schema.columns
+                where table_schema = 'dwp_aura'
+                  and table_name = :table_name
+                  and column_name = 'run_id'
+                limit 1
+                """
+            ),
+            {"table_name": table_name},
+        ).scalar_one_or_none()
+        return row is not None
+
+    # Optional run-linked tables (if present in current schema).
+    optional_run_tables = {
+        "thought_chain_log": "thought_chain_log_deleted",
+        "case_action_proposal": "case_action_proposal_deleted",
+        "case_action_execution": "case_action_execution_deleted",
+    }
+    for table_name, counter_key in optional_run_tables.items():
+        if not _table_exists(table_name) or not _table_has_run_id_column(table_name):
+            continue
+        for run_id in run_ids:
+            rc = db.execute(
+                text(f"delete from dwp_aura.{table_name} where run_id::text = :run_id"),
+                {"run_id": run_id},
+            ).rowcount or 0
+            deleted[counter_key] += int(rc)
+
+    for run_id in run_ids:
+        rc = db.execute(
+            text(
+                """
+                delete from dwp_aura.agent_activity_log
+                where tenant_id = :tenant_id
+                  and resource_type = 'analysis_run'
+                  and resource_id = :run_id
+                """
+            ),
+            {"tenant_id": tenant_id, "run_id": run_id},
+        ).rowcount or 0
+        deleted["agent_activity_log_deleted"] += int(rc)
+
+        rc = db.execute(
+            text(
+                """
+                delete from dwp_aura.case_analysis_result
+                where tenant_id = :tenant_id
+                  and run_id::text = :run_id
+                """
+            ),
+            {"tenant_id": tenant_id, "run_id": run_id},
+        ).rowcount or 0
+        deleted["case_analysis_result_deleted"] += int(rc)
+
+        rc = db.execute(
+            text(
+                """
+                delete from dwp_aura.case_analysis_run
+                where tenant_id = :tenant_id
+                  and run_id::text = :run_id
+                """
+            ),
+            {"tenant_id": tenant_id, "run_id": run_id},
+        ).rowcount or 0
+        deleted["case_analysis_run_deleted"] += int(rc)
+
+    # case_analysis_run orphan rows that were not captured by run_id lookup.
+    for case_id_int in case_ids_int:
+        rc = db.execute(
+            text(
+                """
+                delete from dwp_aura.case_analysis_run
+                where tenant_id = :tenant_id
+                  and case_id = :case_id
+                """
+            ),
+            {"tenant_id": tenant_id, "case_id": case_id_int},
+        ).rowcount or 0
+        deleted["case_analysis_run_deleted"] += int(rc)
+
+    for h in headers:
+        rc = db.execute(
+            delete(AgentCase).where(
+                AgentCase.tenant_id == h.tenant_id,
+                AgentCase.bukrs == h.bukrs,
+                AgentCase.belnr == h.belnr,
+                AgentCase.gjahr == h.gjahr,
+            )
+        ).rowcount or 0
+        deleted["agent_case_deleted"] += int(rc)
+
+        rc = db.execute(
+            delete(FiDocItem).where(
                 FiDocItem.tenant_id == h.tenant_id,
                 FiDocItem.bukrs == h.bukrs,
                 FiDocItem.belnr == h.belnr,
                 FiDocItem.gjahr == h.gjahr,
             )
-        ).all()
-        for it in items:
-            db.delete(it)
-        db.delete(h)
-        count += 1
+        ).rowcount or 0
+        deleted["fi_doc_item_deleted"] += int(rc)
+
+        rc = db.execute(
+            delete(FiDocHeader).where(
+                FiDocHeader.tenant_id == h.tenant_id,
+                FiDocHeader.bukrs == h.bukrs,
+                FiDocHeader.belnr == h.belnr,
+                FiDocHeader.gjahr == h.gjahr,
+            )
+        ).rowcount or 0
+        deleted["fi_doc_header_deleted"] += int(rc)
+
     db.commit()
-    return {"deleted": count}
+    return {
+        "deleted": deleted["fi_doc_header_deleted"],
+        "run_count": len(run_ids),
+        **deleted,
+    }

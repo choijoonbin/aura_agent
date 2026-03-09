@@ -1224,12 +1224,47 @@ def _score(flags: dict[str, Any], tool_results: list[dict[str, Any]]) -> dict[st
     }
 
 
+def _build_prescreened_result(body: dict[str, Any]) -> dict[str, Any]:
+    """사전 스크리닝된 body_evidence로 screening_result 딕셔너리 구성 (start_router / intake 이벤트용)."""
+    ct = body.get("case_type") or body.get("intended_risk_type") or ""
+    severity = body.get("severity") or "MEDIUM"
+    score_raw = body.get("screening_score")
+    score_int = int(score_raw * 100) if isinstance(score_raw, (int, float)) else (int(score_raw) if score_raw else 0)
+    reason_text = body.get("screening_reason_text") or "사전 스크리닝 결과를 사용합니다."
+    reasons = [reason_text] if reason_text else ["사전 스크리닝됨"]
+    return {
+        "case_type": ct,
+        "severity": severity,
+        "score": score_int,
+        "reasons": reasons,
+        "reason_text": reason_text,
+    }
+
+
+async def start_router_node(state: AgentState) -> AgentState:
+    """
+    사전 스크리닝된 전표(case_type 있음)면 screening_result를 주입하고 다음에 intake로 직행하고,
+    아니면 빈 업데이트만 반환해 다음에 screener로 보낸다.
+    """
+    body = state.get("body_evidence") or {}
+    if not body.get("case_type") and not body.get("intended_risk_type"):
+        return {}
+    screening = _build_prescreened_result(body)
+    updated_body = {**body, "case_type": screening["case_type"], "intended_risk_type": screening["case_type"]}
+    return {
+        "screening_result": screening,
+        "intended_risk_type": screening["case_type"],
+        "body_evidence": updated_body,
+    }
+
+
 async def screener_node(state: AgentState) -> AgentState:
     """
     Phase 0 — Screening.
     Runs deterministic signal analysis on raw body_evidence to classify
     the case_type BEFORE the agent begins deep analysis.
     This mirrors the original aura-platform /detect/screen flow.
+    (사전 스크리닝된 경우 start_router에서 intake로 가므로 이 노드는 미스크리닝 건만 처리)
     """
     body = state["body_evidence"]
 
@@ -1309,6 +1344,41 @@ async def screener_node(state: AgentState) -> AgentState:
 
 async def intake_node(state: AgentState) -> AgentState:
     flags = _derive_flags(state["body_evidence"])
+    pending: list[dict[str, Any]] = []
+
+    # 사전 스크리닝된 경우(screener 건너뜀): 스트림/타임라인용 SCREENING_RESULT 이벤트를 먼저 발행
+    screening_result = state.get("screening_result")
+    if screening_result:
+        label_map = {
+            "HOLIDAY_USAGE": "휴일/휴무 중 사용 의심",
+            "LIMIT_EXCEED": "한도 초과 의심",
+            "PRIVATE_USE_RISK": "사적 사용 위험",
+            "UNUSUAL_PATTERN": "비정상 패턴",
+            "NORMAL_BASELINE": "정상 범위",
+        }
+        label = label_map.get(screening_result.get("case_type", ""), screening_result.get("case_type", ""))
+        severity = screening_result.get("severity", "MEDIUM")
+        score = screening_result.get("score", 0)
+        reason_text = screening_result.get("reason_text", "")
+        pending.append(
+            AgentEvent(
+                event_type="SCREENING_RESULT",
+                node="screener",
+                phase="screen",
+                message=f"스크리닝 완료(사전 적용): [{label}] — 중요도 {severity} / 점수 {score}",
+                thought="테스트 데이터 생성 시점에 적용된 스크리닝 결과를 사용합니다.",
+                action="사전 스크리닝 결과 반영",
+                observation=reason_text,
+                metadata={
+                    "case_type": screening_result.get("case_type"),
+                    "severity": severity,
+                    "score": score,
+                    "reasons": screening_result.get("reasons", []),
+                    "reasonText": reason_text,
+                },
+            ).to_payload(),
+        )
+
     reasoning_parts = ["전표 입력값에서 핵심 위험 지표를 추출했다."]
     if flags.get("isHoliday"):
         reasoning_parts.append("휴일 사용 정황이 감지되었다.")
@@ -1318,9 +1388,9 @@ async def intake_node(state: AgentState) -> AgentState:
         reasoning_parts.append("MCC 업종 코드가 있어 업종 위험 검증이 필요하다.")
     reasoning_text = " ".join(reasoning_parts)
     last_node_summary = f"intake 완료: {reasoning_text[:60]}…" if len(reasoning_text) > 60 else f"intake 완료: {reasoning_text}"
-    pending: list[dict[str, Any]] = [
+    pending.append(
         AgentEvent(event_type="NODE_START", node="intake", phase="analyze", message="입력 데이터를 정규화합니다.", metadata=dict(flags)).to_payload(),
-    ]
+    )
     intake_context = {
         "flags": flags,
         "last_node_summary": state.get("last_node_summary", "없음"),
@@ -3051,19 +3121,24 @@ def build_agent_graph():
         return _COMPILED_GRAPH
 
     workflow = StateGraph(AgentState)
-    # Phase 0: Screening (case type classification from raw signals)
+    # 진입 라우터: 사전 스크리닝된 전표(case_type 있음)면 intake로, 아니면 screener로
+    workflow.add_node("start_router", start_router_node)
     workflow.add_node("screener", screener_node)
-    # Phase 1-7: Deep analysis
     workflow.add_node("intake", intake_node)
     workflow.add_node("planner", planner_node)
     workflow.add_node("execute", execute_node)
     workflow.add_node("critic", critic_node)
     workflow.add_node("verify", verify_node)
-    workflow.add_node("hitl_pause", hitl_pause_node)  # Phase D: HITL 시 run 조기 종료
-    workflow.add_node("hitl_validate", hitl_validate_node)  # 재분석 시 필수 항목 채움 여부 검사, 미충족 시 재 HITL
+    workflow.add_node("hitl_pause", hitl_pause_node)
+    workflow.add_node("hitl_validate", hitl_validate_node)
     workflow.add_node("reporter", reporter_node)
     workflow.add_node("finalizer", finalizer_node)
-    workflow.add_edge(START, "screener")
+
+    def _route_after_start_router(state: AgentState) -> str:
+        return "intake" if state.get("screening_result") else "screener"
+
+    workflow.add_edge(START, "start_router")
+    workflow.add_conditional_edges("start_router", _route_after_start_router, {"intake": "intake", "screener": "screener"})
     workflow.add_edge("screener", "intake")
     workflow.add_edge("intake", "planner")
     workflow.add_edge("planner", "execute")
@@ -3148,11 +3223,11 @@ async def run_langgraph_agentic_analysis(
 
     # 1차: checkpoint 기반 resume 시도
     if resume_value is not None:
-        logger.info("[agent] run_langgraph resume_value present run_id=%s — attempting checkpoint resume (hitl_validate→reporter→finalizer)", run_id)
+        logger.info("[RESUME_TRACE] run_langgraph run_id=%s 1차: Command(resume=...) checkpoint 재개 시도 (hitl_pause 이후 reporter→finalizer)", run_id)
         try:
             async for ev in _yield_updates(_stream_from_graph(Command(resume=resume_value))):
                 yield ev
-            logger.info("[agent] run_langgraph checkpoint resume completed run_id=%s", run_id)
+            logger.info("[RESUME_TRACE] run_langgraph run_id=%s 1차 완료: checkpoint 재개 성공", run_id)
             return
         except KeyError as e:
             # 체크포인트가 없거나 깨진 경우: 'body_evidence' KeyError를 만나면 동일 run_id로 새 입력으로 재시작
@@ -3160,7 +3235,7 @@ async def run_langgraph_agentic_analysis(
                 raise
             # 체크포인트 미존재(예: MemorySaver + 다른 워커) 시 처음부터 재실행됨. postgres 사용 시 HITL 직후 노드부터만 재개됨.
             logger.warning(
-                "resume checkpoint not found for run_id=%s (checkpointer=%s); re-running from screener with hitlResponse. "
+                "[RESUME_TRACE] run_langgraph run_id=%s 1차 실패: checkpoint 없음 (checkpointer=%s) → 2차 경로(스크리닝부터 재실행). "
                 "Set CHECKPOINTER_BACKEND=postgres for true resume-from-HITL.",
                 run_id,
                 getattr(settings, "checkpointer_backend", "memory"),
@@ -3169,7 +3244,9 @@ async def run_langgraph_agentic_analysis(
 
     # 2차: 새 입력으로 실행 (resume 없음 또는 resume 실패)
     if resume_value is not None:
-        logger.info("[agent] run_langgraph 2차 경로: full run from screener with hitlResponse run_id=%s", run_id)
+        logger.info("[RESUME_TRACE] run_langgraph run_id=%s 2차 경로: 스크리닝부터 전체 실행 (body_evidence에 hitlResponse 주입)", run_id)
+    else:
+        logger.info("[RESUME_TRACE] run_langgraph run_id=%s 경로: 스크리닝부터 전체 실행 (resume_value 없음)", run_id)
     body_with_hitl = dict(body_evidence or {})
     if resume_value is not None:
         body_with_hitl["hitlResponse"] = resume_value
