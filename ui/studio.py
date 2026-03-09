@@ -127,7 +127,7 @@ def render_agent_studio_page() -> None:
         with tabs[4]:
             graph_tabs = st.tabs(["메인 오케스트레이션", "스킬 실행 흐름"])
             with graph_tabs[0]:
-                st.caption("상위 오케스트레이션 그래프: screener → intake → planner → execute → critic → verify → hitl_pause/reporter → finalizer. 실제 runtime graph와 동일합니다.")
+                st.caption("상위 오케스트레이션 그래프: START → start_router → screener 또는 intake → planner → execute → critic → verify → (hitl_pause → hitl_validate 또는 reporter) → reporter → finalizer → END. 실제 runtime graph와 동일합니다.")
                 render_legend(
                     [
                         ("#f5f3ff", "에이전트 메인 노드"),
@@ -139,13 +139,13 @@ def render_agent_studio_page() -> None:
                 st.markdown("""
 **단계별 설명**
 
-1. **START**: 분석 런 시작
-2. **Intake Agent**: 전표 입력과 위험 지표 정규화
-3. **Planner Agent**: 조사 계획과 tool 순서 수립
-4. **Execute Agent**: 실제 LangChain tool 호출
-5. **Critic Agent**: 과잉 주장과 반례 검토
-6. **Verifier Agent**: 자동 판정 가능 여부 검증
-7. **HITL Review**: 담당자 검토 필요 시 개입
+1. **START** → **Start Router**: 사전 스크리닝 여부에 따라 Intake 직행 또는 Screener로 분기
+2. **Screener**: 전표 기반 케이스 유형 분류(rule/hybrid)
+3. **Intake Agent**: 전표 입력과 위험 지표 정규화
+4. **Planner Agent**: 조사 계획과 tool 순서 수립
+5. **Execute Agent**: 실제 LangChain tool 호출
+6. **Critic Agent**: 과잉 주장과 반례 검토
+7. **Verifier Agent**: 자동 판정 가능 여부 검증 → 필요 시 **HITL Pause** → **HITL Validate** 후 Reporter로 재개
 8. **Reporter Agent**: 설명 문장과 최종 요약 생성
 9. **Finalizer**: 상태/점수/이력 최종 확정
 10. **END**: 저장/조회 가능한 결과로 종료

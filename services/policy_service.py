@@ -581,7 +581,7 @@ def _build_dense_query_with_hyde(
         )
         user_prompt = f"전표 상황:\n{base_query}\n\n이 상황에 적용될 가설 규정 문장:"
         response = client.chat.completions.create(
-            model=getattr(settings, "reasoning_llm_model", "gpt-4o-mini"),
+            model=getattr(settings, "reasoning_llm_model", "gpt-5"),
             max_tokens=150,
             messages=[
                 {"role": "system", "content": system_prompt},

@@ -117,7 +117,7 @@ def rerank_with_llm_fallback(
         )
 
         response = client.chat.completions.create(
-            model=getattr(settings, "reasoning_llm_model", "gpt-4o-mini"),
+            model=getattr(settings, "reasoning_llm_model", "gpt-5"),
             max_tokens=100,
             response_format={"type": "json_object"},
             messages=[

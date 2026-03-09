@@ -474,7 +474,7 @@ if st.session_state.get("last_stream_content"):
 
 ### B-6. 모델명 노이즈 제거 + 아이콘 통일
 
-**문제 1**: `source_label`에 `gpt-4o-mini`가 매 이벤트마다 반복 표시.
+**문제 1**: `source_label`에 모델명(`gpt-5` 등)이 매 이벤트마다 반복 표시.
 
 ```python
 # 기존 — 매 카드에 모델명 표시
@@ -1247,5 +1247,4 @@ reasoning 토큰 실시간 타이핑 출력
 - [ ] `workspace.py` 메인 루프에 `THINKING_RETRY` 분기 추가 (노란색 "재검토 중" 카드)
 - [ ] 재시도 초과 시 경고 로그 확인 (시연 전 로그 점검 필수)
 - [ ] 시연 테스트: critic이 HOLD 판정 시 reasoning에도 보류 근거가 명시되는지 확인
-
 

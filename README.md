@@ -373,6 +373,9 @@ ENABLE_LANGGRAPH_IF_AVAILABLE=true
 ENABLE_REASONING_LIVE_LLM=true
 REASONING_LLM_MODEL=gpt-5
 REASONING_LLM_LABEL=Azure OpenAI gpt-5
+SCREENING_MODE=hybrid
+SCREENING_LLM_MODEL=gpt-5
+SCREENING_LLM_FALLBACK_MODEL=gpt-5
 OPENAI_BASE_URL=https://<your-resource>.openai.azure.com/
 OPENAI_API_VERSION=2024-12-01-preview
 OPENAI_API_KEY=<your-key>
@@ -403,6 +406,9 @@ OPENAI_EMBEDDING_MAX_RETRIES=3
 | `OPENAI_BASE_URL` | OpenAI/Azure 엔드포인트 | - |
 | `OPENAI_API_KEY` | OpenAI/Azure API 키 | - |
 | `REASONING_LLM_MODEL` | Reasoning 생성 모델 | gpt-5 |
+| `SCREENING_MODE` | 스크리닝 실행 모드(`rule`/`hybrid`) | hybrid |
+| `SCREENING_LLM_MODEL` | 스크리닝 분류 모델 | gpt-5 |
+| `SCREENING_LLM_FALLBACK_MODEL` | 스크리닝 fallback 모델 | gpt-5 |
 | `OPENAI_EMBEDDING_MODEL` | 임베딩 모델(배포명) | text-embedding-3-large |
 | `OPENAI_EMBEDDING_DIM` | 임베딩 차원 | 3072 |
 | `RAG_EMBEDDING_COLUMN` | rag_chunk 임베딩 컬럼 | embedding_az |

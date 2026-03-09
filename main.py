@@ -234,6 +234,24 @@ async def _run_analysis_task(
         is_resume,
         list(resume_value.keys()) if isinstance(resume_value, dict) else None,
     )
+    # 스트림이 "started"만 찍히고 한동안 비어 보이는 문제를 줄이기 위해,
+    # 백엔드 태스크 시작 즉시 최소 1개의 AGENT_EVENT를 publish 한다.
+    try:
+        await runtime.publish(
+            run_id,
+            "AGENT_EVENT",
+            {
+                "event_type": "NODE_START",
+                "node": "bootstrap",
+                "phase": "system",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "message": "분석을 시작합니다." if not is_resume else "HITL 응답을 반영해 분석을 이어갑니다.",
+                "metadata": {"resume": bool(is_resume)},
+            },
+        )
+    except Exception:
+        # 스트림 초기 이벤트 실패는 분석 자체를 막지 않는다.
+        pass
     if is_resume:
         logger.info(
             "[RESUME_TRACE] _run_analysis_task run_id=%s → 에이전트에 resume_value 전달, checkpoint 재개 시도 예정",
@@ -354,6 +372,21 @@ async def _run_analysis_task(
                     "result": data,
                     "completed_at": datetime.now(timezone.utc).isoformat(),
                 }
+        # 에이전트가 종료 이벤트를 방출하지 않고 종료되는 경우, 스트림이 영원히 대기 상태로 남는다.
+        # 이런 비정상 종료를 감지해 실패로 마감한다.
+        if last_payload is None:
+            fail_payload = {"error": "agent stream ended without terminal event", "stage": "runner"}
+            try:
+                await runtime.publish(run_id, "failed", fail_payload)
+            except Exception:
+                pass
+            last_payload = {
+                "run_id": run_id,
+                "case_id": case_id,
+                "event_type": "failed",
+                "result": fail_payload,
+                "completed_at": datetime.now(timezone.utc).isoformat(),
+            }
     except Exception as e:
         fail_payload = {"error": str(e), "stage": "runner"}
         await runtime.publish(run_id, "failed", fail_payload)

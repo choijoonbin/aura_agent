@@ -12,12 +12,10 @@ from db.models import AgentCase, FiDocHeader, FiDocItem
 from utils.config import settings
 
 
-# BE(dwp-backend) DemoViolationService 시나리오와 동일한 필드 규칙 적용.
-# BE: setContextForScenario → hr_status, mcc_code, budget_exceeded_flag
-#     preferredMccCodes(HOLIDAY)=5813,5812,5814 / LIMIT=7011,4722,5812 / PRIVATE=7992,5813,7011 / UNUSUAL=4722,7011,7992,5813 / DEFAULT=5812,5814
-#     resolveBudgetExceededFlag: SPLIT_PAYMENT,LIMIT_EXCEED,OVER_LIMIT→Y / UNUSUAL→random / else N
-#     HOLIDAY_USAGE는 budget N (휴일 사용 의심은 한도초과와 별개).
-# BE screen-batch 요청에는 intended_risk_type 미포함 → Aura가 전표 원시 데이터만으로 스크리닝.
+# 시연 데이터 규칙:
+# - AuraAgent 표준 case_type 5종(HOLIDAY_USAGE/LIMIT_EXCEED/PRIVATE_USE_RISK/UNUSUAL_PATTERN/NORMAL_BASELINE)만 사용.
+# - 스크리닝 핵심 입력 필드(occurredAt, isHoliday, hrStatus, hrStatusRaw, mccCode, budgetExceeded, amount)를
+#   생성 단계에서 모두 채우도록 시나리오 프로파일을 강제 검증한다.
 SCENARIO_PROFILES: dict[str, dict[str, Any]] = {
     "HOLIDAY_USAGE": {
         "label": "휴일 사용 의심",
@@ -140,12 +138,54 @@ def _case_id_from_voucher(tenant_id: int, bukrs: str, belnr: str, gjahr: str) ->
     return int(hashlib.md5(key.encode()).hexdigest(), 16) % (10 ** 14) + 1
 
 
+def _validate_scenario_profile(scenario: str, profile: dict[str, Any]) -> None:
+    required = (
+        "hr_status",
+        "mcc_code",
+        "budget_flag",
+        "amount_range",
+        "hour_candidates",
+        "day_mode",
+    )
+    missing = [k for k in required if k not in profile]
+    if missing:
+        raise ValueError(f"invalid demo scenario profile({scenario}): missing={','.join(missing)}")
+
+    if str(profile["day_mode"]) not in {"weekday", "weekend"}:
+        raise ValueError(f"invalid day_mode in scenario({scenario}): {profile['day_mode']}")
+    if str(profile["budget_flag"]).upper() not in {"Y", "N"}:
+        raise ValueError(f"invalid budget_flag in scenario({scenario}): {profile['budget_flag']}")
+    if not str(profile["mcc_code"]).strip():
+        raise ValueError(f"invalid mcc_code in scenario({scenario})")
+    if not str(profile["hr_status"]).strip():
+        raise ValueError(f"invalid hr_status in scenario({scenario})")
+
+    hours = profile["hour_candidates"]
+    if not isinstance(hours, list) or not hours:
+        raise ValueError(f"invalid hour_candidates in scenario({scenario})")
+    for h in hours:
+        if not isinstance(h, int) or h < 0 or h > 23:
+            raise ValueError(f"invalid hour value in scenario({scenario}): {h}")
+
+    amount_range = profile["amount_range"]
+    if (
+        not isinstance(amount_range, tuple)
+        or len(amount_range) != 2
+        or not isinstance(amount_range[0], int)
+        or not isinstance(amount_range[1], int)
+        or amount_range[0] <= 0
+        or amount_range[1] < amount_range[0]
+    ):
+        raise ValueError(f"invalid amount_range in scenario({scenario}): {amount_range}")
+
+
 def seed_demo_scenarios(db: Session, scenario: str, count: int = 5) -> dict[str, Any]:
     tenant_id = settings.default_tenant_id
     user_id = settings.default_user_id
     profile = SCENARIO_PROFILES.get(scenario)
     if not profile:
         raise ValueError(f"unsupported scenario: {scenario}")
+    _validate_scenario_profile(scenario, profile)
 
     target_day = _next_day(profile["day_mode"])
     inserted = 0
@@ -222,17 +262,25 @@ def seed_demo_scenarios(db: Session, scenario: str, count: int = 5) -> dict[str,
         inserted += 1
         keys.append(f"1000-{belnr}-{gjahr_str}")
 
-    db.commit()
-
-    # 테스트 데이터 생성 시점에 스크리닝까지 백엔드에서 수행해 두면, 분석 시작 시 스크리닝 로직을 다시 실행하지 않음
+    # 테스트 데이터 생성 시점에 스크리닝까지 수행:
+    # - strict_required_fields=True로 핵심 필드 누락 시 즉시 실패
+    # - commit=False로 개별 커밋을 막고 일괄 커밋(원자성 유지)
     from services.case_service import run_case_screening
-    for vkey in keys:
-        try:
-            run_case_screening(db, vkey)
-        except Exception:
-            pass
-    if keys:
+
+    try:
+        if keys:
+            db.flush()
+            for vkey in keys:
+                run_case_screening(
+                    db,
+                    vkey,
+                    strict_required_fields=True,
+                    commit=False,
+                )
         db.commit()
+    except Exception:
+        db.rollback()
+        raise
 
     return {"scenario": scenario, "inserted": inserted, "voucher_keys": keys}
 

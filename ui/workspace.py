@@ -444,6 +444,7 @@ def _stream_status_keys(run_id: str | None) -> tuple[str | None, str | None]:
 
 # idle(생각중) 표시 시 마지막 완료 노드가 아닌 다음 단계 문구를 보여주기 위한 메타
 _STREAM_NEXT_FOR_IDLE: dict[str, tuple[str, str]] = {
+    "bootstrap": ("입력 해석", "분석을 시작하는 중입니다."),
     "screener": ("입력 해석", "전표 입력값과 위험 지표를 정규화합니다."),
     "intake": ("조사 계획 수립", "검증할 사실과 사용할 도구 순서를 계획합니다."),
     "planner": ("근거 수집 실행", "휴일/예산/업종/규정 근거를 조회합니다."),
@@ -465,7 +466,9 @@ def _get_stream_waiting_status(run_id: str | None) -> tuple[str, str]:
     if next_info:
         next_label, next_phrase = next_info
         return next_phrase, next_label
-    return str(status_text or ""), str(node_name or "agent")
+    if str(status_text or "").strip():
+        return str(status_text or ""), str(node_name or "agent")
+    return "이벤트 수신을 기다리는 중입니다.", "준비"
 
 
 def sse_node_block_generator_with_idle(
@@ -524,7 +527,7 @@ def sse_node_block_generator_with_idle(
             pass
 
         now = time.monotonic()
-        if had_block and (now - last_block_at) >= idle_after_sec and (now - last_idle_emit) >= 0.6:
+        if (now - last_block_at) >= idle_after_sec and (now - last_idle_emit) >= 0.6:
             status_text, node_name = _get_stream_waiting_status(run_id)
             yield {"type": "idle", "status_text": status_text, "node_name": node_name}
             last_idle_emit = now
@@ -745,10 +748,15 @@ def render_tool_trace_summary(tool_results: list[dict[str, Any]]) -> None:
     if not cards:
         render_empty_state("도구 실행 요약이 없습니다.")
         return
-    cols = st.columns(min(3, len(cards)))
+    # 4개 카드를 한 라인에 나란히 (width 균등 분할)
+    num_cols = min(4, len(cards))
+    cols = st.columns(num_cols)
     for idx, card in enumerate(cards):
-        with cols[idx % len(cols)]:
-            with stylable_container(key=f"tool_summary_{idx}", css_styles="""{padding: 16px 18px; border-radius: 16px; border: 1px solid #e5e7eb; background: #fff; box-shadow: 0 8px 22px rgba(15,23,42,0.04); min-height: 158px;}"""):
+        with cols[idx % num_cols]:
+            with stylable_container(
+                key=f"tool_summary_{idx}",
+                css_styles="""{padding: 10px 12px; border-radius: 14px; border: 1px solid #e5e7eb; background: #fff; box-shadow: 0 6px 18px rgba(15,23,42,0.04); min-height: 120px;}""",
+            ):
                 st.caption(card["tool"])
                 st.markdown(f"**{card['metric_label']}**")
                 st.subheader(card["metric_value"])
@@ -835,6 +843,109 @@ def render_score_breakdown_card(policy_score: int, evidence_score: int, final_sc
         st.html(score_html)
     except Exception:
         st.markdown(score_html, unsafe_allow_html=True)
+
+
+_SCORE_CATEGORY_LABELS: dict[str, str] = {
+    "policy": "정책",
+    "evidence": "근거",
+    "amount": "금액",
+    "multiplier": "승수",
+}
+
+
+def _extract_score_breakdown_from_timeline(timeline: list[dict[str, Any]]) -> dict[str, Any]:
+    for event in reversed(timeline):
+        if event.get("event_type") != "AGENT_EVENT":
+            continue
+        payload = event.get("payload") or {}
+        if str(payload.get("event_type") or "").upper() != "SCORE_BREAKDOWN":
+            continue
+        meta = payload.get("metadata") or {}
+        score = meta.get("score_breakdown") if isinstance(meta.get("score_breakdown"), dict) else meta
+        if isinstance(score, dict):
+            return score
+    return {}
+
+
+def _fmt_score_signal_value(value: Any) -> str:
+    if value is None:
+        return "-"
+    if isinstance(value, bool):
+        return "예" if value else "아니오"
+    if isinstance(value, float):
+        return f"{value:.3f}".rstrip("0").rstrip(".")
+    return str(value)
+
+
+def _fmt_score_points(points: Any) -> str:
+    try:
+        p = float(points or 0.0)
+    except Exception:
+        return str(points or "0")
+    if p > 0:
+        return f"+{p:g}"
+    return f"{p:g}"
+
+
+def render_score_breakdown_detail(score_breakdown: dict[str, Any]) -> None:
+    with st.expander("점수 산정 근거 보기", expanded=False):
+        # 판단 흐름 요약과 동일한 expander 내부 가독성(밝은 카드/진한 텍스트) 적용
+        with stylable_container(
+            key="process_story_score_breakdown_detail",
+            css_styles="""{
+                padding: 0.2rem 0.15rem;
+                border-radius: 12px;
+            }""",
+        ):
+            st.caption("최종 점수 기준으로 계산식과 가산/감점 내역을 확인합니다.")
+
+            trace = str(score_breakdown.get("calculation_trace") or "").strip()
+            if trace:
+                st.markdown(f"`{trace}`")
+
+            policy_weight = score_breakdown.get("policy_weight")
+            evidence_weight = score_breakdown.get("evidence_weight")
+            compound_multiplier = score_breakdown.get("compound_multiplier")
+            amount_weight = score_breakdown.get("amount_weight")
+            weight_parts: list[str] = []
+            if isinstance(policy_weight, (int, float)):
+                weight_parts.append(f"정책 가중치 {float(policy_weight):.2f}")
+            if isinstance(evidence_weight, (int, float)):
+                weight_parts.append(f"근거 가중치 {float(evidence_weight):.2f}")
+            if isinstance(compound_multiplier, (int, float)):
+                weight_parts.append(f"복합 위험 승수 {float(compound_multiplier):.2f}")
+            if isinstance(amount_weight, (int, float)):
+                weight_parts.append(f"금액 승수 {float(amount_weight):.2f}")
+            if weight_parts:
+                st.caption(" · ".join(weight_parts))
+
+            reasons = score_breakdown.get("reasons") or []
+            if isinstance(reasons, list) and reasons:
+                st.markdown("**가산/감점 사유**")
+                for idx, reason in enumerate(reasons, start=1):
+                    text = str(reason or "").strip()
+                    if text:
+                        st.caption(f"{idx}. {text}")
+
+            signals = score_breakdown.get("signals") or []
+            if isinstance(signals, list) and signals:
+                rows: list[dict[str, str]] = []
+                for sig in signals:
+                    if not isinstance(sig, dict):
+                        continue
+                    category = _SCORE_CATEGORY_LABELS.get(str(sig.get("category") or "").strip().lower(), "기타")
+                    label = str(sig.get("label") or sig.get("signal") or "-").strip()
+                    rows.append(
+                        {
+                            "구분": category,
+                            "항목": label or "-",
+                            "값": _fmt_score_signal_value(sig.get("raw_value")),
+                            "점수 영향": _fmt_score_points(sig.get("points")),
+                        }
+                    )
+                if rows:
+                    st.markdown("**항목별 신호 점수**")
+                    st.table(rows)
 
 
 def _thinking_row_html(label: str, icon: str, content: str, row_class: str, border_color: str) -> str:
@@ -3120,9 +3231,12 @@ def render_workspace_results(latest_bundle: dict[str, Any], debug_mode: bool) ->
     )
     if failed and debug_mode:
         st.json(result)
-    if result.get("score_breakdown"):
-        sb = result["score_breakdown"]
+    sb = result.get("score_breakdown") if isinstance(result.get("score_breakdown"), dict) else {}
+    if not sb:
+        sb = _extract_score_breakdown_from_timeline(timeline)
+    if sb:
         st.caption(f"정책점수 {sb.get('policy_score', '-')} · 근거점수 {sb.get('evidence_score', '-')} · 최종점수 {sb.get('final_score', '-')}")
+        render_score_breakdown_detail(sb)
     quality_codes = result.get("quality_gate_codes") or []
     if quality_codes:
         badges_html = "".join(f'<span class="mt-badge mt-badge-amber">{code}</span>' for code in quality_codes)

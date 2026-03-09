@@ -53,6 +53,13 @@ _CHECKPOINTER: Any | None = None
 _COMPILED_GRAPH: Any | None = None
 _MAX_CRITIC_LOOP = 2
 _WORD_RE = re.compile(r"[0-9A-Za-z가-힣]{2,}")
+_VALID_SCREENING_CASE_TYPES = {
+    "HOLIDAY_USAGE",
+    "LIMIT_EXCEED",
+    "PRIVATE_USE_RISK",
+    "UNUSUAL_PATTERN",
+    "NORMAL_BASELINE",
+}
 _CLAIM_PRIORITY: dict[str, int] = {
     "night_violation": 10,
     "holiday_hr_conflict": 9,
@@ -88,6 +95,10 @@ def _compact_reasoning_for_stream(text: str) -> str:
         compact = re.sub(r"[,:;·/\-]\s*[^,:;·/\-]*$", "", compact).rstrip()
         compact = compact.rstrip(".") + "..."
     return compact
+
+
+def _is_valid_screening_case_type(value: Any) -> bool:
+    return str(value or "").strip().upper() in _VALID_SCREENING_CASE_TYPES
 
 
 def _get_attr(output: Any, key: str) -> Any:
@@ -523,7 +534,7 @@ async def _select_policy_refs_by_relevance(
         else:
             client = AsyncOpenAI(api_key=settings.openai_api_key, base_url=base_url or None)
         response = await client.chat.completions.create(
-            model=getattr(settings, "reasoning_llm_model", "gpt-4o-mini"),
+            model=getattr(settings, "reasoning_llm_model", "gpt-5"),
             max_tokens=300,
             response_format={"type": "json_object"},
             messages=[
@@ -789,7 +800,7 @@ async def _llm_decide_hitl_verdict(
         else:
             client = AsyncOpenAI(api_key=settings.openai_api_key, base_url=base_url or None)
         response = await client.chat.completions.create(
-            model=getattr(settings, "reasoning_llm_model", "gpt-4o-mini"),
+            model=getattr(settings, "reasoning_llm_model", "gpt-5"),
             max_tokens=400,
             response_format={"type": "json_object"},
             messages=[
@@ -1227,6 +1238,8 @@ def _score(flags: dict[str, Any], tool_results: list[dict[str, Any]]) -> dict[st
 def _build_prescreened_result(body: dict[str, Any]) -> dict[str, Any]:
     """사전 스크리닝된 body_evidence로 screening_result 딕셔너리 구성 (start_router / intake 이벤트용)."""
     ct = body.get("case_type") or body.get("intended_risk_type") or ""
+    if not _is_valid_screening_case_type(ct):
+        ct = ""
     severity = body.get("severity") or "MEDIUM"
     score_raw = body.get("screening_score")
     score_int = int(score_raw * 100) if isinstance(score_raw, (int, float)) else (int(score_raw) if score_raw else 0)
@@ -1247,7 +1260,8 @@ async def start_router_node(state: AgentState) -> AgentState:
     아니면 빈 업데이트만 반환해 다음에 screener로 보낸다.
     """
     body = state.get("body_evidence") or {}
-    if not body.get("case_type") and not body.get("intended_risk_type"):
+    pre_classified = body.get("case_type") or body.get("intended_risk_type")
+    if not _is_valid_screening_case_type(pre_classified):
         return {}
     screening = _build_prescreened_result(body)
     updated_body = {**body, "case_type": screening["case_type"], "intended_risk_type": screening["case_type"]}
@@ -1271,7 +1285,7 @@ async def screener_node(state: AgentState) -> AgentState:
     # If case_type was already screened (AgentCase exists), skip re-screening
     # but still emit the SCREENING_RESULT event so it shows in the stream.
     pre_classified = body.get("case_type") or body.get("intended_risk_type")
-    if pre_classified and pre_classified not in ("UNKNOWN", "NORMAL_BASELINE", ""):
+    if _is_valid_screening_case_type(pre_classified) and str(pre_classified).upper() != "NORMAL_BASELINE":
         screening = {
             "case_type": pre_classified,
             "severity": body.get("severity") or "MEDIUM",
@@ -1280,7 +1294,7 @@ async def screener_node(state: AgentState) -> AgentState:
             "reason_text": f"기존 분류: {pre_classified}",
         }
     else:
-        screening = run_screening(body)
+        screening = await asyncio.to_thread(run_screening, body)
 
     # Propagate screened case_type into body_evidence so downstream nodes use it
     updated_body = {**body, "case_type": screening["case_type"], "intended_risk_type": screening["case_type"]}
@@ -1488,7 +1502,7 @@ async def _invoke_llm_planner(
             client = AsyncOpenAI(**kw)
 
         response = await client.chat.completions.create(
-            model=getattr(settings, "reasoning_llm_model", "gpt-4o-mini"),
+            model=getattr(settings, "reasoning_llm_model", "gpt-5"),
             max_tokens=600,
             response_format={"type": "json_object"},
             messages=[
@@ -2245,7 +2259,7 @@ async def _derive_hitl_from_regulation(state: AgentState) -> dict[str, Any]:
             client = AsyncOpenAI(api_key=settings.openai_api_key, base_url=base_url or None)
 
         response = await client.chat.completions.create(
-            model=getattr(settings, "reasoning_llm_model", "gpt-4o-mini"),
+            model=getattr(settings, "reasoning_llm_model", "gpt-5"),
             max_tokens=800,
             response_format={"type": "json_object"},
             messages=[
@@ -2391,7 +2405,7 @@ async def _generate_hitl_review_content(
             client = AsyncOpenAI(api_key=settings.openai_api_key, base_url=base_url or None)
 
         response = await client.chat.completions.create(
-            model=getattr(settings, "reasoning_llm_model", "gpt-4o-mini"),
+            model=getattr(settings, "reasoning_llm_model", "gpt-5"),
             max_tokens=600,
             response_format={"type": "json_object"},
             messages=[
@@ -2492,7 +2506,7 @@ async def _retry_fill_hitl_review_when_empty(
             client = AsyncOpenAI(api_key=settings.openai_api_key, base_url=base_url or None)
 
         response = await client.chat.completions.create(
-            model=getattr(settings, "reasoning_llm_model", "gpt-4o-mini"),
+            model=getattr(settings, "reasoning_llm_model", "gpt-5"),
             max_tokens=700,
             response_format={"type": "json_object"},
             messages=[
@@ -3225,10 +3239,21 @@ async def run_langgraph_agentic_analysis(
     if resume_value is not None:
         logger.info("[RESUME_TRACE] run_langgraph run_id=%s 1차: Command(resume=...) checkpoint 재개 시도 (hitl_pause 이후 reporter→finalizer)", run_id)
         try:
+            yielded_terminal = False
             async for ev in _yield_updates(_stream_from_graph(Command(resume=resume_value))):
+                ev_type = ev[0] if isinstance(ev, (list, tuple)) and len(ev) >= 1 else ""
+                if ev_type in ("completed", "failed"):
+                    yielded_terminal = True
                 yield ev
-            logger.info("[RESUME_TRACE] run_langgraph run_id=%s 1차 완료: checkpoint 재개 성공", run_id)
-            return
+            if yielded_terminal:
+                logger.info("[RESUME_TRACE] run_langgraph run_id=%s 1차 완료: checkpoint 재개 성공", run_id)
+                return
+            # 일부 환경/버전에서 Command(resume=...)가 예외 없이 이벤트 없이 끝나는 경우가 있다.
+            # 이 경우 HOLD로 마감하기보다는 2차 경로(스크리닝부터 재실행)로 자동 전환해 결과를 반환한다.
+            logger.warning(
+                "[RESUME_TRACE] run_langgraph run_id=%s 1차: 스트림이 터미널 이벤트(completed/failed) 없이 종료됨 → 2차 경로로 자동 전환(스크리닝부터 재실행)",
+                run_id,
+            )
         except KeyError as e:
             # 체크포인트가 없거나 깨진 경우: 'body_evidence' KeyError를 만나면 동일 run_id로 새 입력으로 재시작
             if str(e) != "'body_evidence'":

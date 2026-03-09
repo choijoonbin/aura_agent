@@ -73,7 +73,36 @@ def _build_screening_body(header: FiDocHeader, amount: float | None) -> dict:
     }
 
 
-def run_case_screening(db: Session, voucher_key: str) -> dict:
+_SCREENING_REQUIRED_FIELDS = (
+    "occurredAt",
+    "isHoliday",
+    "hrStatus",
+    "hrStatusRaw",
+    "mccCode",
+    "budgetExceeded",
+    "amount",
+)
+
+
+def _missing_screening_required_fields(screening_body: dict) -> list[str]:
+    missing: list[str] = []
+    for key in _SCREENING_REQUIRED_FIELDS:
+        val = screening_body.get(key)
+        if val is None:
+            missing.append(key)
+            continue
+        if isinstance(val, str) and not val.strip():
+            missing.append(key)
+    return missing
+
+
+def run_case_screening(
+    db: Session,
+    voucher_key: str,
+    *,
+    strict_required_fields: bool = False,
+    commit: bool = True,
+) -> dict:
     """
     Run screening on a raw voucher and persist the result into AgentCase.
     Returns the screening result dict.
@@ -105,6 +134,14 @@ def run_case_screening(db: Session, voucher_key: str) -> dict:
     )
 
     screening_body = _build_screening_body(header, amount)
+    if strict_required_fields:
+        missing = _missing_screening_required_fields(screening_body)
+        if missing:
+            raise ValueError(
+                "screening required field missing: "
+                + ",".join(missing)
+                + f" (voucher_key={voucher_key})"
+            )
     result = run_screening(screening_body)
 
     # Upsert AgentCase with screening result
@@ -139,7 +176,10 @@ def run_case_screening(db: Session, voucher_key: str) -> dict:
             status="NEW",
         )
         db.add(case)
-    db.commit()
+    if commit:
+        db.commit()
+    else:
+        db.flush()
 
     return {**result, "voucher_key": voucher_key}
 

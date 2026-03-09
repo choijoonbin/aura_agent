@@ -55,6 +55,18 @@ class Settings:
     reasoning_llm_model: str = os.getenv("REASONING_LLM_MODEL", "gpt-5")
     reasoning_stream_max_chars: int = int(os.getenv("REASONING_STREAM_MAX_CHARS", "5000"))
     reasoning_stream_max_sentences: int = int(os.getenv("REASONING_STREAM_MAX_SENTENCES", "10"))
+
+    # Screening mode: rule | hybrid (LLM + deterministic guardrail)
+    screening_mode: str = os.getenv("SCREENING_MODE", "hybrid")
+    screening_llm_model: str = os.getenv("SCREENING_LLM_MODEL", "gpt-5")
+    screening_llm_fallback_model: str = os.getenv("SCREENING_LLM_FALLBACK_MODEL", "gpt-5")
+    screening_llm_temperature: float = float(os.getenv("SCREENING_LLM_TEMPERATURE", "0"))
+    screening_llm_max_tokens: int = int(os.getenv("SCREENING_LLM_MAX_TOKENS", "220"))
+    screening_llm_timeout_seconds: float = float(os.getenv("SCREENING_LLM_TIMEOUT_SECONDS", "8"))
+    screening_llm_override_min_confidence: float = float(
+        os.getenv("SCREENING_LLM_OVERRIDE_MIN_CONFIDENCE", "0.75")
+    )
+
     openai_api_key: str | None = os.getenv("OPENAI_API_KEY") or None
     openai_base_url: str | None = os.getenv("OPENAI_BASE_URL") or None
     openai_api_version: str = os.getenv("OPENAI_API_VERSION", "2024-12-01-preview")

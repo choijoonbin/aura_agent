@@ -169,6 +169,16 @@ def inject_css() -> None:
         .stMetric label, .stMetric div {{ color:#0f172a !important; }}
         [data-testid="stExpanderDetails"] {{ background: #0f172a !important; color: #ffffff !important; }}
         [data-testid="stExpanderDetails"] *, [data-testid="stExpanderDetails"] pre, [data-testid="stExpanderDetails"] code, [data-testid="stExpanderDetails"] pre span {{ color: #ffffff !important; }}
+        /* Expander 내부 배지: 배경·텍스트 대비 유지 (판단 흐름 요약 등에서 배지가 보이도록) */
+        [data-testid="stExpanderDetails"] .mt-badge {{ background: #fff !important; color: #334155 !important; border-color: #e2e8f0 !important; }}
+        [data-testid="stExpanderDetails"] .mt-badge-blue {{ background: #eff6ff !important; color: #1d4ed8 !important; border-color: #bfdbfe !important; }}
+        [data-testid="stExpanderDetails"] .mt-badge-red {{ background: #fef2f2 !important; color: #dc2626 !important; border-color: #fecaca !important; }}
+        [data-testid="stExpanderDetails"] .mt-badge-amber {{ background: #fffbeb !important; color: #d97706 !important; border-color: #fde68a !important; }}
+        [data-testid="stExpanderDetails"] .mt-badge-green {{ background: #ecfdf5 !important; color: #059669 !important; border-color: #a7f3d0 !important; }}
+        /* 판단 흐름 요약 카드 영역: 밝은 배경·진한 텍스트로 가독성 확보 */
+        [data-testid="stExpanderDetails"] [class*="st-key-process_story_"] {{ background: rgba(255,255,255,0.98) !important; color: #0f172a !important; }}
+        [data-testid="stExpanderDetails"] [class*="st-key-process_story_"] *, [data-testid="stExpanderDetails"] [class*="st-key-process_story_"] p, [data-testid="stExpanderDetails"] [class*="st-key-process_story_"] label {{ color: #0f172a !important; }}
+        [data-testid="stExpanderDetails"] [class*="st-key-process_story_"] .stCaption {{ color: #64748b !important; }}
         /* 펼쳤을 때 어두운 영역에서 라벨이 보이도록: 이전 타임라인 카드 보기, 판단 흐름 요약 */
         [data-testid="stExpander"]:has(.pipeline-wrapper) details[open] summary,
         [data-testid="stExpander"]:has(.pipeline-wrapper) details[open] summary * {{ color: #e2e8f0 !important; }}
@@ -442,8 +452,6 @@ def case_type_display_name(case_type: str | None) -> str:
         "PRIVATE_USE_RISK": "사적 사용 위험",
         "UNUSUAL_PATTERN": "비정상 패턴",
         "NORMAL_BASELINE": "정상 기준선",
-        "SPLIT_PAYMENT": "분할 결제 의심",
-        "DUPLICATE_SUSPECT": "중복 결제 의심",
     }
     return labels.get(str(case_type).upper(), case_type)
 
@@ -454,15 +462,12 @@ def case_type_badge(case_type: str | None) -> str:
         "HOLIDAY_USAGE": "휴일 사용 의심",
         "LIMIT_EXCEED": "한도 초과 의심",
         "PRIVATE_USE_RISK": "사적 사용 위험",
-        "SPLIT_PAYMENT": "분할 결제 의심",
-        "DUPLICATE_SUSPECT": "중복 결제 의심",
         "UNUSUAL_PATTERN": "비정상 패턴",
         "NORMAL_BASELINE": "정상 기준선",
         "UNSCREENED": "미분류",
-        "DEFAULT": "기본 분류",
     }
     label = labels.get(value, value)
-    if value in {"HOLIDAY_USAGE", "LIMIT_EXCEED", "PRIVATE_USE_RISK", "SPLIT_PAYMENT", "DUPLICATE_SUSPECT", "UNUSUAL_PATTERN"}:
+    if value in {"HOLIDAY_USAGE", "LIMIT_EXCEED", "PRIVATE_USE_RISK", "UNUSUAL_PATTERN"}:
         return f'<span class="mt-badge mt-badge-blue">{label}</span>'
     if value == "NORMAL_BASELINE":
         return f'<span class="mt-badge mt-badge-green">{label}</span>'
@@ -761,39 +766,46 @@ def _draw_graph_png(
 
 @st.cache_data(show_spinner=False)
 def draw_agent_graph() -> bytes:
-    """상위 오케스트레이션 그래프를 PNG 바이트로 반환. build_agent_graph()와 동일한 노드·엣지."""
+    """상위 오케스트레이션 그래프를 PNG 바이트로 반환. build_agent_graph()와 동일한 노드·엣지(현행)."""
     nodes = [
         ("start", "START", ""),
+        ("start_router", "Start Router", ""),
         ("screener", "Screener", ""),
         ("intake", "Intake Agent", ""),
         ("planner", "Planner Agent", ""),
         ("executor", "Execute Agent", ""),
         ("critic", "Critic Agent", ""),
         ("verifier", "Verifier Agent", ""),
-        ("hitl", "HITL Review", ""),
+        ("hitl_pause", "HITL Pause", ""),
+        ("hitl_validate", "HITL Validate", ""),
         ("reporter", "Reporter Agent", ""),
         ("finalizer", "Finalizer", ""),
         ("end", "END", ""),
     ]
-    # 노드 좌→우 일렬 (START -> screener -> intake -> ...), HITL은 위쪽 분기
-    x_main = [0, 1.6, 3.2, 4.8, 6.4, 8.0, 9.6, 11.2, 12.8, 14.4, 16.0]
-    keys_main = ["start", "screener", "intake", "planner", "executor", "critic", "verifier", "reporter", "finalizer", "end"]
+    # 메인 라인: 동일 간격(1.8)으로 좌→우 정렬. HITL 분기는 메인 라인 위쪽(y=1.35)에 수평 정렬
+    step = 1.8
+    x_main = [i * step for i in range(11)]  # 0 .. 18.0
+    keys_main = ["start", "start_router", "screener", "intake", "planner", "executor", "critic", "verifier", "reporter", "finalizer", "end"]
     pos = {k: (x_main[i], 0.0) for i, k in enumerate(keys_main)}
-    pos["hitl"] = (9.6, 1.2)
+    pos["hitl_pause"] = (x_main[7], 1.35)   # verifier 위
+    pos["hitl_validate"] = (x_main[8], 1.35)  # reporter 위
 
     edges = [
-        ("start", "screener", ""), ("screener", "intake", ""), ("intake", "planner", ""), ("planner", "executor", ""),
+        ("start", "start_router", ""),
+        ("start_router", "screener", "else"), ("start_router", "intake", "if prescreened"),
+        ("screener", "intake", ""), ("intake", "planner", ""), ("planner", "executor", ""),
         ("executor", "critic", ""), ("critic", "verifier", ""),
-        ("verifier", "hitl", "if needed"), ("verifier", "reporter", "or continue"),
-        ("hitl", "reporter", "resume"), ("reporter", "finalizer", ""), ("finalizer", "end", ""),
+        ("verifier", "hitl_pause", "if needed"), ("verifier", "reporter", "continue"),
+        ("hitl_pause", "hitl_validate", ""), ("hitl_validate", "reporter", "resume"), ("hitl_validate", "hitl_pause", "re-request"),
+        ("reporter", "finalizer", ""), ("finalizer", "end", ""),
     ]
-    return _draw_graph_png(nodes, edges, pos, figsize=(17, 3.6), hitl_nodes={"hitl"})
+    return _draw_graph_png(nodes, edges, pos, figsize=(20, 4.2), hitl_nodes={"hitl_pause", "hitl_validate"})
 
 
 @st.cache_data(show_spinner=False)
 def draw_tool_execution_graph() -> bytes:
-    """하위 실행 도구 그래프를 PNG 바이트로 반환. 첫 렌더 후 캐싱."""
-    tool_keys = ["holiday", "budget", "merchant", "document", "policy"]
+    """하위 실행 도구 그래프를 PNG 바이트로 반환. execute 노드가 호출하는 6개 도구 → score_breakdown (실제 런타임과 동일)."""
+    tool_keys = ["holiday", "budget", "merchant", "document", "policy", "legacy"]
     nodes = [
         ("execute", "execute", ""),
         ("holiday", "holiday_compliance_probe", ""),
@@ -804,20 +816,22 @@ def draw_tool_execution_graph() -> bytes:
         ("legacy", "legacy_aura_deep_audit", ""),
         ("score", "score_breakdown", ""),
     ]
-    xs = [-4.5, -2.25, 0, 2.25, 4.5]
-    pos: dict[str, tuple[float, float]] = {"execute": (0.0, 2.2), "score": (0.0, -2.2), "legacy": (6.5, 0.0)}
+    # 6개 도구를 동일 간격으로 수평 배치, execute(위) / score(아래) 중앙
+    step = 2.2
+    xs = [-5.5, -3.3, -1.1, 1.1, 3.3, 5.5]
+    pos: dict[str, tuple[float, float]] = {"execute": (0.0, 2.2), "score": (0.0, -2.2)}
     for i, k in enumerate(tool_keys):
         pos[k] = (xs[i], 0.0)
 
-    edges = [(("execute", k, "") for k in tool_keys)] + [("execute", "legacy", "conditional")]
-    edges_flat: list[tuple[str, str, str]] = [("execute", k, "") for k in tool_keys]
-    edges_flat.append(("execute", "legacy", "cond."))
-    for k in tool_keys + ["legacy"]:
+    edges_flat: list[tuple[str, str, str]] = [
+        ("execute", k, "cond." if k == "legacy" else "") for k in tool_keys
+    ]
+    for k in tool_keys:
         edges_flat.append((k, "score", ""))
 
     return _draw_graph_png(
         nodes, edges_flat, pos, figsize=(14, 5.5),
-        skill_nodes=set(tool_keys) | {"execute", "legacy", "score"},
+        skill_nodes=set(tool_keys) | {"execute", "score"},
     )
 
 
@@ -828,7 +842,10 @@ def render_graph_image(title: str, image_bytes: bytes | None, fallback_graph: by
     with center:
         png = image_bytes or fallback_graph
         if png:
-            st.image(png, use_container_width=True)
+            try:
+                st.image(png, width="stretch")
+            except TypeError:
+                st.image(png, use_container_width=True)
         else:
             st.caption("그래프를 표시할 수 없습니다.")
         st.caption(caption)
