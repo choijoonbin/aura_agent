@@ -485,6 +485,8 @@ def sse_node_block_generator_with_idle(
         try:
             for prefix, addition in sse_node_block_generator(stream_url, run_id=run_id):
                 out_q.put({"type": "block", "prefix": prefix, "addition": addition})
+        except Exception as e:
+            out_q.put({"type": "error", "message": str(e)})
         finally:
             worker_done.set()
 
@@ -1535,17 +1537,44 @@ def _resolve_hitl_request(latest_bundle: dict[str, Any]) -> dict[str, Any]:
     if isinstance(current, dict) and current:
         return current
 
+    latest_result = ((latest_bundle.get("result") or {}).get("result") or {})
+    if isinstance(latest_result, dict):
+        result_req = latest_result.get("hitl_request")
+        if isinstance(result_req, dict) and result_req:
+            return result_req
+
     run_id = str(latest_bundle.get("run_id") or "")
     timeline = latest_bundle.get("timeline") or []
     for event in reversed(timeline):
-        if event.get("event_type") != "AGENT_EVENT":
-            continue
         payload = event.get("payload") or {}
-        if str(payload.get("event_type") or "").upper() != "HITL_REQUESTED":
+        if not isinstance(payload, dict):
             continue
-        meta = payload.get("metadata") or {}
-        if isinstance(meta, dict) and meta:
-            return meta
+        event_type = str(event.get("event_type") or "").upper()
+
+        # RUN_COMPLETED payload에도 hitl_request가 포함될 수 있어(특히 REVIEW_REQUIRED 경로) 역순으로 복원한다.
+        if event_type in {"RUN_COMPLETED", "COMPLETED"}:
+            direct_req = payload.get("hitl_request")
+            if isinstance(direct_req, dict) and direct_req:
+                return direct_req
+            nested_result = payload.get("result")
+            if isinstance(nested_result, dict):
+                nested_req = nested_result.get("hitl_request")
+                if isinstance(nested_req, dict) and nested_req:
+                    return nested_req
+
+        if event_type != "AGENT_EVENT":
+            continue
+        agent_ev_type = str(payload.get("event_type") or "").upper()
+        if agent_ev_type == "HITL_REQUESTED":
+            meta = payload.get("metadata") or {}
+            if isinstance(meta, dict) and meta:
+                return meta
+        if agent_ev_type == "HITL_PAUSE":
+            meta = payload.get("metadata") or {}
+            if isinstance(meta, dict):
+                pause_req = meta.get("hitl_request")
+                if isinstance(pause_req, dict) and pause_req:
+                    return pause_req
 
     history = latest_bundle.get("history") or []
     if run_id:
@@ -2886,6 +2915,10 @@ def render_workspace_chat_panel(selected: dict[str, Any], latest_bundle: dict[st
                             str(stream_ev.get("status_text") or ""),
                             node_name=str(stream_ev.get("node_name") or "agent"),
                         )
+                    elif ev_type == "error":
+                        msg = str(stream_ev.get("message") or "스트림 연결 중 오류가 발생했습니다.")
+                        logger.warning("[ui] SSE worker error run_id=%s msg=%s", run_id, msg)
+                        st.warning(f"실시간 스트림 연결 오류: {msg}")
                 stream_wait_placeholder.empty()
                 logger.info("[ui] 스트림 for 루프 종료 vkey=%s — fetch_case_bundle 후 mt_post_stream_bundle 저장 및 st.rerun() 예정", vkey)
                 try:

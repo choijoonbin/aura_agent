@@ -56,6 +56,27 @@ logger = logging.getLogger(__name__)
 app = FastAPI(title="AuraAgent PoC API", version="0.3.0")
 
 
+def _ensure_runtime_resume_context(run_id: str, lineage: dict[str, Any] | None) -> None:
+    """
+    DB(aux)에서만 lineage를 복원한 재개 요청(review-submit/hitl)에서도
+    stream endpoint가 404가 되지 않도록 runtime queue/lineage를 보장한다.
+    """
+    info = lineage or {}
+    case_id = str(info.get("case_id") or "").strip()
+    if not case_id:
+        return
+    if runtime.get_queue(run_id) is not None and runtime.get_lineage(run_id) is not None:
+        return
+    runtime.ensure_run_context(
+        case_id=case_id,
+        run_id=run_id,
+        parent_run_id=info.get("parent_run_id"),
+        mode=str(info.get("mode") or "primary"),
+        created_at=info.get("created_at"),
+    )
+    logger.info("[analysis] runtime resume context ensured run_id=%s case_id=%s", run_id, case_id)
+
+
 @app.on_event("startup")
 async def startup() -> None:
     ensure_source_paths()
@@ -461,6 +482,7 @@ async def submit_hitl(run_id: str, request: HitlSubmitRequest, db: Session = Dep
         raise HTTPException(status_code=404, detail="source run not found")
 
     lineage = lineage or aux.get("lineage") or {}
+    _ensure_runtime_resume_context(run_id, lineage)
 
     hitl_request = runtime.get_hitl_request(run_id) or aux.get("hitl_request")
     if not hitl_request:
@@ -694,6 +716,7 @@ async def review_submit(
     if not lineage and not aux.get("lineage"):
         raise HTTPException(status_code=404, detail="source run not found")
     lineage = lineage or aux.get("lineage") or {}
+    _ensure_runtime_resume_context(run_id, lineage)
     case_id = lineage["case_id"]
     voucher_key = case_id.replace("POC-", "")
     # runtime/aux에 HITL_REQUESTED 이벤트가 없어도, 완료 결과(result_payload)에 hitl_request가 있으면 사용(팝업 제출 400 방지)

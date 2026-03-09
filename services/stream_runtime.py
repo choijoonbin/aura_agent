@@ -51,6 +51,51 @@ class StreamRuntime:
         }
         return RunContext(case_id=case_id, run_id=run_id, queue=q)
 
+    def ensure_run_context(
+        self,
+        *,
+        case_id: str,
+        run_id: str,
+        parent_run_id: str | None = None,
+        mode: str = "primary",
+        created_at: str | None = None,
+    ) -> RunContext:
+        """
+        기존 run_id를 재사용하는 resume 경로에서 queue/lineage가 메모리에 없을 수 있다.
+        (예: 서버 재시작 후 DB(aux)에서 복원)
+        이 경우 stream 구독이 404가 되지 않도록 런타임 컨텍스트를 보장한다.
+        """
+        q = self._queues.get(run_id)
+        if q is None:
+            q = asyncio.Queue()
+            self._queues[run_id] = q
+
+        self._case_runs[case_id] = run_id
+        runs = self._runs_by_case.setdefault(case_id, [])
+        if run_id not in runs:
+            runs.append(run_id)
+        self._timeline_by_run.setdefault(run_id, [])
+
+        lineage = self._run_lineage.get(run_id) or {}
+        if not lineage:
+            lineage = {
+                "case_id": case_id,
+                "parent_run_id": parent_run_id,
+                "mode": mode,
+                "created_at": created_at or datetime.now(timezone.utc).isoformat(),
+            }
+            self._run_lineage[run_id] = lineage
+        else:
+            lineage.setdefault("case_id", case_id)
+            if parent_run_id is not None and lineage.get("parent_run_id") is None:
+                lineage["parent_run_id"] = parent_run_id
+            if mode and not lineage.get("mode"):
+                lineage["mode"] = mode
+            if created_at and not lineage.get("created_at"):
+                lineage["created_at"] = created_at
+
+        return RunContext(case_id=case_id, run_id=run_id, queue=q)
+
     def get_queue(self, run_id: str) -> asyncio.Queue | None:
         return self._queues.get(run_id)
 

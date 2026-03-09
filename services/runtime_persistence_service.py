@@ -262,20 +262,39 @@ def get_run_aux_state(db: Session, *, run_id: str) -> dict[str, Any]:
         if not isinstance(metadata, dict):
             metadata = {}
         payload = metadata.get("payload") or metadata
+        if not isinstance(payload, dict):
+            payload = {}
         event_type = metadata.get("stored_event_type") or metadata.get("event_type")
         if event_type == "RUN_CREATED":
             lineage = metadata.get("lineage") or payload.get("lineage")
         elif event_type == "HITL_REQUESTED":
-            hitl_request = metadata.get("hitl_request") or payload.get("metadata") or payload
+            candidate = metadata.get("hitl_request") or payload.get("metadata") or payload.get("hitl_request") or payload
+            if isinstance(candidate, dict) and candidate:
+                hitl_request = candidate
         elif event_type == "HITL_DRAFT":
             hitl_draft = metadata.get("hitl_draft") or payload
         elif event_type == "HITL_RESPONSE":
-            hitl_response = metadata.get("hitl_response") or payload
+            candidate = metadata.get("hitl_response") or payload.get("hitl_response") or payload
+            if isinstance(candidate, dict) and candidate:
+                hitl_response = candidate
         elif event_type == "HITL_REQUIRED":
-            result = metadata.get("result") or payload.get("result")
-            hitl_request = (result or {}).get("hitl_request") if isinstance(result, dict) else hitl_request
+            candidate_result = metadata.get("result") or payload.get("result") or payload
+            if isinstance(candidate_result, dict):
+                result = candidate_result
+                candidate_request = candidate_result.get("hitl_request")
+                if isinstance(candidate_request, dict) and candidate_request:
+                    hitl_request = candidate_request
         elif event_type in {"RUN_COMPLETED", "RUN_FAILED"}:
-            result = metadata.get("result") or payload.get("result")
+            candidate_result = metadata.get("result") or payload.get("result") or payload
+            if isinstance(candidate_result, dict):
+                result = candidate_result
+                # REVIEW_REQUIRED 경로는 RUN_COMPLETED payload에만 hitl_request가 들어오므로 aux에서 복원한다.
+                candidate_request = candidate_result.get("hitl_request")
+                if isinstance(candidate_request, dict) and candidate_request:
+                    hitl_request = candidate_request
+                candidate_response = candidate_result.get("hitl_response")
+                if isinstance(candidate_response, dict) and candidate_response:
+                    hitl_response = candidate_response
         elif event_type == "EVIDENCE_UPLOADED":
             evidence_document_result = metadata.get("evidence_document_result") or payload.get("evidence_document_result")
     return {
