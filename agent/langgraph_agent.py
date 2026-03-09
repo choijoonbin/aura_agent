@@ -51,6 +51,7 @@ _TOOL_CALL_SHORT_MESSAGE: dict[str, str] = {
 }
 _CHECKPOINTER: Any | None = None
 _COMPILED_GRAPH: Any | None = None
+_CLOSURE_GRAPH: Any | None = None
 _MAX_CRITIC_LOOP = 2
 _WORD_RE = re.compile(r"[0-9A-Za-z가-힣]{2,}")
 _VALID_SCREENING_CASE_TYPES = {
@@ -404,6 +405,7 @@ async def _stream_reasoning_events_with_llm(
             f"[draft_reasoning] {reasoning_text}\n"
         )
 
+        tok_kw = {"max_completion_tokens": 520} if is_azure else {"max_tokens": 520}
         stream = await client.chat.completions.create(
             model=settings.reasoning_llm_model,
             messages=[
@@ -418,7 +420,7 @@ async def _stream_reasoning_events_with_llm(
             ],
             stream=True,
             response_format={"type": "json_object"},
-            max_tokens=520,
+            **tok_kw,
         )
 
         full_response = ""
@@ -533,14 +535,15 @@ async def _select_policy_refs_by_relevance(
             )
         else:
             client = AsyncOpenAI(api_key=settings.openai_api_key, base_url=base_url or None)
+        tok_kw = {"max_completion_tokens": 300} if is_azure else {"max_tokens": 300}
         response = await client.chat.completions.create(
             model=getattr(settings, "reasoning_llm_model", "gpt-5"),
-            max_tokens=300,
             response_format={"type": "json_object"},
             messages=[
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
             ],
+            **tok_kw,
         )
         raw = (response.choices[0].message.content or "").strip()
         parsed = json.loads(raw)
@@ -764,9 +767,11 @@ async def _llm_decide_hitl_verdict(
         "당신은 엔터프라이즈 감사 에이전트의 판단자다. "
         "담당자 검토(HITL)가 필요했던 전표에 대해 담당자가 응답을 제출했다. "
         "이 응답만 보고 '최종 확정(COMPLETED_AFTER_HITL)' vs '재검토 필요(REVIEW_REQUIRED)' 중 하나를 판단하라. "
-        "필요한 답변·근거 없이 승인만 한 경우 정상적으로는 재검토가 나와야 한다. "
-        "단, 규정·업무 맥락상 담당자 승인만으로 충분한 경우도 있다. 맥락을 보고 판단하라. "
-        "룰이나 키워드로 치지 말고, 제시된 검토 요청 사유·질문·필수 항목과 담당자 응답 내용을 비교해 판단하라. "
+        "필요한 답변·근거 없이 승인만 한 경우(의견 없음 또는 극히 짧은 무의미한 문구) 정상적으로는 재검토가 나와야 한다. "
+        "단, 담당자가 승인하고 검토 의견에 자신의 판단을 명시한 경우(예: 문제 없음, 특이 사항, 승인 가능, 이번 건 괜찮음 등)에는 "
+        "질문 문장과 완전히 같은 표현이 없어도 '질문에 대한 답변으로 해석 가능한 판단'으로 보아 COMPLETED_AFTER_HITL을 우선 고려하라. "
+        "규정·업무 맥락상 담당자 판단을 존중하는 방향으로 맥락을 보고 판단하라. "
+        "룰이나 키워드로만 치지 말고, 검토 요청 사유·질문과 담당자 응답 내용을 비교해 판단하라. "
         "JSON만 출력한다. 키: verdict(반드시 COMPLETED_AFTER_HITL 또는 REVIEW_REQUIRED), reason(한 문장 이유, 한국어)."
     )
     user = (
@@ -783,6 +788,13 @@ async def _llm_decide_hitl_verdict(
         f"증빙 업로드 검증 통과: {evidence_passed}\n\n"
         "위 맥락을 바탕으로 verdict와 reason을 JSON으로 출력하라."
     )
+    logger.info(
+        "[VERDICT_LLM] 호출 직전 approved=%s comment_len=%s comment_preview=%s",
+        approved,
+        len(comment),
+        (comment[:80] + "…") if len(comment) > 80 else (comment or "(없음)"),
+    )
+    raw = ""
     try:
         from openai import AsyncAzureOpenAI, AsyncOpenAI
 
@@ -799,16 +811,47 @@ async def _llm_decide_hitl_verdict(
             )
         else:
             client = AsyncOpenAI(api_key=settings.openai_api_key, base_url=base_url or None)
+        # Azure(gpt-5 등)는 max_tokens 미지원, max_completion_tokens 사용. finish_reason=length 시 800으로도 JSON 전에 잘림 → 1200으로 여유.
+        completion_tokens_kw = {"max_completion_tokens": 5000} if is_azure else {"max_tokens": 5000}
         response = await client.chat.completions.create(
             model=getattr(settings, "reasoning_llm_model", "gpt-5"),
-            max_tokens=400,
             response_format={"type": "json_object"},
             messages=[
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
             ],
+            **completion_tokens_kw,
         )
-        raw = (response.choices[0].message.content or "").strip()
+        choice = response.choices[0] if response.choices else None
+        raw = (choice.message.content if choice and choice.message else None) or ""
+        raw = raw.strip()
+        usage = getattr(response, "usage", None)
+        logger.info(
+            "[VERDICT_LLM] 응답 수신 content_len=%s finish_reason=%s usage=%s",
+            len(raw),
+            getattr(choice, "finish_reason", None) if choice else None,
+            (f"prompt={getattr(usage, 'prompt_tokens', None)} completion={getattr(usage, 'completion_tokens', None)}") if usage else None,
+        )
+        if not raw and choice:
+            finish = getattr(choice, "finish_reason", None)
+            refusal = getattr(choice.message, "refusal", None) if choice.message else None
+            finish_details = getattr(choice, "finish_details", None)
+            logger.warning(
+                "[VERDICT_LLM] 응답 본문 없음 — finish_reason=%s refusal=%s finish_details=%s (content_filter/length 등 원인 확인용)",
+                finish,
+                refusal,
+                finish_details,
+            )
+            # LLM 실패 시: 담당자 승인 + 의견 일정 길이 이상이면 담당자 판단 존중하여 완료 처리
+            if approved and len(comment) >= 15:
+                logger.info(
+                    "[VERDICT_LLM] 담당자 승인+의견 있음 → COMPLETED_AFTER_HITL fallback",
+                )
+                return ("COMPLETED_AFTER_HITL", "담당자 승인 및 검토 의견 반영으로 확정(LLM 판단 보조 실패 시 적용).")
+            logger.warning(
+                "[VERDICT_LLM] REVIEW_REQUIRED fallback (응답 비어 있음)",
+            )
+            return ("REVIEW_REQUIRED", "판단 LLM 응답이 비어 있어 재검토 필요 처리.")
         parsed = json.loads(raw)
         v = str(parsed.get("verdict") or "").upper()
         if v not in ("COMPLETED_AFTER_HITL", "REVIEW_REQUIRED"):
@@ -816,7 +859,19 @@ async def _llm_decide_hitl_verdict(
         reason = str(parsed.get("reason") or "").strip() or "담당자 검토 응답을 기준으로 판단함."
         return (v, reason)
     except Exception as e:
-        logger.warning("_llm_decide_hitl_verdict LLM 호출 실패: %s — REVIEW_REQUIRED로 fallback", e)
+        raw_preview = (raw[:300] + "…") if len(raw) > 300 else (raw or "(empty or not available)")
+        # LLM 예외 시에도 담당자 승인+의견 있으면 완료 fallback
+        if approved and len(comment) >= 15:
+            logger.info(
+                "_llm_decide_hitl_verdict LLM 호출 실패: %s — 담당자 승인+의견 있음 → COMPLETED_AFTER_HITL fallback",
+                e,
+            )
+            return ("COMPLETED_AFTER_HITL", "담당자 승인 및 검토 의견 반영으로 확정(LLM 판단 실패 시 적용).")
+        logger.warning(
+            "_llm_decide_hitl_verdict LLM 호출 실패: %s — REVIEW_REQUIRED로 fallback. raw_response_preview=%s",
+            e,
+            raw_preview,
+        )
         return ("REVIEW_REQUIRED", "판단 LLM 호출 실패로 재검토 필요 처리.")
 
 
@@ -834,6 +889,25 @@ def _pick_llm_review_reason(hitl_request: dict[str, Any]) -> str:
         if t:
             return t
     return ""
+
+
+def _is_verify_ready_without_hitl(state: AgentState) -> bool:
+    """verify 게이트가 READY이고 HITL 필요 신호가 없으면 자동 진행 가능으로 본다."""
+    verification = state.get("verification") or {}
+    verifier_output = state.get("verifier_output") or {}
+    needs_hitl = bool(verification.get("needs_hitl"))
+    gate_raw = verifier_output.get("gate")
+    # pydantic model_dump(mode="python")에서는 Enum 객체가 그대로 들어올 수 있다.
+    if hasattr(gate_raw, "value"):
+        gate_raw = getattr(gate_raw, "value")
+    gate = str(gate_raw or "").upper()
+    if gate.startswith("VERIFIERGATE."):
+        gate = gate.split(".", 1)[1]
+    if not gate and not needs_hitl:
+        quality = {str(x).upper() for x in (verification.get("quality_signals") or [])}
+        if "OK" in quality:
+            gate = "READY"
+    return (not needs_hitl) and gate in {"READY", "PASS"}
 
 
 def _build_grounded_reason(state: AgentState) -> tuple[str, str]:
@@ -888,18 +962,27 @@ def _build_grounded_reason(state: AgentState) -> tuple[str, str]:
             if state["flags"].get("hitlApproved") is True:
                 # reporter가 LLM으로 판단한 verdict를 그대로 사용 (룰/하드코딩 대신 일관된 LLM 판단)
                 reporter_verdict = (state.get("reporter_output") or {}).get("verdict")
+                hitl_reason = (state.get("reporter_output") or {}).get("hitl_verdict_reason") or ""
                 if reporter_verdict in ("COMPLETED_AFTER_HITL", "REVIEW_REQUIRED"):
                     status = reporter_verdict
-                    tail = "담당자 검토 결과 승인 가능으로 확인되어 최종 판단을 확정했습니다." if status == "COMPLETED_AFTER_HITL" else "담당자 검토 기준 미충족으로 재검토가 필요합니다."
+                    tail = hitl_reason if hitl_reason else (
+                        "담당자 검토 결과 승인 가능으로 확인되어 최종 판단을 확정했습니다." if status == "COMPLETED_AFTER_HITL" else "담당자 검토 기준 미충족으로 재검토가 필요합니다."
+                    )
                 else:
                     status = "REVIEW_REQUIRED"
-                    tail = "담당자 검토 기준 미충족으로 재검토가 필요합니다."
+                    tail = hitl_reason if hitl_reason else "담당자 검토 기준 미충족으로 재검토가 필요합니다."
             else:
                 status = "HOLD_AFTER_HITL"
                 tail = "담당자 검토 결과 보류/추가 검토가 필요해 자동 확정을 중단합니다."
         else:
-            status = "REVIEW_REQUIRED"
-            tail = "현재 수집된 증거 기준으로 우선 검토 대상입니다."
+            reporter_verdict = str((state.get("reporter_output") or {}).get("verdict") or "").upper()
+            verify_ready = _is_verify_ready_without_hitl(state)
+            if verify_ready and reporter_verdict in {"", "READY", "COMPLETED", "AUTO_APPROVED"}:
+                status = "COMPLETED"
+                tail = "현재 수집된 증거 기준으로 자동 확정되었습니다."
+            else:
+                status = "REVIEW_REQUIRED"
+                tail = "현재 수집된 증거 기준으로 우선 검토 대상입니다."
     return intro + grounding + score_text + tail, status
 
 
@@ -933,7 +1016,7 @@ def _plan_from_flags(flags: dict[str, Any]) -> list[dict[str, Any]]:
     if flags.get("budgetExceeded"):
         plan.append({"tool": "budget_risk_probe", "reason": "예산 초과 확인", "owner": "planner"})
     if flags.get("mccCode"):
-        plan.append({"tool": "merchant_risk_probe", "reason": "업종/가맹점 업종 코드(MCC) 위험 확인", "owner": "planner"})
+        plan.append({"tool": "merchant_risk_probe", "reason": "가맹점 업종 코드 위험 확인", "owner": "planner"})
     plan.append({"tool": "document_evidence_probe", "reason": "전표 증거 수집", "owner": "specialist"})
     plan.append({"tool": "policy_rulebook_probe", "reason": "내부 규정 조항 조회", "owner": "specialist"})
     if settings.enable_legacy_aura_specialist:
@@ -1038,6 +1121,15 @@ def _compute_plan_achievement(
     }
 
 
+def _reason_prefix(points: float) -> str:
+    """가산/감점 사유 앞에 붙일 접두어. points > 0 → [가산], < 0 → [감점], 0 → 없음."""
+    if points > 0:
+        return "[가산] "
+    if points < 0:
+        return "[감점] "
+    return ""
+
+
 def _score(flags: dict[str, Any], tool_results: list[dict[str, Any]]) -> dict[str, Any]:
     from agent.output_models import ScoreSignalDetail
 
@@ -1050,26 +1142,26 @@ def _score(flags: dict[str, Any], tool_results: list[dict[str, Any]]) -> dict[st
     if bool(flags.get("isHoliday")):
         pts = _POLICY_SIGNAL_POINTS["isHoliday"]
         base_policy_score += pts
-        reasons.append("휴일 사용 정황")
+        reasons.append(_reason_prefix(pts) + "휴일 사용 정황")
         signals.append(ScoreSignalDetail(signal="isHoliday", label="휴일/주말 사용", raw_value=True, points=pts, category="policy"))
 
     hr = str(flags.get("hrStatus") or "").upper()
     if hr in {"LEAVE", "OFF", "VACATION"}:
         pts = _POLICY_SIGNAL_POINTS["hrStatus_conflict"]
         base_policy_score += pts
-        reasons.append(f"근태 상태 충돌 ({hr})")
+        reasons.append(_reason_prefix(pts) + f"근태 상태 충돌 ({hr})")
         signals.append(ScoreSignalDetail(signal="hrStatus_conflict", label=f"근태 충돌({hr})", raw_value=hr, points=pts, category="policy"))
 
     if bool(flags.get("isNight")):
         pts = _POLICY_SIGNAL_POINTS["isNight"]
         base_policy_score += pts
-        reasons.append("심야 시간대")
+        reasons.append(_reason_prefix(pts) + "심야 시간대")
         signals.append(ScoreSignalDetail(signal="isNight", label="심야 시간대(22시~06시)", raw_value=True, points=pts, category="policy"))
 
     if bool(flags.get("budgetExceeded")):
         pts = _POLICY_SIGNAL_POINTS["budgetExceeded"]
         base_policy_score += pts
-        reasons.append("예산 초과")
+        reasons.append(_reason_prefix(pts) + "예산 초과")
         signals.append(ScoreSignalDetail(signal="budgetExceeded", label="예산 한도 초과", raw_value=True, points=pts, category="policy"))
 
     tool_policy_delta = 0.0
@@ -1085,12 +1177,12 @@ def _score(flags: dict[str, Any], tool_results: list[dict[str, Any]]) -> dict[st
         if holiday_risk is True and bool(flags.get("isHoliday")) and hr in {"LEAVE", "OFF", "VACATION"}:
             delta = _HOLIDAY_RISK_POLICY_DELTA["HIGH"]
             tool_policy_delta += delta
-            reasons.append("도구 확인: 휴일+근태 중복 위험(HIGH)")
+            reasons.append(_reason_prefix(delta) + "도구 확인: 휴일+근태 중복 위험(HIGH)")
             signals.append(ScoreSignalDetail(signal="holidayRisk_HIGH", label="도구 확인 - 휴일+근태 중복", raw_value="HIGH", points=delta, category="policy"))
         elif holiday_risk is True:
             delta = _HOLIDAY_RISK_POLICY_DELTA["MEDIUM"]
             tool_policy_delta += delta
-            reasons.append("도구 확인: 휴일 위험(MEDIUM)")
+            reasons.append(_reason_prefix(delta) + "도구 확인: 휴일 위험(MEDIUM)")
             signals.append(ScoreSignalDetail(signal="holidayRisk_MEDIUM", label="도구 확인 - 휴일 위험", raw_value="MEDIUM", points=delta, category="policy"))
 
     if merchant_result:
@@ -1099,7 +1191,7 @@ def _score(flags: dict[str, Any], tool_results: list[dict[str, Any]]) -> dict[st
         delta = _MERCHANT_RISK_POLICY_DELTA.get(merchant_risk, 0.0)
         if delta > 0:
             tool_policy_delta += delta
-            reasons.append(f"도구 확인: 가맹점 위험도 {merchant_risk}")
+            reasons.append(_reason_prefix(delta) + f"도구 확인: 가맹점 위험도 {merchant_risk}")
             signals.append(ScoreSignalDetail(signal=f"merchantRisk_{merchant_risk}", label=f"가맹점/업종 위험도({merchant_risk})", raw_value=merchant_risk, points=delta, category="policy"))
 
     if policy_result:
@@ -1108,7 +1200,7 @@ def _score(flags: dict[str, Any], tool_results: list[dict[str, Any]]) -> dict[st
         delta = _lookup_tiered(ref_count, _POLICY_REF_EVIDENCE_POINTS)
         if delta > 0:
             tool_evidence_delta += delta
-            reasons.append(f"규정 조항 {ref_count}건 확보")
+            reasons.append(_reason_prefix(delta) + f"규정 조항 {ref_count}건 확보")
             signals.append(ScoreSignalDetail(signal="policyRefs", label=f"규정 조항 {ref_count}건", raw_value=ref_count, points=delta, category="evidence"))
 
     if doc_result:
@@ -1117,17 +1209,17 @@ def _score(flags: dict[str, Any], tool_results: list[dict[str, Any]]) -> dict[st
         delta = _lookup_tiered(line_count, _LINE_ITEM_EVIDENCE_POINTS)
         if delta > 0:
             tool_evidence_delta += delta
-            reasons.append(f"전표 라인아이템 {line_count}건 확보")
+            reasons.append(_reason_prefix(delta) + f"전표 라인아이템 {line_count}건 확보")
             signals.append(ScoreSignalDetail(signal="lineItems", label=f"전표 라인 {line_count}건", raw_value=line_count, points=delta, category="evidence"))
 
     if any(_tool_result_key(r) == "legacy_aura_deep_audit" and r.get("facts") for r in tool_results):
         tool_evidence_delta += 15.0
-        reasons.append("심층 감사 결과 확보")
+        reasons.append(_reason_prefix(15.0) + "심층 감사 결과 확보")
         signals.append(ScoreSignalDetail(signal="legacyAudit", label="심층 감사 결과", raw_value=True, points=15.0, category="evidence"))
 
     if bool(flags.get("hasHitlResponse")):
         tool_evidence_delta += 10.0
-        reasons.append("담당자 검토 응답 확보")
+        reasons.append(_reason_prefix(10.0) + "담당자 검토 응답 확보")
         signals.append(ScoreSignalDetail(signal="hitlResponse", label="담당자 검토 응답", raw_value=True, points=10.0, category="evidence"))
 
     ref_count = int(((policy_result or {}).get("facts") or {}).get("ref_count") or 0)
@@ -1142,10 +1234,10 @@ def _score(flags: dict[str, Any], tool_results: list[dict[str, Any]]) -> dict[st
     if total_tools > 0 and success_rate < 0.5:
         penalty = round((0.5 - success_rate) * 40, 1)
         evidence_score = max(0.0, evidence_score - penalty)
-        reasons.append(f"도구 실행 성공률 {success_rate:.0%} → evidence_score -{penalty}점")
+        reasons.append(_reason_prefix(-penalty) + f"도구 실행 성공률 {success_rate:.0%} → evidence_score -{penalty}점")
     if total_tools >= 3 and success_rate == 1.0:
         evidence_score = min(100.0, evidence_score + 5.0)
-        reasons.append(f"계획한 {total_tools}개 도구 전체 성공 → evidence_score +5점")
+        reasons.append(_reason_prefix(5.0) + f"계획한 {total_tools}개 도구 전체 성공 → evidence_score +5점")
 
     high_risk_count = sum(
         [
@@ -1165,7 +1257,7 @@ def _score(flags: dict[str, Any], tool_results: list[dict[str, Any]]) -> dict[st
     elif high_risk_count == 2:
         compound_multiplier = 1.15
     if compound_multiplier > 1.0:
-        reasons.append(f"복합 위험 승수 적용 ({high_risk_count}개 고위험 신호)")
+        reasons.append(_reason_prefix(0.0) + f"복합 위험 승수 적용 ({high_risk_count}개 고위험 신호)")
         signals.append(ScoreSignalDetail(signal="compound_multiplier", label=f"복합 위험({high_risk_count}개)", raw_value=high_risk_count, points=0.0, category="multiplier"))
 
     policy_score = policy_score * compound_multiplier
@@ -1186,7 +1278,7 @@ def _score(flags: dict[str, Any], tool_results: list[dict[str, Any]]) -> dict[st
         amount_multiplier = 1.3
         amount_label = "금액 구간 200만원 초과"
     amount_multiplier = min(amount_multiplier, settings.score_amount_multiplier_max)
-    reasons.append(f"{amount_label} ({int(amount):,}원)")
+    reasons.append(_reason_prefix(0.0) + f"{amount_label} ({int(amount):,}원)")
     signals.append(ScoreSignalDetail(signal="amount_weight", label=f"{amount_label}({int(amount):,}원)", raw_value=amount, points=0.0, category="amount"))
 
     policy_score = min(100.0, policy_score * amount_multiplier)
@@ -1202,7 +1294,7 @@ def _score(flags: dict[str, Any], tool_results: list[dict[str, Any]]) -> dict[st
     if high_risk_count >= 3 and evidence_completeness < 0.4:
         penalty = (0.4 - evidence_completeness) * 20.0
         final_score_raw -= penalty
-        reasons.append(f"증거 부족 보수 패널티 적용 (-{penalty:.1f})")
+        reasons.append(_reason_prefix(-penalty) + f"증거 부족 보수 패널티 적용 (-{penalty:.1f})")
         signals.append(
             ScoreSignalDetail(
                 signal="evidence_shortage_penalty",
@@ -1501,14 +1593,15 @@ async def _invoke_llm_planner(
                 kw["base_url"] = base_url
             client = AsyncOpenAI(**kw)
 
+        tok_kw = {"max_completion_tokens": 600} if is_azure else {"max_tokens": 600}
         response = await client.chat.completions.create(
             model=getattr(settings, "reasoning_llm_model", "gpt-5"),
-            max_tokens=600,
             response_format={"type": "json_object"},
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
+            **tok_kw,
         )
         raw = (response.choices[0].message.content or "").strip()
         parsed = json.loads(raw)
@@ -2258,14 +2351,15 @@ async def _derive_hitl_from_regulation(state: AgentState) -> dict[str, Any]:
         else:
             client = AsyncOpenAI(api_key=settings.openai_api_key, base_url=base_url or None)
 
+        tok_kw = {"max_completion_tokens": 800} if is_azure else {"max_tokens": 800}
         response = await client.chat.completions.create(
             model=getattr(settings, "reasoning_llm_model", "gpt-5"),
-            max_tokens=800,
             response_format={"type": "json_object"},
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
+            **tok_kw,
         )
         raw = (response.choices[0].message.content or "").strip()
         parsed = json.loads(raw)
@@ -2404,14 +2498,15 @@ async def _generate_hitl_review_content(
         else:
             client = AsyncOpenAI(api_key=settings.openai_api_key, base_url=base_url or None)
 
+        tok_kw = {"max_completion_tokens": 600} if is_azure else {"max_tokens": 600}
         response = await client.chat.completions.create(
             model=getattr(settings, "reasoning_llm_model", "gpt-5"),
-            max_tokens=600,
             response_format={"type": "json_object"},
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
+            **tok_kw,
         )
         raw = (response.choices[0].message.content or "").strip()
         parsed = json.loads(raw)
@@ -2505,14 +2600,15 @@ async def _retry_fill_hitl_review_when_empty(
         else:
             client = AsyncOpenAI(api_key=settings.openai_api_key, base_url=base_url or None)
 
+        tok_kw = {"max_completion_tokens": 700} if is_azure else {"max_tokens": 700}
         response = await client.chat.completions.create(
             model=getattr(settings, "reasoning_llm_model", "gpt-5"),
-            max_tokens=700,
             response_format={"type": "json_object"},
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
+            **tok_kw,
         )
         raw = (response.choices[0].message.content or "").strip()
         parsed = json.loads(raw)
@@ -2826,6 +2922,7 @@ async def hitl_pause_node(state: AgentState) -> AgentState:
     hitl_request = state.get("hitl_request") or {}
     # interrupt()로 일시정지; 재개 시 호출자가 Command(resume=payload)로 넘긴 값이 여기로 반환됨
     hitl_response = interrupt(hitl_request)
+    hitl_response = hitl_response if isinstance(hitl_response, dict) else {}
     body = dict(state.get("body_evidence") or {})
     body["hitlResponse"] = hitl_response
     return {"body_evidence": body}
@@ -2837,6 +2934,7 @@ async def reporter_node(state: AgentState) -> AgentState:
     body = state["body_evidence"]
     hitl_response = body.get("hitlResponse") or {}
     hitl_approved = hitl_response.get("approved")
+    hitl_verdict_reason = ""
     occurred_at = _format_occurred_at(body.get("occurredAt"))
     merchant = body.get("merchantName") or "거래처 미상"
     summary = (
@@ -2857,14 +2955,17 @@ async def reporter_node(state: AgentState) -> AgentState:
             evidence_result=evidence_result,
         )
         if verdict == "COMPLETED_AFTER_HITL":
-            summary += " 담당자 검토 결과 승인 가능으로 판단되어 최종 확정 후보로 전환되었습니다."
+            summary += f" {hitl_verdict_reason}" if hitl_verdict_reason else " 담당자 검토 결과 승인 가능으로 판단되어 최종 확정 후보로 전환되었습니다."
         else:
             summary += f" {hitl_verdict_reason}" if hitl_verdict_reason else " 담당자 검토 기준 미충족으로 재검토가 필요합니다."
     elif state["flags"].get("hasHitlResponse") and hitl_approved is False:
         summary += " 담당자 검토 결과 보류/추가 검토 의견이 있어 자동 확정을 중단합니다."
         verdict = "HOLD_AFTER_HITL"
     else:
-        summary += " 현재 수집된 증거 기준으로 추가 검토 우선순위가 높습니다."
+        if _is_verify_ready_without_hitl(state):
+            summary += " 검증 게이트를 통과해 자동 확정 후보로 분류되었습니다."
+        else:
+            summary += " 현재 수집된 증거 기준으로 추가 검토 우선순위가 높습니다."
         verdict = "READY"
     refs = _top_policy_refs(state.get("tool_results", []), limit=5)
     refs = await _select_policy_refs_by_relevance(state, refs)
@@ -2888,6 +2989,8 @@ async def reporter_node(state: AgentState) -> AgentState:
     reasoning_text, reasoning_events, note_source = await _stream_reasoning_events_with_llm("reporter", reasoning_text, context=reporter_context)
     reporter_output = ReporterOutput(summary=summary, verdict=verdict, sentences=sentences_list, reasoning=reasoning_text)
     reporter_output_dict = reporter_output.model_dump()
+    if verdict in ("COMPLETED_AFTER_HITL", "REVIEW_REQUIRED") and hitl_verdict_reason:
+        reporter_output_dict["hitl_verdict_reason"] = hitl_verdict_reason
     last_node_summary = f"reporter 완료: {reasoning_text[:60]}…" if len(reasoning_text) > 60 else f"reporter 완료: {reasoning_text}"
     pending: list[dict[str, Any]] = [
         AgentEvent(event_type="NODE_START", node="reporter", phase="report", message="사용자에게 제시할 보고 문안을 구성합니다.", metadata={}).to_payload(),
@@ -2903,12 +3006,13 @@ async def reporter_node(state: AgentState) -> AgentState:
             ).to_payload()
         )
     pending.extend(reasoning_events)
+    # NODE_END에는 완료 문구만 표시(추론 블록에 이미 보고 문안이 있으므로 중복 제거)
     pending.append(
         AgentEvent(
             event_type="NODE_END",
             node="reporter",
             phase="report",
-            message=summary,
+            message="보고 문안 구성이 완료되었습니다.",
             metadata={"summary": summary, "verdict": verdict, "reasoning": reasoning_text, "note_source": note_source},
         ).to_payload(),
     )
@@ -3027,7 +3131,7 @@ async def finalizer_node(state: AgentState) -> AgentState:
         "severity": score.get("severity") or ("HIGH" if score["final_score"] >= 70 else ("MEDIUM" if score["final_score"] >= 40 else "LOW")),
         "analysis_mode": "langgraph_agentic",
         "score_breakdown": score,
-        "quality_gate_codes": state["verification"]["quality_signals"],
+        "quality_gate_codes": (state.get("verification") or {}).get("quality_signals", []),
         "hitl_request": hitl_request,
         "tool_results": state["tool_results"],
         "policy_refs": probe_facts.get("policy_refs") or [],
@@ -3167,6 +3271,59 @@ def build_agent_graph():
     return _COMPILED_GRAPH
 
 
+def build_hitl_closure_graph():
+    """기존 분석 결과 + 담당자 의견만 반영해 hitl_validate → reporter → finalizer 만 실행 (재분석 없음)."""
+    global _CLOSURE_GRAPH
+    if _CLOSURE_GRAPH is not None:
+        return _CLOSURE_GRAPH
+    workflow = StateGraph(AgentState)
+    workflow.add_node("hitl_validate", hitl_validate_node)
+    workflow.add_node("reporter", reporter_node)
+    workflow.add_node("finalizer", finalizer_node)
+    workflow.add_edge(START, "hitl_validate")
+    workflow.add_edge("hitl_validate", "reporter")
+    workflow.add_edge("reporter", "finalizer")
+    workflow.add_edge("finalizer", END)
+    _CLOSURE_GRAPH = workflow.compile(checkpointer=None)
+    return _CLOSURE_GRAPH
+
+
+def _closure_verification(verification: dict[str, Any] | None) -> dict[str, Any]:
+    """2차 경량용 verification: quality_signals 없으면 기본값 보장."""
+    out = dict(verification or {})
+    if "quality_signals" not in out:
+        out["quality_signals"] = out.get("quality_gate_codes") or ["OK"]
+    return out
+
+
+def _closure_initial_state(
+    *,
+    previous_result: dict[str, Any],
+    body_evidence: dict[str, Any],
+    case_id: str,
+    intended_risk_type: str | None,
+    resume_value: dict[str, Any],
+) -> dict[str, Any]:
+    """2차 경량: 기존 분석 결과(previous_result)와 담당자 응답(resume_value)으로 hitl_validate 이후만 돌릴 초기 state."""
+    body = dict(body_evidence or {})
+    body["hitlResponse"] = resume_value
+    flags = dict(previous_result.get("flags") or {})
+    flags["hasHitlResponse"] = True
+    flags["hitlApproved"] = resume_value.get("approved") is True
+    return {
+        "case_id": case_id,
+        "body_evidence": body,
+        "intended_risk_type": intended_risk_type or None,
+        "hitl_request": previous_result.get("hitl_request"),
+        "score_breakdown": dict(previous_result.get("score_breakdown") or {}),
+        "tool_results": list(previous_result.get("tool_results") or []),
+        "flags": flags,
+        "verification": _closure_verification(previous_result.get("verification")),
+        "verifier_output": dict(previous_result.get("verifier_output") or {}),
+        "last_node_summary": str(previous_result.get("last_node_summary") or ""),
+    }
+
+
 async def run_langgraph_agentic_analysis(
     case_id: str,
     *,
@@ -3174,6 +3331,7 @@ async def run_langgraph_agentic_analysis(
     intended_risk_type: str | None = None,
     run_id: str | None = None,
     resume_value: dict[str, Any] | None = None,
+    previous_result: dict[str, Any] | None = None,
     enable_hitl: bool = True,
 ):
     from langgraph.types import Command
@@ -3181,6 +3339,20 @@ async def run_langgraph_agentic_analysis(
 
     if not run_id:
         run_id = "default-thread"
+    logger.info(
+        "[RESUME_TRACE] run_langgraph 진입: run_id=%s case_id=%s resume_value=%s (None이면 처음부터, 있으면 1차 checkpoint 재개 시도)",
+        run_id, case_id, "있음" if resume_value else "없음",
+    )
+    if resume_value:
+        _cmt = str(resume_value.get("comment") or "") if isinstance(resume_value, dict) else ""
+        _prev = (_cmt[:80] + "…") if len(_cmt) > 80 else _cmt or "(없음)"
+        logger.info(
+            "[RESUME_TRACE] run_langgraph resume_value 요약: approved=%s comment_len=%s comment_preview=%s keys=%s",
+            resume_value.get("approved") if isinstance(resume_value, dict) else None,
+            len(_cmt),
+            _prev,
+            list(resume_value.keys())[:10] if isinstance(resume_value, dict) else [],
+        )
     config: dict[str, Any] = {
         "configurable": {"thread_id": run_id},
         "tags": ["matertask", "analysis", f"case:{case_id}"],
@@ -3197,7 +3369,8 @@ async def run_langgraph_agentic_analysis(
         async for chunk in graph.astream(_inputs, stream_mode="updates", config=config):
             yield chunk
 
-    async def _yield_updates(chunks):
+    async def _yield_updates(chunks, path_tag: str | None = None):
+        path_label = f" {path_tag}" if path_tag else ""
         async for chunk in chunks:
             if chunk.get("__interrupt__"):
                 logger.info("[agent] graph __interrupt__ (HITL pause) — stream will end until review-submit resume")
@@ -3221,8 +3394,14 @@ async def run_langgraph_agentic_analysis(
             for _node, update in chunk.items():
                 if _node == "__interrupt__":
                     continue
-                logger.info("[agent] graph node update run_id=%s node=%s", run_id, _node)
-                for ev in (update.get("pending_events") or []) or []:
+                update = update or {}
+                logger.info("[RESUME_TRACE] run_langgraph%s 노드 실행: run_id=%s node=%s", path_label, run_id, _node)
+                pending = (update.get("pending_events") or []) or []
+                thinking_count = sum(1 for e in pending if (e or {}).get("event_type", "").upper().startswith("THINKING"))
+                if thinking_count:
+                    logger.info("[agent] node=%s pending_events=%s (THINKING_*=%s)", _node, len(pending), thinking_count)
+                for ev in pending:
+                    ev = ev or {}
                     if ev.get("event_type") == "SCORE_BREAKDOWN":
                         yield "confidence", {
                             "label": "RISK_SCORE_BREAKDOWN",
@@ -3237,10 +3416,13 @@ async def run_langgraph_agentic_analysis(
 
     # 1차: checkpoint 기반 resume 시도
     if resume_value is not None:
-        logger.info("[RESUME_TRACE] run_langgraph run_id=%s 1차: Command(resume=...) checkpoint 재개 시도 (hitl_pause 이후 reporter→finalizer)", run_id)
+        logger.info(
+            "[RESUME_TRACE] run_langgraph run_id=%s 1차 시작: Command(resume=...) (execute 재실행 없음, hitl_pause→hitl_validate→reporter→finalizer)",
+            run_id,
+        )
         try:
             yielded_terminal = False
-            async for ev in _yield_updates(_stream_from_graph(Command(resume=resume_value))):
+            async for ev in _yield_updates(_stream_from_graph(Command(resume=resume_value)), path_tag="1차"):
                 ev_type = ev[0] if isinstance(ev, (list, tuple)) and len(ev) >= 1 else ""
                 if ev_type in ("completed", "failed"):
                     yielded_terminal = True
@@ -3258,29 +3440,60 @@ async def run_langgraph_agentic_analysis(
             # 체크포인트가 없거나 깨진 경우: 'body_evidence' KeyError를 만나면 동일 run_id로 새 입력으로 재시작
             if str(e) != "'body_evidence'":
                 raise
-            # 체크포인트 미존재(예: MemorySaver + 다른 워커) 시 처음부터 재실행됨. postgres 사용 시 HITL 직후 노드부터만 재개됨.
             logger.warning(
-                "[RESUME_TRACE] run_langgraph run_id=%s 1차 실패: checkpoint 없음 (checkpointer=%s) → 2차 경로(스크리닝부터 재실행). "
-                "Set CHECKPOINTER_BACKEND=postgres for true resume-from-HITL.",
+                "[RESUME_TRACE] run_langgraph run_id=%s 1차 실패: checkpoint 없음 (checkpointer=%s). "
+                "2차 경량(기존 결과 있음) 또는 2차 전체 재실행으로 진행.",
                 run_id,
                 getattr(settings, "checkpointer_backend", "memory"),
             )
-            # fallthrough to fresh run with hitlResponse 주입
+            # fallthrough to 2차 (경량 가능 시 경량, 아니면 전체)
 
-    # 2차: 새 입력으로 실행 (resume 없음 또는 resume 실패)
+    # 2차: 기존 결과가 있으면 2차 경량(재분석 없음), 없으면 스크리닝부터 전체 실행
+    if resume_value is not None and previous_result and (previous_result.get("score_breakdown") or previous_result.get("tool_results")):
+        logger.info(
+            "[RESUME_TRACE] run_langgraph run_id=%s 2차 경량: 기존 결과+검토의견만 반영 (execute 재실행 없음)",
+            run_id,
+        )
+        body_with_hitl = dict(body_evidence or {})
+        body_with_hitl["hitlResponse"] = resume_value
+        body_with_hitl["_enable_hitl"] = enable_hitl
+        closure_state = _closure_initial_state(
+            previous_result=previous_result,
+            body_evidence=body_with_hitl,
+            case_id=case_id,
+            intended_risk_type=intended_risk_type,
+            resume_value=resume_value,
+        )
+        closure_graph = build_hitl_closure_graph()
+        closure_config: dict[str, Any] = {"configurable": {"thread_id": run_id}}
+        _handler = get_langfuse_handler(session_id=run_id)
+        if _handler:
+            closure_config["callbacks"] = [_handler]
+
+        async def _stream_closure():
+            async for chunk in closure_graph.astream(closure_state, stream_mode="updates", config=closure_config):
+                yield chunk
+
+        async for ev in _yield_updates(_stream_closure(), path_tag="2차경량"):
+            yield ev
+        return
+
     if resume_value is not None:
-        logger.info("[RESUME_TRACE] run_langgraph run_id=%s 2차 경로: 스크리닝부터 전체 실행 (body_evidence에 hitlResponse 주입)", run_id)
+        logger.info(
+            "[RESUME_TRACE] run_langgraph run_id=%s 2차 시작: 스크리닝부터 전체 실행 (execute 포함 재실행, body_evidence에 hitlResponse 주입)",
+            run_id,
+        )
     else:
         logger.info("[RESUME_TRACE] run_langgraph run_id=%s 경로: 스크리닝부터 전체 실행 (resume_value 없음)", run_id)
     body_with_hitl = dict(body_evidence or {})
     if resume_value is not None:
         body_with_hitl["hitlResponse"] = resume_value
     body_with_hitl["_enable_hitl"] = enable_hitl
-    inputs: Any = {
+    inputs = {
         "case_id": case_id,
         "body_evidence": body_with_hitl,
         "intended_risk_type": intended_risk_type,
     }
-
-    async for ev in _yield_updates(_stream_from_graph(inputs)):
+    path_tag_2 = "2차" if resume_value is not None else ""
+    async for ev in _yield_updates(_stream_from_graph(inputs), path_tag=path_tag_2 or None):
         yield ev

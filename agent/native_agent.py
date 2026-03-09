@@ -62,7 +62,7 @@ def _build_investigation_plan(flags: dict[str, Any]) -> list[dict[str, Any]]:
     if flags.get("budget_exceeded"):
         plan.append({"tool": "budget_risk_probe", "why": "예산 초과 여부 검증"})
     if flags.get("mcc_code"):
-        plan.append({"tool": "merchant_risk_probe", "why": "업종/가맹점 업종 코드(MCC) 위험도 확인"})
+        plan.append({"tool": "merchant_risk_probe", "why": "가맹점 업종 코드 위험도 확인"})
     plan.append({"tool": "legacy_aura_deep_audit", "why": "기존 Aura 심층 규정 분석 결과를 전문 도구로 수집"})
     return plan
 

@@ -179,6 +179,13 @@ def inject_css() -> None:
         [data-testid="stExpanderDetails"] [class*="st-key-process_story_"] {{ background: rgba(255,255,255,0.98) !important; color: #0f172a !important; }}
         [data-testid="stExpanderDetails"] [class*="st-key-process_story_"] *, [data-testid="stExpanderDetails"] [class*="st-key-process_story_"] p, [data-testid="stExpanderDetails"] [class*="st-key-process_story_"] label {{ color: #0f172a !important; }}
         [data-testid="stExpanderDetails"] [class*="st-key-process_story_"] .stCaption {{ color: #64748b !important; }}
+        /* 카드/점수 영역 내부 div는 어두운 배경 적용 제외(펼쳤을 때 텍스트·테이블이 보이도록) */
+        [data-testid="stExpanderDetails"] [class*="st-key-process_story_"] div {{ background: transparent !important; }}
+        /* 점수 산정 근거 보기: 계산식·가산감점 텍스트 배경 제거(캡션 아래 내용이 보이도록) */
+        [data-testid="stExpanderDetails"] [class*="st-key-process_story_"] pre,
+        [data-testid="stExpanderDetails"] [class*="st-key-process_story_"] code,
+        [data-testid="stExpanderDetails"] [class*="st-key-process_story_"] pre *,
+        [data-testid="stExpanderDetails"] [class*="st-key-process_story_"] code * {{ background: transparent !important; color: #0f172a !important; }}
         /* 펼쳤을 때 어두운 영역에서 라벨이 보이도록: 이전 타임라인 카드 보기, 판단 흐름 요약 */
         [data-testid="stExpander"]:has(.pipeline-wrapper) details[open] summary,
         [data-testid="stExpander"]:has(.pipeline-wrapper) details[open] summary * {{ color: #e2e8f0 !important; }}
@@ -354,6 +361,7 @@ MCC_DISPLAY_NAMES: dict[str, str] = {
     "5812": "식당/레스토랑",
     "5813": "주점/바",
     "5814": "패스트푸드",
+    "5816": "급식/케이터링",
     "5811": "케이터링",
     "7992": "골프장",
     "7996": "놀이공원",

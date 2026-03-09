@@ -1,0 +1,5 @@
+# Phase F: cross-encoder rerank + 임베딩 (선택). 미설치 시 BM25/LIKE fallback.
+# Python 3.10~3.12 + torch 호환 환경에서 설치 권장.
+# pip install -r requirements.txt 후: pip install -r requirements-optional.txt
+sentence-transformers>=2.2,<3.3
+safetensors>=0.4.0

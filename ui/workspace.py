@@ -625,6 +625,16 @@ def sse_node_block_generator(stream_url: str, *, run_id: str | None = None) -> I
                 elif ev_type == "THINKING_DONE":
                     if thinking_open:
                         addition += "  \n\n"
+                    else:
+                        # THINKING_TOKEN 없이 DONE만 온 경우(예: LLM 실패 후 fallback)에도 추론 문구 표시
+                        done_reasoning = _humanize_stream_text(
+                            (obj.get("metadata") or {}).get("reasoning") or obj.get("message") or ""
+                        ).strip()
+                        if done_reasoning:
+                            ts = fmt_dt_korea(obj.get("timestamp")) or "-"
+                            if current_block or addition:
+                                addition += "\n\n"
+                            addition += f"💭 **{ts}** · {node} / 추론  \n{done_reasoning}  \n\n"
                     thinking_open = False
                     if status_key and thinking_buffer.strip():
                         st.session_state[status_key] = thinking_buffer.strip()
@@ -703,11 +713,11 @@ def sse_node_block_generator(stream_url: str, *, run_id: str | None = None) -> I
 
 
 def fetch_case_bundle(voucher_key: str) -> dict[str, Any]:
-    latest = get(f"/api/v1/cases/{voucher_key}/analysis/latest")
-    history = get(f"/api/v1/cases/{voucher_key}/analysis/history")
+    latest = get(f"/api/v1/cases/{voucher_key}/analysis/latest") or {}
+    history = get(f"/api/v1/cases/{voucher_key}/analysis/history") or {}
     latest["voucher_key"] = voucher_key
     if latest.get("run_id"):
-        events = get(f"/api/v1/analysis-runs/{latest['run_id']}/events")
+        events = get(f"/api/v1/analysis-runs/{latest['run_id']}/events") or {}
         latest["timeline"] = events.get("events") or []
     else:
         latest["timeline"] = []
@@ -2437,6 +2447,13 @@ def render_hitl_panel(latest_bundle: dict[str, Any], *, vkey: str | None = None)
                         "voucher_key": latest_bundle.get("voucher_key") or vkey,
                         "payload": payload_review,
                     }
+                    hr = payload_review.get("hitl_response") or {}
+                    _comment = str(hr.get("comment") or "")
+                    _preview = (_comment[:80] + "…") if len(_comment) > 80 else _comment
+                    logger.info(
+                        "[RESUME_TRACE] 분석 이어가기 버튼 클릭: run_id=%s voucher_key=%s approved=%s comment_len=%s comment_preview=%s evidence_uploaded=%s — mt_pending_review_submit 설정",
+                        run_id, latest_bundle.get("voucher_key") or vkey, hr.get("approved"), len(_comment), _preview or "(없음)", evidence_uploaded,
+                    )
                     logger.info("[HITL_CLOSE] 버튼 클릭: run_id=%s — mt_pending_review_submit 설정, open=False, st.rerun()", run_id)
                     st.session_state.pop(_hitl_state_key("dismissed", run_id), None)
                     st.session_state.pop(_hitl_state_key("open", run_id), None)
@@ -2883,17 +2900,27 @@ def render_workspace_chat_panel(selected: dict[str, Any], latest_bundle: dict[st
     api_pending = st.session_state.get("mt_review_submit_api_pending")
     if api_pending and not just_set_api_pending and api_pending.get("voucher_key") in {None, "", selected_vkey}:
         _run_id = str(api_pending.get("run_id") or "")
-        logger.info("[HITL_CLOSE] 2단계 진입: run_id=%s review-submit API 호출", _run_id)
         _payload = api_pending.get("payload") or {}
+        _hr = _payload.get("hitl_response") or {}
+        _cmt = str(_hr.get("comment") or "")
+        _prev = (_cmt[:80] + "…") if len(_cmt) > 80 else _cmt
         logger.info(
-            "[RESUME_TRACE] UI → review-submit run_id=%s payload_keys=%s (백엔드에서 base_status=HITL_REQUIRED면 checkpoint 재개, 아니면 스크리닝부터 재실행)",
+            "[RESUME_TRACE] UI 2단계 review-submit 직전: run_id=%s payload_keys=%s approved=%s comment_len=%s comment_preview=%s evidence_uploaded=%s",
+            _run_id, list(_payload.keys()) if isinstance(_payload, dict) else [], _hr.get("approved"), len(_cmt), _prev or "(없음)", _payload.get("evidence_uploaded"),
+        )
+        logger.info("[HITL_CLOSE] 2단계 진입: run_id=%s review-submit API 호출", _run_id)
+        logger.info(
+            "[RESUME_TRACE] UI → review-submit run_id=%s (백엔드에서 base_status=HITL_REQUIRED면 checkpoint 재개, 아니면 스크리닝부터 재실행)",
             _run_id,
-            list(_payload.keys()) if isinstance(_payload, dict) else [],
         )
         st.session_state.pop("mt_review_submit_api_pending", None)
         try:
             response = post(f"/api/v1/analysis-runs/{_run_id}/review-submit", json_body=_payload)
             stream_path = response.get("stream_path")
+            logger.info(
+                "[RESUME_TRACE] UI review-submit 응답: run_id=%s stream_path=%s response_keys=%s",
+                _run_id, stream_path, list(response.keys()) if isinstance(response, dict) else [],
+            )
             if stream_path:
                 st.session_state["mt_resume_stream_queued"] = {
                     "run_id": _run_id,
@@ -3087,6 +3114,7 @@ def render_workspace_chat_panel(selected: dict[str, Any], latest_bundle: dict[st
                 stream_url = f"{API}{pending_stream['stream_path']}"
                 run_id = pending_stream["run_id"]
                 logger.info("[ui] 스트림 구독 시작 vkey=%s run_id=%s url=%s", vkey, run_id, stream_url)
+                logger.info("[RESUME_TRACE] UI SSE 스트림 구독 시작 (분석 이어가기 후 재개 스트림일 수 있음) vkey=%s run_id=%s", vkey, run_id)
                 for stream_ev in sse_node_block_generator_with_idle(stream_url, run_id=run_id, idle_after_sec=1.0):
                     ev_type = stream_ev.get("type")
                     if ev_type == "block":

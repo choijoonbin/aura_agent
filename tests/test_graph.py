@@ -59,6 +59,49 @@ class TestAgentGraph(unittest.TestCase):
         self.assertEqual(_route_after_critic(state_no_replan), "verify")
 
 
+class TestFinalStatusDecision(unittest.TestCase):
+    """finalizer 상태 결정 정합성 검증."""
+
+    def _base_state(self):
+        return {
+            "score_breakdown": {"policy_score": 3, "evidence_score": 65, "final_score": 31},
+            "hitl_request": None,
+            "flags": {"hasHitlResponse": False},
+            "body_evidence": {"occurredAt": "2026-03-09T11:02:54", "merchantName": "일반 식대"},
+            "tool_results": [],
+            "reporter_output": {"verdict": "READY"},
+            "verification": {"needs_hitl": False},
+            "verifier_output": {"gate": "READY"},
+        }
+
+    def test_ready_without_hitl_is_completed(self):
+        from agent.langgraph_agent import _build_grounded_reason
+
+        state = self._base_state()
+        reason, status = _build_grounded_reason(state)
+        self.assertEqual(status, "COMPLETED")
+        self.assertIn("자동 확정", reason)
+
+    def test_missing_verify_gate_keeps_review_required(self):
+        from agent.langgraph_agent import _build_grounded_reason
+
+        state = self._base_state()
+        state["verifier_output"] = {}
+        reason, status = _build_grounded_reason(state)
+        self.assertEqual(status, "REVIEW_REQUIRED")
+        self.assertIn("우선 검토 대상", reason)
+
+    def test_enum_gate_ready_is_treated_as_completed(self):
+        from agent.langgraph_agent import _build_grounded_reason
+        from agent.output_models import VerifierGate
+
+        state = self._base_state()
+        state["verifier_output"] = {"gate": VerifierGate.READY}
+        reason, status = _build_grounded_reason(state)
+        self.assertEqual(status, "COMPLETED")
+        self.assertIn("자동 확정", reason)
+
+
 class TestScoreEngine(unittest.TestCase):
     """_score() 함수 5단계 점수 산출 검증."""
 

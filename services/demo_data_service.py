@@ -82,7 +82,8 @@ SCENARIO_PROFILES: dict[str, dict[str, Any]] = {
         "description": "정상 업무 시간대의 일반 식대 시나리오 (BE DEFAULT/NORMAL)",
         "blart": "SA",
         "hr_status": "WORK",
-        "mcc_code": "5812",   # BE preferred: 5812, 5814
+        # 위험도 없는 업종: 5816(케이터링/급식) — MCC_HIGH/MEDIUM/LEISURE 기본값에 없음. 5812는 medium_risk.
+        "mcc_code": "5816",
         "budget_flag": "N",
         "merchant_name": "일반 식대",
         "item_text": "정상 업무 식대",

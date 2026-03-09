@@ -269,13 +269,21 @@ source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
+#### (선택) Postgres 체크포인터 (HITL 재개 안정화)
+
+`CHECKPOINTER_BACKEND=postgres`(기본값) 사용 시 체크포인트가 DB에 저장됩니다. 해당 패키지가 없으면 자동으로 MemorySaver로 fallback됩니다.
+
+```bash
+pip install -r requirements-checkpoint-postgres.txt
+```
+
 #### (선택) Phase F cross-encoder rerank
 
 규정 검색 결과를 cross-encoder로 재정렬하려면 `sentence-transformers`(및 `torch`)를 설치합니다. **미설치 시에도 동작하며**, 이때는 기존 lexical 순위가 그대로 사용됩니다.
 
 ```bash
 # Python/torch 호환 환경에서만 (예: Python 3.10~3.12 권장)
-pip install torch sentence-transformers
+pip install -r requirements-optional.txt
 ```
 
 | 코드 참고 | [`services/retrieval_quality.py`](services/retrieval_quality.py), [`services/policy_service.py`](services/policy_service.py) |
@@ -413,7 +421,7 @@ OPENAI_EMBEDDING_MAX_RETRIES=3
 | `OPENAI_EMBEDDING_DIM` | 임베딩 차원 | 3072 |
 | `RAG_EMBEDDING_COLUMN` | rag_chunk 임베딩 컬럼 | embedding_az |
 | `RAG_EMBEDDING_CAST_TYPE` | 쿼리/저장 캐스팅 타입(`vector`/`halfvec`) | halfvec |
-| `CHECKPOINTER_BACKEND` | LangGraph 체크포인트 저장소. `memory`(기본)=프로세스 메모리(단일 워커에서만 HITL 재개 시 이어서 실행). `postgres`=DB 저장(다중 워커·재시작 후에도 「분석 이어하기」 시 hitl_pause 직후부터만 재개) | memory |
+| `CHECKPOINTER_BACKEND` | LangGraph 체크포인트 저장소. `memory`(기본)=프로세스 메모리(동일 프로세스에서만 HITL 재개). `postgres`=DB 저장(안정적 PoC 시 권장, 재시작 후에도 hitl_pause 직후부터 재개) | memory |
 
 | 코드 참고 | [`.env.example`](.env.example), [`utils/config.py`](utils/config.py) |
 |-----------|---------------------------------------------------------------------|
@@ -498,7 +506,7 @@ with requests.get(
 - **PoC 목적**: 이 프로젝트는 운영용이 아니라 시연/검증용입니다.
 - **인증 미적용**: 인증/권한 검증은 의도적으로 제거되어 있으며, `tenant_id=1`, `user_id=1` 고정 사용
 - **메모리 기반 런타임**: 분석 결과 일부는 메모리 기반으로 저장되며, 서버 재시작 시 초기화됩니다.
-- **HITL resume**: `MemorySaver` 기반이므로 **같은 프로세스/세션**에서만 유효합니다. 서버 재기동 후에는 이전 run의 interrupt 상태가 사라져 해당 run으로의 resume는 불가합니다.
+- **HITL resume**: 기본값 `memory`는 같은 프로세스 내에서만 재개됩니다. **재시작 후에도** hitl_pause 직후부터 재개하려면 `CHECKPOINTER_BACKEND=postgres`로 두고 `pip install -r requirements-checkpoint-postgres.txt` 후 사용하세요.
 - **Aura 연동**: `AURA_PLATFORM_PATH`가 설정된 경우에만 legacy Aura 심층 분석 도구 사용 가능
 
 | 코드 참고 | [`db/models.py`](db/models.py), [`services/stream_runtime.py`](services/stream_runtime.py), [`agent/aura_bridge.py`](agent/aura_bridge.py) |

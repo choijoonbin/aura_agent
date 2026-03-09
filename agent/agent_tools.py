@@ -73,13 +73,14 @@ async def merchant_risk_probe(context: dict[str, Any]) -> dict[str, Any]:
     merchant = body.get("merchantName")
     mcc_sets = get_mcc_sets()
 
-    mcc_str = str(mcc or "")
+    mcc_str = str(mcc or "").strip()
     if mcc_str in mcc_sets["high_risk"]:
         base_risk = "HIGH"
-    elif mcc_str in mcc_sets["leisure"] or mcc_str in mcc_sets["medium_risk"] or mcc_str:
+    elif mcc_str in mcc_sets["leisure"] or mcc_str in mcc_sets["medium_risk"]:
         base_risk = "MEDIUM"
     else:
-        base_risk = "UNKNOWN"
+        # high/medium/leisure 어디에도 없으면 위험도 없음(정상 비교군 등)
+        base_risk = "LOW"
 
     prior = context.get("prior_tool_results") or []
     holiday_facts = next(
@@ -133,8 +134,11 @@ def _adoption_reason_for_ref(ref: dict[str, Any], body_evidence: dict[str, Any])
     case_type = str(body_evidence.get("case_type") or body_evidence.get("intended_risk_type") or "")
     article = ref.get("article") or ""
     parent_title = str(ref.get("parent_title") or "")[:40]
-    if case_type and article:
+    direct_match_case_types = {"HOLIDAY_USAGE", "LIMIT_EXCEED", "PRIVATE_USE_RISK", "UNUSUAL_PATTERN"}
+    if case_type in direct_match_case_types and article:
         return f"{case_type} 조건과 직접 일치하는 조항({article})이어서 채택"
+    if case_type == "NORMAL_BASELINE" and article:
+        return f"정상 비교군 검증에 필요한 기본 조항({article})이어서 채택"
     if parent_title:
         return f"규정 '{parent_title}'과 관련되어 채택"
     return "규정 근거로 채택"

@@ -1,0 +1,3 @@
+# CHECKPOINTER_BACKEND=postgres 사용 시 설치 (기본 requirements.txt 설치 후)
+# pip install -r requirements-checkpoint-postgres.txt
+langgraph-checkpoint-postgres>=2.0.0

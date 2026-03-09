@@ -222,6 +222,7 @@ async def _run_analysis_task(
     body_evidence: dict[str, Any],
     intended_risk_type: str | None,
     resume_value: dict[str, Any] | None = None,
+    previous_result: dict[str, Any] | None = None,
     enable_hitl: bool = True,
 ) -> None:
     last_payload: dict[str, Any] | None = None
@@ -253,25 +254,40 @@ async def _run_analysis_task(
         # 스트림 초기 이벤트 실패는 분석 자체를 막지 않는다.
         pass
     if is_resume:
+        rv_keys = list(resume_value.keys())[:10] if isinstance(resume_value, dict) else []
+        rv_approved = resume_value.get("approved") if isinstance(resume_value, dict) else None
+        rv_comment = str(resume_value.get("comment") or "") if isinstance(resume_value, dict) else ""
+        rv_comment_len = len(rv_comment)
+        rv_comment_preview = (rv_comment[:80] + "…") if len(rv_comment) > 80 else rv_comment or "(없음)"
         logger.info(
-            "[RESUME_TRACE] _run_analysis_task run_id=%s → 에이전트에 resume_value 전달, checkpoint 재개 시도 예정",
-            run_id,
+            "[RESUME_TRACE] _run_analysis_task run_id=%s case_id=%s → 에이전트에 resume_value 전달 (keys=%s approved=%s comment_len=%s comment_preview=%s), checkpoint 재개 시도 예정",
+            run_id, case_id, rv_keys, rv_approved, rv_comment_len, rv_comment_preview,
         )
     else:
         logger.info(
-            "[RESUME_TRACE] _run_analysis_task run_id=%s → resume_value 없음, 스크리닝부터 전체 재실행",
-            run_id,
+            "[RESUME_TRACE] _run_analysis_task run_id=%s case_id=%s → resume_value 없음, 스크리닝부터 전체 재실행",
+            run_id, case_id,
         )
     try:
+        _first_ev = True
         async for ev_type, ev_payload in run_agent_analysis(
             case_id,
             body_evidence=body_evidence,
             intended_risk_type=intended_risk_type,
             run_id=run_id,
             resume_value=resume_value,
+            previous_result=previous_result,
             enable_hitl=enable_hitl,
         ):
             data = ev_payload if isinstance(ev_payload, dict) else {"value": ev_payload}
+            if _first_ev:
+                logger.info("[RESUME_TRACE] _run_analysis_task run_id=%s 첫 스트림 이벤트: ev_type=%s", run_id, ev_type)
+                _first_ev = False
+            if ev_type in ("completed", "failed"):
+                logger.info(
+                    "[RESUME_TRACE] _run_analysis_task run_id=%s 터미널 이벤트: ev_type=%s status=%s",
+                    run_id, ev_type, (data.get("status") or data.get("result", {}).get("status") if isinstance(data.get("result"), dict) else None),
+                )
             await runtime.publish(run_id, ev_type, data)
 
             # 분석 실행 중 스크리닝 결과가 나오면 agent_case에 반영 (한 번만)
@@ -768,6 +784,10 @@ async def review_submit(
     HITL 팝업 통합 제출. 팝업의 모든 내용(HITL 응답 + 증빙 업로드 여부)을 받아
     에이전트가 필수 항목·조건을 판단한 뒤 분석을 이어가거나 증빙만 확정한다.
     """
+    logger.info(
+        "[RESUME_TRACE] review_submit 진입: run_id=%s hitl_response=%s evidence_uploaded=%s",
+        run_id, request.hitl_response is not None, getattr(request, "evidence_uploaded", None),
+    )
     lineage = runtime.get_lineage(run_id)
     aux = get_run_aux_state(db, run_id=run_id)
     if not lineage and not aux.get("lineage"):
@@ -776,6 +796,7 @@ async def review_submit(
     _ensure_runtime_resume_context(run_id, lineage)
     case_id = lineage["case_id"]
     voucher_key = case_id.replace("POC-", "")
+    logger.info("[RESUME_TRACE] review_submit lineage 확보: run_id=%s case_id=%s voucher_key=%s", run_id, case_id, voucher_key)
     # runtime/aux에 HITL_REQUESTED 이벤트가 없어도, 완료 결과(result_payload)에 hitl_request가 있으면 사용(팝업 제출 400 방지)
     base_result_payload = runtime.get_result(run_id) or aux.get("result_payload") or {}
     base_result = (
@@ -828,6 +849,11 @@ async def review_submit(
         base_status = str((base_result or {}).get("status") or "").upper()
         has_runtime_hitl = bool(runtime.get_hitl_request(run_id))
         use_resume_value = hitl_payload if (base_status == "HITL_REQUIRED" or has_runtime_hitl) else None
+        path_kind = "1차(checkpoint 재개)" if use_resume_value is not None else "2차(처음부터 재실행)"
+        logger.info(
+            "[RESUME_TRACE] review_submit 경로 결정: run_id=%s base_status=%s has_runtime_hitl=%s → %s",
+            run_id, base_status, has_runtime_hitl, path_kind,
+        )
         logger.info(
             "[analysis] review_submit run_id=%s base_status=%s use_resume_value=%s (will resume from checkpoint=%s)",
             run_id,
@@ -837,19 +863,19 @@ async def review_submit(
         )
         if use_resume_value is not None:
             logger.info(
-                "[RESUME_TRACE] review_submit run_id=%s → 경로: checkpoint 재개 시도 (base_status=%s, has_runtime_hitl=%s, Command(resume=...) 사용)",
+                "[RESUME_TRACE] review_submit run_id=%s → 1차: Command(resume=...) 사용 (execute 재실행 없음 예상)",
                 run_id,
-                base_status,
-                has_runtime_hitl,
             )
         else:
             logger.info(
-                "[RESUME_TRACE] review_submit run_id=%s → 경로: 처음부터 재실행 (base_status=%s, has_runtime_hitl=%s → body_evidence에 hitlResponse만 주입)",
+                "[RESUME_TRACE] review_submit run_id=%s → 2차: body_evidence에 hitlResponse 주입 후 스크리닝부터 (execute 재실행 예상)",
                 run_id,
-                base_status,
-                has_runtime_hitl,
             )
         runtime.drain_queue_before_resume(run_id)
+        logger.info(
+            "[RESUME_TRACE] review_submit _run_analysis_task 스케줄: run_id=%s case_id=%s path=%s body_evidence_keys=%s",
+            run_id, case_id, path_kind, list(body_evidence.keys())[:15] if isinstance(body_evidence, dict) else [],
+        )
         asyncio.create_task(
             _run_analysis_task(
                 run_id=run_id,
@@ -857,6 +883,7 @@ async def review_submit(
                 body_evidence=body_evidence,
                 intended_risk_type=payload.get("intended_risk_type"),
                 resume_value=use_resume_value,
+                previous_result=base_result,
             )
         )
         await asyncio.sleep(0)
