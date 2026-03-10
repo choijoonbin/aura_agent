@@ -2048,36 +2048,36 @@ def render_hitl_panel(latest_bundle: dict[str, Any], *, vkey: str | None = None)
           overflow-x: hidden;
           overflow-y: visible;
         }
-        [data-testid="stHorizontalBlock"],
-        [data-testid="stHorizontalBlock"] > div,
-        [data-testid="stVerticalBlock"] {
+        div[data-testid="stDialog"] [data-testid="stHorizontalBlock"],
+        div[data-testid="stDialog"] [data-testid="stHorizontalBlock"] > div,
+        div[data-testid="stDialog"] [data-testid="stVerticalBlock"] {
           max-width: 100% !important;
           min-width: 0 !important;
           box-sizing: border-box !important;
         }
-        [data-testid="stHorizontalBlock"]:first-of-type {
+        div[data-testid="stDialog"] [data-testid="stHorizontalBlock"]:first-of-type {
           width: 100% !important;
           max-width: 100% !important;
           min-width: 0 !important;
         }
-        [data-testid="stHorizontalBlock"]:first-of-type > div:first-child {
+        div[data-testid="stDialog"] [data-testid="stHorizontalBlock"]:first-of-type > div:first-child {
           flex: 0 0 auto !important;
           min-width: 0 !important;
           max-width: 36% !important;
         }
-        [data-testid="stHorizontalBlock"]:first-of-type > div:nth-child(2) {
+        div[data-testid="stDialog"] [data-testid="stHorizontalBlock"]:first-of-type > div:nth-child(2) {
           flex: 1 1 auto !important;
           min-width: 0 !important;
           display: flex !important;
           justify-content: flex-end !important;
           align-items: center !important;
         }
-        [data-testid="stHorizontalBlock"]:first-of-type > div:nth-child(2) > div {
+        div[data-testid="stDialog"] [data-testid="stHorizontalBlock"]:first-of-type > div:nth-child(2) > div {
           display: flex !important;
           justify-content: flex-end !important;
           width: 100% !important;
         }
-        [data-testid="stHorizontalBlock"]:first-of-type > div:last-child {
+        div[data-testid="stDialog"] [data-testid="stHorizontalBlock"]:first-of-type > div:last-child {
           flex: 0 0 auto !important;
           min-width: 0 !important;
           max-width: 27% !important;
@@ -2085,20 +2085,20 @@ def render_hitl_panel(latest_bundle: dict[str, Any], *, vkey: str | None = None)
           justify-content: flex-end !important;
           align-items: center !important;
         }
-        [data-testid="stHorizontalBlock"]:first-of-type > div:last-child > div {
+        div[data-testid="stDialog"] [data-testid="stHorizontalBlock"]:first-of-type > div:last-child > div {
           display: flex !important;
           justify-content: flex-end !important;
           width: 100% !important;
         }
-        [data-testid="stHorizontalBlock"]:first-of-type [role="radiogroup"] {
+        div[data-testid="stDialog"] [data-testid="stHorizontalBlock"]:first-of-type [role="radiogroup"] {
           justify-content: flex-end !important;
           max-width: 100% !important;
         }
         /* 증빙 파일 업로더: 박스 안에만 표시 */
-        [data-testid="stFileUploader"],
-        [data-testid="stFileUploader"] > div,
-        [data-testid="stFileUploaderDropzone"],
-        [data-testid="stFileUploaderDropzone"] * {
+        div[data-testid="stDialog"] [data-testid="stFileUploader"],
+        div[data-testid="stDialog"] [data-testid="stFileUploader"] > div,
+        div[data-testid="stDialog"] [data-testid="stFileUploaderDropzone"],
+        div[data-testid="stDialog"] [data-testid="stFileUploaderDropzone"] * {
           max-width: 100% !important;
           min-width: 0 !important;
           box-sizing: border-box !important;
@@ -2254,19 +2254,19 @@ def render_hitl_panel(latest_bundle: dict[str, Any], *, vkey: str | None = None)
           justify-self: center;
           width: 280px;
         }
-        div[data-baseweb="radio"] label,
-        div[role="radiogroup"] label,
-        div[role="radiogroup"] * {
+        div[data-testid="stDialog"] div[data-baseweb="radio"] label,
+        div[data-testid="stDialog"] div[role="radiogroup"] label,
+        div[data-testid="stDialog"] div[role="radiogroup"] * {
           color: #0f172a !important;
         }
-        [data-testid="stTextInput"] label,
-        [data-testid="stTextArea"] label,
-        [data-testid="stCheckbox"] label,
-        [data-testid="stCheckbox"] span {
+        div[data-testid="stDialog"] [data-testid="stTextInput"] label,
+        div[data-testid="stDialog"] [data-testid="stTextArea"] label,
+        div[data-testid="stDialog"] [data-testid="stCheckbox"] label,
+        div[data-testid="stDialog"] [data-testid="stCheckbox"] span {
           color: #0f172a !important;
         }
-        [data-testid="stTextInput"] input,
-        [data-testid="stTextArea"] textarea {
+        div[data-testid="stDialog"] [data-testid="stTextInput"] input,
+        div[data-testid="stDialog"] [data-testid="stTextArea"] textarea {
           background: #ffffff !important;
           color: #0f172a !important;
           -webkit-text-fill-color: #0f172a !important;
@@ -2274,32 +2274,32 @@ def render_hitl_panel(latest_bundle: dict[str, Any], *, vkey: str | None = None)
           border: 1px solid #cbd5e1 !important;
           border-radius: 12px !important;
         }
-        [data-testid="stTextInput"] input::placeholder,
-        [data-testid="stTextArea"] textarea::placeholder {
+        div[data-testid="stDialog"] [data-testid="stTextInput"] input::placeholder,
+        div[data-testid="stDialog"] [data-testid="stTextArea"] textarea::placeholder {
           color: #64748b !important;
           opacity: 1 !important;
         }
-        [data-testid="stTextInput"] > div,
-        [data-testid="stTextArea"] > div {
+        div[data-testid="stDialog"] [data-testid="stTextInput"] > div,
+        div[data-testid="stDialog"] [data-testid="stTextArea"] > div {
           background: transparent !important;
         }
-        [data-testid="stCheckbox"] > div {
+        div[data-testid="stDialog"] [data-testid="stCheckbox"] > div {
           background: transparent !important;
         }
-        [data-testid="stJson"],
-        [data-testid="stJson"] *,
-        [data-testid="stJson"] pre,
-        [data-testid="stJson"] code,
-        [data-testid="stJson"] pre * {
+        div[data-testid="stDialog"] [data-testid="stJson"],
+        div[data-testid="stDialog"] [data-testid="stJson"] *,
+        div[data-testid="stDialog"] [data-testid="stJson"] pre,
+        div[data-testid="stDialog"] [data-testid="stJson"] code,
+        div[data-testid="stDialog"] [data-testid="stJson"] pre * {
           background: #ffffff !important;
           color: #0f172a !important;
         }
-        [data-testid="stAlert"] {
+        div[data-testid="stDialog"] [data-testid="stAlert"] {
           background: #fffbeb !important;
           border: 1px solid #fde68a !important;
           color: #92400e !important;
         }
-        [data-testid="stAlert"] * {
+        div[data-testid="stDialog"] [data-testid="stAlert"] * {
           color: #92400e !important;
         }
         div[data-testid="stDialog"] [data-testid="stFormSubmitButton"] button,
@@ -2503,59 +2503,67 @@ def render_hitl_panel(latest_bundle: dict[str, Any], *, vkey: str | None = None)
                     if not (extra_facts.get(field) or "").strip():
                         missing_required.append(label)
             if missing_required:
-                st.error("필수 입력(*)을 채워 주세요: " + ", ".join(missing_required[:6]))
+                logger.warning(
+                    "[HITL_SUBMIT] 필수 입력 누락 상태로 제출 진행: run_id=%s missing=%s",
+                    run_id,
+                    missing_required[:8],
+                )
+                st.warning(
+                    "필수 입력 일부가 비어 있습니다. 우선 검토 반영 후 분석을 이어가며, 필요하면 다음 단계에서 추가 입력 요청이 다시 표시됩니다."
+                )
+            hitl_response = {
+                "reviewer": reviewer or "FINANCE_REVIEWER",
+                "comment": comment or None,
+                "business_purpose": business_purpose or None,
+                "attendees": [p.strip() for p in attendees_raw.split(",") if p.strip()],
+                "approved": approved,
+                "extra_facts": extra_facts,
+            }
+            evidence_uploaded = has_evidence_result
+            if uploaded_file is not None and getattr(uploaded_file, "getvalue", None):
+                try:
+                    file_bytes = uploaded_file.getvalue()
+                    post_multipart(
+                        f"/api/v1/analysis-runs/{run_id}/evidence-upload",
+                        uploaded_file.name or "upload",
+                        file_bytes,
+                    )
+                    evidence_uploaded = True
+                except Exception as e:
+                    st.error(f"증빙 업로드 실패: {e}")
+                    evidence_uploaded = evidence_uploaded or False
+            if not evidence_uploaded and not _has_pending_hitl(latest_bundle):
+                st.warning("증빙이 필요한 경우 파일을 선택한 뒤 다시 눌러 주세요.")
             else:
-                hitl_response = {
-                    "reviewer": reviewer or "FINANCE_REVIEWER",
-                    "comment": comment or None,
-                    "business_purpose": business_purpose or None,
-                    "attendees": [p.strip() for p in attendees_raw.split(",") if p.strip()],
-                    "approved": approved,
-                    "extra_facts": extra_facts,
-                }
-                evidence_uploaded = has_evidence_result
-                if uploaded_file is not None and getattr(uploaded_file, "getvalue", None):
-                    try:
-                        file_bytes = uploaded_file.getvalue()
-                        post_multipart(
-                            f"/api/v1/analysis-runs/{run_id}/evidence-upload",
-                            uploaded_file.name or "upload",
-                            file_bytes,
-                        )
-                        evidence_uploaded = True
-                    except Exception as e:
-                        st.error(f"증빙 업로드 실패: {e}")
-                        evidence_uploaded = evidence_uploaded or False
-                if not evidence_uploaded and not _has_pending_hitl(latest_bundle):
-                    st.warning("증빙이 필요한 경우 파일을 선택한 뒤 다시 눌러 주세요.")
-                else:
-                    try:
-                        from services.schemas import HitlSubmitRequest
-                        # hitl_request 미로드 시에도 폼에서 입력한 hitl_response를 항상 전송. 백엔드는 runtime/aux에서 hitl_request를 채우므로 400을 피함.
-                        payload_review = {
-                            "hitl_response": HitlSubmitRequest(**hitl_response).model_dump(),
-                            "evidence_uploaded": evidence_uploaded,
-                        }
-                        st.session_state["mt_pending_review_submit"] = {
-                            "run_id": run_id,
-                            "voucher_key": latest_bundle.get("voucher_key") or vkey,
-                            "payload": payload_review,
-                        }
-                        hr = payload_review.get("hitl_response") or {}
-                        _comment = str(hr.get("comment") or "")
-                        _preview = (_comment[:80] + "…") if len(_comment) > 80 else _comment
-                        logger.info(
-                            "[RESUME_TRACE] 분석 이어가기 버튼 클릭: run_id=%s voucher_key=%s approved=%s comment_len=%s comment_preview=%s evidence_uploaded=%s — mt_pending_review_submit 설정",
-                            run_id, latest_bundle.get("voucher_key") or vkey, hr.get("approved"), len(_comment), _preview or "(없음)", evidence_uploaded,
-                        )
-                        logger.info("[HITL_CLOSE] 버튼 클릭: run_id=%s — mt_pending_review_submit 설정, open=False, st.rerun()", run_id)
-                        st.session_state.pop(_hitl_state_key("dismissed", run_id), None)
-                        st.session_state.pop(_hitl_state_key("open", run_id), None)
-                        st.session_state[_hitl_state_key("open", run_id)] = False
-                        st.session_state.pop(_hitl_state_key("shown", run_id), None)
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"제출 실패: {e}")
+                try:
+                    from services.schemas import HitlSubmitRequest
+                    # hitl_request 미로드 시에도 폼에서 입력한 hitl_response를 항상 전송. 백엔드는 runtime/aux에서 hitl_request를 채우므로 400을 피함.
+                    payload_review = {
+                        "hitl_response": HitlSubmitRequest(**hitl_response).model_dump(),
+                        "evidence_uploaded": evidence_uploaded,
+                    }
+                    st.session_state["mt_pending_review_submit"] = {
+                        "run_id": run_id,
+                        "voucher_key": latest_bundle.get("voucher_key") or vkey,
+                        "payload": payload_review,
+                    }
+                    hr = payload_review.get("hitl_response") or {}
+                    _comment = str(hr.get("comment") or "")
+                    _preview = (_comment[:80] + "…") if len(_comment) > 80 else _comment
+                    logger.info(
+                        "[RESUME_TRACE] 분석 이어가기 버튼 클릭: run_id=%s voucher_key=%s approved=%s comment_len=%s comment_preview=%s evidence_uploaded=%s — mt_pending_review_submit 설정",
+                        run_id, latest_bundle.get("voucher_key") or vkey, hr.get("approved"), len(_comment), _preview or "(없음)", evidence_uploaded,
+                    )
+                    logger.info("[HITL_CLOSE] 버튼 클릭: run_id=%s — mt_pending_review_submit 설정, open=False, st.rerun()", run_id)
+                    st.session_state.pop(_hitl_state_key("dismissed", run_id), None)
+                    st.session_state.pop(_hitl_state_key("open", run_id), None)
+                    st.session_state[_hitl_state_key("open", run_id)] = False
+                    st.session_state.pop(_hitl_state_key("shown", run_id), None)
+                    # 다음 run에서 selected_vkey가 바뀌어도 다이얼로그가 즉시 닫히도록 선제 스킵 키를 심는다.
+                    st.session_state["mt_skip_hitl_dialog_run_id"] = run_id
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"제출 실패: {e}")
 
 
 @st.dialog("HITL 팝업", width="large")
@@ -2622,7 +2630,7 @@ def build_workspace_execution_logs(latest_bundle: dict[str, Any]) -> list[dict[s
     return rows
 
 def render_workspace_case_queue(items: list[dict[str, Any]], selected_key: str | None) -> None:
-    render_panel_header("케이스", "분석할 전표를 선택합니다. 좌측은 선택, 우측은 실시간 실행과 판단 리뷰에 집중합니다.")
+    render_panel_header("케이스", "분석할 전표를 선택합니다. 우측은 실시간 실행과 판단 리뷰.")
     # 4개 KPI: items는 /api/v1/vouchers 응답(각 item.case_status = AgentCase.status).
     # 정책: HITL 대기 = 실제 사람 입력 대기(HITL_REQUIRED)만 집계.
     review_statuses = {"NEW", "IN_REVIEW", "REVIEW_REQUIRED", "EVIDENCE_REJECTED", "REVIEW_AFTER_HITL", "HOLD_AFTER_HITL"}
@@ -2660,6 +2668,10 @@ def render_workspace_case_queue(items: list[dict[str, Any]], selected_key: str |
           margin-top: 1px !important;
           margin-bottom: 12px !important;
           line-height: 1.35 !important;
+          white-space: normal !important;
+          overflow-wrap: anywhere !important;
+          word-break: break-word !important;
+          max-width: 100% !important;
         }
         [class*="st-key-workspace_case_queue_card"] [data-testid="stElementContainer"]:has(.mt-panel-header) {
           margin-bottom: 10px !important;
@@ -2805,6 +2817,8 @@ def render_workspace_case_queue(items: list[dict[str, Any]], selected_key: str |
       color: #0f172a !important;
       font-size: 0.9rem !important;
       white-space: pre-wrap !important;
+      overflow-wrap: anywhere !important;
+      word-break: break-word !important;
       line-height: 1.35 !important;
       cursor: pointer !important;
       margin: 0 !important;
@@ -2819,6 +2833,9 @@ def render_workspace_case_queue(items: list[dict[str, Any]], selected_key: str |
     [class*="st-key-case_btn_"] [data-testid="stMarkdownContainer"] p {
       margin: 0 0 2px 0 !important;
       line-height: 1.35 !important;
+      white-space: pre-wrap !important;
+      overflow-wrap: anywhere !important;
+      word-break: break-word !important;
     }
     </style>
     """, unsafe_allow_html=True)
@@ -2851,7 +2868,7 @@ def render_workspace_case_queue(items: list[dict[str, Any]], selected_key: str |
                 btn_label = (
                     f"**{title}**\n\n"
                     f"{amount} · {occurred_at}\n\n"
-                    f"전표키　{case_key}　　가맹점　{merchant}"
+                    f"전표키 {case_key}\n가맹점 {merchant}"
                 )
                 if st.button(
                     btn_label,
@@ -2915,17 +2932,26 @@ def render_workspace_chat_panel(selected: dict[str, Any], latest_bundle: dict[st
     # st.markdown(summary_html, unsafe_allow_html=True)
     # strip_text는 좌측, HITL 확인·분석 시작은 우측 끝에 나란히 정렬
     # 주의: render_workspace_chat_panel는 상위 컬럼 내부에서 호출되므로 중첩 columns는 1단계까지만 허용됨.
-    strip_col, cta_spacer_col, cta_hitl_col, cta_btn_col = st.columns([0.50, 0.08, 0.14, 0.28])
     pending_stream: dict[str, str] | None = None
-    with strip_col:
-        st.markdown(f'<div class="mt-workspace-strip-inline">{strip_text}</div>', unsafe_allow_html=True)
-    with cta_spacer_col:
-        st.markdown("&nbsp;", unsafe_allow_html=True)
-    with cta_hitl_col:
-        enable_hitl = st.checkbox("HITL 확인", key=f"workspace_hitl_check_{vkey}", value=True)
-    with cta_btn_col:
-        with stylable_container(key="workspace_cta_right_1", css_styles=["{}"]):
-            run_clicked = st.button("분석 시작", key=f"workspace_run_{vkey}", type="primary")
+    with stylable_container(
+        key=f"workspace_chat_cta_row_{vkey}",
+        css_styles=[
+            """{padding: 0; margin: 0;}""",
+            """> [data-testid="stHorizontalBlock"] {align-items: center !important; min-height: 0 !important;}""",
+            """> [data-testid="stHorizontalBlock"] > [data-testid="column"] {min-height: 0 !important; align-self: stretch !important;}""",
+            """> [data-testid="stHorizontalBlock"] > [data-testid="stColumn"] {min-height: 0 !important; align-self: stretch !important;}""",
+        ],
+    ):
+        strip_col, cta_spacer_col, cta_hitl_col, cta_btn_col = st.columns([0.50, 0.08, 0.14, 0.28])
+        with strip_col:
+            st.markdown(f'<div class="mt-workspace-strip-inline">{strip_text}</div>', unsafe_allow_html=True)
+        with cta_spacer_col:
+            st.markdown("&nbsp;", unsafe_allow_html=True)
+        with cta_hitl_col:
+            enable_hitl = st.checkbox("HITL 확인", key=f"workspace_hitl_check_{vkey}", value=True)
+        with cta_btn_col:
+            with stylable_container(key="workspace_cta_right_1", css_styles=["{}"]):
+                run_clicked = st.button("분석 시작", key=f"workspace_run_{vkey}", type="primary")
     if run_clicked:
         # 분석 시작 시 스트림/타임라인 패널을 자동으로 펼침
         st.session_state[f"agent_stream_exp_{vkey}"] = True
@@ -2983,7 +3009,10 @@ def render_workspace_chat_panel(selected: dict[str, Any], latest_bundle: dict[st
     logger.info("[HITL_CLOSE] run 시작: mt_pending_review_submit=%s mt_review_submit_api_pending=%s", bool(st.session_state.get("mt_pending_review_submit")), bool(st.session_state.get("mt_review_submit_api_pending")))
     pending_review_submit = st.session_state.get("mt_pending_review_submit")
     just_set_api_pending = False
-    if pending_review_submit and pending_review_submit.get("voucher_key") in {None, "", selected_vkey}:
+    if pending_review_submit and (
+        pending_review_submit.get("voucher_key") in {None, "", selected_vkey}
+        or str(pending_review_submit.get("run_id") or "") == str(latest_bundle.get("run_id") or "")
+    ):
         _run_id = str(pending_review_submit.get("run_id") or "")
         logger.info("[HITL_CLOSE] 1단계 진입: run_id=%s open=False, skip 설정 (이 run에서 한 프레임 그린 뒤 다이얼로그 블록 뒤에서 rerun)", _run_id)
         st.session_state[_hitl_state_key("open", _run_id)] = False
@@ -3645,24 +3674,19 @@ def render_ai_workspace_page() -> None:
         <style>
         [class*="st-key-workspace_main_split"] > [data-testid="stHorizontalBlock"] {
           align-items: stretch !important;
+          flex-wrap: nowrap !important;
         }
-        [class*="st-key-workspace_main_split"] > [data-testid="stHorizontalBlock"] > [data-testid="column"]:first-child,
-        [class*="st-key-workspace_main_split"] > [data-testid="stHorizontalBlock"] > [data-testid="stColumn"]:first-child {
-          flex: 0 0 31% !important;
-          width: 31% !important;
+        [class*="st-key-workspace_main_split"] > [data-testid="stHorizontalBlock"] > [data-testid="column"],
+        [class*="st-key-workspace_main_split"] > [data-testid="stHorizontalBlock"] > [data-testid="stColumn"] {
           min-width: 0 !important;
-          max-width: 31% !important;
         }
-        [class*="st-key-workspace_main_split"] > [data-testid="stHorizontalBlock"] > [data-testid="column"]:last-child,
-        [class*="st-key-workspace_main_split"] > [data-testid="stHorizontalBlock"] > [data-testid="stColumn"]:last-child {
-          flex: 0 0 69% !important;
-          width: 69% !important;
-          min-width: 0 !important;
-          max-width: 69% !important;
-        }
-        [class*="st-key-workspace_case_queue_card"],
-        [class*="st-key-workspace_chat_card"] {
+        [class*="st-key-workspace_case_queue_card"] {
           min-height: 540px !important;
+        }
+        @media (max-width: 1200px) {
+          [class*="st-key-workspace_main_split"] > [data-testid="stHorizontalBlock"] {
+            flex-wrap: wrap !important;
+          }
         }
         </style>
         """,
@@ -3675,7 +3699,7 @@ def render_ai_workspace_page() -> None:
             with stylable_container(key="workspace_case_queue_card", css_styles="""{padding: 18px 18px; border-radius: 20px; border: 1px solid #e5e7eb; background: rgba(255,255,255,0.96); box-shadow: 0 12px 30px rgba(15,23,42,0.05); min-height: 540px;}"""):
                 render_workspace_case_queue(items, selected_key)
         with right:
-            with stylable_container(key="workspace_chat_card", css_styles="""{padding: 18px 20px; border-radius: 20px; border: 1px solid #e5e7eb; background: rgba(255,255,255,0.96); box-shadow: 0 12px 30px rgba(15,23,42,0.05); margin-bottom: 12px; overflow: hidden; max-width: 100%; min-height: 540px;}"""):
+            with stylable_container(key="workspace_chat_card", css_styles="""{padding: 18px 20px; border-radius: 20px; border: 1px solid #e5e7eb; background: rgba(255,255,255,0.96); box-shadow: 0 12px 30px rgba(15,23,42,0.05); margin-bottom: 12px; overflow: hidden; max-width: 100%;}"""):
                 if not selected_key:
                     render_empty_state("선택된 케이스가 없습니다.")
                 else:

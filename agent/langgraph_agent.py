@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
-from datetime import datetime
 import json
 import logging
 import re
@@ -10,11 +8,53 @@ from typing import Any, TypedDict
 
 logger = logging.getLogger(__name__)
 
-from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
 
 from agent.event_schema import AgentEvent
 from agent.hitl import build_hitl_request
+import agent.langgraph_runtime as _runtime_module
+from agent.langgraph_domain import (
+    _build_prescreened_result as _domain_build_prescreened_result,
+    _find_tool_result as _domain_find_tool_result,
+    _format_occurred_at as _domain_format_occurred_at,
+    _is_valid_screening_case_type as _domain_is_valid_screening_case_type,
+    _tool_result_key as _domain_tool_result_key,
+    _top_policy_refs as _domain_top_policy_refs,
+    _voucher_summary_for_context as _domain_voucher_summary_for_context,
+)
+from agent.langgraph_hitl_helpers import (
+    _assess_hitl_resolution_requirements as _hitl_assess_resolution_requirements,
+    _build_system_auto_finalize_blockers as _hitl_build_system_auto_finalize_blockers,
+    _format_hitl_reason_for_stream as _hitl_format_reason_for_stream,
+    _is_verify_ready_without_hitl as _hitl_is_verify_ready_without_hitl,
+    _pick_llm_review_reason as _hitl_pick_llm_review_reason,
+)
+from agent.langgraph_runtime import (
+    _closure_initial_state as _runtime_closure_initial_state,
+    _closure_verification as _runtime_closure_verification,
+    _get_checkpointer as _runtime_get_checkpointer,
+    build_agent_graph as _runtime_build_agent_graph,
+    build_hitl_closure_graph as _runtime_build_hitl_closure_graph,
+)
+from agent.langgraph_reasoning import (
+    ConsistencyCheckResult,
+    _compact_reasoning_for_stream as _reasoning_compact_reasoning_for_stream,
+    _extract_reasoning_token as _reasoning_extract_reasoning_token,
+    _reasoning_stream_events as _reasoning_module_stream_events,
+    _stream_reasoning_events_with_llm as _reasoning_stream_reasoning_events_with_llm,
+    call_node_llm_with_consistency_check as _reasoning_call_node_llm_with_consistency_check,
+    check_reasoning_consistency as _reasoning_check_reasoning_consistency,
+)
+from agent.langgraph_scoring import (
+    _compute_plan_achievement as _scoring_compute_plan_achievement,
+    _derive_flags as _scoring_derive_flags,
+    _lookup_tiered as _scoring_lookup_tiered,
+    _plan_from_flags as _scoring_plan_from_flags,
+    _reason_prefix as _scoring_reason_prefix,
+    _score as _scoring_score,
+    _score_to_severity as _scoring_score_to_severity,
+    _score_with_hitl_adjustment as _scoring_score_with_hitl_adjustment,
+)
 from agent.output_models import (
     Citation,
     ClaimVerificationResult,
@@ -50,18 +90,11 @@ _TOOL_CALL_SHORT_MESSAGE: dict[str, str] = {
     "budget_risk_probe": "예산 초과 점검 중",
     "legacy_aura_deep_audit": "심층 감사 실행 중",
 }
+_MAX_CRITIC_LOOP = 2
 _CHECKPOINTER: Any | None = None
 _COMPILED_GRAPH: Any | None = None
 _CLOSURE_GRAPH: Any | None = None
-_MAX_CRITIC_LOOP = 2
 _WORD_RE = re.compile(r"[0-9A-Za-z가-힣]{2,}")
-_VALID_SCREENING_CASE_TYPES = {
-    "HOLIDAY_USAGE",
-    "LIMIT_EXCEED",
-    "PRIVATE_USE_RISK",
-    "UNUSUAL_PATTERN",
-    "NORMAL_BASELINE",
-}
 _CLAIM_PRIORITY: dict[str, int] = {
     "night_violation": 10,
     "holiday_hr_conflict": 9,
@@ -70,138 +103,18 @@ _CLAIM_PRIORITY: dict[str, int] = {
     "amount_approval_tier": 6,
     "policy_ref_direct": 5,
 }
-_REASONING_JSON_MARKER = '"reasoning"'
-
-
-@dataclass
-class ConsistencyCheckResult:
-    is_consistent: bool
-    conflict_description: str
 
 
 def _compact_reasoning_for_stream(text: str) -> str:
-    """스트림 가독성을 위해 reasoning 길이를 문장/문자 기준으로 압축."""
-    raw = str(text or "").replace("\\n", " ").replace("\n", " ")
-    normalized = re.sub(r"\s+", " ", raw).strip()
-    if not normalized:
-        return ""
-
-    sentence_splits = re.split(r"(?<=[.!?])\s+|(?<=다\.)\s+", normalized)
-    sentence_splits = [s.strip() for s in sentence_splits if s and s.strip()]
-    max_sentences = max(1, int(settings.reasoning_stream_max_sentences))
-    compact = " ".join(sentence_splits[:max_sentences]) if sentence_splits else normalized
-
-    max_chars = max(80, int(settings.reasoning_stream_max_chars))
-    if len(compact) > max_chars:
-        compact = compact[:max_chars].rstrip()
-        compact = re.sub(r"[,:;·/\-]\s*[^,:;·/\-]*$", "", compact).rstrip()
-        compact = compact.rstrip(".") + "..."
-    return compact
+    return _reasoning_compact_reasoning_for_stream(text)
 
 
 def _is_valid_screening_case_type(value: Any) -> bool:
-    return str(value or "").strip().upper() in _VALID_SCREENING_CASE_TYPES
-
-
-def _get_attr(output: Any, key: str) -> Any:
-    if hasattr(output, key):
-        return getattr(output, key)
-    if isinstance(output, dict):
-        return output.get(key)
-    return None
+    return _domain_is_valid_screening_case_type(value)
 
 
 def check_reasoning_consistency(node_name: str, output: Any) -> ConsistencyCheckResult:
-    """
-    workspace.md v3: reasoning 텍스트와 결과 필드 간 모순을 감지한다.
-    모순이 감지되면 conflict_description을 반환해 재검토(재생성/수정)에 활용한다.
-    """
-    reasoning = str(_get_attr(output, "reasoning") or "").lower()
-    if not reasoning.strip():
-        return ConsistencyCheckResult(is_consistent=True, conflict_description="")
-
-    hold_signals = ["보류", "hold", "위반", "문제", "검토 필요", "부적합", "중단", "실패", "fail"]
-    pass_signals = ["정상", "통과", "pass", "적합", "문제없", "이상없", "승인", "가능"]
-    reasoning_says_hold = any(s in reasoning for s in hold_signals)
-    reasoning_says_pass = any(s in reasoning for s in pass_signals)
-
-    # --- Critic ---
-    if node_name == "critic":
-        recommend_hold = bool(_get_attr(output, "recommend_hold"))
-        if recommend_hold and reasoning_says_pass and not reasoning_says_hold:
-            return ConsistencyCheckResult(
-                is_consistent=False,
-                conflict_description=(
-                    "reasoning은 '정상/통과' 취지이나 recommend_hold=True가 반환되었습니다. "
-                    "reasoning과 결과값이 일치하도록 재작성하십시오."
-                ),
-            )
-        if (not recommend_hold) and reasoning_says_hold and not reasoning_says_pass:
-            return ConsistencyCheckResult(
-                is_consistent=False,
-                conflict_description=(
-                    "reasoning은 '보류/위반' 취지이나 recommend_hold=False가 반환되었습니다. "
-                    "reasoning과 결과값이 일치하도록 재작성하십시오."
-                ),
-            )
-
-    # --- Verifier ---
-    if node_name in {"verify", "verifier"}:
-        gate = _get_attr(output, "gate")
-        gate_str = str(gate or "").upper()
-        # 기존 스펙은 PASS/FAIL 예시지만, 현재 구현은 READY/HITL_REQUIRED를 사용한다.
-        if gate_str in {"READY", "PASS"} and reasoning_says_hold and not reasoning_says_pass:
-            return ConsistencyCheckResult(
-                is_consistent=False,
-                conflict_description="reasoning은 검증 실패/보류 취지이나 gate=READY(PASS)가 반환되었습니다. 일치하도록 재작성하십시오.",
-            )
-        if gate_str in {"HITL_REQUIRED", "FAIL"} and reasoning_says_pass and not reasoning_says_hold:
-            return ConsistencyCheckResult(
-                is_consistent=False,
-                conflict_description="reasoning은 검증 통과 취지이나 gate=HITL_REQUIRED(FAIL)이 반환되었습니다. 일치하도록 재작성하십시오.",
-            )
-
-    # --- Reporter ---
-    if node_name == "reporter":
-        verdict = str(_get_attr(output, "verdict") or "").upper()
-        if verdict in {"HITL_REQUIRED", "HOLD", "REJECT", "HOLD_AFTER_HITL"} and reasoning_says_pass and not reasoning_says_hold:
-            return ConsistencyCheckResult(
-                is_consistent=False,
-                conflict_description=f"reasoning은 정상 처리 취지이나 verdict={verdict}가 반환되었습니다. 일치하도록 재작성하십시오.",
-            )
-
-    # --- Finalizer ---
-    if node_name == "finalizer":
-        status = str(_get_attr(output, "status") or _get_attr(output, "final_status") or "").upper()
-        if status in {"HITL_REQUIRED", "HOLD", "REJECT", "FAILED", "HOLD_AFTER_HITL"} and reasoning_says_pass and not reasoning_says_hold:
-            return ConsistencyCheckResult(
-                is_consistent=False,
-                conflict_description=f"reasoning은 정상 처리 취지이나 status={status}가 반환되었습니다. 일치하도록 재작성하십시오.",
-            )
-
-    return ConsistencyCheckResult(is_consistent=True, conflict_description="")
-
-
-def _repair_reasoning_for_consistency(node_name: str, output: Any, *, current_reasoning: str) -> str:
-    """LLM 재호출 없이도 모순을 차단하기 위한 1회 보정(템플릿 기반)."""
-    text = (current_reasoning or "").strip()
-    if node_name == "critic":
-        recommend_hold = bool(_get_attr(output, "recommend_hold"))
-        return (text + (" 결론: 보류가 적절하다." if recommend_hold else " 결론: 정상 진행이 가능하다.")).strip()
-    if node_name in {"verify", "verifier"}:
-        gate = str(_get_attr(output, "gate") or "").upper()
-        return (text + (" 결론: 사람 검토(HITL)가 필요하다." if gate == "HITL_REQUIRED" else " 결론: 자동 진행이 가능하다.")).strip()
-    if node_name == "reporter":
-        verdict = str(_get_attr(output, "verdict") or "").upper()
-        if verdict in {"HITL_REQUIRED", "HOLD", "REJECT", "HOLD_AFTER_HITL"}:
-            return (text + " 결론: 보류/사람 검토가 필요하다.").strip()
-        return (text + " 결론: 자동 확정 후보로 진행한다.").strip()
-    if node_name == "finalizer":
-        status = str(_get_attr(output, "status") or _get_attr(output, "final_status") or "").upper()
-        if status in {"HITL_REQUIRED", "HOLD", "REJECT", "FAILED", "HOLD_AFTER_HITL"}:
-            return (text + " 결론: 보류 또는 사람 검토가 필요하다.").strip()
-        return (text + " 결론: 최종 확정을 진행한다.").strip()
-    return text
+    return _reasoning_check_reasoning_consistency(node_name, output)
 
 
 def call_node_llm_with_consistency_check(
@@ -211,22 +124,12 @@ def call_node_llm_with_consistency_check(
     *,
     max_retries: int = 1,
 ) -> tuple[str, ConsistencyCheckResult, bool]:
-    """
-    workspace.md v3 체크리스트 대응:
-    reasoning 정합성 검사 후 모순 시 최대 1회 자동 재검토(보정)한다.
-    반환: (최종 reasoning, 마지막 검사 결과, 재시도 여부)
-    """
-    text = (reasoning_text or "").strip()
-    retried = False
-    last_check = ConsistencyCheckResult(is_consistent=True, conflict_description="")
-    for attempt in range(max_retries + 1):
-        last_check = check_reasoning_consistency(node_name, {**(output if isinstance(output, dict) else {}), "reasoning": text} if isinstance(output, dict) else output)
-        if last_check.is_consistent:
-            return text, last_check, retried
-        if attempt < max_retries:
-            retried = True
-            text = _repair_reasoning_for_consistency(node_name, output, current_reasoning=text)
-    return text, last_check, retried
+    return _reasoning_call_node_llm_with_consistency_check(
+        node_name,
+        output,
+        reasoning_text,
+        max_retries=max_retries,
+    )
 
 
 def _get_tools_by_name() -> dict[str, Any]:
@@ -265,103 +168,15 @@ class AgentState(TypedDict, total=False):
 
 
 def _format_occurred_at(value: Any) -> str:
-    raw = str(value or "").strip()
-    if not raw:
-        return "발생시각 미상"
-    try:
-        normalized = raw.replace("Z", "+00:00")
-        dt = datetime.fromisoformat(normalized)
-        weekdays = ["월", "화", "수", "목", "금", "토", "일"]
-        return f"{dt.year}년 {dt.month:02d}월 {dt.day:02d}일 {dt.hour:02d}:{dt.minute:02d}:{dt.second:02d} ({weekdays[dt.weekday()]})"
-    except Exception:
-        return raw
-
-
-# 추론 스트림 정책: 표시되는 추론은 LLM 생성만 노출. fallback(API 비활성/오류) 시 하드코딩 초안을 보이지 않고 아래 문구만 표시.
-# 아래 노드들은 내부적으로 "초안" 문자열을 만들어 _stream_reasoning_events_with_llm에 넘기며, LLM이 이를 기반으로 재작성한 결과만 스트림에 노출됨.
-# - intake_node (1488~1495): reasoning_parts = ["전표 입력값에서 ...", "휴일 사용 정황이 ...", ...]
-# - planner: _build_planner_reasoning() → "규칙 기반 기본 경로로...", "1) tool: reason" 등
-# - execute_node (2015~2023): reasoning_parts = ["N개 도구를 실행해 ...", "생략 도구: ...", "실패 도구: ..."]
-# - critic: reasoning_parts = [rationale, 누락/재계획 문구] (rationale은 LLM 출력)
-# - verify_node (2736~2738): reasoning_parts = [rationale, "담당자 검토 필요"|"자동 진행 가능"]
-# - reporter_node: reasoning_text = summary + verdict (템플릿) 후 LLM 정합성 보정
-_REASONING_FALLBACK_MESSAGE = "이 단계의 추론은 LLM으로 생성되지 않았습니다. (API 비활성 또는 일시 오류)"
+    return _domain_format_occurred_at(value)
 
 
 def _reasoning_stream_events(node_name: str, reasoning_text: str) -> list[dict[str, Any]]:
-    """workspace.md 추가보완: reasoning 문자열을 THINKING_TOKEN(단어 단위) + THINKING_DONE 이벤트로 변환."""
-    if not (reasoning_text or "").strip():
-        return [
-            AgentEvent(
-                event_type="THINKING_DONE",
-                node=node_name,
-                message="",
-                metadata={"reasoning": ""},
-            ).to_payload(),
-        ]
-    text = reasoning_text.strip()
-    events: list[dict[str, Any]] = []
-    for word in text.split():
-        if not word:
-            continue
-        events.append(
-            AgentEvent(
-                event_type="THINKING_TOKEN",
-                node=node_name,
-                message="",
-                metadata={"token": word + " "},
-            ).to_payload(),
-        )
-    events.append(
-        AgentEvent(
-            event_type="THINKING_DONE",
-            node=node_name,
-            message=text,
-            metadata={"reasoning": text},
-        ).to_payload(),
-    )
-    return events
+    return _reasoning_module_stream_events(node_name, reasoning_text)
 
 
 def _extract_reasoning_token(delta: str, full_so_far: str, emitted_len: int) -> tuple[str, int, bool]:
-    """
-    workspace.md v2 STEP-3: JSON 스트리밍 중 reasoning 필드의 신규 토큰만 추출.
-    반환값: (new_token, new_emitted_len, completed)
-    """
-    if not delta and not full_so_far:
-        return "", emitted_len, False
-    marker_idx = full_so_far.find(_REASONING_JSON_MARKER)
-    if marker_idx < 0:
-        return "", emitted_len, False
-    colon_idx = full_so_far.find(":", marker_idx + len(_REASONING_JSON_MARKER))
-    if colon_idx < 0:
-        return "", emitted_len, False
-    q0 = full_so_far.find('"', colon_idx + 1)
-    if q0 < 0:
-        return "", emitted_len, False
-
-    chars: list[str] = []
-    escaped = False
-    i = q0 + 1
-    completed = False
-    while i < len(full_so_far):
-        ch = full_so_far[i]
-        if escaped:
-            chars.append(ch)
-            escaped = False
-        elif ch == "\\":
-            escaped = True
-        elif ch == '"':
-            completed = True
-            break
-        else:
-            chars.append(ch)
-        i += 1
-    current = "".join(chars)
-    if len(current) <= emitted_len:
-        return "", emitted_len, completed
-    new_piece = current[emitted_len:]
-    return new_piece, len(current), completed
+    return _reasoning_extract_reasoning_token(delta, full_so_far, emitted_len)
 
 
 async def _stream_reasoning_events_with_llm(
@@ -370,214 +185,27 @@ async def _stream_reasoning_events_with_llm(
     *,
     context: dict[str, Any] | None = None,
 ) -> tuple[str, list[dict[str, Any]], str]:
-    """
-    ENABLE_REASONING_LIVE_LLM=true 일 때 OpenAI stream=True JSON 응답으로 reasoning을 실시간 생성.
-    실패/비활성 시 하드코딩 초안을 스트림에 넣지 않고, 'LLM으로 생성되지 않았습니다' 문구만 전달해 오류가 보이도록 함.
-    return: (final_reasoning, events, source["llm"|"fallback"])
-    """
-    compact_fallback = _compact_reasoning_for_stream(reasoning_text)
-    fallback_message_only = _reasoning_stream_events(node_name, _REASONING_FALLBACK_MESSAGE)
-
-    if not settings.enable_reasoning_live_llm:
-        logger.warning(
-            "reasoning_llm_skipped node=%s reason=enable_reasoning_live_llm_false draft_len=%s",
-            node_name, len(reasoning_text or ""),
-        )
-        return _REASONING_FALLBACK_MESSAGE, fallback_message_only, "fallback"
-    if not (settings.openai_api_key or "").strip():
-        logger.warning(
-            "reasoning_llm_skipped node=%s reason=openai_api_key_missing draft_len=%s",
-            node_name, len(reasoning_text or ""),
-        )
-        return _REASONING_FALLBACK_MESSAGE, fallback_message_only, "fallback"
-
-    try:
-        from openai import AsyncAzureOpenAI, AsyncOpenAI  # type: ignore
-
-        base_url = (settings.openai_base_url or "").strip()
-        is_azure = ".openai.azure.com" in base_url
-        if is_azure:
-            azure_endpoint = base_url.rstrip("/")
-            if azure_endpoint.endswith("/openai/v1"):
-                azure_endpoint = azure_endpoint[: -len("/openai/v1")]
-            client = AsyncAzureOpenAI(
-                api_key=settings.openai_api_key,
-                azure_endpoint=azure_endpoint,
-                api_version=settings.openai_api_version,
-            )
-        else:
-            client_kwargs: dict[str, Any] = {"api_key": settings.openai_api_key}
-            if base_url:
-                client_kwargs["base_url"] = base_url
-            client = AsyncOpenAI(**client_kwargs)
-
-        context_json = json.dumps(context or {}, ensure_ascii=False, default=str)
-        min_sentences = max(4, settings.reasoning_stream_max_sentences // 2)
-        prompt = (
-            "당신은 엔터프라이즈 감사 에이전트의 reasoning 생성기다.\n"
-            "아래 초안을 기반으로 판단 중심의 reasoning을 '식별하기 좋은 중간 길이 요약'으로 JSON 출력하라.\n"
-            f"출력은 한국어 최소 {min_sentences}문장, 최대 {settings.reasoning_stream_max_sentences}문장, 최대 {settings.reasoning_stream_max_chars}자.\n"
-            "장황한 체크리스트/긴 번호 목록은 금지하되, 너무 짧은 한두 문장 요약도 금지한다.\n"
-            "핵심 판단, 근거, 위험 요인, 다음 행동을 구분해서 읽기 쉽게 작성한다.\n"
-            "기술 용어(도구명, 영문 약어, 내부 코드)는 가능한 한 한글 설명을 괄호와 함께 병기한다.\n"
-            "반드시 JSON 객체 1개만 출력하고 키는 reasoning 하나만 사용.\n"
-            "불필요한 설명, 코드블록, 마크다운 금지.\n\n"
-            f"[node] {node_name}\n"
-            f"[context] {context_json}\n"
-            f"[draft_reasoning] {reasoning_text}\n"
-        )
-
-        response_format_req = {"type": "json_object"}
-        tok_kw = {"max_completion_tokens": 1200} if is_azure else {"max_tokens": 1200}
-        # Azure: response_format=json_object 사용 시 content가 비어 오는 케이스 있음 → Azure일 때는 처음부터 생략하고 프롬프트로 JSON 요청
-        if is_azure:
-            create_kw = completion_kwargs_for_azure(
-                base_url,
-                model=settings.reasoning_llm_model,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": (
-                            "Output valid JSON only. reasoning 필드만 포함된 JSON을 출력한다. "
-                            "reasoning은 식별하기 쉬운 한국어 중간 길이 요약문이어야 하며, 전문 용어는 사용자 친화적으로 풀어쓴다."
-                        ),
-                    },
-                    {"role": "user", "content": prompt},
-                ],
-                **tok_kw,
-            )
-            logger.info(
-                "reasoning_llm_request node=%s model=%s stream=False (Azure, no response_format)",
-                node_name, settings.reasoning_llm_model,
-            )
-        else:
-            create_kw = completion_kwargs_for_azure(
-                base_url,
-                model=settings.reasoning_llm_model,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": (
-                            "Output valid JSON only. reasoning 필드만 포함된 JSON을 출력한다. "
-                            "reasoning은 식별하기 쉬운 한국어 중간 길이 요약문이어야 하며, 전문 용어는 사용자 친화적으로 풀어쓴다."
-                        ),
-                    },
-                    {"role": "user", "content": prompt},
-                ],
-                response_format=response_format_req,
-                **tok_kw,
-            )
-            logger.info(
-                "reasoning_llm_request node=%s model=%s response_format=%s stream=False",
-                node_name, settings.reasoning_llm_model, response_format_req,
-            )
-        full_response = ""
-        events: list[dict[str, Any]] = []
-        for_chunk_reasoning = ""
-
-        response = await client.chat.completions.create(**create_kw)
-        full_response = (response.choices[0].message.content or "").strip() if response.choices else ""
-
-        # Azure에서 첫 요청 후에도 content가 비면 response_format 없이 재시도 (이미 없을 수 있음)
-        if is_azure and not full_response:
-            if "response_format" in create_kw:
-                create_kw_no_fmt = {k: v for k, v in create_kw.items() if k != "response_format"}
-                logger.warning(
-                    "reasoning_llm_azure_empty_content node=%s choices_len=%s → retry without response_format",
-                    node_name, len(response.choices or []),
-                )
-                try:
-                    response2 = await client.chat.completions.create(**create_kw_no_fmt)
-                    full_response = (response2.choices[0].message.content or "").strip() if response2.choices else ""
-                except Exception as retry_err:
-                    logger.warning("reasoning_llm_azure_retry_failed node=%s error=%s", node_name, retry_err)
-
-        parsed_reasoning = ""
-        try:
-            parsed = json.loads(full_response)
-            parsed_reasoning = str(parsed.get("reasoning") or "").strip()
-        except Exception as parse_err:
-            logger.warning(
-                "reasoning_llm_json_parse_failed node=%s raw_len=%s error=%s",
-                node_name, len(full_response), str(parse_err),
-            )
-            parsed_reasoning = for_chunk_reasoning.strip()
-            # Azure 재시도 등으로 plain text 온 경우: 코드블록 내 JSON 또는 본문을 추론으로 사용
-            if not parsed_reasoning and full_response:
-                m = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", full_response, re.DOTALL)
-                if m:
-                    try:
-                        p = json.loads(m.group(1))
-                        parsed_reasoning = str(p.get("reasoning") or "").strip()
-                    except Exception:
-                        pass
-                if not parsed_reasoning:
-                    parsed_reasoning = full_response.strip()[: settings.reasoning_stream_max_chars]
-        if not parsed_reasoning and (for_chunk_reasoning or full_response):
-            logger.warning(
-                "reasoning_llm_empty_reasoning node=%s raw_len=%s chunk_len=%s",
-                node_name, len(full_response), len(for_chunk_reasoning or ""),
-            )
-
-        # LLM에서 쓸 수 있는 출력이 없으면 초안(하드코딩)을 보이지 않고 fallback 문구만 반환
-        usable = (parsed_reasoning or (for_chunk_reasoning or "").strip()).strip()
-        if not usable:
-            logger.warning(
-                "reasoning_llm_no_usable_output node=%s raw_len=%s chunk_len=%s → fallback message only",
-                node_name, len(full_response), len(for_chunk_reasoning or ""),
-            )
-            return _REASONING_FALLBACK_MESSAGE, fallback_message_only, "fallback"
-
-        final_reasoning = _compact_reasoning_for_stream(parsed_reasoning or for_chunk_reasoning.strip())
-        events.append(
-            AgentEvent(
-                event_type="THINKING_DONE",
-                node=node_name,
-                message=final_reasoning,
-                metadata={"reasoning": final_reasoning},
-            ).to_payload()
-        )
-        logger.info("reasoning_llm_ok node=%s response_len=%s", node_name, len(final_reasoning))
-        return final_reasoning, events, "llm"
-    except Exception as e:
-        err_detail = str(e)
-        try:
-            resp = getattr(e, "response", None)
-            if resp is not None and hasattr(resp, "text"):
-                err_detail = f"{e!s} | response_body={getattr(resp, 'text', '')[:800]}"
-            elif hasattr(e, "body"):
-                err_detail = f"{e!s} | body={str(getattr(e, 'body', ''))[:800]}"
-        except Exception:
-            pass
-        logger.warning(
-            "reasoning_llm_failed node=%s response_format=json_object stream=True error_type=%s detail=%s",
-            node_name, type(e).__name__, err_detail,
-            exc_info=True,
-        )
-        return _REASONING_FALLBACK_MESSAGE, fallback_message_only, "fallback"
+    return await _reasoning_stream_reasoning_events_with_llm(
+        node_name,
+        reasoning_text,
+        context=context,
+    )
 
 
 def _voucher_summary_for_context(body_evidence: dict[str, Any]) -> str:
-    """사용자 안내용 한 줄 요약. AI 작업 메모에서 내부 ID 대신 이 문구를 사용하도록 전달."""
-    merchant = (body_evidence.get("merchantName") or "").strip() or "거래처 미상"
-    amount = body_evidence.get("amount")
-    amount_str = f"{int(amount):,}원" if amount is not None else "금액 미상"
-    occurred = _format_occurred_at(body_evidence.get("occurredAt"))
-    return f"거래처 {merchant}, {amount_str}, {occurred}"
+    return _domain_voucher_summary_for_context(body_evidence)
 
 
 def _tool_result_key(r: dict[str, Any]) -> str:
-    """도구 결과 봉투에서 도구 이름 (tool/skill 하위 호환)."""
-    return str(r.get("tool") or r.get("skill") or "")
+    return _domain_tool_result_key(r)
 
 
 def _find_tool_result(tool_results: list[dict[str, Any]], tool_name: str) -> dict[str, Any] | None:
-    return next((r for r in tool_results if _tool_result_key(r) == tool_name), None)
+    return _domain_find_tool_result(tool_results, tool_name)
 
 
 def _top_policy_refs(tool_results: list[dict[str, Any]], limit: int = 2) -> list[dict[str, Any]]:
-    refs = (_find_tool_result(tool_results, "policy_rulebook_probe") or {}).get("facts", {}).get("policy_refs") or []
-    return list(refs[:limit])
+    return _domain_top_policy_refs(tool_results, limit=limit)
 
 
 async def _select_policy_refs_by_relevance(
@@ -667,40 +295,7 @@ def _should_skip_tool(step: dict[str, Any], *, state: AgentState, tool_results: 
 
 
 def _score_with_hitl_adjustment(score: dict[str, Any], flags: dict[str, Any]) -> dict[str, Any]:
-    adjusted = dict(score or {})
-    adjusted.setdefault("policy_score", int(score.get("policy_score", 0)))
-    adjusted.setdefault("evidence_score", int(score.get("evidence_score", 0)))
-    adjusted.setdefault("final_score", int(score.get("final_score", 0)))
-    adjusted.setdefault("reasons", list(score.get("reasons") or []))
-    adjusted.setdefault("policy_weight", float(score.get("policy_weight", settings.score_policy_weight)))
-    adjusted.setdefault("evidence_weight", float(score.get("evidence_weight", settings.score_evidence_weight)))
-    adjusted.setdefault("compound_multiplier", float(score.get("compound_multiplier", 1.0)))
-    adjusted.setdefault("amount_weight", float(score.get("amount_weight", 1.0)))
-    adjusted.setdefault("signals", list(score.get("signals") or []))
-    adjusted.setdefault("calculation_trace", str(score.get("calculation_trace") or ""))
-    if not flags.get("hasHitlResponse"):
-        adjusted["severity"] = _score_to_severity(float(adjusted.get("final_score", 0)))
-        return adjusted
-
-    approved = flags.get("hitlApproved")
-    if approved is True:
-        adjusted["evidence_score"] = min(100, adjusted["evidence_score"] + 10)
-        adjusted["reasons"].append("담당자 검토 승인 의견 반영")
-    elif approved is False:
-        adjusted["final_score"] = min(adjusted["final_score"], 59)
-        adjusted["reasons"].append("담당자 검토 보류 의견 반영")
-
-    if approved is not False:
-        pw = float(adjusted.get("policy_weight", settings.score_policy_weight))
-        ew = float(adjusted.get("evidence_weight", settings.score_evidence_weight))
-        adjusted["final_score"] = min(100, int(adjusted["policy_score"] * pw + adjusted["evidence_score"] * ew))
-    adjusted["severity"] = _score_to_severity(float(adjusted.get("final_score", 0)))
-    adjusted["calculation_trace"] = (
-        f"policy({float(adjusted.get('policy_score', 0)):.1f}) × {float(adjusted.get('policy_weight', settings.score_policy_weight)):.1f} + "
-        f"evidence({float(adjusted.get('evidence_score', 0)):.1f}) × {float(adjusted.get('evidence_weight', settings.score_evidence_weight)):.1f} = "
-        f"{float(adjusted.get('final_score', 0)):.1f} [compound×{float(adjusted.get('compound_multiplier', 1.0)):.2f}, amount×{float(adjusted.get('amount_weight', 1.0)):.2f}]"
-    )
-    return adjusted
+    return _scoring_score_with_hitl_adjustment(score, flags)
 
 
 def _build_system_auto_finalize_blockers(
@@ -709,37 +304,11 @@ def _build_system_auto_finalize_blockers(
     quality_signals: list[str] | None = None,
     fallback_reason: str = "",
 ) -> list[str]:
-    """자동확정 중단 사유(시스템 관점)를 구성한다."""
-    out: list[str] = []
-    gate_policy = str(verification_summary.get("gate_policy") or "").strip()
-    covered = verification_summary.get("covered")
-    total = verification_summary.get("total")
-    if gate_policy:
-        out.append(f"검증 게이트 판정: {gate_policy}")
-    if isinstance(covered, int) and isinstance(total, int) and total > 0:
-        ratio = verification_summary.get("coverage_ratio")
-        if isinstance(ratio, (int, float)):
-            out.append(f"근거 연결률: {covered}/{total} ({float(ratio)*100:.1f}%)")
-        else:
-            out.append(f"근거 연결률: {covered}/{total}")
-    missing_citations = verification_summary.get("missing_citations") or []
-    if isinstance(missing_citations, list) and missing_citations:
-        out.append(f"미연결 주장 수: {len(missing_citations)}건")
-    for s in (quality_signals or []):
-        t = str(s or "").strip()
-        if t:
-            out.append(f"검증 신호: {t}")
-    if not out and fallback_reason:
-        out.append(str(fallback_reason).strip())
-    dedup: list[str] = []
-    seen: set[str] = set()
-    for s in out:
-        k = s.strip()
-        if not k or k in seen:
-            continue
-        seen.add(k)
-        dedup.append(k)
-    return dedup
+    return _hitl_build_system_auto_finalize_blockers(
+        verification_summary,
+        quality_signals=quality_signals,
+        fallback_reason=fallback_reason,
+    )
 
 
 def _assess_hitl_resolution_requirements(
@@ -748,80 +317,11 @@ def _assess_hitl_resolution_requirements(
     hitl_response: dict[str, Any],
     evidence_result: dict[str, Any] | None,
 ) -> tuple[bool, list[str], list[str]]:
-    """
-    HITL 응답이 최종 확정을 할 만큼 충분한지 검사한다.
-    반환: (is_sufficient, blockers, followup_questions)
-    담당자가 승인만 체크하고 근거/의견을 비워둔 경우에도 충분한 것으로 보고 reporter가 판단요약을 내도록 함.
-    """
-    approved = hitl_response.get("approved") is True
-    if not approved:
-        return False, [], []
-
-    blockers: list[str] = []
-    followup: list[str] = []
-
-    comment = str(hitl_response.get("comment") or "").strip()
-    # 담당자 승인만 체크·근거/의견 없이 제출한 경우에도 통과 — reporter가 기존 증거·규정 기준으로 판단요약 생성
-
-    required_inputs = hitl_request.get("required_inputs") or []
-    missing_required: list[dict[str, str]] = []
-    extra = hitl_response.get("extra_facts") or {}
-    attendees = hitl_response.get("attendees") or []
-    for req in required_inputs:
-        field = str(req.get("field") or "").strip()
-        if not field:
-            continue
-        if field == "attendees":
-            val = attendees
-        else:
-            val = hitl_response.get(field)
-            if (val is None or (isinstance(val, str) and not val.strip())) and isinstance(extra, dict):
-                val = extra.get(field)
-        if val is None or (isinstance(val, str) and not val.strip()) or (isinstance(val, list) and not val):
-            missing_required.append(req)
-    if missing_required:
-        blockers.append(f"필수 입력/증빙 항목 {len(missing_required)}개가 누락되었습니다.")
-        for m in missing_required[:5]:
-            q = str(m.get("guide") or m.get("reason") or m.get("field") or "").strip()
-            if q:
-                followup.append(q)
-
-    # 승인만 한 경우(의견/질문 답변 없음)는 블로커 없이 통과 — 판단요약은 LLM이 기존 증거로 생성
-    # review_questions 미답변 블로커 제거
-
-    evidence_passed = None
-    if isinstance(evidence_result, dict) and evidence_result:
-        evidence_passed = evidence_result.get("passed") is True
-        if evidence_passed is False:
-            blockers.append("첨부 증빙 검증 결과가 불일치(passed=false)입니다.")
-            reasons = evidence_result.get("reasons") or []
-            for r in reasons[:3]:
-                t = str(r or "").strip()
-                if t:
-                    followup.append(f"증빙 불일치 사유 해소: {t}")
-
-    # 승인만 한 경우 미해결 주장 블로커 없음 — 담당자 책임 하 승인으로 reporter가 판단요약 생성
-    # unresolved_claims 근거 부족 블로커 제거
-
-    # 중복 제거
-    dedup_blockers: list[str] = []
-    seen_b: set[str] = set()
-    for s in blockers:
-        k = s.strip()
-        if not k or k in seen_b:
-            continue
-        seen_b.add(k)
-        dedup_blockers.append(k)
-    dedup_followup: list[str] = []
-    seen_q: set[str] = set()
-    for s in followup:
-        k = s.strip()
-        if not k or k in seen_q:
-            continue
-        seen_q.add(k)
-        dedup_followup.append(k)
-
-    return (len(dedup_blockers) == 0), dedup_blockers, dedup_followup[:8]
+    return _hitl_assess_resolution_requirements(
+        hitl_request=hitl_request,
+        hitl_response=hitl_response,
+        evidence_result=evidence_result,
+    )
 
 
 async def _llm_decide_hitl_verdict(
@@ -1153,38 +653,11 @@ async def _llm_summarize_completed_reason(state: AgentState) -> str:
 
 
 def _pick_llm_review_reason(hitl_request: dict[str, Any]) -> str:
-    """사용자 노출용 재검토 사유는 hitl_request의 LLM 생성 문구를 우선 사용한다."""
-    for key in ("unresolved_claims", "reasons", "review_questions", "questions"):
-        vals = hitl_request.get(key) or []
-        if isinstance(vals, list):
-            for v in vals:
-                t = str(v or "").strip()
-                if t:
-                    return t
-    for key in ("why_hitl", "blocking_reason"):
-        t = str(hitl_request.get(key) or "").strip()
-        if t:
-            return t
-    return ""
+    return _hitl_pick_llm_review_reason(hitl_request)
 
 
 def _is_verify_ready_without_hitl(state: AgentState) -> bool:
-    """verify 게이트가 READY이고 HITL 필요 신호가 없으면 자동 진행 가능으로 본다."""
-    verification = state.get("verification") or {}
-    verifier_output = state.get("verifier_output") or {}
-    needs_hitl = bool(verification.get("needs_hitl"))
-    gate_raw = verifier_output.get("gate")
-    # pydantic model_dump(mode="python")에서는 Enum 객체가 그대로 들어올 수 있다.
-    if hasattr(gate_raw, "value"):
-        gate_raw = getattr(gate_raw, "value")
-    gate = str(gate_raw or "").upper()
-    if gate.startswith("VERIFIERGATE."):
-        gate = gate.split(".", 1)[1]
-    if not gate and not needs_hitl:
-        quality = {str(x).upper() for x in (verification.get("quality_signals") or [])}
-        if "OK" in quality:
-            gate = "READY"
-    return (not needs_hitl) and gate in {"READY", "PASS"}
+    return _hitl_is_verify_ready_without_hitl(state)
 
 
 def _build_grounded_reason(state: AgentState, completed_tail: str | None = None) -> tuple[str, str]:
@@ -1281,363 +754,38 @@ def _build_grounded_reason(state: AgentState, completed_tail: str | None = None)
 
 
 def _derive_flags(body_evidence: dict[str, Any]) -> dict[str, Any]:
-    occurred_at = body_evidence.get("occurredAt")
-    hour = None
-    if occurred_at:
-        try:
-            hour = int(str(occurred_at)[11:13])
-        except Exception:
-            hour = None
-    hitl_response = body_evidence.get("hitlResponse") or {}
-    return {
-        "isHoliday": bool(body_evidence.get("isHoliday")),
-        "hrStatus": body_evidence.get("hrStatus"),
-        "mccCode": body_evidence.get("mccCode"),
-        "merchantName": body_evidence.get("merchantName"),
-        "budgetExceeded": bool(body_evidence.get("budgetExceeded")),
-        "isNight": hour is not None and (hour >= 22 or hour < 6),
-        "amount": body_evidence.get("amount"),
-        "caseType": body_evidence.get("case_type") or body_evidence.get("intended_risk_type"),
-        "hasHitlResponse": bool(hitl_response),
-        "hitlApproved": hitl_response.get("approved"),
-    }
+    return _scoring_derive_flags(body_evidence)
 
 
 def _plan_from_flags(flags: dict[str, Any]) -> list[dict[str, Any]]:
-    plan: list[dict[str, Any]] = []
-    if flags.get("isHoliday") or flags.get("hrStatus") in {"LEAVE", "OFF", "VACATION"}:
-        plan.append({"tool": "holiday_compliance_probe", "reason": "휴일/휴무 리스크 확인", "owner": "planner"})
-    if flags.get("budgetExceeded"):
-        plan.append({"tool": "budget_risk_probe", "reason": "예산 초과 확인", "owner": "planner"})
-    if flags.get("mccCode"):
-        plan.append({"tool": "merchant_risk_probe", "reason": "가맹점 업종 코드 위험 확인", "owner": "planner"})
-    plan.append({"tool": "document_evidence_probe", "reason": "전표 증거 수집", "owner": "specialist"})
-    plan.append({"tool": "policy_rulebook_probe", "reason": "내부 규정 조항 조회", "owner": "specialist"})
-    if settings.enable_legacy_aura_specialist:
-        plan.append({"tool": "legacy_aura_deep_audit", "reason": "기존 Aura 심층 검토", "owner": "specialist"})
-    return plan
-
-
-_POLICY_SIGNAL_POINTS: dict[str, float] = {
-    "isHoliday": 35.0,
-    "hrStatus_conflict": 20.0,
-    "isNight": 10.0,
-    "budgetExceeded": 15.0,
-}
-
-_HOLIDAY_RISK_POLICY_DELTA: dict[str, float] = {
-    "HIGH": 10.0,
-    "MEDIUM": 5.0,
-    "LOW": 0.0,
-}
-
-_MERCHANT_RISK_POLICY_DELTA: dict[str, float] = {
-    "HIGH": 20.0,
-    "MEDIUM": 10.0,
-    "LOW": 3.0,
-    "UNKNOWN": 0.0,
-}
-
-_POLICY_REF_EVIDENCE_POINTS: list[tuple[int, float]] = [
-    (5, 30.0),
-    (3, 22.0),
-    (2, 15.0),
-    (1, 10.0),
-    (0, 0.0),
-]
-
-_LINE_ITEM_EVIDENCE_POINTS: list[tuple[int, float]] = [
-    (3, 20.0),
-    (2, 15.0),
-    (1, 10.0),
-    (0, 0.0),
-]
+    return _scoring_plan_from_flags(flags)
 
 
 def _lookup_tiered(value: int, table: list[tuple[int, float]]) -> float:
-    for threshold, points in table:
-        if value >= threshold:
-            return points
-    return 0.0
+    return _scoring_lookup_tiered(value, table)
 
 
 def _score_to_severity(final_score: float) -> str:
-    if final_score >= 75:
-        return "CRITICAL"
-    if final_score >= 55:
-        return "HIGH"
-    if final_score >= 35:
-        return "MEDIUM"
-    return "LOW"
+    return _scoring_score_to_severity(final_score)
 
 
 def _compute_plan_achievement(
     plan: list[dict[str, Any]],
     tool_results: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    """planner 계획 대비 실제 실행 달성도를 계산한다."""
-    executed_map = {_tool_result_key(r): r for r in tool_results}
-    planned_tools = [step.get("tool", "") for step in plan]
-
-    step_results: list[dict[str, Any]] = []
-    succeeded = failed = skipped = 0
-
-    for tool_name in planned_tools:
-        if tool_name not in executed_map:
-            step_results.append({"tool": tool_name, "status": "skipped", "ok": None})
-            skipped += 1
-            continue
-        result = executed_map[tool_name]
-        ok = bool(result.get("ok"))
-        step_results.append({
-            "tool": tool_name,
-            "status": "success" if ok else "failed",
-            "ok": ok,
-            "facts_keys": list((result.get("facts") or {}).keys()),
-        })
-        if ok:
-            succeeded += 1
-        else:
-            failed += 1
-
-    total = len(planned_tools)
-    executed = succeeded + failed
-    rate = round(succeeded / total, 3) if total else 0.0
-
-    return {
-        "total_planned": total,
-        "executed": executed,
-        "succeeded": succeeded,
-        "failed": failed,
-        "skipped": skipped,
-        "achievement_rate": rate,
-        "step_results": step_results,
-    }
+    return _scoring_compute_plan_achievement(plan, tool_results)
 
 
 def _reason_prefix(points: float) -> str:
-    """가산/감점 사유 앞에 붙일 접두어. points > 0 → [가산], < 0 → [감점], 0 → 없음."""
-    if points > 0:
-        return "[가산] "
-    if points < 0:
-        return "[감점] "
-    return ""
+    return _scoring_reason_prefix(points)
 
 
 def _score(flags: dict[str, Any], tool_results: list[dict[str, Any]]) -> dict[str, Any]:
-    from agent.output_models import ScoreSignalDetail
-
-    signals: list[ScoreSignalDetail] = []
-    reasons: list[str] = []
-
-    base_policy_score = 0.0
-    base_evidence_score = 20.0
-
-    if bool(flags.get("isHoliday")):
-        pts = _POLICY_SIGNAL_POINTS["isHoliday"]
-        base_policy_score += pts
-        reasons.append(_reason_prefix(pts) + "휴일 사용 정황")
-        signals.append(ScoreSignalDetail(signal="isHoliday", label="휴일/주말 사용", raw_value=True, points=pts, category="policy"))
-
-    hr = str(flags.get("hrStatus") or "").upper()
-    if hr in {"LEAVE", "OFF", "VACATION"}:
-        pts = _POLICY_SIGNAL_POINTS["hrStatus_conflict"]
-        base_policy_score += pts
-        reasons.append(_reason_prefix(pts) + f"근태 상태 충돌 ({hr})")
-        signals.append(ScoreSignalDetail(signal="hrStatus_conflict", label=f"근태 충돌({hr})", raw_value=hr, points=pts, category="policy"))
-
-    if bool(flags.get("isNight")):
-        pts = _POLICY_SIGNAL_POINTS["isNight"]
-        base_policy_score += pts
-        reasons.append(_reason_prefix(pts) + "심야 시간대")
-        signals.append(ScoreSignalDetail(signal="isNight", label="심야 시간대(22시~06시)", raw_value=True, points=pts, category="policy"))
-
-    if bool(flags.get("budgetExceeded")):
-        pts = _POLICY_SIGNAL_POINTS["budgetExceeded"]
-        base_policy_score += pts
-        reasons.append(_reason_prefix(pts) + "예산 초과")
-        signals.append(ScoreSignalDetail(signal="budgetExceeded", label="예산 한도 초과", raw_value=True, points=pts, category="policy"))
-
-    tool_policy_delta = 0.0
-    tool_evidence_delta = 0.0
-    holiday_result = _find_tool_result(tool_results, "holiday_compliance_probe")
-    merchant_result = _find_tool_result(tool_results, "merchant_risk_probe")
-    policy_result = _find_tool_result(tool_results, "policy_rulebook_probe")
-    doc_result = _find_tool_result(tool_results, "document_evidence_probe")
-
-    if holiday_result:
-        h_facts = holiday_result.get("facts") or {}
-        holiday_risk = h_facts.get("holidayRisk")
-        if holiday_risk is True and bool(flags.get("isHoliday")) and hr in {"LEAVE", "OFF", "VACATION"}:
-            delta = _HOLIDAY_RISK_POLICY_DELTA["HIGH"]
-            tool_policy_delta += delta
-            reasons.append(_reason_prefix(delta) + "도구 확인: 휴일+근태 중복 위험(HIGH)")
-            signals.append(ScoreSignalDetail(signal="holidayRisk_HIGH", label="도구 확인 - 휴일+근태 중복", raw_value="HIGH", points=delta, category="policy"))
-        elif holiday_risk is True:
-            delta = _HOLIDAY_RISK_POLICY_DELTA["MEDIUM"]
-            tool_policy_delta += delta
-            reasons.append(_reason_prefix(delta) + "도구 확인: 휴일 위험(MEDIUM)")
-            signals.append(ScoreSignalDetail(signal="holidayRisk_MEDIUM", label="도구 확인 - 휴일 위험", raw_value="MEDIUM", points=delta, category="policy"))
-
-    if merchant_result:
-        m_facts = merchant_result.get("facts") or {}
-        merchant_risk = str(m_facts.get("merchantRisk") or "UNKNOWN").upper()
-        delta = _MERCHANT_RISK_POLICY_DELTA.get(merchant_risk, 0.0)
-        if delta > 0:
-            tool_policy_delta += delta
-            reasons.append(_reason_prefix(delta) + f"도구 확인: 가맹점 위험도 {merchant_risk}")
-            signals.append(ScoreSignalDetail(signal=f"merchantRisk_{merchant_risk}", label=f"가맹점/업종 위험도({merchant_risk})", raw_value=merchant_risk, points=delta, category="policy"))
-
-    if policy_result:
-        p_facts = policy_result.get("facts") or {}
-        ref_count = int(p_facts.get("ref_count") or 0)
-        delta = _lookup_tiered(ref_count, _POLICY_REF_EVIDENCE_POINTS)
-        if delta > 0:
-            tool_evidence_delta += delta
-            reasons.append(_reason_prefix(delta) + f"규정 조항 {ref_count}건 확보")
-            signals.append(ScoreSignalDetail(signal="policyRefs", label=f"규정 조항 {ref_count}건", raw_value=ref_count, points=delta, category="evidence"))
-
-    if doc_result:
-        d_facts = doc_result.get("facts") or {}
-        line_count = int(d_facts.get("lineItemCount") or 0)
-        delta = _lookup_tiered(line_count, _LINE_ITEM_EVIDENCE_POINTS)
-        if delta > 0:
-            tool_evidence_delta += delta
-            reasons.append(_reason_prefix(delta) + f"전표 라인아이템 {line_count}건 확보")
-            signals.append(ScoreSignalDetail(signal="lineItems", label=f"전표 라인 {line_count}건", raw_value=line_count, points=delta, category="evidence"))
-
-    if any(_tool_result_key(r) == "legacy_aura_deep_audit" and r.get("facts") for r in tool_results):
-        tool_evidence_delta += 15.0
-        reasons.append(_reason_prefix(15.0) + "심층 감사 결과 확보")
-        signals.append(ScoreSignalDetail(signal="legacyAudit", label="심층 감사 결과", raw_value=True, points=15.0, category="evidence"))
-
-    if bool(flags.get("hasHitlResponse")):
-        tool_evidence_delta += 10.0
-        reasons.append(_reason_prefix(10.0) + "담당자 검토 응답 확보")
-        signals.append(ScoreSignalDetail(signal="hitlResponse", label="담당자 검토 응답", raw_value=True, points=10.0, category="evidence"))
-
-    ref_count = int(((policy_result or {}).get("facts") or {}).get("ref_count") or 0)
-    line_count = int(((doc_result or {}).get("facts") or {}).get("lineItemCount") or 0)
-
-    policy_score = base_policy_score + tool_policy_delta
-    evidence_score = min(100.0, base_evidence_score + tool_evidence_delta)
-
-    total_tools = len(tool_results)
-    ok_tools = sum(1 for result in tool_results if result.get("ok"))
-    success_rate = (ok_tools / total_tools) if total_tools else 0.0
-    if total_tools > 0 and success_rate < 0.5:
-        penalty = round((0.5 - success_rate) * 40, 1)
-        evidence_score = max(0.0, evidence_score - penalty)
-        reasons.append(_reason_prefix(-penalty) + f"도구 실행 성공률 {success_rate:.0%} → evidence_score -{penalty}점")
-    if total_tools >= 3 and success_rate == 1.0:
-        evidence_score = min(100.0, evidence_score + 5.0)
-        reasons.append(_reason_prefix(5.0) + f"계획한 {total_tools}개 도구 전체 성공 → evidence_score +5점")
-
-    high_risk_count = sum(
-        [
-            bool(flags.get("isHoliday")),
-            bool(hr in {"LEAVE", "OFF", "VACATION"}),
-            bool(flags.get("isNight")),
-            bool(flags.get("budgetExceeded")),
-            bool(merchant_result and str((merchant_result.get("facts") or {}).get("merchantRisk") or "").upper() == "HIGH"),
-        ]
-    )
-
-    compound_multiplier = 1.0
-    if high_risk_count >= 4:
-        compound_multiplier = settings.score_compound_multiplier_max
-    elif high_risk_count == 3:
-        compound_multiplier = 1.3
-    elif high_risk_count == 2:
-        compound_multiplier = 1.15
-    if compound_multiplier > 1.0:
-        reasons.append(_reason_prefix(0.0) + f"복합 위험 승수 적용 ({high_risk_count}개 고위험 신호)")
-        signals.append(ScoreSignalDetail(signal="compound_multiplier", label=f"복합 위험({high_risk_count}개)", raw_value=high_risk_count, points=0.0, category="multiplier"))
-
-    policy_score = policy_score * compound_multiplier
-
-    amount = float(flags.get("amount") or 0)
-    # 금액 승수를 계단식이 아닌 연속 함수로 적용해 경계값 점프를 완화한다.
-    # 0~100k: 1.00~1.07, 100k~500k: 1.07~1.15, 500k~2m: 1.15~1.30
-    if amount <= 100_000:
-        amount_multiplier = 1.0 + 0.07 * (max(amount, 0.0) / 100_000.0)
-        amount_label = "금액 구간 10만원 이하"
-    elif amount <= 500_000:
-        amount_multiplier = 1.07 + 0.08 * ((amount - 100_000.0) / 400_000.0)
-        amount_label = "금액 구간 10만원~50만원"
-    elif amount <= 2_000_000:
-        amount_multiplier = 1.15 + 0.15 * ((amount - 500_000.0) / 1_500_000.0)
-        amount_label = "금액 구간 50만원~200만원"
-    else:
-        amount_multiplier = 1.3
-        amount_label = "금액 구간 200만원 초과"
-    amount_multiplier = min(amount_multiplier, settings.score_amount_multiplier_max)
-    reasons.append(_reason_prefix(0.0) + f"{amount_label} ({int(amount):,}원)")
-    signals.append(ScoreSignalDetail(signal="amount_weight", label=f"{amount_label}({int(amount):,}원)", raw_value=amount, points=0.0, category="amount"))
-
-    policy_score = min(100.0, policy_score * amount_multiplier)
-
-    has_strong_evidence = bool(ref_count >= 3 and line_count >= 1)
-    evidence_completeness = min(1.0, (min(ref_count, 3) / 3.0) * 0.6 + (min(line_count, 2) / 2.0) * 0.4)
-    # 증거 품질이 높을수록 0.75/0.25 -> 0.5/0.5 로 점진 전환
-    policy_weight = 0.75 - (0.25 * evidence_completeness)
-    evidence_weight = 1.0 - policy_weight
-
-    final_score_raw = policy_score * policy_weight + evidence_score * evidence_weight
-    # 고위험 신호가 많지만 증거가 빈약하면 과대확신을 막기 위해 보수 패널티를 적용
-    if high_risk_count >= 3 and evidence_completeness < 0.4:
-        penalty = (0.4 - evidence_completeness) * 20.0
-        final_score_raw -= penalty
-        reasons.append(_reason_prefix(-penalty) + f"증거 부족 보수 패널티 적용 (-{penalty:.1f})")
-        signals.append(
-            ScoreSignalDetail(
-                signal="evidence_shortage_penalty",
-                label="증거 부족 보수 패널티",
-                raw_value=round(evidence_completeness, 3),
-                points=-round(penalty, 1),
-                category="evidence",
-            )
-        )
-    final_score = min(100.0, max(0.0, round(final_score_raw, 1)))
-    severity = _score_to_severity(final_score)
-    calculation_trace = (
-        f"policy({policy_score:.1f}) × {policy_weight} + "
-        f"evidence({evidence_score:.1f}) × {evidence_weight} = {final_score:.1f} "
-        f"[compound×{compound_multiplier:.2f}, amount×{amount_multiplier:.2f}]"
-    )
-
-    return {
-        "policy_score": int(round(policy_score)),
-        "evidence_score": int(round(evidence_score)),
-        "final_score": int(round(final_score)),
-        "reasons": reasons,
-        "amount_weight": amount_multiplier,
-        "compound_multiplier": compound_multiplier,
-        "policy_weight": policy_weight,
-        "evidence_weight": evidence_weight,
-        "severity": severity,
-        "signals": [s.model_dump() for s in signals],
-        "calculation_trace": calculation_trace,
-    }
+    return _scoring_score(flags, tool_results)
 
 
 def _build_prescreened_result(body: dict[str, Any]) -> dict[str, Any]:
-    """사전 스크리닝된 body_evidence로 screening_result 딕셔너리 구성 (start_router / intake 이벤트용)."""
-    ct = body.get("case_type") or body.get("intended_risk_type") or ""
-    if not _is_valid_screening_case_type(ct):
-        ct = ""
-    severity = body.get("severity") or "MEDIUM"
-    score_raw = body.get("screening_score")
-    score_int = int(score_raw * 100) if isinstance(score_raw, (int, float)) else (int(score_raw) if score_raw else 0)
-    reason_text = body.get("screening_reason_text") or "사전 스크리닝 결과를 사용합니다."
-    reasons = [reason_text] if reason_text else ["사전 스크리닝됨"]
-    return {
-        "case_type": ct,
-        "severity": severity,
-        "score": score_int,
-        "reasons": reasons,
-        "reason_text": reason_text,
-    }
+    return _domain_build_prescreened_result(body)
 
 
 async def start_router_node(state: AgentState) -> AgentState:
@@ -3265,30 +2413,7 @@ async def hitl_validate_node(state: AgentState) -> AgentState:
 
 
 def _format_hitl_reason_for_stream(hitl_payload: dict[str, Any]) -> str:
-    """
-    스트림/UI에 표시할 "왜 담당자 검토가 필요한지" 한 줄 사유.
-    재인터럽트 시 필수 입력 누락(required_inputs) 등으로 쓰인다.
-    """
-    if not hitl_payload:
-        return ""
-    why = str(hitl_payload.get("why_hitl") or hitl_payload.get("blocking_reason") or "").strip()
-    reqs = hitl_payload.get("required_inputs") or []
-    parts = []
-    if why:
-        parts.append(why)
-    for r in reqs[:5]:
-        if not isinstance(r, dict):
-            continue
-        guide = str(r.get("guide") or "").strip()
-        reason = str(r.get("reason") or "").strip()
-        field = str(r.get("field") or "").strip()
-        if guide:
-            parts.append(guide)
-        elif reason or field:
-            parts.append(f"{field}: {reason}" if field and reason else (reason or field))
-    if not parts:
-        return ""
-    return " ".join(parts)[:400].rstrip()
+    return _hitl_format_reason_for_stream(hitl_payload)
 
 
 def _route_after_hitl_validate(state: AgentState) -> str:
@@ -3624,60 +2749,11 @@ async def finalizer_node(state: AgentState) -> AgentState:
 
 
 def _get_checkpointer():
-    """동일 프로세스 내 run resume를 위해 checkpointer는 싱글톤으로 유지한다.
-    CHECKPOINTER_BACKEND=postgres 이면 AsyncPostgresSaver 사용, 아니면 MemorySaver.
-    """
     global _CHECKPOINTER
     if _CHECKPOINTER is not None:
         return _CHECKPOINTER
-
-    backend = getattr(settings, "checkpointer_backend", "memory").lower()
-
-    if backend == "postgres":
-        try:
-            from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver  # type: ignore[import-untyped]
-
-            async def _init_postgres_checkpointer() -> Any:
-                cp = await AsyncPostgresSaver.from_conn_string(settings.database_url)
-                await cp.setup()
-                return cp
-
-            try:
-                loop = asyncio.get_running_loop()
-            except RuntimeError:
-                loop = None
-            if loop is not None and loop.is_running():
-                import concurrent.futures
-
-                def _run_init() -> Any:
-                    return asyncio.run(_init_postgres_checkpointer())
-
-                with concurrent.futures.ThreadPoolExecutor() as pool:
-                    future = pool.submit(_run_init)
-                    _CHECKPOINTER = future.result(timeout=15)
-            else:
-                _loop = asyncio.new_event_loop()
-                try:
-                    _CHECKPOINTER = _loop.run_until_complete(_init_postgres_checkpointer())
-                finally:
-                    _loop.close()
-        except ImportError:
-            import warnings
-
-            warnings.warn(
-                "langgraph-checkpoint-postgres가 없어 MemorySaver로 fallback합니다. "
-                "pip install langgraph-checkpoint-postgres",
-                RuntimeWarning,
-                stacklevel=2,
-            )
-            from langgraph.checkpoint.memory import MemorySaver
-
-            _CHECKPOINTER = MemorySaver()
-    else:
-        from langgraph.checkpoint.memory import MemorySaver
-
-        _CHECKPOINTER = MemorySaver()
-
+    _runtime_module._CHECKPOINTER = _CHECKPOINTER
+    _CHECKPOINTER = _runtime_get_checkpointer()
     return _CHECKPOINTER
 
 
@@ -3685,63 +2761,43 @@ def build_agent_graph():
     global _COMPILED_GRAPH
     if _COMPILED_GRAPH is not None:
         return _COMPILED_GRAPH
-
-    workflow = StateGraph(AgentState)
-    # 진입 라우터: 사전 스크리닝된 전표(case_type 있음)면 intake로, 아니면 screener로
-    workflow.add_node("start_router", start_router_node)
-    workflow.add_node("screener", screener_node)
-    workflow.add_node("intake", intake_node)
-    workflow.add_node("planner", planner_node)
-    workflow.add_node("execute", execute_node)
-    workflow.add_node("critic", critic_node)
-    workflow.add_node("verify", verify_node)
-    workflow.add_node("hitl_pause", hitl_pause_node)
-    workflow.add_node("hitl_validate", hitl_validate_node)
-    workflow.add_node("reporter", reporter_node)
-    workflow.add_node("finalizer", finalizer_node)
-
-    def _route_after_start_router(state: AgentState) -> str:
-        return "intake" if state.get("screening_result") else "screener"
-
-    workflow.add_edge(START, "start_router")
-    workflow.add_conditional_edges("start_router", _route_after_start_router, {"intake": "intake", "screener": "screener"})
-    workflow.add_edge("screener", "intake")
-    workflow.add_edge("intake", "planner")
-    workflow.add_edge("planner", "execute")
-    workflow.add_edge("execute", "critic")
-    workflow.add_conditional_edges("critic", _route_after_critic, {"planner": "planner", "verify": "verify"})
-    workflow.add_conditional_edges("verify", _route_after_verify, {"hitl_pause": "hitl_pause", "reporter": "reporter"})
-    workflow.add_edge("hitl_pause", "hitl_validate")  # resume 후 검증 → 충족 시 reporter, 미충족 시 hitl_pause 재요청
-    workflow.add_conditional_edges("hitl_validate", _route_after_hitl_validate, {"hitl_pause": "hitl_pause", "reporter": "reporter"})
-    workflow.add_edge("reporter", "finalizer")
-    workflow.add_edge("finalizer", END)
-    _COMPILED_GRAPH = workflow.compile(checkpointer=_get_checkpointer())
+    _runtime_module._COMPILED_GRAPH = _COMPILED_GRAPH
+    _COMPILED_GRAPH = _runtime_build_agent_graph(
+        state_type=AgentState,
+        start_router_node=start_router_node,
+        screener_node=screener_node,
+        intake_node=intake_node,
+        planner_node=planner_node,
+        execute_node=execute_node,
+        critic_node=critic_node,
+        verify_node=verify_node,
+        hitl_pause_node=hitl_pause_node,
+        hitl_validate_node=hitl_validate_node,
+        reporter_node=reporter_node,
+        finalizer_node=finalizer_node,
+        route_after_critic=_route_after_critic,
+        route_after_verify=_route_after_verify,
+        route_after_hitl_validate=_route_after_hitl_validate,
+    )
     return _COMPILED_GRAPH
 
 
 def build_hitl_closure_graph():
-    """기존 분석 결과 + 담당자 의견만 반영해 hitl_validate → reporter → finalizer 만 실행 (재분석 없음)."""
     global _CLOSURE_GRAPH
     if _CLOSURE_GRAPH is not None:
         return _CLOSURE_GRAPH
-    workflow = StateGraph(AgentState)
-    workflow.add_node("hitl_validate", hitl_validate_node)
-    workflow.add_node("reporter", reporter_node)
-    workflow.add_node("finalizer", finalizer_node)
-    workflow.add_edge(START, "hitl_validate")
-    workflow.add_edge("hitl_validate", "reporter")
-    workflow.add_edge("reporter", "finalizer")
-    workflow.add_edge("finalizer", END)
-    _CLOSURE_GRAPH = workflow.compile(checkpointer=None)
+    _runtime_module._CLOSURE_GRAPH = _CLOSURE_GRAPH
+    _CLOSURE_GRAPH = _runtime_build_hitl_closure_graph(
+        state_type=AgentState,
+        hitl_validate_node=hitl_validate_node,
+        reporter_node=reporter_node,
+        finalizer_node=finalizer_node,
+    )
     return _CLOSURE_GRAPH
 
 
 def _closure_verification(verification: dict[str, Any] | None) -> dict[str, Any]:
-    """2차 경량용 verification: quality_signals 없으면 기본값 보장."""
-    out = dict(verification or {})
-    if "quality_signals" not in out:
-        out["quality_signals"] = out.get("quality_gate_codes") or ["OK"]
-    return out
+    return _runtime_closure_verification(verification)
 
 
 def _closure_initial_state(
@@ -3752,24 +2808,13 @@ def _closure_initial_state(
     intended_risk_type: str | None,
     resume_value: dict[str, Any],
 ) -> dict[str, Any]:
-    """2차 경량: 기존 분석 결과(previous_result)와 담당자 응답(resume_value)으로 hitl_validate 이후만 돌릴 초기 state."""
-    body = dict(body_evidence or {})
-    body["hitlResponse"] = resume_value
-    flags = dict(previous_result.get("flags") or {})
-    flags["hasHitlResponse"] = True
-    flags["hitlApproved"] = resume_value.get("approved") is True
-    return {
-        "case_id": case_id,
-        "body_evidence": body,
-        "intended_risk_type": intended_risk_type or None,
-        "hitl_request": previous_result.get("hitl_request"),
-        "score_breakdown": dict(previous_result.get("score_breakdown") or {}),
-        "tool_results": list(previous_result.get("tool_results") or []),
-        "flags": flags,
-        "verification": _closure_verification(previous_result.get("verification")),
-        "verifier_output": dict(previous_result.get("verifier_output") or {}),
-        "last_node_summary": str(previous_result.get("last_node_summary") or ""),
-    }
+    return _runtime_closure_initial_state(
+        previous_result=previous_result,
+        body_evidence=body_evidence,
+        case_id=case_id,
+        intended_risk_type=intended_risk_type,
+        resume_value=resume_value,
+    )
 
 
 async def run_langgraph_agentic_analysis(
