@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import random
 from datetime import date, datetime, time, timezone
 from typing import Any
 
@@ -99,6 +98,11 @@ SCENARIO_PROFILES: dict[str, dict[str, Any]] = {
     },
 }
 
+# OCR 검증/시연 일관성을 위한 고정 생성값
+_FIXED_WEEKEND_DATE = date(2026, 3, 14)  # 2026-03-14 (토)
+_FIXED_OCCUR_TIME = time(19, 45, 0)
+_FIXED_AMOUNT_KRW = 97042
+
 
 def list_demo_scenarios() -> list[dict[str, Any]]:
     out = []
@@ -127,11 +131,17 @@ def _eul_reul(label: str) -> str:
 
 
 def _next_day(mode: str) -> date:
-    target = date.today()
     if mode == "weekend":
-        while target.weekday() != 5:
-            target = date.fromordinal(target.toordinal() + 1)
-        return target
+        return _FIXED_WEEKEND_DATE
+
+    # 기존 주말 동적 계산 로직(원복 참고용):
+    # target = date.today()
+    # if mode == "weekend":
+    #     while target.weekday() != 5:
+    #         target = date.fromordinal(target.toordinal() + 1)
+    #     return target
+
+    target = date.today()
     while target.weekday() >= 5:
         target = date.fromordinal(target.toordinal() + 1)
     return target
@@ -238,11 +248,13 @@ def seed_demo_scenarios(db: Session, scenario: str, count: int = 5) -> dict[str,
             doc_source="POC",
             budat=target_day,
             cpudt=target_day,
-            cputm=time(
-                hour=random.choice(profile["hour_candidates"]),
-                minute=random.randint(0, 59),
-                second=random.randint(0, 59),
-            ),
+            cputm=_FIXED_OCCUR_TIME,
+            # 기존 시간 랜덤 로직(원복 참고용):
+            # cputm=time(
+            #     hour=random.choice(profile["hour_candidates"]),
+            #     minute=random.randint(0, 59),
+            #     second=random.randint(0, 59),
+            # ),
             blart=profile["blart"],
             waers="KRW",
             bktxt=f"{profile['label']}{_eul_reul(profile['label'])} 위한 테스트 데이터 ({belnr})",
@@ -263,7 +275,9 @@ def seed_demo_scenarios(db: Session, scenario: str, count: int = 5) -> dict[str,
             gjahr=gjahr_str,
             buzei="001",
             hkont="0000601000",
-            wrbtr=random.randint(*profile["amount_range"]),
+            wrbtr=_FIXED_AMOUNT_KRW,
+            # 기존 금액 랜덤 로직(원복 참고용):
+            # wrbtr=random.randint(*profile["amount_range"]),
             waers="KRW",
             lifnr=f"C{1000+i}",
             sgtxt=profile["item_text"],

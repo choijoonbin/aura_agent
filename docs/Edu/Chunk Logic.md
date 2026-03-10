@@ -108,7 +108,21 @@
 
 에이전트 도구 **policy_rulebook_probe**는 `search_policy_chunks(db, body_evidence, limit)`를 호출한다.
 
-### 5.1 검색 파이프라인
+### 하이브리드 RAG 검색 파이프라인
+
+본 프로젝트는 **하이브리드 RAG 검색 파이프라인**을 적용하고 있다. 키워드 검색(BM25)과 의미 검색(Dense)을 함께 사용한 뒤 RRF(순위 기반 융합)로 융합하고, 필요 시 Cross-Encoder Rerank로 재정렬하여, 단일 검색 방식보다 **재현율·정확도·안정성**을 높인다.
+
+| 구성 요소 | 역할 | 장점 |
+|-----------|------|------|
+| **BM25** (tsvector) | 키워드·동의어 확장(search_tsv) 기반 검색 | 규정 용어(조문 번호, 전문 용어) 정확 매칭 |
+| **Dense** (pgvector) | 쿼리 임베딩과의 코사인 유사도 검색 | 의역·유사 표현, 문맥 기반 검색 |
+| **RRF** (Reciprocal Rank Fusion) | BM25·Dense 순위 융합 (k=60) | 한쪽만 약해도 다른 쪽으로 보완, 순위 안정화 |
+| **Cross-Encoder Rerank** (선택) | query–chunk 쌍 재점수화(ko-reranker) | 최종 상위 N건 정확도 향상 |
+| **케이스별 가중치** | case_type에 따라 BM25/Dense 비율 조정 | 휴일·한도·업종 등 유형별 검색 특성 반영 |
+
+→ 구현: [`services/policy_service.py`](services/policy_service.py) — `search_policy_chunks()`, `_get_rrf_weights()`, `_reciprocal_rank_fusion()` / [`services/retrieval_quality.py`](services/retrieval_quality.py) — `rerank_with_cross_encoder()`
+
+### 5.1 검색 파이프라인 (단계)
 
 1. **키워드 생성**: `build_policy_keywords(body_evidence)` — case_type, 휴일, 한도, MCC, 전표 항목(sgtxt, hkont) 등.
 2. **BM25**: `rag_chunk.search_tsv`에 대한 `to_tsquery` 검색, `ts_rank_cd`로 정렬.
@@ -244,5 +258,5 @@ API 재청킹: main.py
 - **청킹 = 규정집 원문을 조문·항/호 단위로 나누어 RAG 검색 단위로 저장**하는 과정. 기본 전략은 **계층적 parent-child(ARTICLE + CLAUSE)** 이다.
 - **계층**: 장(章) → 조(條) → 항/호 파싱. 200자 미만 조문은 다음 조문과 병합. 검색 시 CLAUSE에 부모 ARTICLE 맥락을 붙여 문맥 확장.
 - **파이프라인**: hierarchical_chunk → save_hierarchical_chunks(비활성화 → ARTICLE/CLAUSE INSERT → search_text 기준 임베딩 → search_tsv 갱신).
-- **검색**: policy_rulebook_probe가 BM25 + Dense → RRF → (선택) Cross-Encoder Rerank로 청크를 가져와 규정 근거로 사용.
+- **하이브리드 RAG 검색**: BM25(키워드) + Dense(의미)를 RRF(순위 기반 융합)로 융합하고, 케이스 유형별 가중치·(선택) Cross-Encoder Rerank를 적용해 **단일 검색 대비 재현율·정확도·안정성**을 높인다. policy_rulebook_probe가 이 파이프라인으로 청크를 조회해 규정 근거로 사용한다.
 - **테이블**: `dwp_aura.rag_chunk`에 chunk_text, search_text, node_type, parent_id, embedding_az, search_tsv 등 저장. 재색인 시 기존 청크는 is_active=false 후 새로 INSERT.

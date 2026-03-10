@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+import logging
 from typing import Any, Awaitable, Callable
 
 from langchain_core.tools import StructuredTool
@@ -19,6 +20,7 @@ from utils.config import get_mcc_sets, settings
 
 
 ToolFn = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
+logger = logging.getLogger(__name__)
 
 
 def _tool_key(r: dict[str, Any]) -> str:
@@ -144,6 +146,26 @@ def _adoption_reason_for_ref(ref: dict[str, Any], body_evidence: dict[str, Any])
     return "규정 근거로 채택"
 
 
+def _article_key(ref: dict[str, Any]) -> str:
+    return "".join(str(ref.get("article") or ref.get("regulation_article") or "").split())
+
+
+def _is_common_evidence_article(ref: dict[str, Any]) -> bool:
+    article = _article_key(ref)
+    parent_title = "".join(str(ref.get("parent_title") or "").split())
+    # 제14조(공통 증빙 의무) 식별
+    return "제14조" in article or "제14조" in parent_title
+
+
+def _ref_log_label(ref: dict[str, Any]) -> str:
+    article = str(ref.get("article") or ref.get("regulation_article") or "-").strip() or "-"
+    title = str(ref.get("parent_title") or "-").strip() or "-"
+    score = ref.get("retrieval_score")
+    if isinstance(score, (int, float)):
+        return f"{article}/{title}({float(score):.2f})"
+    return f"{article}/{title}"
+
+
 async def policy_rulebook_probe(context: dict[str, Any]) -> dict[str, Any]:
     prior = context.get("prior_tool_results") or []
     enriched_body = dict(context["body_evidence"])
@@ -169,19 +191,66 @@ async def policy_rulebook_probe(context: dict[str, Any]) -> dict[str, Any]:
     engine = create_engine(settings.database_url, future=True)
     with Session(engine) as db:
         candidates = search_policy_chunks(db, enriched_body, limit=20)
+        case_type = str(enriched_body.get("case_type") or "").upper()
+        common_in_candidates = any(_is_common_evidence_article(r) for r in candidates)
+        logger.info(
+            "[POLICY_REF_TRACE] start case_type=%s candidates=%s common_in_candidates=%s candidate_preview=%s",
+            case_type or "-",
+            len(candidates),
+            common_in_candidates,
+            [_ref_log_label(r) for r in candidates[:8]],
+        )
         # 채택 인용은 조문(article) 단위로 하나만 노출: 동일 제23조가 ARTICLE+CLAUSE 등 여러 청크로 검색되면 중복 표시되므로, 조문별 최고점 청크 1개만 채택
+        ranked_unique_refs: list[dict[str, Any]] = []
         seen_articles: set[str] = set()
-        refs = []
         for r in candidates:
-            if len(refs) >= 3:
-                break
-            article_key = str(r.get("article") or r.get("regulation_article") or "").strip()
+            ref = dict(r)
+            article_key = _article_key(ref)
             if not article_key or article_key in seen_articles:
                 continue
             seen_articles.add(article_key)
-            ref = dict(r)
             ref["adoption_reason"] = _adoption_reason_for_ref(ref, enriched_body)
+            ranked_unique_refs.append(ref)
+
+        need_common_evidence_first = case_type not in {"", "NORMAL_BASELINE"}
+        common_evidence_ref = next((ref for ref in ranked_unique_refs if _is_common_evidence_article(ref)), None)
+        max_ref_count = 4 if (need_common_evidence_first and common_evidence_ref is not None) else 3
+        logger.info(
+            "[POLICY_REF_TRACE] dedup case_type=%s unique_refs=%s need_common_evidence_first=%s common_found=%s common_ref=%s max_ref_count=%s",
+            case_type or "-",
+            len(ranked_unique_refs),
+            need_common_evidence_first,
+            common_evidence_ref is not None,
+            _ref_log_label(common_evidence_ref) if common_evidence_ref is not None else "-",
+            max_ref_count,
+        )
+        if need_common_evidence_first and common_evidence_ref is None:
+            logger.warning(
+                "[POLICY_REF_TRACE] common evidence article(제14조) not found in ranked_unique_refs for case_type=%s; common_in_candidates=%s",
+                case_type or "-",
+                common_in_candidates,
+            )
+
+        refs: list[dict[str, Any]] = []
+        picked_keys: set[str] = set()
+        if common_evidence_ref is not None and need_common_evidence_first:
+            refs.append(common_evidence_ref)
+            picked_keys.add(_article_key(common_evidence_ref))
+        for ref in ranked_unique_refs:
+            if len(refs) >= max_ref_count:
+                break
+            key = _article_key(ref)
+            if key in picked_keys:
+                continue
             refs.append(ref)
+            picked_keys.add(key)
+        logger.info(
+            "[POLICY_REF_TRACE] final case_type=%s selected_refs=%s selected_preview=%s",
+            case_type or "-",
+            len(refs),
+            [_ref_log_label(r) for r in refs],
+        )
+
         candidates_with_reason = []
         for r in candidates:
             ref = dict(r)
