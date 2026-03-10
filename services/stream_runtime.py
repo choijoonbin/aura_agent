@@ -132,6 +132,37 @@ class StreamRuntime:
     def get_lineage(self, run_id: str) -> dict[str, Any] | None:
         return self._run_lineage.get(run_id)
 
+    def purge_case(self, case_id: str) -> None:
+        """
+        특정 케이스에 연결된 메모리 런타임 상태를 모두 정리한다.
+        demo 데이터 삭제 후 동일 voucher_key/case_id 재생성 시 이전 run 잔상 노출을 방지한다.
+        """
+        if not case_id:
+            return
+
+        run_ids: set[str] = set(self._runs_by_case.pop(case_id, []))
+        latest_run = self._case_runs.pop(case_id, None)
+        if latest_run:
+            run_ids.add(latest_run)
+
+        # 비정상 경로로 runs_by_case에서 누락된 run도 lineage를 기준으로 정리한다.
+        for run_id, lineage in list(self._run_lineage.items()):
+            if isinstance(lineage, dict) and lineage.get("case_id") == case_id:
+                run_ids.add(run_id)
+
+        for run_id in run_ids:
+            self._queues.pop(run_id, None)
+            self._results_by_run.pop(run_id, None)
+            self._timeline_by_run.pop(run_id, None)
+            self._hitl_requests_by_run.pop(run_id, None)
+            self._hitl_responses_by_run.pop(run_id, None)
+            self._hitl_drafts_by_run.pop(run_id, None)
+            self._run_lineage.pop(run_id, None)
+
+    def purge_cases(self, case_ids: list[str] | set[str]) -> None:
+        for case_id in set(case_ids or []):
+            self.purge_case(str(case_id or "").strip())
+
     async def publish(self, run_id: str, event_type: str, payload: dict[str, Any]) -> None:
         q = self._queues.get(run_id)
         if q is None:

@@ -12,6 +12,7 @@ import re
 from typing import Any
 
 from utils.config import get_mcc_sets, settings
+from utils.llm_azure import completion_kwargs_for_azure
 
 logger = logging.getLogger(__name__)
 
@@ -222,9 +223,10 @@ def _extract_json_object(raw: str) -> dict[str, Any]:
 
 
 def _build_llm_screening_prompt(body: dict[str, Any], signals: dict[str, Any]) -> tuple[str, str]:
+    # Azure: response_format json_object 사용 시 messages에 'json' 포함 필수
     system_prompt = (
         "당신은 기업 경비 전표 사전 스크리닝 분류기다.\n"
-        "반드시 JSON 객체만 반환하라.\n"
+        "Respond with a single JSON object only. 반드시 JSON 객체만 반환하라.\n"
         "허용 case_type: HOLIDAY_USAGE, LIMIT_EXCEED, PRIVATE_USE_RISK, UNUSUAL_PATTERN, NORMAL_BASELINE.\n"
         "출력 형식: {\"case_type\":\"...\",\"reason\":\"한국어 1문장\",\"confidence\":0.0~1.0}\n"
         "입력에 없는 사실을 만들지 마라."
@@ -246,6 +248,26 @@ def _build_llm_screening_prompt(body: dict[str, Any], signals: dict[str, Any]) -
         + json.dumps(payload, ensure_ascii=False)
     )
     return system_prompt, user_prompt
+
+
+def _screening_llm_error_detail(exc: Exception) -> tuple[int | None, str]:
+    """400 원인 파악: 예외에서 status_code와 response_body 추출."""
+    status: int | None = None
+    body = ""
+    try:
+        resp = getattr(exc, "response", None)
+        if resp is not None:
+            status = getattr(resp, "status_code", None)
+            if hasattr(resp, "text"):
+                body = (getattr(resp, "text") or "")[:1200]
+            elif hasattr(resp, "content"):
+                raw = getattr(resp, "content") or b""
+                body = (raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else str(raw))[:1200]
+        if not body and hasattr(exc, "body"):
+            body = (str(getattr(exc, "body", "")) or "")[:1200]
+    except Exception:
+        pass
+    return status, body or str(exc)
 
 
 def _create_screening_llm_client() -> Any | None:
@@ -281,7 +303,7 @@ def _invoke_llm_case_type(body: dict[str, Any], signals: dict[str, Any]) -> dict
     if client is None:
         return None
 
-    primary_model = getattr(settings, "screening_llm_model", None) or getattr(settings, "reasoning_llm_model", "gpt-5")
+    primary_model = getattr(settings, "screening_llm_model", None) or getattr(settings, "reasoning_llm_model", "gpt-4o-mini")
     fallback_model = str(getattr(settings, "screening_llm_fallback_model", "") or "").strip()
     model_candidates: list[str] = [str(primary_model)]
     if fallback_model and fallback_model not in model_candidates:
@@ -289,17 +311,27 @@ def _invoke_llm_case_type(body: dict[str, Any], signals: dict[str, Any]) -> dict
     system_prompt, user_prompt = _build_llm_screening_prompt(body, signals)
     max_out = int(getattr(settings, "screening_llm_max_tokens", 220))
     requested_temp = float(getattr(settings, "screening_llm_temperature", 0.0))
+    base_url = (getattr(settings, "openai_base_url", None) or "").strip()
+    is_azure = ".openai.azure.com" in base_url
 
     for model_name in model_candidates:
         try:
+            response_format = {"type": "json_object"}
             req_base = {
                 "model": model_name,
-                "response_format": {"type": "json_object"},
+                "response_format": response_format,
                 "messages": [
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},
                 ],
             }
+            messages_combined = (system_prompt + " " + user_prompt).lower()
+            logger.info(
+                "screening llm request: model=%s response_format=%s messages_contain_json=%s",
+                model_name,
+                response_format,
+                "json" in messages_combined,
+            )
 
             def _call(
                 *,
@@ -313,6 +345,7 @@ def _invoke_llm_case_type(body: dict[str, Any], signals: dict[str, Any]) -> dict
                     kwargs["max_completion_tokens"] = max_out
                 else:
                     kwargs["max_tokens"] = max_out
+                kwargs = completion_kwargs_for_azure(base_url, **kwargs)
                 return client.chat.completions.create(**kwargs)
 
             response = None
@@ -328,6 +361,10 @@ def _invoke_llm_case_type(body: dict[str, Any], signals: dict[str, Any]) -> dict
                     last_error = exc
                     msg = str(exc).lower()
                     token_kw = "max_completion_tokens" if use_max_completion_tokens else "max_tokens"
+                    logger.warning(
+                        "screening llm TypeError: model=%s use_max_completion_tokens=%s exc=%s",
+                        model_name, use_max_completion_tokens, exc,
+                    )
                     if token_kw in msg:
                         continue
                     try:
@@ -338,6 +375,11 @@ def _invoke_llm_case_type(body: dict[str, Any], signals: dict[str, Any]) -> dict
                         break
                     except Exception as exc2:
                         last_error = exc2
+                        status2, body2 = _screening_llm_error_detail(exc2)
+                        logger.warning(
+                            "screening llm call error (TypeError retry): status=%s response_body=%s",
+                            status2, body2,
+                        )
                         msg2 = str(exc2).lower()
                         if "unsupported parameter" in msg2 and token_kw in msg2:
                             continue
@@ -345,6 +387,14 @@ def _invoke_llm_case_type(body: dict[str, Any], signals: dict[str, Any]) -> dict
                     last_error = exc
                     msg = str(exc).lower()
                     token_kw = "max_completion_tokens" if use_max_completion_tokens else "max_tokens"
+                    status_code, response_body = _screening_llm_error_detail(exc)
+                    logger.warning(
+                        "screening llm call error (400 원인 파악): model=%s use_max_completion_tokens=%s include_temperature=True status=%s response_body=%s",
+                        model_name,
+                        use_max_completion_tokens,
+                        status_code,
+                        response_body,
+                    )
 
                     if "unsupported value" in msg and "temperature" in msg:
                         try:
@@ -355,6 +405,12 @@ def _invoke_llm_case_type(body: dict[str, Any], signals: dict[str, Any]) -> dict
                             break
                         except Exception as exc2:
                             last_error = exc2
+                            status2, body2 = _screening_llm_error_detail(exc2)
+                            logger.warning(
+                                "screening llm call error (retry no temp): status=%s response_body=%s",
+                                status2,
+                                body2,
+                            )
                             msg2 = str(exc2).lower()
                             if "unsupported parameter" in msg2 and token_kw in msg2:
                                 continue
@@ -364,10 +420,8 @@ def _invoke_llm_case_type(body: dict[str, Any], signals: dict[str, Any]) -> dict
                         continue
                     raise
 
-            if response is None:
-                if last_error is not None:
-                    raise last_error
-                continue
+            if response is None and last_error is not None:
+                raise last_error
 
             raw = (response.choices[0].message.content or "").strip()
             parsed = _extract_json_object(raw)
@@ -401,7 +455,15 @@ def _invoke_llm_case_type(body: dict[str, Any], signals: dict[str, Any]) -> dict
                 "raw": parsed,
             }
         except Exception as exc:
-            logger.warning("screening llm failed for model=%s, fallback candidate check: %s", model_name, exc)
+            status_code, response_body = _screening_llm_error_detail(exc)
+            logger.warning(
+                "screening llm failed: model=%s response_format=%s status=%s response_body=%s exc=%s",
+                model_name,
+                response_format,
+                status_code,
+                response_body,
+                exc,
+            )
 
     return None
 

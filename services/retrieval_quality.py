@@ -7,6 +7,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from utils.llm_azure import completion_kwargs_for_azure
+
 # 1차 구현: cross-encoder. 미설치 시 입력 그대로 반환
 _CROSS_ENCODER_MODEL: Any = None
 
@@ -117,13 +119,16 @@ def rerank_with_llm_fallback(
         )
 
         response = client.chat.completions.create(
-            model=getattr(settings, "reasoning_llm_model", "gpt-5"),
-            max_tokens=100,
-            response_format={"type": "json_object"},
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
+            **completion_kwargs_for_azure(
+                base_url,
+                model=getattr(settings, "reasoning_llm_model", "gpt-4o-mini"),
+                max_tokens=100,
+                response_format={"type": "json_object"},
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+            ),
         )
 
         raw = (response.choices[0].message.content or "").strip()

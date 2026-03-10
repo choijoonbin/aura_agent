@@ -31,6 +31,7 @@ from agent.screener import run_screening
 from agent.agent_tools import get_langchain_tools
 from agent.tool_schemas import ToolContextInput
 from utils.config import settings
+from utils.llm_azure import completion_kwargs_for_azure
 
 # Phase C: plan 기반 도구 실행은 LangChain tool 호출로만 수행 (registry direct dispatch 제거)
 _TOOLS_BY_NAME: dict[str, Any] = {}
@@ -276,6 +277,17 @@ def _format_occurred_at(value: Any) -> str:
         return raw
 
 
+# 추론 스트림 정책: 표시되는 추론은 LLM 생성만 노출. fallback(API 비활성/오류) 시 하드코딩 초안을 보이지 않고 아래 문구만 표시.
+# 아래 노드들은 내부적으로 "초안" 문자열을 만들어 _stream_reasoning_events_with_llm에 넘기며, LLM이 이를 기반으로 재작성한 결과만 스트림에 노출됨.
+# - intake_node (1488~1495): reasoning_parts = ["전표 입력값에서 ...", "휴일 사용 정황이 ...", ...]
+# - planner: _build_planner_reasoning() → "규칙 기반 기본 경로로...", "1) tool: reason" 등
+# - execute_node (2015~2023): reasoning_parts = ["N개 도구를 실행해 ...", "생략 도구: ...", "실패 도구: ..."]
+# - critic: reasoning_parts = [rationale, 누락/재계획 문구] (rationale은 LLM 출력)
+# - verify_node (2736~2738): reasoning_parts = [rationale, "담당자 검토 필요"|"자동 진행 가능"]
+# - reporter_node: reasoning_text = summary + verdict (템플릿) 후 LLM 정합성 보정
+_REASONING_FALLBACK_MESSAGE = "이 단계의 추론은 LLM으로 생성되지 않았습니다. (API 비활성 또는 일시 오류)"
+
+
 def _reasoning_stream_events(node_name: str, reasoning_text: str) -> list[dict[str, Any]]:
     """workspace.md 추가보완: reasoning 문자열을 THINKING_TOKEN(단어 단위) + THINKING_DONE 이벤트로 변환."""
     if not (reasoning_text or "").strip():
@@ -360,14 +372,24 @@ async def _stream_reasoning_events_with_llm(
 ) -> tuple[str, list[dict[str, Any]], str]:
     """
     ENABLE_REASONING_LIVE_LLM=true 일 때 OpenAI stream=True JSON 응답으로 reasoning을 실시간 생성.
-    실패 시 기존 reasoning_text 단어 분해 fallback.
+    실패/비활성 시 하드코딩 초안을 스트림에 넣지 않고, 'LLM으로 생성되지 않았습니다' 문구만 전달해 오류가 보이도록 함.
     return: (final_reasoning, events, source["llm"|"fallback"])
     """
     compact_fallback = _compact_reasoning_for_stream(reasoning_text)
+    fallback_message_only = _reasoning_stream_events(node_name, _REASONING_FALLBACK_MESSAGE)
+
     if not settings.enable_reasoning_live_llm:
-        return compact_fallback, _reasoning_stream_events(node_name, compact_fallback), "fallback"
-    if not settings.openai_api_key:
-        return compact_fallback, _reasoning_stream_events(node_name, compact_fallback), "fallback"
+        logger.warning(
+            "reasoning_llm_skipped node=%s reason=enable_reasoning_live_llm_false draft_len=%s",
+            node_name, len(reasoning_text or ""),
+        )
+        return _REASONING_FALLBACK_MESSAGE, fallback_message_only, "fallback"
+    if not (settings.openai_api_key or "").strip():
+        logger.warning(
+            "reasoning_llm_skipped node=%s reason=openai_api_key_missing draft_len=%s",
+            node_name, len(reasoning_text or ""),
+        )
+        return _REASONING_FALLBACK_MESSAGE, fallback_message_only, "fallback"
 
     try:
         from openai import AsyncAzureOpenAI, AsyncOpenAI  # type: ignore
@@ -405,53 +427,108 @@ async def _stream_reasoning_events_with_llm(
             f"[draft_reasoning] {reasoning_text}\n"
         )
 
-        tok_kw = {"max_completion_tokens": 520} if is_azure else {"max_tokens": 520}
-        stream = await client.chat.completions.create(
-            model=settings.reasoning_llm_model,
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "reasoning 필드만 포함된 JSON을 출력한다. "
-                        "reasoning은 식별하기 쉬운 한국어 중간 길이 요약문이어야 하며, 전문 용어는 사용자 친화적으로 풀어쓴다."
-                    ),
-                },
-                {"role": "user", "content": prompt},
-            ],
-            stream=True,
-            response_format={"type": "json_object"},
-            **tok_kw,
-        )
-
+        response_format_req = {"type": "json_object"}
+        tok_kw = {"max_completion_tokens": 1200} if is_azure else {"max_tokens": 1200}
+        # Azure: response_format=json_object 사용 시 content가 비어 오는 케이스 있음 → Azure일 때는 처음부터 생략하고 프롬프트로 JSON 요청
+        if is_azure:
+            create_kw = completion_kwargs_for_azure(
+                base_url,
+                model=settings.reasoning_llm_model,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "Output valid JSON only. reasoning 필드만 포함된 JSON을 출력한다. "
+                            "reasoning은 식별하기 쉬운 한국어 중간 길이 요약문이어야 하며, 전문 용어는 사용자 친화적으로 풀어쓴다."
+                        ),
+                    },
+                    {"role": "user", "content": prompt},
+                ],
+                **tok_kw,
+            )
+            logger.info(
+                "reasoning_llm_request node=%s model=%s stream=False (Azure, no response_format)",
+                node_name, settings.reasoning_llm_model,
+            )
+        else:
+            create_kw = completion_kwargs_for_azure(
+                base_url,
+                model=settings.reasoning_llm_model,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "Output valid JSON only. reasoning 필드만 포함된 JSON을 출력한다. "
+                            "reasoning은 식별하기 쉬운 한국어 중간 길이 요약문이어야 하며, 전문 용어는 사용자 친화적으로 풀어쓴다."
+                        ),
+                    },
+                    {"role": "user", "content": prompt},
+                ],
+                response_format=response_format_req,
+                **tok_kw,
+            )
+            logger.info(
+                "reasoning_llm_request node=%s model=%s response_format=%s stream=False",
+                node_name, settings.reasoning_llm_model, response_format_req,
+            )
         full_response = ""
-        emitted_len = 0
         events: list[dict[str, Any]] = []
         for_chunk_reasoning = ""
-        async for chunk in stream:
-            delta = (chunk.choices[0].delta.content or "") if chunk.choices else ""
-            if not delta:
-                continue
-            full_response += delta
-            token, emitted_len, _done = _extract_reasoning_token(delta, full_response, emitted_len)
-            if token:
-                for_chunk_reasoning += token
-                events.append(
-                    AgentEvent(
-                        event_type="THINKING_TOKEN",
-                        node=node_name,
-                        message="",
-                        metadata={"token": token},
-                    ).to_payload()
+
+        response = await client.chat.completions.create(**create_kw)
+        full_response = (response.choices[0].message.content or "").strip() if response.choices else ""
+
+        # Azure에서 첫 요청 후에도 content가 비면 response_format 없이 재시도 (이미 없을 수 있음)
+        if is_azure and not full_response:
+            if "response_format" in create_kw:
+                create_kw_no_fmt = {k: v for k, v in create_kw.items() if k != "response_format"}
+                logger.warning(
+                    "reasoning_llm_azure_empty_content node=%s choices_len=%s → retry without response_format",
+                    node_name, len(response.choices or []),
                 )
+                try:
+                    response2 = await client.chat.completions.create(**create_kw_no_fmt)
+                    full_response = (response2.choices[0].message.content or "").strip() if response2.choices else ""
+                except Exception as retry_err:
+                    logger.warning("reasoning_llm_azure_retry_failed node=%s error=%s", node_name, retry_err)
 
         parsed_reasoning = ""
         try:
             parsed = json.loads(full_response)
             parsed_reasoning = str(parsed.get("reasoning") or "").strip()
-        except Exception:
+        except Exception as parse_err:
+            logger.warning(
+                "reasoning_llm_json_parse_failed node=%s raw_len=%s error=%s",
+                node_name, len(full_response), str(parse_err),
+            )
             parsed_reasoning = for_chunk_reasoning.strip()
+            # Azure 재시도 등으로 plain text 온 경우: 코드블록 내 JSON 또는 본문을 추론으로 사용
+            if not parsed_reasoning and full_response:
+                m = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", full_response, re.DOTALL)
+                if m:
+                    try:
+                        p = json.loads(m.group(1))
+                        parsed_reasoning = str(p.get("reasoning") or "").strip()
+                    except Exception:
+                        pass
+                if not parsed_reasoning:
+                    parsed_reasoning = full_response.strip()[: settings.reasoning_stream_max_chars]
+        if not parsed_reasoning and (for_chunk_reasoning or full_response):
+            logger.warning(
+                "reasoning_llm_empty_reasoning node=%s raw_len=%s chunk_len=%s",
+                node_name, len(full_response), len(for_chunk_reasoning or ""),
+            )
 
-        final_reasoning = _compact_reasoning_for_stream(parsed_reasoning or (for_chunk_reasoning.strip() or reasoning_text))
+        # LLM에서 쓸 수 있는 출력이 없으면 초안(하드코딩)을 보이지 않고 fallback 문구만 반환
+        usable = (parsed_reasoning or (for_chunk_reasoning or "").strip()).strip()
+        if not usable:
+            logger.warning(
+                "reasoning_llm_no_usable_output node=%s raw_len=%s chunk_len=%s → fallback message only",
+                node_name, len(full_response), len(for_chunk_reasoning or ""),
+            )
+            return _REASONING_FALLBACK_MESSAGE, fallback_message_only, "fallback"
+
+        final_reasoning = _compact_reasoning_for_stream(parsed_reasoning or for_chunk_reasoning.strip())
         events.append(
             AgentEvent(
                 event_type="THINKING_DONE",
@@ -460,9 +537,24 @@ async def _stream_reasoning_events_with_llm(
                 metadata={"reasoning": final_reasoning},
             ).to_payload()
         )
+        logger.info("reasoning_llm_ok node=%s response_len=%s", node_name, len(final_reasoning))
         return final_reasoning, events, "llm"
-    except Exception:
-        return compact_fallback, _reasoning_stream_events(node_name, compact_fallback), "fallback"
+    except Exception as e:
+        err_detail = str(e)
+        try:
+            resp = getattr(e, "response", None)
+            if resp is not None and hasattr(resp, "text"):
+                err_detail = f"{e!s} | response_body={getattr(resp, 'text', '')[:800]}"
+            elif hasattr(e, "body"):
+                err_detail = f"{e!s} | body={str(getattr(e, 'body', ''))[:800]}"
+        except Exception:
+            pass
+        logger.warning(
+            "reasoning_llm_failed node=%s response_format=json_object stream=True error_type=%s detail=%s",
+            node_name, type(e).__name__, err_detail,
+            exc_info=True,
+        )
+        return _REASONING_FALLBACK_MESSAGE, fallback_message_only, "fallback"
 
 
 def _voucher_summary_for_context(body_evidence: dict[str, Any]) -> str:
@@ -535,15 +627,18 @@ async def _select_policy_refs_by_relevance(
             )
         else:
             client = AsyncOpenAI(api_key=settings.openai_api_key, base_url=base_url or None)
-        tok_kw = {"max_completion_tokens": 300} if is_azure else {"max_tokens": 300}
+        tok_kw = {"max_completion_tokens": 1200} if is_azure else {"max_tokens": 1200}
         response = await client.chat.completions.create(
-            model=getattr(settings, "reasoning_llm_model", "gpt-5"),
-            response_format={"type": "json_object"},
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-            **tok_kw,
+            **completion_kwargs_for_azure(
+                base_url,
+                model=getattr(settings, "reasoning_llm_model", "gpt-4o-mini"),
+                response_format={"type": "json_object"},
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+                **tok_kw,
+            ),
         )
         raw = (response.choices[0].message.content or "").strip()
         parsed = json.loads(raw)
@@ -811,16 +906,19 @@ async def _llm_decide_hitl_verdict(
             )
         else:
             client = AsyncOpenAI(api_key=settings.openai_api_key, base_url=base_url or None)
-        # Azure(gpt-5 등)는 max_tokens 미지원, max_completion_tokens 사용. finish_reason=length 시 800으로도 JSON 전에 잘림 → 1200으로 여유.
+        # Azure(gpt-4o-mini 등)는 max_tokens 미지원, max_completion_tokens 사용. finish_reason=length 시 800으로도 JSON 전에 잘림 → 1200으로 여유.
         completion_tokens_kw = {"max_completion_tokens": 5000} if is_azure else {"max_tokens": 5000}
         response = await client.chat.completions.create(
-            model=getattr(settings, "reasoning_llm_model", "gpt-5"),
-            response_format={"type": "json_object"},
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-            **completion_tokens_kw,
+            **completion_kwargs_for_azure(
+                base_url,
+                model=getattr(settings, "reasoning_llm_model", "gpt-4o-mini"),
+                response_format={"type": "json_object"},
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+                **completion_tokens_kw,
+            ),
         )
         choice = response.choices[0] if response.choices else None
         raw = (choice.message.content if choice and choice.message else None) or ""
@@ -1593,15 +1691,18 @@ async def _invoke_llm_planner(
                 kw["base_url"] = base_url
             client = AsyncOpenAI(**kw)
 
-        tok_kw = {"max_completion_tokens": 600} if is_azure else {"max_tokens": 600}
+        tok_kw = {"max_completion_tokens": 1200} if is_azure else {"max_tokens": 1200}
         response = await client.chat.completions.create(
-            model=getattr(settings, "reasoning_llm_model", "gpt-5"),
-            response_format={"type": "json_object"},
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            **tok_kw,
+            **completion_kwargs_for_azure(
+                base_url,
+                model=getattr(settings, "reasoning_llm_model", "gpt-4o-mini"),
+                response_format={"type": "json_object"},
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                **tok_kw,
+            ),
         )
         raw = (response.choices[0].message.content or "").strip()
         parsed = json.loads(raw)
@@ -2351,15 +2452,18 @@ async def _derive_hitl_from_regulation(state: AgentState) -> dict[str, Any]:
         else:
             client = AsyncOpenAI(api_key=settings.openai_api_key, base_url=base_url or None)
 
-        tok_kw = {"max_completion_tokens": 800} if is_azure else {"max_tokens": 800}
+        tok_kw = {"max_completion_tokens": 1500} if is_azure else {"max_tokens": 1500}
         response = await client.chat.completions.create(
-            model=getattr(settings, "reasoning_llm_model", "gpt-5"),
-            response_format={"type": "json_object"},
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            **tok_kw,
+            **completion_kwargs_for_azure(
+                base_url,
+                model=getattr(settings, "reasoning_llm_model", "gpt-4o-mini"),
+                response_format={"type": "json_object"},
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                **tok_kw,
+            ),
         )
         raw = (response.choices[0].message.content or "").strip()
         parsed = json.loads(raw)
@@ -2498,15 +2602,18 @@ async def _generate_hitl_review_content(
         else:
             client = AsyncOpenAI(api_key=settings.openai_api_key, base_url=base_url or None)
 
-        tok_kw = {"max_completion_tokens": 600} if is_azure else {"max_tokens": 600}
+        tok_kw = {"max_completion_tokens": 1200} if is_azure else {"max_tokens": 1200}
         response = await client.chat.completions.create(
-            model=getattr(settings, "reasoning_llm_model", "gpt-5"),
-            response_format={"type": "json_object"},
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            **tok_kw,
+            **completion_kwargs_for_azure(
+                base_url,
+                model=getattr(settings, "reasoning_llm_model", "gpt-4o-mini"),
+                response_format={"type": "json_object"},
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                **tok_kw,
+            ),
         )
         raw = (response.choices[0].message.content or "").strip()
         parsed = json.loads(raw)
@@ -2600,15 +2707,18 @@ async def _retry_fill_hitl_review_when_empty(
         else:
             client = AsyncOpenAI(api_key=settings.openai_api_key, base_url=base_url or None)
 
-        tok_kw = {"max_completion_tokens": 700} if is_azure else {"max_tokens": 700}
+        tok_kw = {"max_completion_tokens": 1200} if is_azure else {"max_tokens": 1200}
         response = await client.chat.completions.create(
-            model=getattr(settings, "reasoning_llm_model", "gpt-5"),
-            response_format={"type": "json_object"},
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            **tok_kw,
+            **completion_kwargs_for_azure(
+                base_url,
+                model=getattr(settings, "reasoning_llm_model", "gpt-4o-mini"),
+                response_format={"type": "json_object"},
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                **tok_kw,
+            ),
         )
         raw = (response.choices[0].message.content or "").strip()
         parsed = json.loads(raw)
@@ -2876,7 +2986,13 @@ async def hitl_validate_node(state: AgentState) -> AgentState:
     hitl_request = state.get("hitl_request") or {}
     hitl_response = (state.get("body_evidence") or {}).get("hitlResponse") or {}
     required_inputs = hitl_request.get("required_inputs") or []
+    logger.info(
+        "[RESUME_TRACE] hitl_validate_node: required_inputs=%s hitl_response_keys=%s",
+        [r.get("field") for r in required_inputs[:10]],
+        list(hitl_response.keys()) if isinstance(hitl_response, dict) else type(hitl_response).__name__,
+    )
     if not required_inputs:
+        logger.info("[RESUME_TRACE] hitl_validate_node: required_inputs 비어 있음 → reporter")
         return {"hitl_request": None}
 
     missing: list[dict[str, str]] = []
@@ -2887,17 +3003,25 @@ async def hitl_validate_node(state: AgentState) -> AgentState:
         val = _get_hitl_response_value(hitl_response, field)
         if val is None:
             missing.append(req)
+            logger.info("[RESUME_TRACE] hitl_validate_node: field=%r → 값 없음 (missing)", field)
             continue
         if isinstance(val, list):
             if not val:
                 missing.append(req)
+                logger.info("[RESUME_TRACE] hitl_validate_node: field=%r → 빈 리스트 (missing)", field)
             continue
         if isinstance(val, str) and not val.strip():
             missing.append(req)
+            logger.info("[RESUME_TRACE] hitl_validate_node: field=%r → 빈 문자열 (missing)", field)
 
     if not missing:
+        logger.info("[RESUME_TRACE] hitl_validate_node: 모든 필수 항목 충족 → reporter")
         return {"hitl_request": None}
 
+    logger.info(
+        "[RESUME_TRACE] hitl_validate_node: 누락 필드=%s → hitl_pause 재요청",
+        [m.get("field") for m in missing[:5]],
+    )
     # 누락 항목만으로 재요청 (가이드 문구로 사용자에게 안내)
     new_request = dict(hitl_request)
     new_request["required_inputs"] = missing
@@ -2923,6 +3047,15 @@ async def hitl_pause_node(state: AgentState) -> AgentState:
     # interrupt()로 일시정지; 재개 시 호출자가 Command(resume=payload)로 넘긴 값이 여기로 반환됨
     hitl_response = interrupt(hitl_request)
     hitl_response = hitl_response if isinstance(hitl_response, dict) else {}
+    # 재개 시: resume_value가 넘어오면 approved/comment 등 사용자 입력 키가 있음. 첫 정지 시: hitl_request와 동일/빈 dict일 수 있음
+    looks_like_resume = isinstance(hitl_response, dict) and (
+        "approved" in hitl_response or "comment" in hitl_response or "reviewer" in hitl_response
+    )
+    logger.info(
+        "[RESUME_TRACE] hitl_pause_node: interrupt 반환 keys=%s looks_like_resume=%s",
+        list(hitl_response.keys()) if hitl_response else [],
+        looks_like_resume,
+    )
     body = dict(state.get("body_evidence") or {})
     body["hitlResponse"] = hitl_response
     return {"body_evidence": body}
@@ -3416,9 +3549,11 @@ async def run_langgraph_agentic_analysis(
 
     # 1차: checkpoint 기반 resume 시도
     if resume_value is not None:
+        rv_keys = list(resume_value.keys())[:12] if isinstance(resume_value, dict) else []
         logger.info(
-            "[RESUME_TRACE] run_langgraph run_id=%s 1차 시작: Command(resume=...) (execute 재실행 없음, hitl_pause→hitl_validate→reporter→finalizer)",
+            "[RESUME_TRACE] run_langgraph run_id=%s 1차 시작: Command(resume=...) resume_value_keys=%s (hitl_pause→hitl_validate→reporter→finalizer)",
             run_id,
+            rv_keys,
         )
         try:
             yielded_terminal = False
@@ -3448,10 +3583,11 @@ async def run_langgraph_agentic_analysis(
             )
             # fallthrough to 2차 (경량 가능 시 경량, 아니면 전체)
 
-    # 2차: 기존 결과가 있으면 2차 경량(재분석 없음), 없으면 스크리닝부터 전체 실행
-    if resume_value is not None and previous_result and (previous_result.get("score_breakdown") or previous_result.get("tool_results")):
+    # 2차: HITL 재개 시 기존 결과(또는 hitl_request만)가 있으면 2차 경량(closure)으로 hitl_validate→reporter→finalizer만 실행.
+    # score_breakdown/tool_results가 없어도 hitl_request가 있으면 경량 경로 사용(전체 재실행 시 verify에서 또 인터럽트되는 것 방지).
+    if resume_value is not None and previous_result and (previous_result.get("hitl_request") or previous_result.get("score_breakdown") or previous_result.get("tool_results")):
         logger.info(
-            "[RESUME_TRACE] run_langgraph run_id=%s 2차 경량: 기존 결과+검토의견만 반영 (execute 재실행 없음)",
+            "[RESUME_TRACE] run_langgraph run_id=%s 2차 경량: 기존 결과+검토의견 반영 (execute 재실행 없음, hitl_validate→reporter→finalizer)",
             run_id,
         )
         body_with_hitl = dict(body_evidence or {})

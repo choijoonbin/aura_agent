@@ -9,6 +9,7 @@ from sqlalchemy import and_, delete, func, select, text
 from sqlalchemy.orm import Session
 
 from db.models import AgentCase, FiDocHeader, FiDocItem
+from services.stream_runtime import runtime
 from utils.config import settings
 
 
@@ -576,6 +577,8 @@ def clear_demo_data(db: Session) -> dict[str, Any]:
         deleted["fi_doc_header_deleted"] += int(rc)
 
     db.commit()
+    # DB 삭제와 함께 메모리 런타임 상태도 정리해 동일 case_id 재사용 시 과거 run 잔상이 보이지 않게 한다.
+    runtime.purge_cases(case_ids_str)
     return {
         "deleted": deleted["fi_doc_header_deleted"],
         "run_count": len(run_ids),

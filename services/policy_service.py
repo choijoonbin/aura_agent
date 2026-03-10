@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from services.chunking_pipeline import _embedding_column_exists
 from utils.config import settings
+from utils.llm_azure import completion_kwargs_for_azure
 
 
 KEYWORD_HINTS: dict[str, list[str]] = {
@@ -572,6 +573,7 @@ def _build_dense_query_with_hyde(
             client = None
     if client is None:
         return base_query
+    base_url = (settings.openai_base_url or "").strip()
     try:
         system_prompt = (
             "당신은 한국 기업의 사내 경비 지출 관리 규정 전문가다.\n"
@@ -581,12 +583,15 @@ def _build_dense_query_with_hyde(
         )
         user_prompt = f"전표 상황:\n{base_query}\n\n이 상황에 적용될 가설 규정 문장:"
         response = client.chat.completions.create(
-            model=getattr(settings, "reasoning_llm_model", "gpt-5"),
-            max_tokens=150,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
+            **completion_kwargs_for_azure(
+                base_url,
+                model=getattr(settings, "reasoning_llm_model", "gpt-4o-mini"),
+                max_tokens=150,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+            ),
         )
         hyde_text = (response.choices[0].message.content or "").strip()
         return f"{base_query}\n\n[가설 규정 문장] {hyde_text}"

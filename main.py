@@ -85,6 +85,11 @@ def _ensure_runtime_resume_context(run_id: str, lineage: dict[str, Any] | None) 
 @app.on_event("startup")
 async def startup() -> None:
     ensure_source_paths()
+    logger.info(
+        "LLM models (from env/config): REASONING_LLM_MODEL=%s SCREENING_LLM_MODEL=%s",
+        settings.reasoning_llm_model,
+        settings.screening_llm_model,
+    )
     # LangGraph/Checkpointer를 시작 시점에 선초기화해 첫 요청 지연을 줄인다.
     # postgres checkpointer 초기화 실패/지연 시에도 서비스는 계속 기동(요청 시 lazy 재시도).
     try:

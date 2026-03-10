@@ -15,6 +15,10 @@ if TYPE_CHECKING:
 load_dotenv()
 
 
+# .env에 gpt-5가 남아 있어도 런타임에서 gpt-4o-mini로 통일 (Azure 빈 응답 등 회피)
+_LLM_MODEL_GPT5_REPLACEMENT = "gpt-4o-mini"
+
+
 @dataclass(frozen=True)
 class Settings:
     app_env: str = os.getenv("APP_ENV", "local")
@@ -52,17 +56,27 @@ class Settings:
     # Reasoning note LLM label (shown in UI when note_source is "llm")
     reasoning_llm_label: str = os.getenv("REASONING_LLM_LABEL", "LLM")
     enable_reasoning_live_llm: bool = os.getenv("ENABLE_REASONING_LIVE_LLM", "true").lower() == "true"
-    reasoning_llm_model: str = os.getenv("REASONING_LLM_MODEL", "gpt-5")
+    reasoning_llm_model: str = os.getenv("REASONING_LLM_MODEL", "gpt-4o-mini")
     reasoning_stream_max_chars: int = int(os.getenv("REASONING_STREAM_MAX_CHARS", "5000"))
     reasoning_stream_max_sentences: int = int(os.getenv("REASONING_STREAM_MAX_SENTENCES", "10"))
 
     # Screening mode: rule | hybrid (LLM + deterministic guardrail)
     screening_mode: str = os.getenv("SCREENING_MODE", "hybrid")
-    screening_llm_model: str = os.getenv("SCREENING_LLM_MODEL", "gpt-5")
-    screening_llm_fallback_model: str = os.getenv("SCREENING_LLM_FALLBACK_MODEL", "gpt-5")
+    screening_llm_model: str = os.getenv("SCREENING_LLM_MODEL", "gpt-4o-mini")
+    screening_llm_fallback_model: str = os.getenv("SCREENING_LLM_FALLBACK_MODEL", "gpt-4o-mini")
     screening_llm_temperature: float = float(os.getenv("SCREENING_LLM_TEMPERATURE", "0"))
-    screening_llm_max_tokens: int = int(os.getenv("SCREENING_LLM_MAX_TOKENS", "220"))
-    screening_llm_timeout_seconds: float = float(os.getenv("SCREENING_LLM_TIMEOUT_SECONDS", "8"))
+
+    def __post_init__(self) -> None:
+        # .env에 gpt-5가 설정돼 있으면 gpt-4o-mini로 보정 (코드/문서는 gpt-4o-mini 기준)
+        obj = object.__setattr__
+        if (self.reasoning_llm_model or "").strip().lower() == "gpt-5":
+            obj(self, "reasoning_llm_model", _LLM_MODEL_GPT5_REPLACEMENT)
+        if (self.screening_llm_model or "").strip().lower() == "gpt-5":
+            obj(self, "screening_llm_model", _LLM_MODEL_GPT5_REPLACEMENT)
+        if (self.screening_llm_fallback_model or "").strip().lower() == "gpt-5":
+            obj(self, "screening_llm_fallback_model", _LLM_MODEL_GPT5_REPLACEMENT)
+    screening_llm_max_tokens: int = int(os.getenv("SCREENING_LLM_MAX_TOKENS", "1024"))
+    screening_llm_timeout_seconds: float = float(os.getenv("SCREENING_LLM_TIMEOUT_SECONDS", "30"))
     screening_llm_override_min_confidence: float = float(
         os.getenv("SCREENING_LLM_OVERRIDE_MIN_CONFIDENCE", "0.75")
     )

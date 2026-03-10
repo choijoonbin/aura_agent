@@ -545,6 +545,7 @@ def sse_node_block_generator(stream_url: str, *, run_id: str | None = None) -> I
     thinking_open = False
     thinking_buffer = ""
     event_name: str | None = None
+    hitl_message_shown = False
     status_key, node_key = _stream_status_keys(run_id)
     if status_key:
         st.session_state[status_key] = ""
@@ -564,7 +565,10 @@ def sse_node_block_generator(stream_url: str, *, run_id: str | None = None) -> I
                 continue
             payload = line.split(":", 1)[1].strip()
             if payload == "[DONE]":
-                done_line = "\n\n**분석 스트림 종료**\n"
+                if run_id and st.session_state.get(f"mt_run_terminal_status_{run_id}") == "HITL_REQUIRED":
+                    done_line = "\n\n**담당자 검토 의견 입력 후 \"분석 이어가기 실행\" 버튼을 클릭하시면 분석을 이어서 진행하겠습니다.**\n"
+                else:
+                    done_line = "\n\n**분석 스트림 종료**\n"
                 prefix = current_block
                 current_block += done_line
                 history_buffer.append(done_line)
@@ -673,6 +677,7 @@ def sse_node_block_generator(stream_url: str, *, run_id: str | None = None) -> I
                         if run_id:
                             st.session_state[_hitl_state_key("dismissed", run_id)] = False
                             st.session_state[_hitl_state_key("shown", run_id)] = True
+                        hitl_message_shown = True
                         addition += "\n\n**[최종]** 담당자 검토 입력을 기다립니다.\n"
             elif event_name == "confidence":
                 score = obj.get("score_breakdown") or obj
@@ -689,7 +694,11 @@ def sse_node_block_generator(stream_url: str, *, run_id: str | None = None) -> I
                 if status == "HITL_REQUIRED" and run_id:
                     st.session_state[_hitl_state_key("dismissed", run_id)] = False
                     st.session_state[_hitl_state_key("shown", run_id)] = True
-                addition = f"\n\n**[최종]** {final_text}\n"
+                # HITL_PAUSE에서 이미 "[최종] 담당자 검토 입력을 기다립니다." 표시한 경우 한 번만 노출
+                if status == "HITL_REQUIRED" and hitl_message_shown:
+                    addition = ""
+                else:
+                    addition = f"\n\n**[최종]** {final_text}\n"
             elif event_name == "failed":
                 if status_key:
                     st.session_state[status_key] = _humanize_stream_text(obj.get("error", "unknown error"))[:220]
@@ -2845,6 +2854,7 @@ def render_workspace_chat_panel(selected: dict[str, Any], latest_bundle: dict[st
         st.session_state.pop(_hitl_state_key("shown", run_id), None)
         st.success(f"분석 시작: run_id={response['run_id']}")
         pending_stream = {"run_id": str(run_id), "stream_path": str(response["stream_path"])}
+        st.session_state.pop("mt_current_stream_is_resume", None)  # 새 분석 시작이므로 재개 스트림 아님
 
     # 모달 닫힘을 먼저 반영하기 위한 2-step 재개:
     # review-submit 성공 직후에는 queued 키에 저장하고 rerun,
@@ -2877,6 +2887,7 @@ def render_workspace_chat_panel(selected: dict[str, Any], latest_bundle: dict[st
         st.session_state.pop("mt_resume_stream", None)
         st.success(f"HITL 응답 반영 후 재개: run_id={run_id}")
         pending_stream = {"run_id": run_id, "stream_path": stream_path}
+        st.session_state["mt_current_stream_is_resume"] = run_id  # 재개 스트림 종료 시 팝업 자동 오픈 방지
 
     # HITL 팝업에서 "분석 이어가기" 제출 직후 — 2단계로 분리해 팝업을 즉시 닫음:
     # 1) mt_pending_review_submit이 있으면 API 호출 없이 open=False, skip 설정만 하고 rerun 하지 않음
@@ -3138,6 +3149,8 @@ def render_workspace_chat_panel(selected: dict[str, Any], latest_bundle: dict[st
                 stream_wait_placeholder.empty()
                 logger.info("[ui] 스트림 for 루프 종료 vkey=%s — fetch_case_bundle 후 mt_post_stream_bundle 저장 및 st.rerun() 예정", vkey)
                 try:
+                    # 재개 스트림 여부는 스트림 종료 시 한 번만 사용 후 제거 (다음 run에 남기지 않음)
+                    _stream_was_resume = st.session_state.pop("mt_current_stream_is_resume", None)
                     latest_bundle = fetch_case_bundle(vkey)
                     result = ((latest_bundle.get("result") or {}).get("result") or {})
                     timeline = latest_bundle.get("timeline") or []
@@ -3157,6 +3170,14 @@ def render_workspace_chat_panel(selected: dict[str, Any], latest_bundle: dict[st
                     if _has_pending_hitl(latest_bundle) and latest_bundle.get("run_id"):
                         _rid = latest_bundle.get("run_id")
                         st.session_state[_hitl_state_key("dismissed", _rid)] = False
+                        # 재개 스트림이 끝난 경우에는 open_key 설정하지 않음 (이미 제출 후 재개한 것이므로 팝업 다시 띄우지 않음)
+                        if _stream_was_resume == run_id:
+                            logger.info("[ui] 재개 스트림 종료 run_id=%s → open_key 설정 생략 (팝업 재오픈 방지)", run_id)
+                        else:
+                            # HITL 확인 체크하고 분석한 경우에만 최초 인터럽트 시 팝업 자동 오픈
+                            if st.session_state.get(f"mt_hitl_ui_enabled_{_rid}", False):
+                                st.session_state[_hitl_state_key("open", _rid)] = True
+                                logger.info("[ui] HITL 인터럽트 + mt_hitl_ui_enabled → open_key=True 설정 run_id=%s", _rid)
                 except Exception as e:
                     # fetch 실패 시에도 rerun은 수행해 기존 화면을 갱신
                     logger.exception("[ui] fetch_case_bundle 실패 vkey=%s — mt_post_stream_bundle 미저장, rerun만 수행", vkey)
@@ -3432,7 +3453,19 @@ def render_ai_workspace_page() -> None:
     render_page_header("AI 워크스페이스", "전표 기반 자율형 에이전트가 실제로 추론하고, 도구를 호출하고, 규정 근거를 바탕으로 판단하는 메인 시연 화면입니다.")
     items = get("/api/v1/vouchers?queue=all&limit=50").get("items") or []
     debug_mode = bool(st.session_state.get("mt_debug_mode", False))
-    selected_key = st.session_state.get("mt_selected_voucher") or (items[0]["voucher_key"] if items else None)
+    item_keys = {str(item.get("voucher_key") or "") for item in items if item.get("voucher_key")}
+    selected_key = str(st.session_state.get("mt_selected_voucher") or "")
+    # 삭제/필터 변경 후에도 stale 선택키가 남지 않도록 현재 목록 기준으로 보정한다.
+    if selected_key and selected_key not in item_keys:
+        st.session_state.pop("mt_selected_voucher", None)
+        selected_key = ""
+    if not selected_key and items:
+        selected_key = str(items[0].get("voucher_key") or "")
+        if selected_key:
+            st.session_state["mt_selected_voucher"] = selected_key
+    if not items:
+        st.session_state.pop("mt_selected_voucher", None)
+    selected_key = selected_key or None
     # 스트림 종료 직후 rerun인 경우, 그때 가져둔 번들로 판단요약 등 하단 탭을 즉시 갱신
     post_stream = st.session_state.pop("mt_post_stream_bundle", None)
     if selected_key and post_stream and post_stream.get("voucher_key") == selected_key:
