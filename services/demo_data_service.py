@@ -245,7 +245,7 @@ def seed_demo_scenarios(db: Session, scenario: str, count: int = 5) -> dict[str,
             ),
             blart=profile["blart"],
             waers="KRW",
-            bktxt=f"{profile['label']}{_eul_reul(profile['label'])} 위한 테스트 데이터",
+            bktxt=f"{profile['label']}{_eul_reul(profile['label'])} 위한 테스트 데이터 ({belnr})",
             xblnr=f"DEMO-{scenario}-{seq}",
             intended_risk_type=None,  # Raw data: screener_node will classify during analysis
             hr_status=profile["hr_status"],
