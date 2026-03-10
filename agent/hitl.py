@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import logging
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 _CASE_TYPE_LABELS = {
@@ -81,6 +84,12 @@ def build_hitl_request(
 
     case_type = screening_result.get("case_type") or screening_result.get("caseType") or body_evidence.get("case_type")
     severity = screening_result.get("severity") or body_evidence.get("severity")
+    logger.info(
+        "[HITL_BUILD] case_type source: screening_result.case_type=%s body_evidence.case_type=%s → case_type=%s",
+        screening_result.get("case_type") or screening_result.get("caseType"),
+        body_evidence.get("case_type"),
+        case_type,
+    )
     score = screening_result.get("score")
     if score is None:
         score = score_breakdown.get("final_score")
@@ -143,6 +152,30 @@ def build_hitl_request(
         review_questions.extend(reg_questions)
     # review_questions는 규정 기반(regulation_driven) 또는 verify_node에서 LLM이 생성한 값만 사용. 하드코딩/폴백 없음.
 
+    # 정상 비교군(NORMAL_BASELINE): 검증 연결률/게이트/비판·규정 추출 필수입력(reg_required)만으로는 HITL 부여하지 않음.
+    # 실제 결격(전표 필드 누락 missing_fields, 라인 없음 document_items, missing_evidence)이 있을 때만 HITL.
+    is_normal_baseline = str(case_type or "").upper() == "NORMAL_BASELINE"
+    critical_required = [r for r in required_inputs if (r.get("field") or "").strip() in ("missing_fields", "document_items")]
+    logger.info(
+        "[HITL_BUILD] case_type=%s is_normal_baseline=%s len(missing_evidence)=%s len(required_inputs)=%s len(critical_required)=%s len(blocking_reasons)=%s reg_required=%s",
+        case_type,
+        is_normal_baseline,
+        len(missing_evidence),
+        len(required_inputs),
+        len(critical_required),
+        len(blocking_reasons),
+        bool(reg_required),
+    )
+    if is_normal_baseline and not missing_evidence and not critical_required:
+        logger.info("[HITL_BUILD] NORMAL_BASELINE → HITL skip (no missing_evidence, no critical required_inputs; reg_required ignored for 정상비교군)")
+        return None
+    if is_normal_baseline and (missing_evidence or critical_required):
+        logger.info(
+            "[HITL_BUILD] NORMAL_BASELINE but HITL required: missing_evidence=%s critical_fields=%s",
+            [m[:60] for m in missing_evidence[:3]],
+            [r.get("field") for r in critical_required[:5]],
+        )
+
     if case_type:
         evidence_snapshot.append({"type": "risk", "label": "위험 유형", "value": _label_case_type(case_type)})
     if severity:
@@ -164,8 +197,11 @@ def build_hitl_request(
 
     # 검토 필요(REVIEW_REQUIRED)인데 HITL 요청이 없으면 UI에 담당자 검토 패널이 안 뜸.
     # 규정 적용·위험 유형이 있으면 최소한의 hitl_request를 만들어 run이 hitl_pause에서 멈추도록 함.
+    # 정상 비교군(NORMAL_BASELINE)은 분석 결과가 양호하면 HITL 없이 완료: enable_hitl 체크해도 팝업이 뜨지 않음.
     if not blocking_reasons and not unresolved_claims and not missing_evidence:
-        if policy_refs and (case_type or severity or reg_required or reg_questions):
+        is_normal_baseline = str(case_type or "").upper() == "NORMAL_BASELINE"
+        risk_case_or_reg = (case_type and not is_normal_baseline) or severity or reg_required or reg_questions
+        if policy_refs and risk_case_or_reg:
             blocking_reasons.append("규정 적용 건으로 담당자 검토(통과/미통과 판단)가 필요합니다.")
         else:
             return None
@@ -178,6 +214,11 @@ def build_hitl_request(
     if unresolved_claims:
         why_parts.append(unresolved_claims[0])
 
+    logger.info(
+        "[HITL_BUILD] building hitl_request: case_type=%s why_preview=%s",
+        case_type,
+        (why_parts[0][:80] + "…") if why_parts else "",
+    )
     return {
         "required": True,
         "handoff": "FINANCE_REVIEWER",

@@ -173,7 +173,7 @@ async def policy_rulebook_probe(context: dict[str, Any]) -> dict[str, Any]:
         seen_articles: set[str] = set()
         refs = []
         for r in candidates:
-            if len(refs) >= 5:
+            if len(refs) >= 3:
                 break
             article_key = str(r.get("article") or r.get("regulation_article") or "").strip()
             if not article_key or article_key in seen_articles:

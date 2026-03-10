@@ -17,6 +17,8 @@ from utils.config import settings
 # - AuraAgent 표준 case_type 5종(HOLIDAY_USAGE/LIMIT_EXCEED/PRIVATE_USE_RISK/UNUSUAL_PATTERN/NORMAL_BASELINE)만 사용.
 # - 스크리닝 핵심 입력 필드(occurredAt, isHoliday, hrStatus, hrStatusRaw, mccCode, budgetExceeded, amount)를
 #   생성 단계에서 모두 채우도록 시나리오 프로파일을 강제 검증한다.
+# - 정상 비교군(NORMAL_BASELINE)은 분석 시 HITL 없이 완료되도록 규정에 걸리지 않는 값으로 고정:
+#   평일(day_mode=weekday), 낮 시간(hour_candidates=11~13), hr_status=WORK, mcc_code=5816(위험 MCC 아님), budget=N.
 SCENARIO_PROFILES: dict[str, dict[str, Any]] = {
     "HOLIDAY_USAGE": {
         "label": "휴일 사용 의심",
@@ -27,7 +29,7 @@ SCENARIO_PROFILES: dict[str, dict[str, Any]] = {
         "budget_flag": "N",   # BE: HOLIDAY_USAGE는 N
         "merchant_name": "심야 식대",
         "item_text": "휴일 야간 식대",
-        "amount_range": (30000, 150000),
+        "amount_range": (30000, 99999),
         "hour_candidates": [22, 23, 1],
         "day_mode": "weekend",
         "belnr_prefix": "H",
@@ -83,12 +85,13 @@ SCENARIO_PROFILES: dict[str, dict[str, Any]] = {
         "description": "정상 업무 시간대의 일반 식대 시나리오 (BE DEFAULT/NORMAL)",
         "blart": "SA",
         "hr_status": "WORK",
-        # 위험도 없는 업종: 5816(케이터링/급식) — MCC_HIGH/MEDIUM/LEISURE 기본값에 없음. 5812는 medium_risk.
+        # 규정 미걸림: 5816(케이터링/급식) — MCC_HIGH/MEDIUM/LEISURE 기본값에 없음. 심야·휴일 규정 회피용.
         "mcc_code": "5816",
         "budget_flag": "N",
         "merchant_name": "일반 식대",
         "item_text": "정상 업무 식대",
         "amount_range": (12000, 45000),
+        # 낮 시간만 사용(심야 제한 규정 회피). 11~13시 = 업무 시간대.
         "hour_candidates": [11, 12, 13],
         "day_mode": "weekday",
         "belnr_prefix": "N",
@@ -168,6 +171,12 @@ def _validate_scenario_profile(scenario: str, profile: dict[str, Any]) -> None:
     for h in hours:
         if not isinstance(h, int) or h < 0 or h > 23:
             raise ValueError(f"invalid hour value in scenario({scenario}): {h}")
+    # 정상 비교군: 규정(심야·휴일 등)에 걸리지 않도록 낮 시간(6~21)·평일만 허용
+    if scenario == "NORMAL_BASELINE":
+        if profile["day_mode"] != "weekday":
+            raise ValueError(f"NORMAL_BASELINE must use day_mode=weekday (current: {profile['day_mode']})")
+        if any(h < 6 or h > 21 for h in hours):
+            raise ValueError(f"NORMAL_BASELINE hour_candidates must be daytime 6~21 to avoid night rules (current: {hours})")
 
     amount_range = profile["amount_range"]
     if (

@@ -81,6 +81,23 @@ PIPELINE_NODES = [
     ("finalizer", "최종 판정"),
 ]
 
+# SSE 스트림/실행 내역에서 "node / 단계 시작" 대신 "한글 설명 (node) 단계 시작" 형태로 사용자에게 표시
+NODE_DISPLAY_LABEL: dict[str, str] = {
+    "start_router": "사전 스크리닝 여부에 따라 Intake 직행 또는 Screener로 분기",
+    "screener": "전표 기반 케이스 유형 분류",
+    "intake": "전표 입력과 위험 지표 정규화",
+    "planner": "조사 계획과 tool 순서 수립",
+    "execute": "실제 LangChain tool 호출",
+    "critic": "과잉 주장과 반례 검토",
+    "verify": "자동 판정 가능 여부 검증",
+    "hitl_pause": "담당자 검토 대기",
+    "hitl_validate": "담당자 응답 검증 후 재개",
+    "reporter": "설명 문장과 최종 요약 생성",
+    "finalizer": "상태/점수/이력 최종 확정",
+    "bootstrap": "분석 시작",
+}
+
+
 STREAM_TERM_MAP: dict[str, str] = {
     "policy_rulebook_probe": "규정 조항 조회 도구",
     "holiday_compliance_probe": "휴일/휴무 적격성 점검 도구",
@@ -107,6 +124,32 @@ def _humanize_stream_text(text: str) -> str:
     for key in sorted(STREAM_TERM_MAP.keys(), key=len, reverse=True):
         out = out.replace(key, STREAM_TERM_MAP[key])
     return out
+
+
+def _stream_node_event_label(node: str, event_type: str, *, tool_frag: str | None = None) -> str:
+    """노드+이벤트를 사용자용 문구로 변환. 예: '전표 입력과 위험 지표 정규화(intake) 단계 시작'."""
+    n = (node or "agent").strip().lower()
+    desc = NODE_DISPLAY_LABEL.get(n, n)
+    ev_type = (event_type or "").strip().upper()
+    if tool_frag:
+        return f"{desc} ({n}) · {tool_frag}"
+    if ev_type == "NODE_START":
+        return f"{desc} ({n}) 단계 시작"
+    if ev_type == "NODE_END":
+        return f"{desc} ({n}) 단계 종료"
+    ev_label = _humanize_stream_text(ev_type)
+    if ev_type == "THINKING_DONE":
+        return f"{desc} ({n}) · 추론"
+    if ev_type == "THINKING_RETRY":
+        return f"{desc} ({n}) · 재검토"
+    return f"{desc} ({n}) · {ev_label}"
+
+
+def _stream_node_activity_label(node: str, activity: str) -> str:
+    """추론/재검토 등 활동만 있을 때(이벤트 타입 없이) 표시용. 예: '전표 입력과 위험 지표 정규화(intake) · 추론'."""
+    n = (node or "agent").strip().lower()
+    desc = NODE_DISPLAY_LABEL.get(n, n)
+    return f"{desc} ({n}) · {activity}"
 
 
 def _build_thinking_card_html(node_name: str, text: str, *, is_complete: bool) -> str:
@@ -206,10 +249,8 @@ def _stream_card_chunks(obj: dict[str, Any]) -> Iterator[str]:
         yield "  \n\n"
         return
 
-    part2 = f"{node} / {_humanize_stream_text(ev_type)}"
     tool_frag = _tool_caption_fragment(ev_type, tool, tool_desc, html_tooltip=False)
-    if tool_frag:
-        part2 = f"{node} / {tool_frag}"
+    part2 = _stream_node_event_label(node, ev_type, tool_frag=tool_frag if tool_frag else None)
     icon = EVENT_ICON_MAP.get(ev_type, "🤖")
     header = f"{icon} **{ts}** · {part2}  \n"
     yield header
@@ -287,7 +328,7 @@ def sse_text_stream(stream_url: str, *, run_id: str | None = None) -> Iterator[s
                                 stream_buffer.append(sep)
                                 yield sep
                             ts = fmt_dt_korea(obj.get("timestamp")) or "-"
-                            header = f"💭 **{ts}** · {node} / 추론  \n"
+                            header = f"💭 **{ts}** · {_stream_node_activity_label(node, '추론')}  \n"
                             stream_buffer.append(header)
                             yield header
                             thinking_node = node
@@ -314,7 +355,7 @@ def sse_text_stream(stream_url: str, *, run_id: str | None = None) -> Iterator[s
                             yield sep
                         ts = fmt_dt_korea(obj.get("timestamp")) or "-"
                         node = obj.get("node") or "agent"
-                        retry_header = f"🔄 **{ts}** · {node} / 재검토  \n"
+                        retry_header = f"🔄 **{ts}** · {_stream_node_activity_label(node, '재검토')}  \n"
                         retry_body = "_판단 결과와 추론 문구 정합성을 다시 맞추는 중..._  \n\n"
                         stream_buffer.append(retry_header)
                         stream_buffer.append(retry_body)
@@ -342,7 +383,8 @@ def sse_text_stream(stream_url: str, *, run_id: str | None = None) -> Iterator[s
                             if run_id:
                                 st.session_state[_hitl_state_key("dismissed", run_id)] = False
                                 st.session_state[_hitl_state_key("shown", run_id)] = True
-                            final_line = "\n\n**[최종]** 담당자 검토 입력을 기다립니다.\n"
+                            reason = (obj.get("metadata") or {}).get("reason") or ""
+                            final_line = "\n\n**[최종]** 담당자 검토 입력을 기다립니다." + (f" 사유: {reason}" if reason else "") + "\n"
                             stream_buffer.append(final_line)
                             yield final_line
                             break
@@ -619,7 +661,7 @@ def sse_node_block_generator(stream_url: str, *, run_id: str | None = None) -> I
                         ts = fmt_dt_korea(obj.get("timestamp")) or "-"
                         if current_block:
                             addition += "\n\n"
-                        addition += f"💭 **{ts}** · {node} / 추론  \n"
+                        addition += f"💭 **{ts}** · {_stream_node_activity_label(node, '추론')}  \n"
                         thinking_open = True
                     if token:
                         addition += token
@@ -638,7 +680,7 @@ def sse_node_block_generator(stream_url: str, *, run_id: str | None = None) -> I
                             ts = fmt_dt_korea(obj.get("timestamp")) or "-"
                             if current_block or addition:
                                 addition += "\n\n"
-                            addition += f"💭 **{ts}** · {node} / 추론  \n{done_reasoning}  \n\n"
+                            addition += f"💭 **{ts}** · {_stream_node_activity_label(node, '추론')}  \n{done_reasoning}  \n\n"
                     thinking_open = False
                     if status_key and thinking_buffer.strip():
                         st.session_state[status_key] = thinking_buffer.strip()
@@ -651,7 +693,7 @@ def sse_node_block_generator(stream_url: str, *, run_id: str | None = None) -> I
                     if current_block or addition:
                         addition += "\n\n"
                     ts = fmt_dt_korea(obj.get("timestamp")) or "-"
-                    addition += f"🔄 **{ts}** · {node} / 재검토  \n"
+                    addition += f"🔄 **{ts}** · {_stream_node_activity_label(node, '재검토')}  \n"
                     addition += "_판단 결과와 추론 문구 정합성을 다시 맞추는 중..._  \n\n"
                     if status_key:
                         retry_msg = _humanize_stream_text(obj.get("message") or "")
@@ -678,7 +720,8 @@ def sse_node_block_generator(stream_url: str, *, run_id: str | None = None) -> I
                             st.session_state[_hitl_state_key("dismissed", run_id)] = False
                             st.session_state[_hitl_state_key("shown", run_id)] = True
                         hitl_message_shown = True
-                        addition += "\n\n**[최종]** 담당자 검토 입력을 기다립니다.\n"
+                        reason = (obj.get("metadata") or {}).get("reason") or ""
+                        addition += "\n\n**[최종]** 담당자 검토 입력을 기다립니다." + (f" 사유: {reason}" if reason else "") + "\n"
             elif event_name == "confidence":
                 score = obj.get("score_breakdown") or obj
                 addition = _score_breakdown_stream_block(score)
@@ -1167,10 +1210,10 @@ def render_timeline_cards(events: list[dict[str, Any]], *, view_mode: str = "bus
                                 st.write(line)
                         else:
                             icon = EVENT_ICON_MAP.get(ev_type, "🤖")
-                            part2 = f"{payload.get('node') or '-'} / {'추론' if ev_type == 'THINKING_DONE' else _humanize_stream_text(ev_type)}"
                             tool_frag = _tool_caption_fragment(ev_type, payload.get("tool"), meta.get("tool_description"), html_tooltip=True)
-                            if tool_frag:
-                                part2 = f"{payload.get('node') or '-'} / {tool_frag}"
+                            part2 = _stream_node_event_label(
+                                payload.get("node") or "-", ev_type, tool_frag=tool_frag if tool_frag else None
+                            )
                             cap = f"{icon} {fmt_dt_korea(event.get('at') or payload.get('timestamp')) or '-'} · {part2}"
                             st.caption(cap, unsafe_allow_html=True)
                             if ev_type == "SCORE_BREAKDOWN":
@@ -1240,10 +1283,10 @@ def render_timeline_cards(events: list[dict[str, Any]], *, view_mode: str = "bus
                                 st.write(line)
                         else:
                             icon = EVENT_ICON_MAP.get(ev_type, "🤖")
-                            part2 = f"{payload.get('node') or '-'} / {'추론' if ev_type == 'THINKING_DONE' else _humanize_stream_text(ev_type)}"
                             tool_frag = _tool_caption_fragment(ev_type, payload.get("tool"), meta.get("tool_description"), html_tooltip=True)
-                            if tool_frag:
-                                part2 = f"{payload.get('node') or '-'} / {tool_frag}"
+                            part2 = _stream_node_event_label(
+                                payload.get("node") or "-", ev_type, tool_frag=tool_frag if tool_frag else None
+                            )
                             cap = f"{icon} {fmt_dt_korea(event.get('at') or payload.get('timestamp')) or '-'} · {part2}"
                             st.caption(cap, unsafe_allow_html=True)
                             if ev_type == "SCORE_BREAKDOWN":
@@ -2306,7 +2349,7 @@ def render_hitl_panel(latest_bundle: dict[str, Any], *, vkey: str | None = None)
         with title_col:
             st.markdown("#### 담당자 검토 (HITL)")
         with radio_col:
-            st.radio(
+            decision_val = st.radio(
                 "판단 선택",
                 options=["보류/추가 검토", "승인 가능"],
                 horizontal=True,
@@ -2418,8 +2461,13 @@ def render_hitl_panel(latest_bundle: dict[str, Any], *, vkey: str | None = None)
             comment = str(st.session_state.get(form_keys["comment"], "") or "").strip()
             business_purpose = str(st.session_state.get(form_keys["business_purpose"], "") or "").strip()
             attendees_raw = str(st.session_state.get(form_keys["attendees"], "") or "")
-            decision_val = st.session_state.get(form_keys["decision"], "보류/추가 검토")
+            # 위 st.radio() 반환값 사용 — session_state 기본값으로 인한 approved=False 오류 방지
             approved = decision_val == "승인 가능"
+            logger.info(
+                "[HITL_SUBMIT] 판단 선택: decision_val=%s approved=%s (라디오 반환값 기준)",
+                decision_val,
+                approved,
+            )
             hitl_response = {
                 "reviewer": reviewer or "FINANCE_REVIEWER",
                 "comment": comment or None,
@@ -2837,7 +2885,7 @@ def render_workspace_chat_panel(selected: dict[str, Any], latest_bundle: dict[st
     with cta_spacer_col:
         st.markdown("&nbsp;", unsafe_allow_html=True)
     with cta_hitl_col:
-        enable_hitl = st.checkbox("HITL 확인", key=f"workspace_hitl_check_{vkey}", value=False)
+        enable_hitl = st.checkbox("HITL 확인", key=f"workspace_hitl_check_{vkey}", value=True)
     with cta_btn_col:
         with stylable_container(key="workspace_cta_right_1", css_styles=["{}"]):
             run_clicked = st.button("분석 시작", key=f"workspace_run_{vkey}", type="primary")
@@ -3352,13 +3400,13 @@ def render_workspace_evidence_map(latest_bundle: dict[str, Any], debug_mode: boo
     verification_summary = result.get("verification_summary") or {}
     if verification_summary:
         st.markdown("#### 검증 현황")
-        st.caption("검증 대상 주장(문장) 중 규정 청크와 연결된 비율입니다. **높을수록** 자동 확정 가능, 낮으면 담당자 검토가 필요합니다.")
+        st.caption("검증 대상 **주장(문장)** 중 규정 청크와 연결된 비율입니다. 규정 개수(C1,C2,C3…)와 별개로, ‘검증할 문장 몇 개 중 몇 개가 근거와 연결됐는지’를 나타냅니다. **높을수록** 자동 확정 가능, 낮으면 담당자 검토가 필요합니다.")
         v1, v2, v3 = st.columns(3)
         with v1:
             ratio = verification_summary.get("coverage_ratio")
             covered = verification_summary.get("covered", 0)
             total = verification_summary.get("total", 0)
-            st.metric("검증 주장 근거 연결률", f"{(ratio or 0) * 100:.0f}%" if ratio is not None else "-", f"{covered}/{total}건 연결")
+            st.metric("검증 주장 근거 연결률", f"{(ratio or 0) * 100:.0f}%" if ratio is not None else "-", f"주장 {covered}/{total}건 연결")
         with v2:
             missing = verification_summary.get("missing_citations") or []
             st.metric("근거 미연결 주장 수", str(len(missing)))
@@ -3379,10 +3427,34 @@ def render_workspace_evidence_map(latest_bundle: dict[str, Any], debug_mode: boo
                     is_covered = bool(d.get("covered"))
                     icon = "✅ 연결됨" if is_covered else "❌ 미연결"
                     st.markdown(f"**{idx}. {icon}**  \n{preview}")
-        if verification_summary.get("missing_citations"):
-            with st.expander("근거 미연결 검증 주장", expanded=False):
-                for i, s in enumerate(verification_summary["missing_citations"], 1):
-                    st.caption(f"{i}. {(s or '')[:160]}{'…' if len(str(s or '')) > 160 else ''}")
+
+    # 검증 주장 ↔ 규정 매핑: 어떤 주장이 어떤 규정 조항으로 뒷받침됐는지 표시
+    verifier_output = result.get("verifier_output") or {}
+    claim_results = verifier_output.get("claim_results") or []
+    if claim_results:
+        st.markdown("#### 검증 주장 ↔ 규정 매핑")
+        st.caption("각 검증 주장이 어떤 규정 조항으로 연결되었는지 확인할 수 있습니다.")
+        for i, cr in enumerate(claim_results, start=1):
+            item = cr if isinstance(cr, dict) else (cr.model_dump() if hasattr(cr, "model_dump") else {})
+            claim_text = (item.get("claim") or "").strip()
+            is_covered = bool(item.get("covered"))
+            supporting = item.get("supporting_articles") or []
+            gap = (item.get("gap") or "").strip()
+            icon = "✅" if is_covered else "❌"
+            with st.expander(f"**{icon} 주장 {i}** — {claim_text[:60]}{'…' if len(claim_text) > 60 else ''}", expanded=(i == 1)):
+                st.markdown("**검증 주장**")
+                st.caption(claim_text)
+                if is_covered and supporting:
+                    st.markdown("**연결된 규정**  \n" + ", ".join(f"**{a}**" for a in supporting))
+                elif not is_covered and gap:
+                    st.markdown("**미연결 사유**  \n" + gap)
+                elif not is_covered:
+                    st.caption("규정 청크와 매칭되지 않았습니다.")
+
+    if verification_summary.get("missing_citations"):
+        with st.expander("근거 미연결 검증 주장", expanded=False):
+            for i, s in enumerate(verification_summary["missing_citations"], 1):
+                st.caption(f"{i}. {(s or '')[:160]}{'…' if len(str(s or '')) > 160 else ''}")
 
     if retrieval_snapshot:
         with st.expander("Retrieval 인용 현황", expanded=False):

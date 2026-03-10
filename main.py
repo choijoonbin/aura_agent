@@ -823,6 +823,10 @@ async def review_submit(
 
     if hitl_request and request.hitl_response is not None:
         hitl_payload = request.hitl_response.model_dump()
+        logger.info(
+            "[RESUME_TRACE] review_submit 수신 hitl_response.approved=%s (UI에서 승인 체크 시 True 기대)",
+            hitl_payload.get("approved"),
+        )
         runtime.set_hitl_response(run_id, hitl_payload)
         try:
             log_run_event(

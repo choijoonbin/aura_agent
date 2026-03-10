@@ -836,6 +836,7 @@ async def _llm_decide_hitl_verdict(
     그 판단은 LLM이 맥락을 보고 하도록 함. 하드코딩/룰베이스 금지.
     반환: (verdict, reason) — verdict는 COMPLETED_AFTER_HITL 또는 REVIEW_REQUIRED.
     """
+    logger.info("[VERDICT_LLM] _llm_decide_hitl_verdict 진입 (확정 vs 재검토 LLM 판단)")
     why = str(hitl_request.get("why_hitl") or hitl_request.get("blocking_reason") or "").strip()
     reasons = hitl_request.get("reasons") or hitl_request.get("auto_finalize_blockers") or []
     questions = hitl_request.get("review_questions") or hitl_request.get("questions") or []
@@ -850,7 +851,7 @@ async def _llm_decide_hitl_verdict(
     context = {
         "why_hitl": why,
         "reasons": reasons[:10],
-        "review_questions": questions[:5],
+        "review_questions": questions[:3],
         "required_inputs": [r.get("field") for r in required_inputs[:5] if r.get("field")],
         "reviewer_approved": approved,
         "reviewer_comment_length": len(comment),
@@ -940,14 +941,14 @@ async def _llm_decide_hitl_verdict(
                 refusal,
                 finish_details,
             )
-            # LLM 실패 시: 담당자 승인 + 의견 일정 길이 이상이면 담당자 판단 존중하여 완료 처리
-            if approved and len(comment) >= 15:
+            # LLM 실패 시: 담당자 승인 시 답변 길이 무관하게 완료 fallback
+            if approved:
                 logger.info(
-                    "[VERDICT_LLM] 담당자 승인+의견 있음 → COMPLETED_AFTER_HITL fallback",
+                    "[VERDICT_LLM] fallback: 응답 비어 있음, approved=True → COMPLETED_AFTER_HITL (답변 길이 제한 없음)",
                 )
                 return ("COMPLETED_AFTER_HITL", "담당자 승인 및 검토 의견 반영으로 확정(LLM 판단 보조 실패 시 적용).")
             logger.warning(
-                "[VERDICT_LLM] REVIEW_REQUIRED fallback (응답 비어 있음)",
+                "[VERDICT_LLM] fallback: 응답 비어 있음, approved=False → REVIEW_REQUIRED",
             )
             return ("REVIEW_REQUIRED", "판단 LLM 응답이 비어 있어 재검토 필요 처리.")
         parsed = json.loads(raw)
@@ -955,22 +956,200 @@ async def _llm_decide_hitl_verdict(
         if v not in ("COMPLETED_AFTER_HITL", "REVIEW_REQUIRED"):
             v = "REVIEW_REQUIRED"
         reason = str(parsed.get("reason") or "").strip() or "담당자 검토 응답을 기준으로 판단함."
+        logger.info(
+            "[VERDICT_LLM] LLM 정상 응답 (검토 필요 여부는 LLM 판단) verdict=%s reason=%s raw_preview=%s",
+            v,
+            (reason[:80] + "…") if len(reason) > 80 else reason,
+            (raw[:200] + "…") if len(raw) > 200 else raw,
+        )
         return (v, reason)
     except Exception as e:
         raw_preview = (raw[:300] + "…") if len(raw) > 300 else (raw or "(empty or not available)")
-        # LLM 예외 시에도 담당자 승인+의견 있으면 완료 fallback
-        if approved and len(comment) >= 15:
+        # LLM 예외 시에도 담당자 승인 시 답변 길이 무관하게 완료 fallback
+        if approved:
             logger.info(
-                "_llm_decide_hitl_verdict LLM 호출 실패: %s — 담당자 승인+의견 있음 → COMPLETED_AFTER_HITL fallback",
-                e,
+                "[VERDICT_LLM] fallback: LLM 호출 실패 (%s) approved=True → COMPLETED_AFTER_HITL (답변 길이 제한 없음)",
+                type(e).__name__,
             )
             return ("COMPLETED_AFTER_HITL", "담당자 승인 및 검토 의견 반영으로 확정(LLM 판단 실패 시 적용).")
         logger.warning(
-            "_llm_decide_hitl_verdict LLM 호출 실패: %s — REVIEW_REQUIRED로 fallback. raw_response_preview=%s",
-            e,
+            "[VERDICT_LLM] fallback: LLM 호출 실패 (%s) approved=False → REVIEW_REQUIRED. raw_preview=%s",
+            type(e).__name__,
             raw_preview,
         )
         return ("REVIEW_REQUIRED", "판단 LLM 호출 실패로 재검토 필요 처리.")
+
+
+async def _llm_summarize_hold_reason(hitl_response: dict[str, Any]) -> str:
+    """
+    담당자가 보류를 선택했을 때, HITL 의견(comment 등)을 LLM이 한 문장으로 요약해 판단요약에 쓴다.
+    하드코딩 '담당자 사유: {comment}' 대신 LLM 해석 문장을 적용.
+    """
+    comment = str(hitl_response.get("comment") or "").strip()
+    business_purpose = str(hitl_response.get("business_purpose") or "").strip()
+    attendees = hitl_response.get("attendees")
+    if isinstance(attendees, list):
+        attendees_str = ", ".join(str(x) for x in attendees[:5] if x)
+    else:
+        attendees_str = str(attendees or "").strip()
+    parts = [p for p in [comment, business_purpose, attendees_str] if p]
+    if not parts:
+        return ""
+    text = "\n".join(f"- {p[:300]}" for p in parts)
+    system = (
+        "당신은 감사 판단요약 문구를 작성하는 보조자다. "
+        "담당자가 검토 보류를 선택했고, 아래와 같은 의견/사유를 제출했다. "
+        "이 내용을 '담당자 검토 결과 보류합니다.' 뒤에 붙일 한 문장(한국어, 80자 내외)으로 요약하라. "
+        "원문을 그대로 나열하지 말고, 요지만 정리한 한 문장으로 출력하라. 다른 설명 없이 그 한 문장만 출력하라."
+    )
+    user = f"[담당자 제출 내용]\n{text}"
+    try:
+        from openai import AsyncAzureOpenAI, AsyncOpenAI
+
+        base_url = (getattr(settings, "openai_base_url") or "").strip()
+        is_azure = ".openai.azure.com" in base_url
+        if is_azure:
+            azure_ep = base_url.rstrip("/")
+            if azure_ep.endswith("/openai/v1"):
+                azure_ep = azure_ep[: -len("/openai/v1")]
+            client = AsyncAzureOpenAI(
+                api_key=settings.openai_api_key,
+                azure_endpoint=azure_ep,
+                api_version=getattr(settings, "openai_api_version", "2024-02-15-preview"),
+            )
+        else:
+            client = AsyncOpenAI(api_key=settings.openai_api_key, base_url=base_url or None)
+        completion_tokens_kw = {"max_completion_tokens": 256} if is_azure else {"max_tokens": 256}
+        response = await client.chat.completions.create(
+            **completion_kwargs_for_azure(
+                base_url,
+                model=settings.reasoning_llm_model,
+                messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
+                **completion_tokens_kw,
+            )
+        )
+        raw = (response.choices[0].message.content or "").strip()
+        if raw:
+            # 한 문장만 취함(첫 줄)
+            first = raw.split("\n")[0].strip()
+            if len(first) > 300:
+                first = first[:297] + "…"
+            logger.info("[VERDICT_LLM] HOLD 사유 LLM 요약: %s", first[:100] + "…" if len(first) > 100 else first)
+            return first
+    except Exception as e:
+        logger.warning("[VERDICT_LLM] HOLD 사유 LLM 요약 실패: %s", type(e).__name__)
+    return ""
+
+
+async def _llm_summarize_completed_reason(state: AgentState) -> str:
+    """
+    자동 확정(COMPLETED)인 경우, 수집된 증거·규정·검증 결과를 바탕으로
+    '왜 확정인지' 한 문장을 LLM이 생성해 판단요약 꼬리에 쓴다.
+    하드코딩 '현재 수집된 증거 기준으로 자동 확정되었습니다.' 대신 증거 기반 사유를 노출.
+    """
+    body = state.get("body_evidence") or {}
+    tool_results = state.get("tool_results") or []
+    verification = state.get("verification") or {}
+    reporter_output = state.get("reporter_output") or {}
+    score = _score_with_hitl_adjustment(state.get("score_breakdown") or {}, state.get("flags") or {})
+
+    voucher_line = _voucher_summary_for_context(body)
+    case_type = str(body.get("case_type") or state.get("intended_risk_type") or "").strip() or "미분류"
+
+    # 규정·증거 요약
+    refs = _top_policy_refs(tool_results, limit=5)
+    ref_labels = []
+    for r in refs:
+        art = (r.get("article") or r.get("regulation_article") or "").strip()
+        title = (r.get("parent_title") or "").strip()
+        ref_labels.append(f"{art} ({title})" if title else art)
+    policy_line = "규정: " + ", ".join(ref_labels) if ref_labels else "규정: (없음)"
+
+    doc_result = _find_tool_result(tool_results, "document_evidence_probe")
+    line_count = int(((doc_result or {}).get("facts") or {}).get("lineItemCount") or 0)
+    policy_result = _find_tool_result(tool_results, "policy_rulebook_probe")
+    ref_count = int(((policy_result or {}).get("facts") or {}).get("ref_count") or 0)
+    evidence_line = f"규정 조항 {ref_count}건, 전표 라인 {line_count}건 확보."
+
+    holiday_result = _find_tool_result(tool_results, "holiday_compliance_probe")
+    merchant_result = _find_tool_result(tool_results, "merchant_risk_probe")
+    risk_parts = []
+    if holiday_result:
+        h_risk = (holiday_result.get("facts") or {}).get("holidayRisk")
+        if h_risk is not True:
+            risk_parts.append("휴일 위험 없음")
+    if merchant_result:
+        m_risk = str((merchant_result.get("facts") or {}).get("merchantRisk") or "UNKNOWN").upper()
+        if m_risk in ("LOW", "UNKNOWN"):
+            risk_parts.append(f"가맹점 위험도 {m_risk}")
+    risk_line = " ".join(risk_parts) if risk_parts else ""
+
+    verifier_output = state.get("verifier_output") or {}
+    gate = str(getattr(verifier_output.get("gate"), "value", verifier_output.get("gate")) or "").upper()
+    if gate.startswith("VERIFIERGATE."):
+        gate = gate.split(".", 1)[1]
+    quality = verification.get("quality_signals") or []
+    quality_line = f"검증 게이트: {gate}, 품질: {quality}" if gate or quality else ""
+
+    summary = (reporter_output.get("summary") or "").strip()
+    context_parts = [
+        f"[전표] {voucher_line}",
+        f"[케이스유형] {case_type}",
+        policy_line,
+        evidence_line,
+        f"[점수] 정책 {score['policy_score']}점, 근거 {score['evidence_score']}점",
+    ]
+    if risk_line:
+        context_parts.append(f"[위험점검] {risk_line}")
+    if quality_line:
+        context_parts.append(quality_line)
+    if summary:
+        context_parts.append(f"[보고요약] {summary[:300]}")
+    text = "\n".join(context_parts)
+
+    system = (
+        "당신은 감사 판단요약 문구를 작성하는 보조자다. "
+        "아래 분석 결과는 이미 '자동 확정(COMPLETED)'으로 판단된 전표이다. "
+        "수집된 증거·규정 근거·검증 결과를 바탕으로, 사용자가 '왜 확정인지' 이해할 수 있게 한 문장(한국어, 100자 내외)으로 요약하라. "
+        "예: 평일 업무 시간대 일반 식대 사용, 규정 위험 없음, 증빙·규정 조항 충족 등 수집된 증거상 위반 소지가 없어 자동 확정하였습니다. "
+        "다른 설명 없이 그 한 문장만 출력하라."
+    )
+    user = f"[분석 결과]\n{text}"
+    try:
+        from openai import AsyncAzureOpenAI, AsyncOpenAI
+
+        base_url = (getattr(settings, "openai_base_url") or "").strip()
+        is_azure = ".openai.azure.com" in base_url
+        if is_azure:
+            azure_ep = base_url.rstrip("/")
+            if azure_ep.endswith("/openai/v1"):
+                azure_ep = azure_ep[: -len("/openai/v1")]
+            client = AsyncAzureOpenAI(
+                api_key=settings.openai_api_key,
+                azure_endpoint=azure_ep,
+                api_version=getattr(settings, "openai_api_version", "2024-02-15-preview"),
+            )
+        else:
+            client = AsyncOpenAI(api_key=settings.openai_api_key, base_url=base_url or None)
+        completion_tokens_kw = {"max_completion_tokens": 256} if is_azure else {"max_tokens": 256}
+        response = await client.chat.completions.create(
+            **completion_kwargs_for_azure(
+                base_url,
+                model=settings.reasoning_llm_model,
+                messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
+                **completion_tokens_kw,
+            )
+        )
+        raw = (response.choices[0].message.content or "").strip()
+        if raw:
+            first = raw.split("\n")[0].strip()
+            if len(first) > 350:
+                first = first[:347] + "…"
+            logger.info("[VERDICT_LLM] COMPLETED 확정 사유 LLM 요약: %s", first[:100] + "…" if len(first) > 100 else first)
+            return first
+    except Exception as e:
+        logger.warning("[VERDICT_LLM] COMPLETED 확정 사유 LLM 요약 실패: %s", type(e).__name__)
+    return ""
 
 
 def _pick_llm_review_reason(hitl_request: dict[str, Any]) -> str:
@@ -1008,7 +1187,7 @@ def _is_verify_ready_without_hitl(state: AgentState) -> bool:
     return (not needs_hitl) and gate in {"READY", "PASS"}
 
 
-def _build_grounded_reason(state: AgentState) -> tuple[str, str]:
+def _build_grounded_reason(state: AgentState, completed_tail: str | None = None) -> tuple[str, str]:
     score = _score_with_hitl_adjustment(state["score_breakdown"], state["flags"])
     hitl_request = state.get("hitl_request")
     body = state["body_evidence"]
@@ -1066,21 +1245,38 @@ def _build_grounded_reason(state: AgentState) -> tuple[str, str]:
                     tail = hitl_reason if hitl_reason else (
                         "담당자 검토 결과 승인 가능으로 확인되어 최종 판단을 확정했습니다." if status == "COMPLETED_AFTER_HITL" else "담당자 검토 기준 미충족으로 재검토가 필요합니다."
                     )
+                    if status == "REVIEW_REQUIRED":
+                        logger.info("[FINAL_STATUS] status=REVIEW_REQUIRED (출처: verdict LLM 반환 — reporter_verdict=REVIEW_REQUIRED)")
                 else:
                     status = "REVIEW_REQUIRED"
                     tail = hitl_reason if hitl_reason else "담당자 검토 기준 미충족으로 재검토가 필요합니다."
+                    logger.info("[FINAL_STATUS] status=REVIEW_REQUIRED (출처: hasHitlResponse=True이나 reporter_verdict 미사용, finalizer fallback)")
             else:
                 status = "HOLD_AFTER_HITL"
-                tail = "담당자 검토 결과 보류/추가 검토가 필요해 자동 확정을 중단합니다."
+                hitl_reason = (state.get("reporter_output") or {}).get("hitl_verdict_reason") or ""
+                if hitl_reason:
+                    tail = f"담당자 검토 결과 보류합니다. {hitl_reason}"
+                else:
+                    hitl_response = (body.get("hitlResponse") or {}) if isinstance(body.get("hitlResponse"), dict) else {}
+                    hold_reason = (hitl_response.get("comment") or hitl_response.get("business_purpose") or "").strip()
+                    if hold_reason:
+                        tail = f"담당자 검토 결과 보류합니다. 담당자 사유: {hold_reason[:400]}{'…' if len(hold_reason) > 400 else ''}"
+                    else:
+                        tail = "담당자 검토 결과 보류/추가 검토가 필요해 자동 확정을 중단합니다."
         else:
             reporter_verdict = str((state.get("reporter_output") or {}).get("verdict") or "").upper()
             verify_ready = _is_verify_ready_without_hitl(state)
             if verify_ready and reporter_verdict in {"", "READY", "COMPLETED", "AUTO_APPROVED"}:
                 status = "COMPLETED"
-                tail = "현재 수집된 증거 기준으로 자동 확정되었습니다."
+                tail = (completed_tail or "현재 수집된 증거 기준으로 자동 확정되었습니다.").strip() or "현재 수집된 증거 기준으로 자동 확정되었습니다."
             else:
                 status = "REVIEW_REQUIRED"
                 tail = "현재 수집된 증거 기준으로 우선 검토 대상입니다."
+                logger.info(
+                    "[FINAL_STATUS] status=REVIEW_REQUIRED (출처: finalizer 룰 — verify_ready=%s reporter_verdict=%s, verdict LLM 미호출)",
+                    verify_ready,
+                    reporter_verdict,
+                )
     return intro + grounding + score_text + tail, status
 
 
@@ -2427,7 +2623,8 @@ async def _derive_hitl_from_regulation(state: AgentState) -> dict[str, Any]:
         "규칙:\n"
         "1. 규정에 '필수 입력', '필수 증빙', '② 필수' 등으로 열거된 항목을 required_inputs로 나열하라. "
         "각 항목은 {\"field\": \"영문식별자\", \"reason\": \"규정에서 요구하는 이유 한 줄\", \"guide\": \"사용자에게 보여줄 가이드 문구\"} 형태로.\n"
-        "2. 규정에서 예외·승인·검토 시 확인하라고 한 내용을 review_questions로 짧은 질문 문장으로 나열하라.\n"
+        "2. 규정에서 예외·승인·검토 시 확인하라고 한 내용을 review_questions로 짧은 질문 문장으로 나열하라. "
+        "질문은 최대 3개만. 유사·중복 질문은 제외하고, 판단에 가장 중요한 핵심만 선별하라.\n"
         "3. 현재 케이스(휴일/심야/접대 등)에 실제로 해당하는 조문만 사용하라. 해당 없으면 빈 배열을 반환하라.\n"
         "4. 반드시 JSON만 응답하라: {\"required_inputs\": [...], \"review_questions\": [...]}\n"
     )
@@ -2477,7 +2674,7 @@ async def _derive_hitl_from_regulation(state: AgentState) -> dict[str, Any]:
             {"field": str(x.get("field", "")), "reason": str(x.get("reason", "")), "guide": str(x.get("guide", ""))}
             for x in required_inputs if isinstance(x, dict)
         ]
-        review_questions = [str(q).strip() for q in review_questions if str(q).strip()]
+        review_questions = [str(q).strip() for q in review_questions if str(q).strip()][:3]
         return {"required_inputs": required_inputs, "review_questions": review_questions}
     except Exception:
         return {}
@@ -2512,9 +2709,9 @@ async def _generate_hitl_review_content(
         "당신은 경비 감사 에이전트다. 이 전표는 담당자 검토(HITL)가 필요한 것으로 판정되었다. "
         "아래 맥락(분석 과정에서 나온 근거)만을 사용하여 다음 두 가지를 반드시 생성하라.\n"
         "1. review_reasons: 검토가 필요한 이유를 담당자가 이해할 수 있는 문장 1~5개. 분석 결과 기반으로 명확히.\n"
-        "2. review_questions: 검토자가 검토의견에 작성해야 할 질문 1~5개. 이 답변은 이어서 분석할 때 재분석·마무리 또는 재검토 요청에 활용되므로, 분석 결과와 연결된 구체적 질문으로 작성. 예: '휴일 사용 사전 승인 여부를 확인했는가?'\n"
+        "2. review_questions: 검토자가 검토의견에 답해야 할 질문을 2~3개만 작성하라. 중복·유사 질문 없이, 판단에 가장 중요한 핵심만 선별. 분석 결과와 연결된 구체적 질문으로. 예: '휴일 사용 사전 승인 여부를 확인했는가?'\n"
         "반드시 JSON만 응답: {\"review_reasons\": [\"...\", ...], \"review_questions\": [\"...\", ...]}\n"
-        "review_reasons와 review_questions는 각각 최소 1개 이상 필수."
+        "review_reasons는 최소 1개, review_questions는 2~3개(최대 3개) 필수."
     )
     user_parts = [f"검증 판단 요약: {reasoning_text[:500]}" if reasoning_text else ""]
     if why:
@@ -2581,7 +2778,7 @@ async def _generate_hitl_review_content(
         else:
             dedup_questions = ["검토 보류 사유를 해소할 추가 근거를 제출할 수 있는가?"]
 
-    baseline = {"review_reasons": dedup_reasons[:5], "review_questions": dedup_questions[:5]}
+    baseline = {"review_reasons": dedup_reasons[:5], "review_questions": dedup_questions[:3]}
 
     if not getattr(settings, "openai_api_key", None):
         return baseline
@@ -2628,7 +2825,7 @@ async def _generate_hitl_review_content(
         # 2) LLM 결과가 비거나 일부만 있으면 baseline으로 보강(실패/빈값 방지)
         merged_reasons = reasons + [s for s in baseline["review_reasons"] if s not in set(reasons)]
         merged_questions = questions + [s for s in baseline["review_questions"] if s not in set(questions)]
-        return {"review_reasons": merged_reasons[:5], "review_questions": merged_questions[:5]}
+        return {"review_reasons": merged_reasons[:5], "review_questions": merged_questions[:3]}
     except Exception:
         return baseline
 
@@ -2672,10 +2869,10 @@ async def _retry_fill_hitl_review_when_empty(
         f"그런데 현재 {missing_str} 항목이 비어 있다. "
         "아래 분석 결과(검증 판단 요약, 자동 확정 차단 사유, 주장별 검증 결과 등)를 **근거**로 다음을 반드시 수행하라.\n"
         "1. review_reasons: 검토가 필요한 이유를 담당자가 이해할 수 있는 문장 1~5개. 분석 과정에서 나온 근거 기반으로 작성.\n"
-        "2. review_questions: 검토자가 검토의견에 반드시 답해야 할 질문 1~5개. 이어서 분석할 때 이 답변을 활용하므로, 분석 결과와 연결된 구체적 질문으로 작성.\n"
+        "2. review_questions: 검토자가 검토의견에 답해야 할 질문을 2~3개만 작성하라. 중복·유사 없이 핵심만. 분석 결과와 연결된 구체적 질문으로.\n"
         "3. empty_explanation: (선택) 위 두 항목이 비어 있었을 수 있는 이유를 한 줄로.\n"
         "반드시 JSON만 응답: {\"review_reasons\": [\"...\"], \"review_questions\": [\"...\"], \"empty_explanation\": \"...\"}\n"
-        "review_reasons와 review_questions는 각각 최소 1개 이상 필수."
+        "review_reasons는 최소 1개, review_questions는 2~3개(최대 3개) 필수."
     )
     user_parts = [f"검증 판단 요약: {reasoning_text[:600]}" if reasoning_text else ""]
     if why:
@@ -2729,7 +2926,7 @@ async def _retry_fill_hitl_review_when_empty(
         if not isinstance(questions, list):
             questions = [str(questions)] if questions else []
         reasons = [str(s).strip() for s in reasons if str(s).strip()][:5]
-        questions = [str(q).strip() for q in questions if str(q).strip()][:5]
+        questions = [str(q).strip() for q in questions if str(q).strip()][:3]
         return {"review_reasons": reasons, "review_questions": questions}
     except Exception:
         return {"review_reasons": [], "review_questions": []}
@@ -2779,9 +2976,8 @@ async def verify_node(state: AgentState) -> AgentState:
     )
     if state["flags"].get("hasHitlResponse"):
         hitl_request = None
-    # HITL 확인 체크 해제 시: 팝업/중단 없이 reporter로 직행 (이벤트·상태에 HITL 남기지 않음)
-    if (state.get("body_evidence") or {}).get("_enable_hitl", True) is False:
-        hitl_request = None
+    # 분석 결과가 위험/규정 위배이면 항상 hitl_request를 세우고, 라우팅에서 담당자 검토로 보냄.
+    # _enable_hitl(체크박스)은 라우팅에서만 '건너뛰기' 시 사용하며, verify 단계에서는 무시함.
     needs_hitl = bool(hitl_request)
     verification["needs_hitl"] = needs_hitl
     verification["quality_signals"] = ["HITL_REQUIRED"] if needs_hitl else ["OK"]
@@ -2893,8 +3089,8 @@ async def verify_node(state: AgentState) -> AgentState:
         final_reasons = [str(x).strip() for x in (hitl_request.get("unresolved_claims") or []) if str(x).strip()]
         final_questions = [str(x).strip() for x in (hitl_request.get("review_questions") or hitl_request.get("questions") or []) if str(x).strip()]
         hitl_request["unresolved_claims"] = final_reasons[:5]
-        hitl_request["review_questions"] = final_questions[:5]
-        hitl_request["questions"] = final_questions[:5]
+        hitl_request["review_questions"] = final_questions[:3]
+        hitl_request["questions"] = final_questions[:3]
 
     events: list[dict[str, Any]] = [
         AgentEvent(event_type="NODE_START", node="verify", phase="verify", message="근거 정합성과 추가 검토 필요 여부를 확인합니다.", metadata={}).to_payload(),
@@ -2958,23 +3154,53 @@ def _route_after_critic(state: AgentState) -> str:
 
 
 def _route_after_verify(state: AgentState) -> str:
-    """Phase D: HITL 필요 시 reporter로 가지 않고 hitl_pause로 끝낸다. enable_hitl=False면 HITL 없이 reporter로 직행."""
-    if (state.get("body_evidence") or {}).get("_enable_hitl", True) is False:
-        return "reporter"
+    """Phase D: 위험/규정 위배로 hitl_request가 있으면 항상 담당자 검토(hitl_pause). HITL 체크박스와 무관."""
     if state.get("hitl_request"):
         return "hitl_pause"
     return "reporter"
 
 
+# 규정/LLM에서 나온 required_inputs 필드명 → UI 제출 키 매핑 (필드명 불일치로 재인터럽트 방지)
+# business_purpose: 업무 목적란을 비우고 검토 의견에만 적은 경우 comment로 충족
+_HITL_FIELD_TO_UI_ALIASES: dict[str, list[str]] = {
+    "reason_for_expense": ["comment", "business_purpose"],
+    "participants_list": ["attendees"],
+    "purpose_of_expense": ["business_purpose", "comment"],
+    "comment": ["comment"],
+    "attendees": ["attendees"],
+    "business_purpose": ["business_purpose", "comment"],
+}
+
+
 def _get_hitl_response_value(hitl_response: dict[str, Any], field: str) -> Any:
-    """HITL 응답에서 필드값 추출. 상위 키 또는 extra_facts[field] 확인."""
+    """HITL 응답에서 필드값 추출. 상위 키, extra_facts[field], 규정필드→UI 키 별칭 순으로 확인."""
+    def _valid(v: Any) -> bool:
+        if v is None:
+            return False
+        if isinstance(v, str):
+            return bool(v.strip())
+        if isinstance(v, list):
+            return len(v) > 0
+        return True
+
     v = hitl_response.get(field)
-    if v is not None and (not isinstance(v, str) or v.strip()):
+    if _valid(v):
         return v
     extra = hitl_response.get("extra_facts") or {}
     v = extra.get(field) if isinstance(extra, dict) else None
-    if v is not None and (not isinstance(v, str) or v.strip()):
+    if _valid(v):
         return v
+    # 규정/LLM 필드명과 UI 제출 키가 다를 수 있음 → 별칭으로 재시도
+    aliases = _HITL_FIELD_TO_UI_ALIASES.get(field) or [field]
+    for alias in aliases:
+        if alias == field:
+            continue
+        v = hitl_response.get(alias)
+        if _valid(v):
+            return v
+        v = extra.get(alias) if isinstance(extra, dict) else None
+        if _valid(v):
+            return v
     return None
 
 
@@ -3015,7 +3241,11 @@ async def hitl_validate_node(state: AgentState) -> AgentState:
             logger.info("[RESUME_TRACE] hitl_validate_node: field=%r → 빈 문자열 (missing)", field)
 
     if not missing:
-        logger.info("[RESUME_TRACE] hitl_validate_node: 모든 필수 항목 충족 → reporter")
+        flags_has = (state.get("flags") or {}).get("hasHitlResponse")
+        logger.info(
+            "[RESUME_TRACE] hitl_validate_node: 모든 필수 항목 충족 → reporter (flags.hasHitlResponse=%s, True여야 사용자 답변 반영 후 verdict LLM 호출됨)",
+            flags_has,
+        )
         return {"hitl_request": None}
 
     logger.info(
@@ -3032,6 +3262,33 @@ async def hitl_validate_node(state: AgentState) -> AgentState:
         new_request["review_questions"] = [f"{m.get('field')}: {m.get('reason')}" for m in missing]
     new_request["questions"] = new_request["review_questions"]
     return {"hitl_request": new_request}
+
+
+def _format_hitl_reason_for_stream(hitl_payload: dict[str, Any]) -> str:
+    """
+    스트림/UI에 표시할 "왜 담당자 검토가 필요한지" 한 줄 사유.
+    재인터럽트 시 필수 입력 누락(required_inputs) 등으로 쓰인다.
+    """
+    if not hitl_payload:
+        return ""
+    why = str(hitl_payload.get("why_hitl") or hitl_payload.get("blocking_reason") or "").strip()
+    reqs = hitl_payload.get("required_inputs") or []
+    parts = []
+    if why:
+        parts.append(why)
+    for r in reqs[:5]:
+        if not isinstance(r, dict):
+            continue
+        guide = str(r.get("guide") or "").strip()
+        reason = str(r.get("reason") or "").strip()
+        field = str(r.get("field") or "").strip()
+        if guide:
+            parts.append(guide)
+        elif reason or field:
+            parts.append(f"{field}: {reason}" if field and reason else (reason or field))
+    if not parts:
+        return ""
+    return " ".join(parts)[:400].rstrip()
 
 
 def _route_after_hitl_validate(state: AgentState) -> str:
@@ -3058,7 +3315,18 @@ async def hitl_pause_node(state: AgentState) -> AgentState:
     )
     body = dict(state.get("body_evidence") or {})
     body["hitlResponse"] = hitl_response
-    return {"body_evidence": body}
+    out: dict[str, Any] = {"body_evidence": body}
+    # 재개 시: reporter/finalizer가 사용자 답변을 인식하도록 flags 반영 (미반영 시 hasHitlResponse=False로 verdict LLM 미호출 → 응답 없음 현상)
+    if looks_like_resume and hitl_response:
+        flags = dict(state.get("flags") or {})
+        flags["hasHitlResponse"] = True
+        flags["hitlApproved"] = hitl_response.get("approved") is True
+        out["flags"] = flags
+        logger.info(
+            "[HITL_RESPONSE_TRACE] hitl_pause_node: 재개 감지 → flags.hasHitlResponse=True hitlApproved=%s 반영 (verdict LLM 호출되도록 함)",
+            flags["hitlApproved"],
+        )
+    return out
 
 
 async def reporter_node(state: AgentState) -> AgentState:
@@ -3074,32 +3342,68 @@ async def reporter_node(state: AgentState) -> AgentState:
         f"전표는 {occurred_at} 시점 {merchant} 사용 건으로 분석되었습니다. "
         f"정책점수 {score['policy_score']}점, 근거점수 {score['evidence_score']}점, 최종점수 {score['final_score']}점입니다."
     )
+    has_hitl_response = state["flags"].get("hasHitlResponse")
+    body_has_hitl = bool(hitl_response)
+    if body_has_hitl and not has_hitl_response:
+        logger.warning(
+            "[HITL_RESPONSE_TRACE] reporter_node 의심: body_evidence.hitlResponse 있음(keys=%s) but flags.hasHitlResponse=False → 사용자 답변 작성했는데 응답 없으면 flags 미반영 가능성",
+            list(hitl_response.keys())[:12] if isinstance(hitl_response, dict) else None,
+        )
+    logger.info(
+        "[VERDICT_LLM] reporter_node verdict 분기: hitl_request=%s hasHitlResponse=%s hitl_approved=%s (body_has_hitl=%s)",
+        bool(hitl_request),
+        has_hitl_response,
+        hitl_approved,
+        body_has_hitl,
+    )
     if hitl_request:
         summary += " 담당자 검토가 필요한 상태입니다."
         verdict = "HITL_REQUIRED"
-    elif state["flags"].get("hasHitlResponse") and hitl_approved is True:
+        logger.info("[VERDICT_LLM] reporter_node → 분기: hitl_request 있음, verdict=HITL_REQUIRED (verdict LLM 미호출)")
+    elif has_hitl_response and hitl_approved is True:
         prior_hitl_request = (body.get("hitlRequest") or {}) if isinstance(body.get("hitlRequest"), dict) else {}
         check_req = hitl_request or prior_hitl_request or {}
         evidence_result = body.get("evidenceDocumentResult") if isinstance(body.get("evidenceDocumentResult"), dict) else None
+        logger.info(
+            "[VERDICT_LLM] reporter_node → verdict LLM 호출 (hasHitlResponse=True approved=True) check_req_keys=%s",
+            list(check_req.keys())[:12] if isinstance(check_req, dict) else None,
+        )
         # 확정 vs 재검토는 룰/하드코딩이 아닌 LLM 판단으로 결정 (필요 답변 없이 승인만 온 경우 재검토가 나오는지 LLM이 맥락으로 판단)
         verdict, hitl_verdict_reason = await _llm_decide_hitl_verdict(
             hitl_request=check_req,
             hitl_response=hitl_response,
             evidence_result=evidence_result,
         )
+        logger.info(
+            "[VERDICT_LLM] reporter_node ← verdict LLM 반환 verdict=%s reason_preview=%s",
+            verdict,
+            (hitl_verdict_reason[:100] + "…") if hitl_verdict_reason and len(hitl_verdict_reason) > 100 else (hitl_verdict_reason or "(없음)"),
+        )
         if verdict == "COMPLETED_AFTER_HITL":
             summary += f" {hitl_verdict_reason}" if hitl_verdict_reason else " 담당자 검토 결과 승인 가능으로 판단되어 최종 확정 후보로 전환되었습니다."
         else:
             summary += f" {hitl_verdict_reason}" if hitl_verdict_reason else " 담당자 검토 기준 미충족으로 재검토가 필요합니다."
-    elif state["flags"].get("hasHitlResponse") and hitl_approved is False:
-        summary += " 담당자 검토 결과 보류/추가 검토 의견이 있어 자동 확정을 중단합니다."
+    elif has_hitl_response and hitl_approved is False:
         verdict = "HOLD_AFTER_HITL"
+        hold_summary = await _llm_summarize_hold_reason(hitl_response)
+        if hold_summary:
+            hitl_verdict_reason = hold_summary
+            summary += f" 담당자 검토 결과 보류합니다. {hold_summary}"
+        else:
+            hitl_verdict_reason = ""
+            hold_reason = (hitl_response.get("comment") or hitl_response.get("business_purpose") or "").strip()
+            if hold_reason:
+                summary += f" 담당자 검토 결과 보류합니다. 담당자 사유: {hold_reason[:400]}{'…' if len(hold_reason) > 400 else ''}"
+            else:
+                summary += " 담당자 검토 결과 보류/추가 검토 의견이 있어 자동 확정을 중단합니다."
+        logger.info("[VERDICT_LLM] reporter_node → 분기: approved=False, verdict=HOLD_AFTER_HITL (verdict LLM 미호출)")
     else:
         if _is_verify_ready_without_hitl(state):
             summary += " 검증 게이트를 통과해 자동 확정 후보로 분류되었습니다."
         else:
             summary += " 현재 수집된 증거 기준으로 추가 검토 우선순위가 높습니다."
         verdict = "READY"
+        logger.info("[VERDICT_LLM] reporter_node → 분기: hasHitlResponse=False 또는 기타, verdict=READY (verdict LLM 미호출)")
     refs = _top_policy_refs(state.get("tool_results", []), limit=5)
     refs = await _select_policy_refs_by_relevance(state, refs)
     citations_list = []
@@ -3122,7 +3426,7 @@ async def reporter_node(state: AgentState) -> AgentState:
     reasoning_text, reasoning_events, note_source = await _stream_reasoning_events_with_llm("reporter", reasoning_text, context=reporter_context)
     reporter_output = ReporterOutput(summary=summary, verdict=verdict, sentences=sentences_list, reasoning=reasoning_text)
     reporter_output_dict = reporter_output.model_dump()
-    if verdict in ("COMPLETED_AFTER_HITL", "REVIEW_REQUIRED") and hitl_verdict_reason:
+    if verdict in ("COMPLETED_AFTER_HITL", "REVIEW_REQUIRED", "HOLD_AFTER_HITL") and hitl_verdict_reason:
         reporter_output_dict["hitl_verdict_reason"] = hitl_verdict_reason
     last_node_summary = f"reporter 완료: {reasoning_text[:60]}…" if len(reasoning_text) > 60 else f"reporter 완료: {reasoning_text}"
     pending: list[dict[str, Any]] = [
@@ -3159,7 +3463,13 @@ async def reporter_node(state: AgentState) -> AgentState:
 async def finalizer_node(state: AgentState) -> AgentState:
     score = _score_with_hitl_adjustment(state["score_breakdown"], state["flags"])
     hitl_request = state.get("hitl_request")
-    reason, status = _build_grounded_reason(state)
+    completed_tail = None
+    if not hitl_request and not state.get("flags", {}).get("hasHitlResponse"):
+        verify_ready = _is_verify_ready_without_hitl(state)
+        reporter_verdict = str((state.get("reporter_output") or {}).get("verdict") or "").upper()
+        if verify_ready and reporter_verdict in {"", "READY", "COMPLETED", "AUTO_APPROVED"}:
+            completed_tail = await _llm_summarize_completed_reason(state)
+    reason, status = _build_grounded_reason(state, completed_tail=completed_tail)
     final_reasoning = f"{reason} 최종 상태는 {status}로 확정한다.".strip()
     final_reasoning, final_check, final_retried = call_node_llm_with_consistency_check("finalizer", {"status": status}, final_reasoning, max_retries=1)
     finalizer_context = {
@@ -3167,6 +3477,11 @@ async def finalizer_node(state: AgentState) -> AgentState:
         "score_breakdown": score,
         "has_hitl_request": bool(hitl_request),
         "last_node_summary": state.get("last_node_summary", "없음"),
+        "score_semantics": (
+            "정책점수(policy_score)는 위험 지표: 높을수록 휴일/심야/근태충돌/고위험업종 등 위반 정황이 많음. "
+            "근거점수(evidence_score)는 수집 증거 충실도: 높을수록 규정 조항·전표 증거가 잘 확보됨. "
+            "따라서 정책점수 높음=위험 높음, 근거점수 높음=증거 충실."
+        ),
     }
     final_reasoning, final_reasoning_events, note_source = await _stream_reasoning_events_with_llm("finalizer", final_reasoning, context=finalizer_context)
     # REVIEW_REQUIRED 경로도 공통 검토 팝업에서 사유/질문을 사용하므로 반드시 생성·저장한다.
@@ -3510,18 +3825,26 @@ async def run_langgraph_agentic_analysis(
                 # HITL: interrupt()로 일시정지. 호출자에게 HITL_REQUIRED 전달 후 같은 run_id로 재개 대기
                 interrupt_list = chunk["__interrupt__"]
                 hitl_payload = interrupt_list[0].value if interrupt_list else {}
+                reason_text = _format_hitl_reason_for_stream(hitl_payload)
+                base_msg = "담당자 검토가 필요합니다."
+                if reason_text:
+                    stream_msg = f"{base_msg} {reason_text} HITL 응답 후 같은 run으로 재개됩니다."
+                    reason_final = f"담당자 검토 입력을 기다립니다. 사유: {reason_text}"
+                else:
+                    stream_msg = f"{base_msg} HITL 응답 후 같은 run으로 재개됩니다."
+                    reason_final = "담당자 검토 입력을 기다립니다."
                 yield "AGENT_EVENT", AgentEvent(
                     event_type="HITL_PAUSE",
                     node="hitl_pause",
                     phase="verify",
-                    message="담당자 검토가 필요합니다. HITL 응답 후 같은 run으로 재개됩니다.",
+                    message=stream_msg,
                     observation="interrupt",
-                    metadata={"hitl_request": hitl_payload},
+                    metadata={"hitl_request": hitl_payload, "reason": reason_text},
                 ).to_payload()
                 yield "completed", {
                     "status": "HITL_REQUIRED",
                     "hitl_request": hitl_payload,
-                    "reasonText": "담당자 검토 입력을 기다립니다.",
+                    "reasonText": reason_final,
                 }
                 return
             for _node, update in chunk.items():
