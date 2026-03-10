@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -69,12 +70,25 @@ class Settings:
     def __post_init__(self) -> None:
         # .env에 gpt-5가 설정돼 있으면 gpt-4o-mini로 보정 (코드/문서는 gpt-4o-mini 기준)
         obj = object.__setattr__
+        reasoning_model_replaced = False
         if (self.reasoning_llm_model or "").strip().lower() == "gpt-5":
             obj(self, "reasoning_llm_model", _LLM_MODEL_GPT5_REPLACEMENT)
+            reasoning_model_replaced = True
         if (self.screening_llm_model or "").strip().lower() == "gpt-5":
             obj(self, "screening_llm_model", _LLM_MODEL_GPT5_REPLACEMENT)
         if (self.screening_llm_fallback_model or "").strip().lower() == "gpt-5":
             obj(self, "screening_llm_fallback_model", _LLM_MODEL_GPT5_REPLACEMENT)
+        # 모델 강제 보정 시 라벨에 gpt-5가 남아 있으면 UI 표시도 실제 모델과 맞춘다.
+        if reasoning_model_replaced:
+            label = (self.reasoning_llm_label or "").strip()
+            if label and "gpt-5" in label.lower():
+                replaced_label = re.sub(
+                    r"gpt-5",
+                    _LLM_MODEL_GPT5_REPLACEMENT,
+                    label,
+                    flags=re.IGNORECASE,
+                )
+                obj(self, "reasoning_llm_label", replaced_label)
     screening_llm_max_tokens: int = int(os.getenv("SCREENING_LLM_MAX_TOKENS", "1024"))
     screening_llm_timeout_seconds: float = float(os.getenv("SCREENING_LLM_TIMEOUT_SECONDS", "30"))
     screening_llm_override_min_confidence: float = float(

@@ -128,13 +128,6 @@ def render_agent_studio_page() -> None:
             graph_tabs = st.tabs(["메인 오케스트레이션", "스킬 실행 흐름"])
             with graph_tabs[0]:
                 st.caption("상위 오케스트레이션 그래프: START → start_router → screener 또는 intake → planner → execute → critic → verify → (hitl_pause → hitl_validate 또는 reporter) → reporter → finalizer → END. 실제 runtime graph와 동일합니다.")
-                render_legend(
-                    [
-                        ("#f5f3ff", "에이전트 메인 노드"),
-                        ("#fffbeb", "조건부 HITL 노드"),
-                        ("#94a3b8", "상태 전이"),
-                    ]
-                )
                 render_graph_image("메인 오케스트레이션 그래프", draw_agent_graph(), None, "상위 오케스트레이션: 전체 노드 흐름. 하위는 '실행 도구 그래프' 탭에서 execute 노드 내부 도구 순서를 확인할 수 있습니다.")
                 st.markdown("""
 **단계별 설명**
@@ -151,12 +144,6 @@ def render_agent_studio_page() -> None:
 10. **END**: 저장/조회 가능한 결과로 종료
 """)
             with graph_tabs[1]:
-                render_legend(
-                    [
-                        ("#eff6ff", "실행 스킬 노드"),
-                        ("#94a3b8", "실행/집계 흐름"),
-                    ]
-                )
                 render_graph_image("실행 도구 그래프", draw_tool_execution_graph(), None, "하위 실행 도구 그래프: execute 노드 내부에서 호출되는 LangChain tool 순서입니다.")
                 st.markdown("""
 **단계별 설명**

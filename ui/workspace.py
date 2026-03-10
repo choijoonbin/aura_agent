@@ -1496,9 +1496,21 @@ def render_hitl_history(history: list[dict[str, Any]]) -> None:
         return
     for idx, item in enumerate(rows):
         with stylable_container(key=f"hitl_history_{idx}", css_styles="""{padding: 14px 16px; border-radius: 16px; border: 1px solid #e5e7eb; background: #fff; margin-bottom: 10px;}"""):
-            st.markdown(f"**run_id** `{item.get('run_id')}`")
+            st.markdown(
+                f"**run_id** <span style='background:#ffffff;color:#111827;padding:0 2px;border-radius:3px;'>{item.get('run_id')}</span>",
+                unsafe_allow_html=True,
+            )
             lineage = item.get("lineage") or {}
-            st.caption(f"mode={lineage.get('mode') or '-'} / parent={lineage.get('parent_run_id') or '-'}")
+            mode = str(lineage.get("mode") or "").strip()
+            parent = str(lineage.get("parent_run_id") or "").strip()
+            lineage_parts: list[str] = []
+            # 기본값(mode=primary / parent 없음)은 정보성이 낮아 숨기고, 의미 있는 계보 정보만 노출한다.
+            if mode and mode.lower() != "primary":
+                lineage_parts.append(f"mode={mode}")
+            if parent:
+                lineage_parts.append(f"parent={parent}")
+            if lineage_parts:
+                st.caption(" / ".join(lineage_parts))
             if item.get("hitl_request"):
                 st.markdown("**요청**")
                 st.json(item["hitl_request"])
@@ -2340,11 +2352,16 @@ def render_hitl_panel(latest_bundle: dict[str, Any], *, vkey: str | None = None)
     ):
         # HITL 영역: 항상 표시 (대기 중이 아니면 fallback 요약으로 표시)
         summary = _build_hitl_summary_sections(bundle_for_hitl)
-        lead_message = (
-            hitl_request.get("why_hitl")
-            or hitl_request.get("blocking_reason")
-            or "담당자 검토가 필요한 상태입니다."
-        )
+        # 조건은 아래 '자동 확정 중단 이유' 박스에 나열되므로, 상단은 안내만 표시
+        stop_reasons = summary.get("stop_reasons") or []
+        if stop_reasons:
+            lead_message = "아래 **자동 확정 중단 이유**에서 해당 조건을 확인해 주세요."
+        else:
+            lead_message = (
+                hitl_request.get("why_hitl")
+                or hitl_request.get("blocking_reason")
+                or "담당자 검토가 필요한 상태입니다."
+            )
         title_col, radio_col, btn_col = st.columns([0.35, 0.40, 0.25])
         with title_col:
             st.markdown("#### 담당자 검토 (HITL)")
@@ -2405,14 +2422,15 @@ def render_hitl_panel(latest_bundle: dict[str, Any], *, vkey: str | None = None)
             + '</div>',
             unsafe_allow_html=True,
         )
+        required_inputs = (hitl_request.get("required_inputs") or [])
+        _req_fields = {(req.get("field") or "").strip() for req in required_inputs}
         info_cols = st.columns(3)
         with info_cols[0]:
             st.text_input("검토자", key=form_keys["reviewer"])
         with info_cols[1]:
-            st.text_input("업무 목적", key=form_keys["business_purpose"], placeholder="예: 주말 장애 대응 회의")
+            st.text_input("업무 목적" + (" *" if "business_purpose" in _req_fields else ""), key=form_keys["business_purpose"], placeholder="예: 주말 장애 대응 회의")
         with info_cols[2]:
-            st.text_input("참석자(쉼표 구분)", key=form_keys["attendees"], placeholder="예: 홍길동, 김민수, 외부 파트너 1명")
-        required_inputs = (hitl_request.get("required_inputs") or [])
+            st.text_input("참석자(쉼표 구분)" + (" *" if "attendees" in _req_fields else ""), key=form_keys["attendees"], placeholder="예: 홍길동, 김민수, 외부 파트너 1명")
         for req in required_inputs:
             field = (req.get("field") or "").strip()
             if not field or field in ("business_purpose", "attendees"):
@@ -2420,7 +2438,7 @@ def render_hitl_panel(latest_bundle: dict[str, Any], *, vkey: str | None = None)
             label = (req.get("guide") or req.get("reason") or field).strip()
             key = form_keys.get(f"extra_{field}")
             if key:
-                st.text_input(label, key=key, placeholder=f"규정 요구 항목: {label[:50]}")
+                st.text_input(f"{label} *", key=key, placeholder=f"규정 요구 항목(필수): {label[:50]}")
         # 검토 의견 placeholder: LLM/규정에서 요구한 항목을 동적으로 안내
         must_fill: list[str] = []
         for q in (hitl_request.get("review_questions") or hitl_request.get("questions") or []):
@@ -2468,57 +2486,76 @@ def render_hitl_panel(latest_bundle: dict[str, Any], *, vkey: str | None = None)
                 decision_val,
                 approved,
             )
-            hitl_response = {
-                "reviewer": reviewer or "FINANCE_REVIEWER",
-                "comment": comment or None,
-                "business_purpose": business_purpose or None,
-                "attendees": [p.strip() for p in attendees_raw.split(",") if p.strip()],
-                "approved": approved,
-                "extra_facts": extra_facts,
-            }
-            evidence_uploaded = has_evidence_result
-            if uploaded_file is not None and getattr(uploaded_file, "getvalue", None):
-                try:
-                    file_bytes = uploaded_file.getvalue()
-                    post_multipart(
-                        f"/api/v1/analysis-runs/{run_id}/evidence-upload",
-                        uploaded_file.name or "upload",
-                        file_bytes,
-                    )
-                    evidence_uploaded = True
-                except Exception as e:
-                    st.error(f"증빙 업로드 실패: {e}")
-                    evidence_uploaded = evidence_uploaded or False
-            if not evidence_uploaded and not _has_pending_hitl(latest_bundle):
-                st.warning("증빙이 필요한 경우 파일을 선택한 뒤 다시 눌러 주세요.")
+            # 필수 입력값 검사: 누락 시 제출/팝업 닫기 불가
+            missing_required: list[str] = []
+            for req in required_inputs:
+                field = (req.get("field") or "").strip()
+                if not field:
+                    continue
+                label = (req.get("guide") or req.get("reason") or req.get("field") or field).strip()
+                if field == "attendees":
+                    if not [p.strip() for p in attendees_raw.split(",") if p.strip()]:
+                        missing_required.append(label)
+                elif field == "business_purpose":
+                    if not business_purpose:
+                        missing_required.append(label)
+                else:
+                    if not (extra_facts.get(field) or "").strip():
+                        missing_required.append(label)
+            if missing_required:
+                st.error("필수 입력(*)을 채워 주세요: " + ", ".join(missing_required[:6]))
             else:
-                try:
-                    from services.schemas import HitlSubmitRequest
-                    # hitl_request 미로드 시에도 폼에서 입력한 hitl_response를 항상 전송. 백엔드는 runtime/aux에서 hitl_request를 채우므로 400을 피함.
-                    payload_review = {
-                        "hitl_response": HitlSubmitRequest(**hitl_response).model_dump(),
-                        "evidence_uploaded": evidence_uploaded,
-                    }
-                    st.session_state["mt_pending_review_submit"] = {
-                        "run_id": run_id,
-                        "voucher_key": latest_bundle.get("voucher_key") or vkey,
-                        "payload": payload_review,
-                    }
-                    hr = payload_review.get("hitl_response") or {}
-                    _comment = str(hr.get("comment") or "")
-                    _preview = (_comment[:80] + "…") if len(_comment) > 80 else _comment
-                    logger.info(
-                        "[RESUME_TRACE] 분석 이어가기 버튼 클릭: run_id=%s voucher_key=%s approved=%s comment_len=%s comment_preview=%s evidence_uploaded=%s — mt_pending_review_submit 설정",
-                        run_id, latest_bundle.get("voucher_key") or vkey, hr.get("approved"), len(_comment), _preview or "(없음)", evidence_uploaded,
-                    )
-                    logger.info("[HITL_CLOSE] 버튼 클릭: run_id=%s — mt_pending_review_submit 설정, open=False, st.rerun()", run_id)
-                    st.session_state.pop(_hitl_state_key("dismissed", run_id), None)
-                    st.session_state.pop(_hitl_state_key("open", run_id), None)
-                    st.session_state[_hitl_state_key("open", run_id)] = False
-                    st.session_state.pop(_hitl_state_key("shown", run_id), None)
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"제출 실패: {e}")
+                hitl_response = {
+                    "reviewer": reviewer or "FINANCE_REVIEWER",
+                    "comment": comment or None,
+                    "business_purpose": business_purpose or None,
+                    "attendees": [p.strip() for p in attendees_raw.split(",") if p.strip()],
+                    "approved": approved,
+                    "extra_facts": extra_facts,
+                }
+                evidence_uploaded = has_evidence_result
+                if uploaded_file is not None and getattr(uploaded_file, "getvalue", None):
+                    try:
+                        file_bytes = uploaded_file.getvalue()
+                        post_multipart(
+                            f"/api/v1/analysis-runs/{run_id}/evidence-upload",
+                            uploaded_file.name or "upload",
+                            file_bytes,
+                        )
+                        evidence_uploaded = True
+                    except Exception as e:
+                        st.error(f"증빙 업로드 실패: {e}")
+                        evidence_uploaded = evidence_uploaded or False
+                if not evidence_uploaded and not _has_pending_hitl(latest_bundle):
+                    st.warning("증빙이 필요한 경우 파일을 선택한 뒤 다시 눌러 주세요.")
+                else:
+                    try:
+                        from services.schemas import HitlSubmitRequest
+                        # hitl_request 미로드 시에도 폼에서 입력한 hitl_response를 항상 전송. 백엔드는 runtime/aux에서 hitl_request를 채우므로 400을 피함.
+                        payload_review = {
+                            "hitl_response": HitlSubmitRequest(**hitl_response).model_dump(),
+                            "evidence_uploaded": evidence_uploaded,
+                        }
+                        st.session_state["mt_pending_review_submit"] = {
+                            "run_id": run_id,
+                            "voucher_key": latest_bundle.get("voucher_key") or vkey,
+                            "payload": payload_review,
+                        }
+                        hr = payload_review.get("hitl_response") or {}
+                        _comment = str(hr.get("comment") or "")
+                        _preview = (_comment[:80] + "…") if len(_comment) > 80 else _comment
+                        logger.info(
+                            "[RESUME_TRACE] 분석 이어가기 버튼 클릭: run_id=%s voucher_key=%s approved=%s comment_len=%s comment_preview=%s evidence_uploaded=%s — mt_pending_review_submit 설정",
+                            run_id, latest_bundle.get("voucher_key") or vkey, hr.get("approved"), len(_comment), _preview or "(없음)", evidence_uploaded,
+                        )
+                        logger.info("[HITL_CLOSE] 버튼 클릭: run_id=%s — mt_pending_review_submit 설정, open=False, st.rerun()", run_id)
+                        st.session_state.pop(_hitl_state_key("dismissed", run_id), None)
+                        st.session_state.pop(_hitl_state_key("open", run_id), None)
+                        st.session_state[_hitl_state_key("open", run_id)] = False
+                        st.session_state.pop(_hitl_state_key("shown", run_id), None)
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"제출 실패: {e}")
 
 
 @st.dialog("HITL 팝업", width="large")
@@ -3384,18 +3421,25 @@ def render_workspace_evidence_map(latest_bundle: dict[str, Any], debug_mode: boo
     for idx, ref in enumerate(policy_refs, start=1):
         title = f"C{idx}. {ref.get('article') or '-'} / {ref.get('parent_title') or '-'}"
         with st.expander(title, expanded=(idx == 1)):
-            meta = []
-            if ref.get("retrieval_score") is not None:
-                meta.append(f"score={ref.get('retrieval_score')}")
-            if ref.get("source_strategy"):
-                meta.append(str(ref.get("source_strategy")))
-            if ref.get("adoption_reason"):
-                meta.append(str(ref.get("adoption_reason")))
-            if meta:
-                st.caption(" · ".join(meta))
-            st.write(ref.get("chunk_text") or "")
-            if debug_mode:
-                st.json(ref)
+            with stylable_container(
+                key=f"process_story_evidence_ref_{latest_bundle.get('run_id') or 'none'}_{idx}",
+                css_styles="""{
+                    padding: 0.2rem 0.15rem;
+                    border-radius: 12px;
+                }""",
+            ):
+                meta = []
+                if ref.get("retrieval_score") is not None:
+                    meta.append(f"score={ref.get('retrieval_score')}")
+                if ref.get("source_strategy"):
+                    meta.append(str(ref.get("source_strategy")))
+                if ref.get("adoption_reason"):
+                    meta.append(str(ref.get("adoption_reason")))
+                if meta:
+                    st.caption(" · ".join(meta))
+                st.write(ref.get("chunk_text") or "")
+                if debug_mode:
+                    st.json(ref)
 
     verification_summary = result.get("verification_summary") or {}
     if verification_summary:
@@ -3414,19 +3458,6 @@ def render_workspace_evidence_map(latest_bundle: dict[str, Any], debug_mode: boo
             gate = verification_summary.get("gate_policy") or "-"
             gate_label = {"hold": "보류", "caution": "주의", "regenerate_citations": "인용 보완 유도"}.get(str(gate).lower(), str(gate))
             st.metric("자동 확정 여부", gate_label, "담당자 검토 필요" if str(gate).lower() == "hold" else ("주의 검토" if str(gate).lower() == "caution" else None))
-        # 검증 대상별 연결 여부: 4개 중 어떤 것이 연결/미연결인지 내용으로 설명
-        details = verification_summary.get("details") or []
-        if details:
-            with st.expander(f"검증 대상별 연결 여부 ({total}개 중 {covered}개 연결)", expanded=False):
-                st.caption("아래는 Verifier가 검증한 주장 문장입니다. ✅ = 규정 청크로 뒷받침됨, ❌ = 근거 미연결.")
-                for d in details:
-                    idx = d.get("index", 0) + 1
-                    preview = (d.get("sentence_preview") or "").strip()
-                    if len(preview) >= 80:
-                        preview = preview + "…"
-                    is_covered = bool(d.get("covered"))
-                    icon = "✅ 연결됨" if is_covered else "❌ 미연결"
-                    st.markdown(f"**{idx}. {icon}**  \n{preview}")
 
     # 검증 주장 ↔ 규정 매핑: 어떤 주장이 어떤 규정 조항으로 뒷받침됐는지 표시
     verifier_output = result.get("verifier_output") or {}
@@ -3442,40 +3473,61 @@ def render_workspace_evidence_map(latest_bundle: dict[str, Any], debug_mode: boo
             gap = (item.get("gap") or "").strip()
             icon = "✅" if is_covered else "❌"
             with st.expander(f"**{icon} 주장 {i}** — {claim_text[:60]}{'…' if len(claim_text) > 60 else ''}", expanded=(i == 1)):
-                st.markdown("**검증 주장**")
-                st.caption(claim_text)
-                if is_covered and supporting:
-                    st.markdown("**연결된 규정**  \n" + ", ".join(f"**{a}**" for a in supporting))
-                elif not is_covered and gap:
-                    st.markdown("**미연결 사유**  \n" + gap)
-                elif not is_covered:
-                    st.caption("규정 청크와 매칭되지 않았습니다.")
+                with stylable_container(
+                    key=f"process_story_evidence_claim_{latest_bundle.get('run_id') or 'none'}_{i}",
+                    css_styles="""{
+                        padding: 0.2rem 0.15rem;
+                        border-radius: 12px;
+                    }""",
+                ):
+                    st.markdown("**검증 주장**")
+                    st.caption(claim_text)
+                    if is_covered and supporting:
+                        st.markdown("**연결된 규정**  \n" + ", ".join(f"**{a}**" for a in supporting))
+                    elif not is_covered and gap:
+                        st.markdown("**미연결 사유**  \n" + gap)
+                    elif not is_covered:
+                        st.caption("규정 청크와 매칭되지 않았습니다.")
 
     if verification_summary.get("missing_citations"):
         with st.expander("근거 미연결 검증 주장", expanded=False):
-            for i, s in enumerate(verification_summary["missing_citations"], 1):
-                st.caption(f"{i}. {(s or '')[:160]}{'…' if len(str(s or '')) > 160 else ''}")
+            with stylable_container(
+                key=f"process_story_evidence_missing_{latest_bundle.get('run_id') or 'none'}",
+                css_styles="""{
+                    padding: 0.2rem 0.15rem;
+                    border-radius: 12px;
+                }""",
+            ):
+                for i, s in enumerate(verification_summary["missing_citations"], 1):
+                    st.caption(f"{i}. {(s or '')[:160]}{'…' if len(str(s or '')) > 160 else ''}")
 
     if retrieval_snapshot:
         with st.expander("Retrieval 인용 현황", expanded=False):
-            candidates = retrieval_snapshot.get("candidates_after_rerank") or []
-            adopted = retrieval_snapshot.get("adopted_citations") or []
-            st.caption("after rerank 후보, 최종 채택 citation, 채택 이유를 함께 표시합니다.")
-            st.caption(f"후보 청크 {len(candidates)}건 · 채택 인용 {len(adopted)}건")
-            if adopted:
-                st.markdown("**최종 채택 citation**")
-                for i, c in enumerate(adopted[:10], 1):
-                    art = c.get("article") or c.get("title") or "-"
-                    reason = c.get("adoption_reason") or "규정 근거로 채택"
-                    st.markdown(f"**{i}. {art}**  \n채택 이유: {reason}")
-            if candidates:
-                st.markdown("**후보 목록 (after rerank)**")
-                for i, g in enumerate(candidates[:5], 1):
-                    reason = g.get("adoption_reason")
-                    line = f"{i}. {g.get('article') or '-'} · {g.get('parent_title') or '-'} (score={g.get('retrieval_score') or '-'})"
-                    if reason:
-                        line += f" — {reason}"
-                    st.caption(line)
+            with stylable_container(
+                key=f"process_story_evidence_retrieval_{latest_bundle.get('run_id') or 'none'}",
+                css_styles="""{
+                    padding: 0.2rem 0.15rem;
+                    border-radius: 12px;
+                }""",
+            ):
+                candidates = retrieval_snapshot.get("candidates_after_rerank") or []
+                adopted = retrieval_snapshot.get("adopted_citations") or []
+                st.caption("after rerank 후보, 최종 채택 citation, 채택 이유를 함께 표시합니다.")
+                st.caption(f"후보 청크 {len(candidates)}건 · 채택 인용 {len(adopted)}건")
+                if adopted:
+                    st.markdown("**최종 채택 citation**")
+                    for i, c in enumerate(adopted[:10], 1):
+                        art = c.get("article") or c.get("title") or "-"
+                        reason = c.get("adoption_reason") or "규정 근거로 채택"
+                        st.markdown(f"**{i}. {art}**  \n채택 이유: {reason}")
+                if candidates:
+                    st.markdown("**후보 목록 (after rerank)**")
+                    for i, g in enumerate(candidates[:5], 1):
+                        reason = g.get("adoption_reason")
+                        line = f"{i}. {g.get('article') or '-'} · {g.get('parent_title') or '-'} (score={g.get('retrieval_score') or '-'})"
+                        if reason:
+                            line += f" — {reason}"
+                        st.caption(line)
 
 
 def render_workspace_execution_review(latest_bundle: dict[str, Any], debug_mode: bool) -> None:
@@ -3485,29 +3537,36 @@ def render_workspace_execution_review(latest_bundle: dict[str, Any], debug_mode:
     exec_logs = build_workspace_execution_logs(latest_bundle)
     render_panel_header("실행 내역", "계획 수립, 도구 실행, 게이트 판정 등 실제 오케스트레이션 흔적을 요약해 보여줍니다.")
 
-    if plan_steps:
-        st.markdown("#### 작업 계획")
-        for step in plan_steps:
-            with stylable_container(key=f"plan_review_{latest_bundle.get('run_id')}_{step['order']}", css_styles="""{background:#fff; border:1px solid #e5e7eb; border-radius:16px; padding:0.9rem 1rem; margin-bottom:0.6rem;}"""):
-                left_step, right_step = st.columns([0.78, 0.22])
-                with left_step:
-                    st.markdown(f"**{step['order']}. {step['title']}**")
-                    st.caption(step["description"])
-                with right_step:
-                    st.markdown(status_badge(step["status"] if step["status"] != "진행중" else "IN_REVIEW"), unsafe_allow_html=True)
-
     st.markdown("#### 도구 실행 요약")
     render_tool_trace_summary(tool_results)
 
+    if plan_steps:
+        with st.expander("작업 계획", expanded=False):
+            for step in plan_steps:
+                header = f"**{step['order']}. {step['title']}**"
+                with stylable_container(
+                    key=f"plan_review_{latest_bundle.get('run_id')}_{step['order']}",
+                    css_styles="""{background:#fff; border:1px solid #e5e7eb; border-radius:16px; padding:0.9rem 1rem; margin-bottom:0.6rem;}""",
+                ):
+                    left_step, right_step = st.columns([0.78, 0.22])
+                    with left_step:
+                        st.markdown(header)
+                        st.caption(step["description"])
+                    with right_step:
+                        st.markdown(
+                            status_badge(step["status"] if step["status"] != "진행중" else "IN_REVIEW"),
+                            unsafe_allow_html=True,
+                        )
+
     if exec_logs:
-        st.markdown("#### 주요 실행 이벤트")
-        for idx, log in enumerate(exec_logs):
-            with stylable_container(key=f"log_review_{idx}_{latest_bundle.get('run_id')}", css_styles="""{background:#f8fafc; border:1px solid #e5e7eb; border-radius:14px; padding:0.85rem 0.95rem; margin-bottom:0.55rem;}"""):
-                st.caption(f"{fmt_dt_korea(log.get('at')) or '-'} · {log['node']} / {log['event_type']}")
-                st.markdown(f"**{log['tool']}**")
-                st.write(log["message"])
-                if log["observation"]:
-                    st.caption(log["observation"])
+        with st.expander("주요 실행 이벤트", expanded=False):
+            for idx, log in enumerate(exec_logs):
+                with stylable_container(key=f"log_review_{idx}_{latest_bundle.get('run_id')}", css_styles="""{background:#f8fafc; border:1px solid #e5e7eb; border-radius:14px; padding:0.85rem 0.95rem; margin-bottom:0.55rem;}"""):
+                    st.caption(f"{fmt_dt_korea(log.get('at')) or '-'} · {log['node']} / {log['event_type']}")
+                    st.markdown(f"**{log['tool']}**")
+                    st.write(log["message"])
+                    if log["observation"]:
+                        st.caption(log["observation"])
     else:
         render_empty_state("표시할 실행 이벤트가 없습니다.")
 

@@ -61,6 +61,14 @@ def _extract_document_facts(tool_results: list[dict[str, Any]]) -> dict[str, Any
     return {}
 
 
+# 자동 확정 미달 조건(하나라도 해당 시 HITL 발생):
+# 1. 검증 게이트: gate_policy (hold/caution/regenerate_citations 등)
+# 2. 근거 연결률 100% 미만: verification_summary covered/total, coverage_ratio < 1.0
+# 3. 비판 검토 보류 권고: critique.recommend_hold
+# 4. 규정 위반 유형 + 고심각도: case_type in HOLIDAY_USAGE/LIMIT_EXCEED/…, severity in MEDIUM/HIGH/CRITICAL
+# 5. 전표 필드 누락: missing_fields
+# 6. 전표 라인 없음: document_items 비어 있음
+# 7. 규정 기반 필수 입력/질문: regulation_driven required_inputs 또는 review_questions
 def build_hitl_request(
     body_evidence: dict[str, Any],
     tool_results: list[dict[str, Any]],
@@ -112,8 +120,10 @@ def build_hitl_request(
     total = verification_summary.get("total")
     if total:
         ratio = verification_summary.get("coverage_ratio")
-        ratio_text = f"{(ratio or 0) * 100:.0f}%"
-        blocking_reasons.append(f"근거 연결률이 {covered}/{total} ({ratio_text})로 자동 확정 기준에 미달했습니다.")
+        # 연결률이 100% 미만일 때만 "미달" 사유로 넣음 (100%면 자동 확정 기준 충족)
+        if ratio is not None and ratio < 1.0:
+            ratio_text = f"{(ratio or 0) * 100:.0f}%"
+            blocking_reasons.append(f"근거 연결률이 {covered}/{total} ({ratio_text})로 자동 확정 기준에 미달했습니다.")
 
     missing_citations = verification_summary.get("missing_citations") or []
     for sentence in missing_citations[:3]:
