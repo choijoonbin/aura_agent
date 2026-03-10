@@ -451,9 +451,10 @@ def hierarchical_chunk(text: str) -> list[ChunkNode]:
                 article_node.children.append(clause_node)
                 nodes.append(clause_node)
 
-                # ITEM 노드 생성: 항(①②③) 내부의 호(1./가.) 단위 분리
-                if marker:
-                    items = _split_into_items(clause_text)
+                # ITEM 노드 생성: 호(1./가.) 단위 분리
+                # marker 여부와 무관하게 항상 실행 — 빈 marker clause에도 1./가. 항목이 존재할 수 있음
+                items = _split_into_items(clause_text)
+                if items:
                     for item_marker, item_text in items:
                         item_contextual_header = _build_item_contextual_header(
                             src_article,
