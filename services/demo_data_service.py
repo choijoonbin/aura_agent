@@ -21,12 +21,12 @@ from utils.config import settings
 SCENARIO_PROFILES: dict[str, dict[str, Any]] = {
     "HOLIDAY_USAGE": {
         "label": "휴일 사용 의심",
-        "description": "주말/휴무일 심야 식대 사용 시나리오",
+        "description": "주말/휴무일 식당 사용 시나리오",
         "blart": "SA",
         "hr_status": "LEAVE",  # BE: weekend→OFF, calendar or fallback
         "mcc_code": "5813",   # BE preferred: 5813, 5812, 5814
         "budget_flag": "N",   # BE: HOLIDAY_USAGE는 N
-        "merchant_name": "심야 식대",
+        "merchant_name": "가온 식당",
         "item_text": "휴일 야간 식대",
         "amount_range": (30000, 99999),
         "hour_candidates": [22, 23, 1],
