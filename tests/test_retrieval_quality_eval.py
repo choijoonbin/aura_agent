@@ -7,117 +7,118 @@ import pytest
 from services import retrieval_quality as rq
 
 
-def test_compute_retrieval_metrics_for_case_article_match():
-    retrieved = [
-        {"chunk_id": 101, "article": "제1조"},
-        {"chunk_id": 102, "article": "제14조"},
-        {"chunk_id": 103, "article": "제23조"},
+def test_gold_loader_legacy_schema_conversion():
+    loader = rq.GoldDatasetLoader()
+    rows = [
+        {
+            "id": "old-1",
+            "query": "q1",
+            "case_type": "HOLIDAY_USAGE",
+            "expected_regulation_article": "제39조",
+            "expected_regulation_clause": "①",
+            "acceptable_chunk_ids": ["10", "x"],
+        },
+        {
+            "id": "old-2",
+            "query": "q2",
+            "case_type": "LIMIT_EXCEED",
+            "expected_articles": ["제19조", "제11조"],
+        },
     ]
-    gold = {"expected_regulation_article": "제14조"}
 
-    metrics = rq.compute_retrieval_metrics_for_case(
-        retrieved,
-        gold,
-        top_ks=(3, 5),
-        ndcg_k=5,
-    )
-
-    assert metrics["recall@3"] == pytest.approx(1.0)
-    assert metrics["recall@5"] == pytest.approx(1.0)
-    assert metrics["mrr"] == pytest.approx(0.5)
-    assert metrics["ndcg@5"] == pytest.approx(1 / 1.5849625, rel=1e-3)
+    out = loader.load(rows)
+    assert len(out) == 2
+    assert out[0]["expected_targets"][0]["article"] == "제39조"
+    assert out[0]["expected_targets"][0]["clause"] == "①"
+    assert out[0]["acceptable_chunk_ids"] == [10]
+    assert len(out[1]["expected_targets"]) == 2
 
 
-def test_compute_retrieval_metrics_for_case_chunk_id_recall_fraction():
-    retrieved = [
-        {"chunk_id": 10, "article": "제10조"},
-        {"chunk_id": 99, "article": "제99조"},
-        {"chunk_id": 50, "article": "제50조"},
+def test_relevance_evaluator_strict_loose_and_negative():
+    evaluator = rq.RelevanceEvaluator()
+    case = {
+        "expected_targets": [{"article": "제39조", "clause": "①", "weight": 1.0}],
+        "acceptable_chunk_ids": [200],
+        "must_not_return_articles": ["제14조"],
+    }
+    results = [
+        {"chunk_id": 101, "article": "제39조", "clause": ""},   # loose match
+        {"chunk_id": 102, "article": "제39조", "clause": "①"},  # strict match
+        {"chunk_id": 103, "article": "제14조", "clause": ""},   # negative violation
     ]
-    gold = {"acceptable_chunk_ids": [10, 11]}
 
-    metrics = rq.compute_retrieval_metrics_for_case(
-        retrieved,
-        gold,
-        top_ks=(3,),
-        ndcg_k=3,
-    )
-
-    assert metrics["recall@3"] == pytest.approx(0.5)
-    assert metrics["mrr"] == pytest.approx(1.0)
+    out = evaluator.evaluate_case(case, results, k=3)
+    assert out["matched"] is True
+    assert out["matched_at_rank"] == 1
+    assert out["strict_match"] is True
+    assert out["strict_matched_at_rank"] == 2
+    assert out["negative_violation"] is True
+    assert out["loose_recall"] == pytest.approx(1.0)
+    assert out["strict_recall"] == pytest.approx(1.0)
 
 
-def test_evaluate_gold_dataset_aggregates(monkeypatch):
-    def _fake_run(_db, body_evidence, *, strategy, chunking_mode, limit):
-        keywords = body_evidence.get("_extra_keywords") or []
-        query = keywords[0] if keywords else ""
-        if query == "q-hit":
-            results = [{"chunk_id": 1, "article": "제14조"}]
+def test_experiment_runner_compare_query_rewrite(monkeypatch):
+    def _fake_run_case(
+        self,
+        case,
+        *,
+        strategy,
+        k,
+        use_query_rewrite,
+        use_body_evidence,
+        chunking_mode,
+        trace_level="basic",
+    ):
+        if use_query_rewrite:
+            results = [{"chunk_id": 1, "article": "제39조", "clause": "①", "retrieval_score": 0.9}]
         else:
-            results = [{"chunk_id": 2, "article": "제23조"}]
+            results = [{"chunk_id": 2, "article": "제11조", "clause": "", "retrieval_score": 0.3}]
         return {
             "strategy": strategy,
-            "chunking_mode": chunking_mode,
+            "dense_query": "query",
+            "rewrite_used": use_query_rewrite,
+            "body_evidence_used": use_body_evidence,
             "selection_stage": "fused_rrf",
-            "fallback_used": False,
-            "reranker_used": False,
-            "results": results[:limit],
+            "results": results[:k],
+            "trace": {"stages": {}},
         }
 
-    monkeypatch.setattr(rq, "run_retrieval_strategy", _fake_run)
-
-    gold_examples = [
-        {"id": "c1", "query": "q-hit", "case_type": "HOLIDAY_USAGE", "expected_regulation_article": "제14조"},
-        {"id": "c2", "query": "q-miss", "case_type": "HOLIDAY_USAGE", "expected_regulation_article": "제14조"},
+    monkeypatch.setattr(rq.RetrievalRunner, "run_case", _fake_run_case)
+    runner = rq.ExperimentRunner(db=None)
+    dataset = [
+        {
+            "id": "g1",
+            "query": "주말 식대 규정",
+            "case_type": "HOLIDAY_USAGE",
+            "expected_targets": [{"article": "제39조", "clause": "①", "weight": 1.0}],
+            "acceptable_chunk_ids": [],
+            "must_not_return_articles": [],
+            "priority": "P0",
+            "body_evidence": {},
+        }
     ]
-
-    report = rq.evaluate_gold_dataset(
-        None,
-        gold_examples,
-        strategies=["sparse_only"],
-        chunking_modes=["hybrid_hierarchical"],
-        top_ks=(3, 5),
-        ndcg_k=5,
-    )
-
-    assert report["dataset_size"] == 2
-    assert len(report["reports"]) == 1
-    summary = report["reports"][0]["summary"]
-    assert summary["recall@3"] == pytest.approx(0.5)
-    assert "mrr" in summary
-    assert "ndcg@5" in summary
-
-
-def test_compare_retrieval_strategies(monkeypatch):
-    def _fake_run(_db, _body, *, strategy, chunking_mode, limit):
-        return {
-            "strategy": strategy,
-            "chunking_mode": chunking_mode,
-            "selection_stage": "fused_rrf",
-            "fallback_used": False,
-            "reranker_used": strategy.endswith("rerank"),
-            "reranker_type": "cross_encoder" if strategy.endswith("rerank") else "none",
-            "results": [{"chunk_id": 11, "article": "제11조"}][:limit],
-        }
-
-    monkeypatch.setattr(rq, "run_retrieval_strategy", _fake_run)
-    out = rq.compare_retrieval_strategies(
-        None,
-        {"case_type": "HOLIDAY_USAGE"},
-        strategies=["sparse_only", "hybrid_rrf_rerank"],
-        limit=3,
-    )
-
-    assert out["comparison_ready"] is True
-    assert out["run_count"] == 2
-    assert len(out["runs"]) == 2
+    out = runner.compare_query_rewrite(dataset, strategy="hybrid_rrf_rerank", k=5)
+    assert out["rewrite_on"]["summary_metrics"]["Recall@k"] == pytest.approx(1.0)
+    assert out["rewrite_off"]["summary_metrics"]["Recall@k"] == pytest.approx(0.0)
 
 
 def test_load_gold_dataset_jsonl(tmp_path):
     path = tmp_path / "gold.jsonl"
     rows = [
-        {"id": "a", "query": "q1", "expected_regulation_article": "제14조"},
-        {"id": "b", "query": "q2", "expected_regulation_article": "제23조"},
+        {
+            "id": "a",
+            "query": "q1",
+            "case_type": "HOLIDAY_USAGE",
+            "expected_targets": [{"article": "제39조", "clause": "①", "weight": 1.0}],
+            "acceptable_chunk_ids": [],
+        },
+        {
+            "id": "b",
+            "query": "q2",
+            "case_type": "LIMIT_EXCEED",
+            "expected_targets": [{"article": "제19조", "clause": "", "weight": 1.0}],
+            "acceptable_chunk_ids": [],
+        },
     ]
     path.write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in rows), encoding="utf-8")
 

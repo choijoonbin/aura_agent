@@ -907,6 +907,57 @@ def _build_why_selected(item: dict[str, Any], selection_stage: str) -> str:
     return "하이브리드 검색 상위"
 
 
+def _build_domain_match_hints(item: dict[str, Any], body_evidence: dict[str, Any]) -> list[str]:
+    """검색엔진 점수 외에 업무 맥락 일치 힌트."""
+    case_type = str(body_evidence.get("case_type") or body_evidence.get("intended_risk_type") or "").upper()
+    merged = " ".join(
+        str(v or "")
+        for v in [
+            item.get("chunk_text"),
+            item.get("parent_title"),
+            item.get("regulation_article"),
+            item.get("regulation_clause"),
+        ]
+    ).lower()
+    hints: list[str] = []
+
+    if case_type == "HOLIDAY_USAGE":
+        if any(token in merged for token in ("휴일", "주말", "공휴일")):
+            hints.append("휴일/주말 사용 제약 문맥과 일치")
+        if any(token in merged for token in ("심야", "23:00", "06:00", "시간대")):
+            hints.append("심야/시간대 제약 문맥과 일치")
+    elif case_type == "LIMIT_EXCEED":
+        if any(token in merged for token in ("예산", "초과", "한도")):
+            hints.append("예산 초과/한도 통제 문맥과 일치")
+        if any(token in merged for token in ("승인", "상위 승인", "차단")):
+            hints.append("승인 단계 강화 문맥과 일치")
+    elif case_type == "PRIVATE_USE_RISK":
+        if any(token in merged for token in ("사적", "개인")):
+            hints.append("사적 사용 금지 문맥과 일치")
+        if any(token in merged for token in ("업무 관련", "업무 관련성", "증빙")):
+            hints.append("업무 관련성/증빙 검증 문맥과 일치")
+    elif case_type == "UNUSUAL_PATTERN":
+        if any(token in merged for token in ("분할", "반복", "패턴", "회피")):
+            hints.append("비정상 패턴/회피 탐지 문맥과 일치")
+
+    if body_evidence.get("isHoliday") and any(token in merged for token in ("휴일", "주말", "공휴일")):
+        hints.append("입력값 isHoliday=true와 조항 내용이 정합")
+    if body_evidence.get("budgetExceeded") and any(token in merged for token in ("예산", "초과", "한도")):
+        hints.append("입력값 budgetExceeded=true와 조항 내용이 정합")
+
+    seen: set[str] = set()
+    out: list[str] = []
+    for hint in hints:
+        if hint not in seen:
+            seen.add(hint)
+            out.append(hint)
+    return out
+
+
+def _resolve_source_strategy(selection_stage: str) -> str:
+    return f"policy_search:{selection_stage}"
+
+
 def _rewrite_query(
     body_evidence: dict[str, Any],
     *,
@@ -917,11 +968,14 @@ def _rewrite_query(
     bm25_weight: float,
     dense_weight: float,
 ) -> dict[str, Any]:
-    rewritten = query_rewrite_for_retrieval(body_evidence)
-    rerank_query = _build_dense_query(body_evidence)
+    structured_query = query_rewrite_for_retrieval(body_evidence)
+    dense_query = _build_dense_query(body_evidence)
     return {
-        "original_query": rewritten,
-        "rewritten_query": rerank_query,
+        "structured_query": structured_query,
+        "dense_query": dense_query,
+        # backward compatibility
+        "original_query": structured_query,
+        "rewritten_query": dense_query,
         "effective_date": str(effective_date) if effective_date else None,
         "limit": limit,
         "candidate_limit": candidate_limit,
@@ -1061,7 +1115,14 @@ def _rerank_candidates(
     reranker_type = "none"
     rerank_input_limit = min(len(enriched), 25)
     rerank_input = enriched[:rerank_input_limit]
-    rerank_exception: str | None = None
+    rerank_errors: list[dict[str, str]] = []
+
+    def _push_rerank_error(stage: str, ex: Exception) -> None:
+        rerank_errors.append({
+            "stage": stage,
+            "type": ex.__class__.__name__,
+            "message": str(ex)[:300],
+        })
 
     try:
         from services.retrieval_quality import rerank_with_cross_encoder
@@ -1118,9 +1179,9 @@ def _rerank_candidates(
                     item["selected_by"] = selection_stage
                     item["selection_rank"] = idx
             except Exception as llm_ex:
-                rerank_exception = f"llm_fallback_failed:{llm_ex.__class__.__name__}"
+                _push_rerank_error("llm_fallback", llm_ex)
     except Exception as ce_ex:
-        rerank_exception = f"cross_encoder_failed:{ce_ex.__class__.__name__}"
+        _push_rerank_error("cross_encoder", ce_ex)
         if getattr(settings, "enable_llm_rerank_fallback", True):
             try:
                 from services.retrieval_quality import rerank_with_llm_fallback
@@ -1148,7 +1209,7 @@ def _rerank_candidates(
                     item["selected_by"] = selection_stage
                     item["selection_rank"] = idx
             except Exception as llm_ex:
-                rerank_exception = f"{rerank_exception}|llm_fallback_failed:{llm_ex.__class__.__name__}"
+                _push_rerank_error("llm_fallback", llm_ex)
 
     return {
         "enriched": enriched,
@@ -1156,7 +1217,8 @@ def _rerank_candidates(
         "reranker_used": reranker_used,
         "reranker_type": reranker_type,
         "rerank_input_limit": rerank_input_limit,
-        "rerank_exception": rerank_exception,
+        "rerank_error": rerank_errors[0] if rerank_errors else None,
+        "rerank_errors": rerank_errors,
     }
 
 
@@ -1169,12 +1231,16 @@ def _finalize_context(
     reranker_type: str,
     fallback_used: bool,
     fallback_reason: str | None,
+    body_evidence: dict[str, Any],
 ) -> list[dict[str, Any]]:
     results: list[dict[str, Any]] = []
     for item in enriched[:limit]:
         regulation_item = _get_regulation_item(item)
         why_selected = _build_why_selected(item, selection_stage)
+        domain_match_hints = _build_domain_match_hints(item, body_evidence)
+        chunk_id = item.get("chunk_id")
         results.append({
+            "chunk_id": chunk_id,
             "doc_id": item.get("doc_id"),
             "article": item.get("regulation_article"),
             "clause": item.get("regulation_clause"),
@@ -1185,10 +1251,10 @@ def _finalize_context(
             "version": item.get("version"),
             "effective_from": str(item.get("effective_from")) if item.get("effective_from") else None,
             "effective_to": str(item.get("effective_to")) if item.get("effective_to") else None,
-            "chunk_ids": [item.get("chunk_id")] if item.get("chunk_id") is not None else [],
+            "chunk_ids": [chunk_id] if chunk_id is not None else [],
             "context_chunk_ids": item.get("context_chunk_ids", []),
             "retrieval_score": item.get("cross_encoder_score") or item.get("rrf_score") or item.get("bm25_score") or 0,
-            "source_strategy": "hybrid_bm25_dense_rrf",
+            "source_strategy": _resolve_source_strategy(selection_stage),
             "score_detail": {
                 "bm25_score": item.get("bm25_score"),
                 "dense_score": item.get("dense_score"),
@@ -1197,6 +1263,7 @@ def _finalize_context(
                 "llm_rerank_score": item.get("llm_rerank_score"),
             },
             "why_selected": why_selected,
+            "domain_match_hints": domain_match_hints,
             "fallback_used": fallback_used,
             "fallback_reason": fallback_reason,
             "reranker_used": reranker_used,
@@ -1212,6 +1279,7 @@ def _run_search_policy_chunks_pipeline(
     body_evidence: dict[str, Any],
     *,
     limit: int,
+    trace_level: str = "basic",
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """검색 파이프라인 실행 + structured trace 생성."""
     effective_date = None
@@ -1263,7 +1331,7 @@ def _run_search_policy_chunks_pipeline(
 
     rerank_out = _rerank_candidates(
         enriched,
-        rerank_query=rewrite_trace["rewritten_query"],
+        rerank_query=rewrite_trace["dense_query"],
         selection_stage=selection_stage,
         body_evidence=body_evidence,
     )
@@ -1272,7 +1340,8 @@ def _run_search_policy_chunks_pipeline(
     reranker_used = bool(rerank_out["reranker_used"])
     reranker_type = str(rerank_out["reranker_type"] or "none")
     rerank_input_limit = int(rerank_out["rerank_input_limit"])
-    rerank_exception = rerank_out.get("rerank_exception")
+    rerank_error = rerank_out.get("rerank_error")
+    rerank_errors = rerank_out.get("rerank_errors") or []
 
     results = _finalize_context(
         enriched,
@@ -1282,19 +1351,27 @@ def _run_search_policy_chunks_pipeline(
         reranker_type=reranker_type,
         fallback_used=fallback_used,
         fallback_reason=fallback_reason,
+        body_evidence=body_evidence,
     )
+
+    normalized_trace_level = str(trace_level or "basic").strip().lower()
+    if normalized_trace_level not in {"basic", "full"}:
+        normalized_trace_level = "basic"
+    trace_candidate_limit = 10 if normalized_trace_level == "basic" else candidate_limit
 
     trace = {
         "trace_version": "policy_search.v1",
         "search": {
             **rewrite_trace,
+            "trace_level": normalized_trace_level,
             "selection_stage": selection_stage,
             "fallback_used": fallback_used,
             "fallback_reason": fallback_reason,
             "reranker_used": reranker_used,
             "reranker_type": reranker_type,
             "rerank_input_limit": rerank_input_limit,
-            "rerank_exception": rerank_exception,
+            "rerank_error": rerank_error,
+            "rerank_errors": rerank_errors,
             "group_filter_relaxed": {
                 "bm25": bool(retrieve_out["bm25_group_relaxed"]),
                 "dense": bool(retrieve_out["dense_group_relaxed"]),
@@ -1308,23 +1385,25 @@ def _run_search_policy_chunks_pipeline(
         "stages": {
             "bm25_candidates": [
                 _to_trace_candidate(item, rank=i, stage="bm25")
-                for i, item in enumerate(bm25_results[:candidate_limit], start=1)
+                for i, item in enumerate(bm25_results[:trace_candidate_limit], start=1)
             ],
             "dense_candidates": [
                 _to_trace_candidate(item, rank=i, stage="dense")
-                for i, item in enumerate(dense_results[:candidate_limit], start=1)
+                for i, item in enumerate(dense_results[:trace_candidate_limit], start=1)
             ],
             "fused_candidates": [
                 _to_trace_candidate(item, rank=i, stage="fused", selected_by=fuse_out["selection_stage"])
-                for i, item in enumerate(fused_snapshot, start=1)
+                for i, item in enumerate(fused_snapshot[:trace_candidate_limit], start=1)
             ],
             "reranked_candidates": [
                 _to_trace_candidate(item, rank=i, stage="reranked", selected_by=selection_stage)
-                for i, item in enumerate(enriched[:candidate_limit], start=1)
+                for i, item in enumerate(enriched[:trace_candidate_limit], start=1)
             ],
             "selected_candidates": [
                 {
                     "rank": i,
+                    "chunk_id": item.get("chunk_id"),
+                    "doc_id": item.get("doc_id"),
                     "article": item.get("article"),
                     "clause": item.get("clause"),
                     "item": item.get("item"),
@@ -1333,6 +1412,7 @@ def _run_search_policy_chunks_pipeline(
                     "selected_by": item.get("selected_by"),
                     "selection_stage": item.get("selection_stage"),
                     "why_selected": item.get("why_selected"),
+                    "domain_match_hints": item.get("domain_match_hints", []),
                     "scores": {
                         "bm25": item.get("score_detail", {}).get("bm25_score"),
                         "dense": item.get("score_detail", {}).get("dense_score"),
@@ -1352,12 +1432,15 @@ def search_policy_chunks_with_trace(
     db: Session,
     body_evidence: dict[str, Any],
     limit: int = 5,
+    *,
+    trace_level: str = "basic",
 ) -> dict[str, Any]:
     """디버그/설명용 검색 결과. chunks + trace를 함께 반환."""
     chunks, trace = _run_search_policy_chunks_pipeline(
         db,
         body_evidence,
         limit=limit,
+        trace_level=trace_level,
     )
     return {"chunks": chunks, "trace": trace}
 
@@ -1368,6 +1451,7 @@ def search_policy_chunks(
     limit: int = 5,
     *,
     debug: bool = False,
+    trace_level: str = "basic",
 ) -> list[dict[str, Any]] | dict[str, Any]:
     """
     메인 검색 함수.
@@ -1379,6 +1463,7 @@ def search_policy_chunks(
         db,
         body_evidence,
         limit=limit,
+        trace_level=trace_level,
     )
     if debug:
         return {"chunks": chunks, "trace": trace}

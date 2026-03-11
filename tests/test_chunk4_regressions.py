@@ -113,3 +113,58 @@ def test_search_policy_chunks_debug_returns_chunks_and_trace(monkeypatch):
     assert isinstance(out, dict)
     assert out.get("chunks") == fake_chunks
     assert out.get("trace") == fake_trace
+
+
+def test_search_policy_chunks_debug_trace_fields_and_size(monkeypatch):
+    def _mk_row(cid: int):
+        return {
+            "chunk_id": cid,
+            "doc_id": 1,
+            "regulation_article": "제39조",
+            "regulation_clause": "①",
+            "parent_title": "제39조 (주말·공휴일 제약)",
+            "chunk_text": "휴일 및 주말 지출은 검토 대상이다.",
+            "node_type": "CLAUSE",
+            "bm25_score": 0.3,
+            "dense_score": 0.2,
+            "rrf_score": 0.1,
+        }
+
+    bm25_rows = [_mk_row(i) for i in range(1, 13)]
+    dense_rows = [_mk_row(i + 100) for i in range(1, 13)]
+
+    monkeypatch.setattr(policy_service, "_search_bm25_with_group_filter", lambda *a, **k: bm25_rows)
+    monkeypatch.setattr(policy_service, "_search_bm25", lambda *a, **k: [])
+    monkeypatch.setattr(policy_service, "_search_dense", lambda *a, **k: dense_rows)
+    monkeypatch.setattr(policy_service, "_search_lexical_legacy", lambda *a, **k: [])
+    monkeypatch.setattr(policy_service, "_enrich_with_parent_context", lambda _db, chunks: chunks)
+
+    original_fallback = _override_setting("enable_llm_rerank_fallback", False)
+    try:
+        out = policy_service.search_policy_chunks(
+            None,
+            {
+                "case_type": "HOLIDAY_USAGE",
+                "occurredAt": "2026-03-14T19:45:00",
+                "isHoliday": True,
+            },
+            limit=3,
+            debug=True,
+            trace_level="basic",
+        )
+    finally:
+        object.__setattr__(settings, "enable_llm_rerank_fallback", original_fallback)
+
+    trace = out["trace"]
+    assert "structured_query" in trace["search"]
+    assert "dense_query" in trace["search"]
+    assert "rerank_error" in trace["search"]
+    assert "rerank_errors" in trace["search"]
+    assert len(trace["stages"]["bm25_candidates"]) <= 10
+    assert len(trace["stages"]["dense_candidates"]) <= 10
+    first_selected = trace["stages"]["selected_candidates"][0]
+    assert "chunk_id" in first_selected
+    assert "doc_id" in first_selected
+    assert isinstance(first_selected.get("domain_match_hints"), list)
+    first_chunk = out["chunks"][0]
+    assert first_chunk["source_strategy"].startswith("policy_search:")

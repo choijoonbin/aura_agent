@@ -1,19 +1,26 @@
 """
 Retrieval 품질 고도화 모듈.
 
-포함 범위:
-1) Cross-Encoder / LLM fallback rerank
-2) 전략별 retrieval 비교 (sparse, dense, hybrid, rerank, query rewrite on/off)
-3) Gold dataset 기반 평가 루프 (Recall@k, MRR, nDCG@k)
+핵심 목표
+- 운영 RAG 파이프라인과 동일한 경로로 검색
+- 전략별 비교(sparse/dense/hybrid/rerank)
+- gold dataset 기반 정량 평가
+- strict/loose relevance 분리
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import date
+import argparse
 import json
 import math
 from pathlib import Path
 from typing import Any
 
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session
+
+from utils.config import settings
 from utils.llm_azure import completion_kwargs_for_azure
 
 # 1차 구현: cross-encoder. 미설치 시 입력 그대로 반환
@@ -22,23 +29,27 @@ _CROSS_ENCODER_MODEL: Any = None
 # 한국어 규정 텍스트용 cross-encoder (영어 ms-marco 대체)
 _KO_CROSS_ENCODER_MODEL_NAME = "Dongjin-kr/ko-reranker"
 
-
-# 평가/비교 시 지원 전략
+# 평가 전략
 RETRIEVAL_STRATEGIES: tuple[str, ...] = (
     "sparse_only",
     "dense_only",
     "hybrid_rrf",
     "hybrid_rrf_rerank",
-    "hybrid_rrf_rerank_rewrite_on",
-    "hybrid_rrf_rerank_rewrite_off",
 )
 
-# 청킹 관점 비교 모드
+# 청킹 비교 모드
 CHUNKING_MODES: tuple[str, ...] = (
-    "hybrid_hierarchical",  # ARTICLE+CLAUSE+ITEM
-    "article_only",         # ARTICLE만
-    "clause_only",          # CLAUSE만
+    "hybrid_hierarchical",  # ARTICLE + CLAUSE + ITEM
+    "article_only",
+    "clause_only",
 )
+
+PRIORITY_WEIGHTS: dict[str, float] = {
+    "P0": 3.0,
+    "P1": 2.0,
+    "P2": 1.0,
+    "P3": 0.5,
+}
 
 
 def _get_cross_encoder(model_name: str | None = None):
@@ -65,7 +76,6 @@ def rerank_with_cross_encoder(
     """
     cross-encoder rerank 적용. 한국어 ko-reranker 기본.
     sentence-transformers 미설치 시 입력 그대로 반환하되 cross_encoder_available=False 마킹.
-    batch_size: CrossEncoder.predict() 배치 크기 (GPU 메모리에 따라 조정).
     """
     if not groups or not query or not query.strip():
         return groups
@@ -97,10 +107,7 @@ def rerank_with_llm_fallback(
 ) -> list[dict[str, Any]]:
     """
     Cross-Encoder 미설치 시 LLM 기반 경량 Rerank.
-    상위 10개 청크를 LLM에 전달해 관련성 순서를 JSON으로 받아 재정렬.
     """
-    from utils.config import settings
-
     if not getattr(settings, "openai_api_key", None) or not groups:
         return groups
 
@@ -135,7 +142,7 @@ def rerank_with_llm_fallback(
         system_prompt = (
             "당신은 한국 기업 경비 규정 전문가다.\n"
             "아래 케이스 상황에 대해 규정 조항들의 관련성 순서를 JSON 배열로만 응답하라.\n"
-            "형식: {\"order\": [0, 2, 1, 5, 3, ...]} (인덱스 번호, 관련성 높은 순)\n"
+            "형식: {\"order\": [0, 2, 1, ...]} (인덱스 번호, 관련성 높은 순)\n"
             "불필요한 설명, 마크다운 금지."
         )
         user_prompt = (
@@ -190,9 +197,7 @@ def verify_evidence_coverage(
     sentences: list[dict[str, Any]],
     retrieved_chunks: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    """
-    evidence_verification 모듈 위임. 문장–청크 coverage 검증 및 gate_policy 반환.
-    """
+    """evidence_verification 모듈 위임."""
     from services.evidence_verification import verify_evidence_coverage as _verify
 
     return _verify(sentences, retrieved_chunks)
@@ -231,656 +236,1050 @@ def _extract_clause(item: dict[str, Any]) -> str:
     return str(item.get("clause") or item.get("regulation_clause") or "")
 
 
-def _extract_item(item: dict[str, Any]) -> str | None:
-    raw = item.get("item")
-    if raw is not None:
-        return str(raw)
-    meta = item.get("metadata_json")
-    if isinstance(meta, dict):
-        marker = meta.get("regulation_item")
-        return str(marker) if marker is not None else None
-    if isinstance(meta, str):
-        try:
-            parsed = json.loads(meta)
-            marker = parsed.get("regulation_item") if isinstance(parsed, dict) else None
-            return str(marker) if marker is not None else None
-        except Exception:
-            return None
-    return None
+def _extract_score(item: dict[str, Any]) -> float:
+    val = item.get("retrieval_score")
+    if isinstance(val, (int, float)):
+        return float(val)
+    detail = item.get("score_detail") or {}
+    for key in ("cross_encoder_score", "rrf_score", "bm25_score", "dense_score", "llm_rerank_score"):
+        v = detail.get(key)
+        if isinstance(v, (int, float)):
+            return float(v)
+    return 0.0
 
 
-def _resolve_effective_date(body_evidence: dict[str, Any]) -> date | None:
-    occurred_at = body_evidence.get("occurredAt")
-    if not occurred_at:
-        return None
-    try:
-        return date.fromisoformat(str(occurred_at)[:10])
-    except Exception:
-        return None
+@dataclass
+class GoldTarget:
+    article: str
+    clause: str = ""
+    weight: float = 1.0
 
 
-def _filter_by_chunking_mode(
-    rows: list[dict[str, Any]],
-    chunking_mode: str,
-) -> list[dict[str, Any]]:
-    if chunking_mode == "hybrid_hierarchical":
-        return rows
-    if chunking_mode == "article_only":
-        return [r for r in rows if str(r.get("node_type") or "").upper() == "ARTICLE"]
-    if chunking_mode == "clause_only":
-        return [r for r in rows if str(r.get("node_type") or "").upper() == "CLAUSE"]
-    raise ValueError(f"Unsupported chunking_mode: {chunking_mode}")
+class GoldDatasetLoader:
+    """gold dataset 로드/정규화. legacy 필드도 지원."""
+
+    def load(self, dataset: list[dict[str, Any]] | str | Path) -> list[dict[str, Any]]:
+        if isinstance(dataset, (str, Path)):
+            rows = self._load_from_path(Path(dataset))
+        else:
+            rows = dataset
+        return [self.normalize_case(row) for row in rows]
+
+    def _load_from_path(self, path: Path) -> list[dict[str, Any]]:
+        if not path.exists():
+            raise FileNotFoundError(f"Dataset file not found: {path}")
+        if path.suffix.lower() == ".jsonl":
+            out: list[dict[str, Any]] = []
+            for line in path.read_text(encoding="utf-8").splitlines():
+                row = line.strip()
+                if not row:
+                    continue
+                parsed = json.loads(row)
+                if not isinstance(parsed, dict):
+                    raise ValueError("Each JSONL row must be an object")
+                out.append(parsed)
+            return out
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(raw, list) or not all(isinstance(v, dict) for v in raw):
+            raise ValueError("JSON dataset must be list[object]")
+        return raw
+
+    def normalize_case(self, row: dict[str, Any]) -> dict[str, Any]:
+        out = dict(row)
+        out.setdefault("id", out.get("case_id") or out.get("voucher_key") or "")
+        out.setdefault("query", "")
+        out.setdefault("case_type", "")
+        out.setdefault("priority", "P2")
+        out.setdefault("requires_body_evidence", True)
+        out.setdefault("must_not_return_articles", [])
+        out.setdefault("gold_rationale", "")
+        out.setdefault("body_evidence", {})
+
+        acceptable_chunk_ids = []
+        for val in _as_list(out.get("acceptable_chunk_ids")):
+            try:
+                acceptable_chunk_ids.append(int(val))
+            except Exception:
+                continue
+        out["acceptable_chunk_ids"] = acceptable_chunk_ids
+
+        expected_targets = out.get("expected_targets")
+        if not isinstance(expected_targets, list) or not expected_targets:
+            expected_targets = self._convert_legacy_targets(out)
+
+        normalized_targets: list[dict[str, Any]] = []
+        seen: set[tuple[str, str]] = set()
+        for raw_t in expected_targets:
+            if not isinstance(raw_t, dict):
+                continue
+            article = str(raw_t.get("article") or "").strip()
+            clause = str(raw_t.get("clause") or "").strip()
+            if not article:
+                continue
+            key = (_normalize_token(article), _normalize_token(clause))
+            if key in seen:
+                continue
+            seen.add(key)
+            try:
+                weight = float(raw_t.get("weight", 1.0))
+            except Exception:
+                weight = 1.0
+            normalized_targets.append(
+                {
+                    "article": article,
+                    "clause": clause,
+                    "weight": weight if weight > 0 else 1.0,
+                }
+            )
+
+        if not normalized_targets:
+            normalized_targets = [{"article": "제14조", "clause": "", "weight": 1.0}]
+
+        out["expected_targets"] = normalized_targets
+        out["must_not_return_articles"] = [str(v) for v in _as_list(out.get("must_not_return_articles")) if str(v).strip()]
+        if not isinstance(out.get("body_evidence"), dict):
+            out["body_evidence"] = {}
+        return out
+
+    def _convert_legacy_targets(self, row: dict[str, Any]) -> list[dict[str, Any]]:
+        targets: list[dict[str, Any]] = []
+        article = str(row.get("expected_regulation_article") or row.get("expected_article") or "").strip()
+        clause = str(row.get("expected_regulation_clause") or row.get("expected_clause") or "").strip()
+        if article:
+            targets.append({"article": article, "clause": clause, "weight": 1.0})
+
+        for art in _as_list(row.get("expected_articles")):
+            token = str(art or "").strip()
+            if token:
+                targets.append({"article": token, "clause": "", "weight": 1.0})
+
+        return targets
 
 
-def _build_dense_query_for_strategy(
-    body_evidence: dict[str, Any],
-    *,
-    use_query_rewrite: bool,
-) -> str:
-    from services import policy_service
+class RetrievalRunner:
+    """운영 policy_service 함수 재사용으로 평가용 retrieval 실행."""
 
-    if use_query_rewrite:
-        return policy_service._build_dense_query(body_evidence)
-    rewritten = policy_service.query_rewrite_for_retrieval(body_evidence)
-    keywords = rewritten.get("keywords") or policy_service.build_policy_keywords(body_evidence)
-    parts = [
-        str(rewritten.get("risk_type") or ""),
-        str(rewritten.get("merchant_name") or ""),
-        str(rewritten.get("hr_status") or ""),
-        str(rewritten.get("occurred_at") or ""),
-        " ".join(str(v) for v in (rewritten.get("document_line_hints") or []) if v),
-        " ".join(str(v) for v in keywords[:12]),
-    ]
-    query_text = " ".join(p for p in parts if p).strip()
-    return query_text or "경비 지출 규정"
+    def __init__(self, db: Session):
+        self.db = db
 
+    def run_case(
+        self,
+        case: dict[str, Any],
+        *,
+        strategy: str,
+        k: int,
+        use_query_rewrite: bool,
+        use_body_evidence: bool,
+        chunking_mode: str,
+        trace_level: str = "basic",
+    ) -> dict[str, Any]:
+        if strategy not in RETRIEVAL_STRATEGIES:
+            raise ValueError(f"Unsupported strategy: {strategy}")
+        if chunking_mode not in CHUNKING_MODES:
+            raise ValueError(f"Unsupported chunking_mode: {chunking_mode}")
 
-def _strategy_specs() -> dict[str, dict[str, Any]]:
-    return {
-        "sparse_only": {
-            "use_bm25": True,
-            "use_dense": False,
-            "use_rrf": False,
-            "use_rerank": False,
-            "use_query_rewrite": True,
-            "allow_lexical_fallback": False,
-        },
-        "dense_only": {
-            "use_bm25": False,
-            "use_dense": True,
-            "use_rrf": False,
-            "use_rerank": False,
-            "use_query_rewrite": True,
-            "allow_lexical_fallback": False,
-        },
-        "hybrid_rrf": {
-            "use_bm25": True,
-            "use_dense": True,
-            "use_rrf": True,
-            "use_rerank": False,
-            "use_query_rewrite": True,
-            "allow_lexical_fallback": True,
-        },
-        "hybrid_rrf_rerank": {
-            "use_bm25": True,
-            "use_dense": True,
-            "use_rrf": True,
-            "use_rerank": True,
-            "use_query_rewrite": True,
-            "allow_lexical_fallback": True,
-        },
-        "hybrid_rrf_rerank_rewrite_on": {
-            "use_bm25": True,
-            "use_dense": True,
-            "use_rrf": True,
-            "use_rerank": True,
-            "use_query_rewrite": True,
-            "allow_lexical_fallback": True,
-        },
-        "hybrid_rrf_rerank_rewrite_off": {
-            "use_bm25": True,
-            "use_dense": True,
-            "use_rrf": True,
-            "use_rerank": True,
-            "use_query_rewrite": False,
-            "allow_lexical_fallback": True,
-        },
-    }
+        from services import policy_service
 
+        body = self._build_body_evidence(case, use_body_evidence=use_body_evidence)
+        query = str(case.get("query") or "").strip()
+        candidate_limit = max(k * 6, 20)
+        effective_date = self._resolve_effective_date(body)
+        bm25_weight, dense_weight = policy_service._get_rrf_weights(body)
+        group_filter = policy_service._get_semantic_group_filter(body)
+        rewrite_ctx = policy_service._rewrite_query(
+            body,
+            limit=k,
+            effective_date=effective_date,
+            candidate_limit=candidate_limit,
+            group_filter=group_filter,
+            bm25_weight=bm25_weight,
+            dense_weight=dense_weight,
+        )
+        dense_query = rewrite_ctx["dense_query"] if use_query_rewrite else (query or rewrite_ctx["dense_query"])
 
-def _build_retrieval_results(
-    fused: list[dict[str, Any]],
-    *,
-    limit: int,
-    selection_stage: str,
-    fallback_used: bool,
-    fallback_reason: str | None,
-    reranker_used: bool,
-    reranker_type: str,
-) -> list[dict[str, Any]]:
-    results: list[dict[str, Any]] = []
-    for idx, item in enumerate(fused[:limit], start=1):
-        results.append(
-            {
-                "rank": idx,
-                "chunk_id": _extract_chunk_id(item),
-                "chunk_ids": [_extract_chunk_id(item)] if _extract_chunk_id(item) is not None else [],
-                "doc_id": item.get("doc_id"),
-                "article": _extract_article(item),
-                "clause": _extract_clause(item),
-                "item": _extract_item(item),
-                "node_type": item.get("node_type"),
-                "parent_title": item.get("parent_title"),
-                "chunk_text": item.get("chunk_text"),
-                "retrieval_score": item.get("cross_encoder_score") or item.get("rrf_score") or item.get("bm25_score") or item.get("dense_score") or 0,
-                "score_detail": {
-                    "bm25_score": item.get("bm25_score"),
-                    "dense_score": item.get("dense_score"),
-                    "rrf_score": item.get("rrf_score"),
-                    "cross_encoder_score": item.get("cross_encoder_score"),
-                    "llm_rerank_score": item.get("llm_rerank_score"),
-                },
+        # 운영 기본 경로와 완전 동일하게 타는 fast-path
+        if (
+            strategy == "hybrid_rrf_rerank"
+            and use_query_rewrite
+            and use_body_evidence
+            and chunking_mode == "hybrid_hierarchical"
+        ):
+            payload = policy_service.search_policy_chunks_with_trace(
+                self.db,
+                body,
+                limit=k,
+                trace_level=trace_level,
+            )
+            results = payload.get("chunks") or []
+            trace = payload.get("trace") or {}
+            return {
+                "strategy": strategy,
+                "chunking_mode": chunking_mode,
+                "rewrite_used": use_query_rewrite,
+                "body_evidence_used": use_body_evidence,
+                "dense_query": dense_query,
+                "selection_stage": trace.get("search", {}).get("selection_stage"),
+                "fallback_used": trace.get("search", {}).get("fallback_used"),
+                "reranker_used": trace.get("search", {}).get("reranker_used"),
+                "results": results,
+                "trace": trace,
+            }
+
+        bm25_results = self._bm25_candidates(
+            body,
+            candidate_limit=candidate_limit,
+            effective_date=effective_date,
+            group_filter=group_filter,
+            enabled=(strategy in {"sparse_only", "hybrid_rrf", "hybrid_rrf_rerank"}),
+        )
+        dense_results = self._dense_candidates(
+            body,
+            candidate_limit=candidate_limit,
+            effective_date=effective_date,
+            group_filter=group_filter,
+            enabled=(strategy in {"dense_only", "hybrid_rrf", "hybrid_rrf_rerank"}),
+            dense_query=dense_query,
+        )
+
+        bm25_results = self._apply_chunking_mode(bm25_results, chunking_mode)
+        dense_results = self._apply_chunking_mode(dense_results, chunking_mode)
+
+        selection_stage = "empty"
+        fallback_used = False
+        fallback_reason: str | None = None
+        reranker_used = False
+        reranker_type = "none"
+
+        if strategy == "sparse_only":
+            fused = sorted(bm25_results, key=lambda x: x.get("bm25_score", 0), reverse=True)
+            fused = policy_service._enrich_with_parent_context(self.db, fused[:candidate_limit])
+            selection_stage = "bm25_only"
+        elif strategy == "dense_only":
+            fused = sorted(dense_results, key=lambda x: x.get("dense_score", 0), reverse=True)
+            fused = policy_service._enrich_with_parent_context(self.db, fused[:candidate_limit])
+            selection_stage = "dense_only"
+        else:
+            fuse_out = policy_service._fuse_candidates(
+                self.db,
+                body,
+                bm25_results=bm25_results,
+                dense_results=dense_results,
+                candidate_limit=candidate_limit,
+                effective_date=effective_date,
+                bm25_weight=bm25_weight,
+                dense_weight=dense_weight,
+            )
+            fused = fuse_out["enriched"]
+            selection_stage = str(fuse_out["selection_stage"])
+            fallback_used = bool(fuse_out["fallback_used"])
+            fallback_reason = fuse_out.get("fallback_reason")
+
+            # chunking mode는 fuse 이후에도 유지
+            fused = self._apply_chunking_mode(fused, chunking_mode)
+
+            if strategy == "hybrid_rrf_rerank":
+                rerank_out = policy_service._rerank_candidates(
+                    fused,
+                    rerank_query=dense_query,
+                    selection_stage=selection_stage,
+                    body_evidence=body,
+                )
+                fused = rerank_out["enriched"]
+                selection_stage = str(rerank_out["selection_stage"])
+                reranker_used = bool(rerank_out["reranker_used"])
+                reranker_type = str(rerank_out["reranker_type"] or "none")
+
+        results = policy_service._finalize_context(
+            fused,
+            limit=k,
+            selection_stage=selection_stage,
+            reranker_used=reranker_used,
+            reranker_type=reranker_type,
+            fallback_used=fallback_used,
+            fallback_reason=fallback_reason,
+            body_evidence=body,
+        )
+
+        trace = {
+            "trace_version": "retrieval_runner.v1",
+            "search": {
+                "structured_query": rewrite_ctx.get("structured_query"),
+                "dense_query": dense_query,
                 "selection_stage": selection_stage,
                 "fallback_used": fallback_used,
                 "fallback_reason": fallback_reason,
                 "reranker_used": reranker_used,
                 "reranker_type": reranker_type,
-            }
-        )
-    return results
+            },
+            "stages": {
+                "bm25_candidates": bm25_results[:10],
+                "dense_candidates": dense_results[:10],
+                "final_results": results,
+            },
+        }
+        return {
+            "strategy": strategy,
+            "chunking_mode": chunking_mode,
+            "rewrite_used": use_query_rewrite,
+            "body_evidence_used": use_body_evidence,
+            "dense_query": dense_query,
+            "selection_stage": selection_stage,
+            "fallback_used": fallback_used,
+            "reranker_used": reranker_used,
+            "results": results,
+            "trace": trace,
+        }
 
+    def _build_body_evidence(self, case: dict[str, Any], *, use_body_evidence: bool) -> dict[str, Any]:
+        case_type = str(case.get("case_type") or "").strip()
+        query = str(case.get("query") or "").strip()
 
-def run_retrieval_strategy(
-    db: Any,
-    body_evidence: dict[str, Any],
-    *,
-    strategy: str = "hybrid_rrf_rerank",
-    chunking_mode: str = "hybrid_hierarchical",
-    limit: int = 5,
-) -> dict[str, Any]:
-    """
-    전략별 retrieval 실행.
-    - sparse_only
-    - dense_only
-    - hybrid_rrf
-    - hybrid_rrf_rerank
-    - hybrid_rrf_rerank_rewrite_on / off
-    """
-    from services import policy_service
+        if use_body_evidence:
+            body = dict(case.get("body_evidence") or {})
+        else:
+            body = {}
 
-    specs = _strategy_specs()
-    if strategy not in specs:
-        raise ValueError(f"Unsupported strategy: {strategy}")
-    if chunking_mode not in CHUNKING_MODES:
-        raise ValueError(f"Unsupported chunking_mode: {chunking_mode}")
+        if case_type and not body.get("case_type"):
+            body["case_type"] = case_type
 
-    spec = specs[strategy]
-    candidate_limit = max(limit * 6, 20)
-    effective_date = _resolve_effective_date(body_evidence)
-    group_filter = policy_service._get_semantic_group_filter(body_evidence)
-    dense_query = _build_dense_query_for_strategy(
-        body_evidence,
-        use_query_rewrite=bool(spec["use_query_rewrite"]),
-    )
+        extras = list(body.get("_extra_keywords") or [])
+        if query and query not in extras:
+            extras.append(query)
+        if extras:
+            body["_extra_keywords"] = extras
+        return body
 
-    bm25_results: list[dict[str, Any]] = []
-    dense_results: list[dict[str, Any]] = []
+    def _resolve_effective_date(self, body: dict[str, Any]) -> date | None:
+        occurred_at = body.get("occurredAt")
+        if not occurred_at:
+            return None
+        try:
+            return date.fromisoformat(str(occurred_at)[:10])
+        except Exception:
+            return None
 
-    if spec["use_bm25"]:
-        bm25_results = policy_service._search_bm25_with_group_filter(
-            db,
-            body_evidence,
+    def _bm25_candidates(
+        self,
+        body: dict[str, Any],
+        *,
+        candidate_limit: int,
+        effective_date: date | None,
+        group_filter: list[str] | None,
+        enabled: bool,
+    ) -> list[dict[str, Any]]:
+        if not enabled:
+            return []
+        from services import policy_service
+
+        rows = policy_service._search_bm25_with_group_filter(
+            self.db,
+            body,
             limit=candidate_limit,
             effective_date=effective_date,
             group_filter=group_filter,
         )
-        if group_filter and len(bm25_results) < candidate_limit:
-            bm25_fallback = policy_service._search_bm25(
-                db,
-                body_evidence,
+        if group_filter and len(rows) < candidate_limit:
+            fallback = policy_service._search_bm25(
+                self.db,
+                body,
                 limit=candidate_limit,
                 effective_date=effective_date,
             )
-            seen = {row.get("chunk_id") for row in bm25_results}
-            for row in bm25_fallback:
-                cid = row.get("chunk_id")
+            seen = {r.get("chunk_id") for r in rows}
+            for r in fallback:
+                cid = r.get("chunk_id")
                 if cid not in seen:
-                    bm25_results.append(row)
+                    rows.append(r)
                     seen.add(cid)
+        return rows
 
-    if spec["use_dense"]:
-        dense_results = policy_service._search_dense(
-            db,
-            body_evidence,
+    def _dense_candidates(
+        self,
+        body: dict[str, Any],
+        *,
+        candidate_limit: int,
+        effective_date: date | None,
+        group_filter: list[str] | None,
+        enabled: bool,
+        dense_query: str,
+    ) -> list[dict[str, Any]]:
+        if not enabled:
+            return []
+        from services import policy_service
+
+        rows = policy_service._search_dense(
+            self.db,
+            body,
             limit=candidate_limit,
             effective_date=effective_date,
             group_filter=group_filter,
             use_hyde=False,
             query_text_override=dense_query,
         )
-        if group_filter and len(dense_results) < candidate_limit:
-            dense_fallback = policy_service._search_dense(
-                db,
-                body_evidence,
+        if group_filter and len(rows) < candidate_limit:
+            fallback = policy_service._search_dense(
+                self.db,
+                body,
                 limit=candidate_limit,
                 effective_date=effective_date,
                 group_filter=None,
                 use_hyde=False,
                 query_text_override=dense_query,
             )
-            seen = {row.get("chunk_id") for row in dense_results}
-            for row in dense_fallback:
-                cid = row.get("chunk_id")
+            seen = {r.get("chunk_id") for r in rows}
+            for r in fallback:
+                cid = r.get("chunk_id")
                 if cid not in seen:
-                    dense_results.append(row)
+                    rows.append(r)
                     seen.add(cid)
+        return rows
 
-    bm25_results = _filter_by_chunking_mode(bm25_results, chunking_mode)
-    dense_results = _filter_by_chunking_mode(dense_results, chunking_mode)
+    def _apply_chunking_mode(
+        self,
+        rows: list[dict[str, Any]],
+        chunking_mode: str,
+    ) -> list[dict[str, Any]]:
+        if chunking_mode == "hybrid_hierarchical":
+            return rows
+        if chunking_mode == "article_only":
+            return [r for r in rows if str(r.get("node_type") or "").upper() == "ARTICLE"]
+        if chunking_mode == "clause_only":
+            return [r for r in rows if str(r.get("node_type") or "").upper() == "CLAUSE"]
+        raise ValueError(f"Unsupported chunking_mode: {chunking_mode}")
 
-    bm25_weight, dense_weight = policy_service._get_rrf_weights(body_evidence)
-    fallback_used = False
-    fallback_reason: str | None = None
 
-    if spec["use_rrf"]:
-        if bm25_results and dense_results:
-            fused = policy_service._reciprocal_rank_fusion(
-                bm25_results,
-                dense_results,
-                k=60,
-                bm25_weight=bm25_weight,
-                dense_weight=dense_weight,
+class RelevanceEvaluator:
+    """strict/loose relevance 판정."""
+
+    def evaluate_case(self, case: dict[str, Any], results: list[dict[str, Any]], *, k: int) -> dict[str, Any]:
+        targets = self._targets(case)
+        acceptable_chunk_ids = {int(v) for v in case.get("acceptable_chunk_ids") or []}
+        must_not_return = {_normalize_token(v) for v in case.get("must_not_return_articles") or []}
+
+        loose_expected = {(_normalize_token(t.article), "") for t in targets}
+        strict_expected_pairs = {
+            (_normalize_token(t.article), _normalize_token(t.clause))
+            for t in targets
+            if _normalize_token(t.clause)
+        }
+        # `acceptable_chunk_ids` are treated as strict alternatives only when
+        # explicit strict targets(article+clause)가 없는 케이스에서 사용한다.
+        # (둘 다 있을 때 chunk_id를 strict 분모에 더하면 recall이 과도하게 페널티됨)
+        use_chunk_ids_as_strict_targets = (not strict_expected_pairs) and bool(acceptable_chunk_ids)
+        strict_expected = set(strict_expected_pairs)
+        if use_chunk_ids_as_strict_targets:
+            for cid in acceptable_chunk_ids:
+                strict_expected.add((f"CHUNK:{cid}", ""))
+
+        loose_hits: set[tuple[str, str]] = set()
+        strict_hits: set[tuple[str, str]] = set()
+        loose_first_rank = 0
+        strict_first_rank = 0
+
+        loose_gains: list[float] = []
+        strict_gains: list[float] = []
+
+        top_results = []
+        retrieved_articles: list[str] = []
+        retrieved_chunk_ids: list[int] = []
+
+        for idx, item in enumerate(results[:k], start=1):
+            chunk_id = _extract_chunk_id(item)
+            article = _normalize_token(_extract_article(item))
+            clause = _normalize_token(_extract_clause(item))
+            retrieved_articles.append(_extract_article(item))
+            if chunk_id is not None:
+                retrieved_chunk_ids.append(chunk_id)
+
+            strict_hit, loose_hit, strict_gain, loose_gain = self._judge_item(
+                item,
+                targets,
+                acceptable_chunk_ids,
+                use_chunk_ids_as_strict_targets=use_chunk_ids_as_strict_targets,
             )
-            selection_stage = "fused_rrf"
-        elif bm25_results:
-            fused = [dict(r, rrf_score=r.get("bm25_score", 0)) for r in bm25_results]
-            fused.sort(key=lambda x: x.get("rrf_score", 0), reverse=True)
-            selection_stage = "bm25_only"
-        elif dense_results:
-            fused = [dict(r, rrf_score=r.get("dense_score", 0)) for r in dense_results]
-            fused.sort(key=lambda x: x.get("rrf_score", 0), reverse=True)
-            selection_stage = "dense_only"
-        elif spec["allow_lexical_fallback"]:
-            fused = policy_service._search_lexical_legacy(
-                db,
-                body_evidence,
-                limit=candidate_limit,
-                effective_date=effective_date,
-            )
-            fused = _filter_by_chunking_mode(fused, chunking_mode)
-            for row in fused:
-                row.setdefault("rrf_score", row.get("bm25_score", 0))
-            selection_stage = "lexical_fallback"
-            fallback_used = True
-            fallback_reason = "no_bm25_dense_hits"
-        else:
-            fused = []
-            selection_stage = "empty"
-            fallback_reason = "no_candidates"
-    elif spec["use_bm25"]:
-        fused = sorted(bm25_results, key=lambda x: x.get("bm25_score", 0), reverse=True)
-        selection_stage = "bm25_only"
-    else:
-        fused = sorted(dense_results, key=lambda x: x.get("dense_score", 0), reverse=True)
-        selection_stage = "dense_only"
 
-    fused = policy_service._enrich_with_parent_context(db, fused[:candidate_limit])
+            if strict_hit:
+                if use_chunk_ids_as_strict_targets and chunk_id in acceptable_chunk_ids and chunk_id is not None:
+                    strict_hits.add((f"CHUNK:{chunk_id}", ""))
+                if article and clause and ((article, clause) in strict_expected_pairs):
+                    strict_hits.add((article, clause))
+                if strict_first_rank == 0:
+                    strict_first_rank = idx
+            if loose_hit:
+                if article:
+                    loose_hits.add((article, ""))
+                if loose_first_rank == 0:
+                    loose_first_rank = idx
 
-    reranker_used = False
-    reranker_type = "none"
-    if spec["use_rerank"] and fused:
-        rerank_input_limit = min(len(fused), 25)
-        rerank_input = [dict(v) for v in fused[:rerank_input_limit]]
-        reranked = rerank_with_cross_encoder(rerank_input, dense_query)
-        reranked_ids = {row.get("chunk_id") for row in reranked if row.get("chunk_id") is not None}
-        tail = [row for row in fused[rerank_input_limit:] if row.get("chunk_id") not in reranked_ids]
-        fused = reranked + tail
+            strict_gains.append(strict_gain)
+            loose_gains.append(loose_gain)
 
-        if any(row.get("cross_encoder_available") is True for row in reranked):
-            reranker_used = True
-            reranker_type = "cross_encoder"
-            selection_stage = "reranked_cross_encoder"
-
-    results = _build_retrieval_results(
-        fused,
-        limit=limit,
-        selection_stage=selection_stage,
-        fallback_used=fallback_used,
-        fallback_reason=fallback_reason,
-        reranker_used=reranker_used,
-        reranker_type=reranker_type,
-    )
-    return {
-        "strategy": strategy,
-        "chunking_mode": chunking_mode,
-        "candidate_limit": candidate_limit,
-        "selection_stage": selection_stage,
-        "fallback_used": fallback_used,
-        "fallback_reason": fallback_reason,
-        "reranker_used": reranker_used,
-        "reranker_type": reranker_type,
-        "dense_query": dense_query,
-        "bm25_count": len(bm25_results),
-        "dense_count": len(dense_results),
-        "results": results,
-    }
-
-
-def _expected_chunk_ids(gold_example: dict[str, Any]) -> set[int]:
-    values = (
-        _as_list(gold_example.get("acceptable_chunk_ids"))
-        + _as_list(gold_example.get("expected_chunk_ids"))
-    )
-    out: set[int] = set()
-    for value in values:
-        try:
-            out.add(int(value))
-        except Exception:
-            continue
-    return out
-
-
-def _expected_articles(gold_example: dict[str, Any]) -> set[str]:
-    values = (
-        _as_list(gold_example.get("expected_regulation_article"))
-        + _as_list(gold_example.get("expected_article"))
-        + _as_list(gold_example.get("expected_articles"))
-    )
-    return {_normalize_token(v) for v in values if str(v).strip()}
-
-
-def _expected_clauses(gold_example: dict[str, Any]) -> set[str]:
-    values = (
-        _as_list(gold_example.get("expected_regulation_clause"))
-        + _as_list(gold_example.get("expected_clause"))
-        + _as_list(gold_example.get("expected_clauses"))
-    )
-    return {_normalize_token(v) for v in values if str(v).strip()}
-
-
-def _expected_relevant_count(gold_example: dict[str, Any]) -> int:
-    chunk_ids = _expected_chunk_ids(gold_example)
-    articles = _expected_articles(gold_example)
-    clauses = _expected_clauses(gold_example)
-    if chunk_ids:
-        return len(chunk_ids)
-    if articles:
-        return len(articles)
-    if clauses:
-        return len(clauses)
-    return 1
-
-
-def _is_relevant(
-    item: dict[str, Any],
-    gold_example: dict[str, Any],
-) -> tuple[bool, str | None]:
-    chunk_id = _extract_chunk_id(item)
-    article = _normalize_token(_extract_article(item))
-    clause = _normalize_token(_extract_clause(item))
-
-    chunk_ids = _expected_chunk_ids(gold_example)
-    if chunk_id is not None and chunk_id in chunk_ids:
-        return True, f"chunk:{chunk_id}"
-
-    articles = _expected_articles(gold_example)
-    clauses = _expected_clauses(gold_example)
-    if article and articles and article in articles:
-        if clauses:
-            if clause and clause in clauses:
-                return True, f"article_clause:{article}:{clause}"
-            return False, None
-        return True, f"article:{article}"
-
-    return False, None
-
-
-def compute_retrieval_metrics_for_case(
-    retrieved: list[dict[str, Any]],
-    gold_example: dict[str, Any],
-    *,
-    top_ks: tuple[int, ...] = (3, 5),
-    ndcg_k: int = 5,
-) -> dict[str, Any]:
-    """
-    단일 케이스 기준 retrieval 지표 계산.
-    반환:
-      recall@k, mrr, ndcg@k
-    """
-    expected_count = _expected_relevant_count(gold_example)
-
-    metrics: dict[str, Any] = {}
-    for k in top_ks:
-        matched: set[str] = set()
-        for item in retrieved[:k]:
-            ok, key = _is_relevant(item, gold_example)
-            if ok and key is not None:
-                matched.add(key)
-        metrics[f"recall@{k}"] = round(min(1.0, len(matched) / max(1, expected_count)), 6)
-
-    first_rank = 0
-    for idx, item in enumerate(retrieved, start=1):
-        ok, _ = _is_relevant(item, gold_example)
-        if ok:
-            first_rank = idx
-            break
-    metrics["mrr"] = round(1.0 / first_rank, 6) if first_rank > 0 else 0.0
-
-    rel_vector: list[int] = []
-    for item in retrieved[:ndcg_k]:
-        ok, _ = _is_relevant(item, gold_example)
-        rel_vector.append(1 if ok else 0)
-
-    dcg = 0.0
-    for idx, rel in enumerate(rel_vector, start=1):
-        if rel <= 0:
-            continue
-        dcg += rel / math.log2(idx + 1)
-    ideal_rels = [1] * min(expected_count, ndcg_k)
-    idcg = 0.0
-    for idx, rel in enumerate(ideal_rels, start=1):
-        idcg += rel / math.log2(idx + 1)
-    metrics[f"ndcg@{ndcg_k}"] = round((dcg / idcg) if idcg > 0 else 0.0, 6)
-    return metrics
-
-
-def _priority_weight(value: Any) -> float:
-    if value is None:
-        return 1.0
-    try:
-        numeric = float(value)
-        if numeric > 0:
-            return numeric
-    except Exception:
-        pass
-    token = str(value).strip().upper()
-    mapping = {"P0": 3.0, "HIGH": 2.0, "MEDIUM": 1.5, "LOW": 1.0}
-    return mapping.get(token, 1.0)
-
-
-def _build_body_evidence_from_gold(gold_example: dict[str, Any]) -> dict[str, Any]:
-    body = dict(gold_example.get("body_evidence") or {})
-    case_type = str(gold_example.get("case_type") or body.get("case_type") or "").strip()
-    query = str(gold_example.get("query") or "").strip()
-    if case_type and "case_type" not in body:
-        body["case_type"] = case_type
-    if query:
-        extra = list(body.get("_extra_keywords") or [])
-        if query not in extra:
-            extra.append(query)
-        body["_extra_keywords"] = extra
-    return body
-
-
-def evaluate_gold_dataset(
-    db: Any,
-    gold_examples: list[dict[str, Any]],
-    *,
-    strategies: list[str] | None = None,
-    chunking_modes: list[str] | None = None,
-    top_ks: tuple[int, ...] = (3, 5),
-    ndcg_k: int = 5,
-) -> dict[str, Any]:
-    """
-    Gold dataset 기반 retrieval 평가 루프.
-    - Recall@k
-    - MRR
-    - nDCG@k
-    """
-    chosen_strategies = strategies or list(RETRIEVAL_STRATEGIES)
-    chosen_chunking_modes = chunking_modes or ["hybrid_hierarchical"]
-    eval_limit = max(max(top_ks), ndcg_k)
-
-    reports: list[dict[str, Any]] = []
-    for strategy in chosen_strategies:
-        for chunking_mode in chosen_chunking_modes:
-            cases: list[dict[str, Any]] = []
-            for idx, gold in enumerate(gold_examples):
-                body = _build_body_evidence_from_gold(gold)
-                run = run_retrieval_strategy(
-                    db,
-                    body,
-                    strategy=strategy,
-                    chunking_mode=chunking_mode,
-                    limit=eval_limit,
-                )
-                metrics = compute_retrieval_metrics_for_case(
-                    run.get("results") or [],
-                    gold,
-                    top_ks=top_ks,
-                    ndcg_k=ndcg_k,
-                )
-                case_id = (
-                    gold.get("id")
-                    or gold.get("voucher_key")
-                    or gold.get("case_id")
-                    or f"case_{idx+1}"
-                )
-                weight = _priority_weight(gold.get("priority"))
-                cases.append(
+            if idx <= 3:
+                top_results.append(
                     {
-                        "case_id": case_id,
-                        "priority": gold.get("priority"),
-                        "weight": weight,
-                        "metrics": metrics,
-                        "selection_stage": run.get("selection_stage"),
-                        "reranker_used": run.get("reranker_used"),
-                        "fallback_used": run.get("fallback_used"),
-                        "top_result": (run.get("results") or [None])[0],
+                        "rank": idx,
+                        "chunk_id": chunk_id,
+                        "article": _extract_article(item),
+                        "clause": _extract_clause(item),
+                        "score": _extract_score(item),
                     }
                 )
 
-            denominator = max(1, len(cases))
-            weight_sum = sum(float(c.get("weight") or 1.0) for c in cases) or 1.0
-            summary: dict[str, Any] = {"case_count": len(cases)}
-            for k in top_ks:
-                key = f"recall@{k}"
-                mean_value = sum(c["metrics"].get(key, 0.0) for c in cases) / denominator
-                weighted_value = sum(c["metrics"].get(key, 0.0) * float(c.get("weight") or 1.0) for c in cases) / weight_sum
-                summary[key] = round(mean_value, 6)
-                summary[f"{key}_weighted"] = round(weighted_value, 6)
+        loose_recall = len(loose_hits) / max(1, len(loose_expected))
+        strict_recall = len(strict_hits) / max(1, len(strict_expected) if strict_expected else 1)
 
-            mrr = sum(c["metrics"].get("mrr", 0.0) for c in cases) / denominator
-            mrr_w = sum(c["metrics"].get("mrr", 0.0) * float(c.get("weight") or 1.0) for c in cases) / weight_sum
-            ndcg_key = f"ndcg@{ndcg_k}"
-            ndcg = sum(c["metrics"].get(ndcg_key, 0.0) for c in cases) / denominator
-            ndcg_w = sum(c["metrics"].get(ndcg_key, 0.0) * float(c.get("weight") or 1.0) for c in cases) / weight_sum
-            summary["mrr"] = round(mrr, 6)
-            summary["mrr_weighted"] = round(mrr_w, 6)
-            summary[ndcg_key] = round(ndcg, 6)
-            summary[f"{ndcg_key}_weighted"] = round(ndcg_w, 6)
+        loose_mrr = (1.0 / loose_first_rank) if loose_first_rank > 0 else 0.0
+        strict_mrr = (1.0 / strict_first_rank) if strict_first_rank > 0 else 0.0
 
-            reports.append(
-                {
-                    "strategy": strategy,
-                    "chunking_mode": chunking_mode,
-                    "summary": summary,
-                    "cases": cases,
-                }
+        loose_ndcg = self._ndcg(loose_gains, self._ideal_gains(targets, strict=False, k=k))
+        strict_ndcg = self._ndcg(
+            strict_gains,
+            self._ideal_gains(
+                targets,
+                strict=True,
+                k=k,
+                acceptable_chunk_ids=(acceptable_chunk_ids if use_chunk_ids_as_strict_targets else None),
+            ),
+        )
+
+        negative_violation = any(_normalize_token(v) in must_not_return for v in retrieved_articles)
+
+        return {
+            "matched": loose_first_rank > 0,
+            "matched_at_rank": loose_first_rank if loose_first_rank > 0 else None,
+            "strict_match": strict_first_rank > 0,
+            "strict_matched_at_rank": strict_first_rank if strict_first_rank > 0 else None,
+            "loose_recall": round(loose_recall, 6),
+            "strict_recall": round(strict_recall, 6),
+            "loose_mrr": round(loose_mrr, 6),
+            "strict_mrr": round(strict_mrr, 6),
+            "loose_ndcg": round(loose_ndcg, 6),
+            "strict_ndcg": round(strict_ndcg, 6),
+            "top_results": top_results,
+            "retrieved_articles": retrieved_articles,
+            "retrieved_chunk_ids": retrieved_chunk_ids,
+            "expected_targets": [t.__dict__ for t in targets],
+            "acceptable_chunk_ids": sorted(acceptable_chunk_ids),
+            "negative_violation": negative_violation,
+            "must_not_return_articles": [v for v in case.get("must_not_return_articles") or []],
+        }
+
+    def _targets(self, case: dict[str, Any]) -> list[GoldTarget]:
+        out: list[GoldTarget] = []
+        for raw in case.get("expected_targets") or []:
+            if not isinstance(raw, dict):
+                continue
+            article = str(raw.get("article") or "").strip()
+            if not article:
+                continue
+            clause = str(raw.get("clause") or "").strip()
+            try:
+                weight = float(raw.get("weight", 1.0))
+            except Exception:
+                weight = 1.0
+            out.append(GoldTarget(article=article, clause=clause, weight=(weight if weight > 0 else 1.0)))
+        return out
+
+    def _judge_item(
+        self,
+        item: dict[str, Any],
+        targets: list[GoldTarget],
+        acceptable_chunk_ids: set[int],
+        *,
+        use_chunk_ids_as_strict_targets: bool,
+    ) -> tuple[bool, bool, float, float]:
+        chunk_id = _extract_chunk_id(item)
+        article = _normalize_token(_extract_article(item))
+        clause = _normalize_token(_extract_clause(item))
+
+        strict_hit = False
+        loose_hit = False
+        strict_gain = 0.0
+        loose_gain = 0.0
+
+        if chunk_id is not None and chunk_id in acceptable_chunk_ids:
+            strict_hit = True
+            if use_chunk_ids_as_strict_targets:
+                strict_gain = max(strict_gain, 2.0)
+
+        for t in targets:
+            t_article = _normalize_token(t.article)
+            t_clause = _normalize_token(t.clause)
+            if article and article == t_article:
+                loose_hit = True
+                loose_gain = max(loose_gain, float(t.weight))
+                if t_clause and clause and clause == t_clause:
+                    strict_hit = True
+                    strict_gain = max(strict_gain, float(t.weight))
+
+        return strict_hit, loose_hit, strict_gain, loose_gain
+
+    def _ideal_gains(
+        self,
+        targets: list[GoldTarget],
+        *,
+        strict: bool,
+        k: int,
+        acceptable_chunk_ids: set[int] | None = None,
+    ) -> list[float]:
+        gains = [float(t.weight) for t in targets]
+        if strict and acceptable_chunk_ids:
+            gains.extend([2.0 for _ in acceptable_chunk_ids])
+        gains.sort(reverse=True)
+        return gains[:k]
+
+    def _ndcg(self, gains: list[float], ideal_gains: list[float]) -> float:
+        def _dcg(vals: list[float]) -> float:
+            score = 0.0
+            for i, g in enumerate(vals, start=1):
+                if g <= 0:
+                    continue
+                score += g / math.log2(i + 1)
+            return score
+
+        dcg = _dcg(gains)
+        idcg = _dcg(ideal_gains)
+        return (dcg / idcg) if idcg > 0 else 0.0
+
+
+class MetricCalculator:
+    """dataset 전체 metric 집계."""
+
+    def summarize(self, case_rows: list[dict[str, Any]], *, k: int) -> dict[str, Any]:
+        if not case_rows:
+            return {
+                "Recall@k": 0.0,
+                "MRR": 0.0,
+                "nDCG@k": 0.0,
+                "Strict Recall@k": 0.0,
+                "Strict MRR": 0.0,
+                "Strict nDCG@k": 0.0,
+            }
+
+        n = len(case_rows)
+        summary = {
+            "Recall@k": round(sum(v["loose_recall"] for v in case_rows) / n, 6),
+            "MRR": round(sum(v["loose_mrr"] for v in case_rows) / n, 6),
+            "nDCG@k": round(sum(v["loose_ndcg"] for v in case_rows) / n, 6),
+            "Strict Recall@k": round(sum(v["strict_recall"] for v in case_rows) / n, 6),
+            "Strict MRR": round(sum(v["strict_mrr"] for v in case_rows) / n, 6),
+            "Strict nDCG@k": round(sum(v["strict_ndcg"] for v in case_rows) / n, 6),
+            "negative_violation_rate": round(sum(1 for v in case_rows if v.get("negative_violation")) / n, 6),
+            "case_count": n,
+        }
+
+        weighted = self._weighted(case_rows)
+        return {"summary_metrics": summary, "weighted_metrics": weighted}
+
+    def _priority_weight(self, priority: Any) -> float:
+        token = str(priority or "P2").strip().upper()
+        return PRIORITY_WEIGHTS.get(token, 1.0)
+
+    def _weighted(self, case_rows: list[dict[str, Any]]) -> dict[str, float]:
+        denom = sum(self._priority_weight(v.get("priority")) for v in case_rows) or 1.0
+
+        def _wavg(key: str) -> float:
+            return round(
+                sum(float(v.get(key, 0.0)) * self._priority_weight(v.get("priority")) for v in case_rows) / denom,
+                6,
             )
 
-    return {
-        "dataset_size": len(gold_examples),
-        "strategies": chosen_strategies,
-        "chunking_modes": chosen_chunking_modes,
-        "top_ks": list(top_ks),
-        "ndcg_k": ndcg_k,
-        "reports": reports,
+        return {
+            "Recall@k_weighted": _wavg("loose_recall"),
+            "MRR_weighted": _wavg("loose_mrr"),
+            "nDCG@k_weighted": _wavg("loose_ndcg"),
+            "Strict Recall@k_weighted": _wavg("strict_recall"),
+            "Strict MRR_weighted": _wavg("strict_mrr"),
+            "Strict nDCG@k_weighted": _wavg("strict_ndcg"),
+        }
+
+
+class ExperimentRunner:
+    def __init__(self, db: Session):
+        self.db = db
+        self.loader = GoldDatasetLoader()
+        self.retrieval_runner = RetrievalRunner(db)
+        self.relevance = RelevanceEvaluator()
+        self.metrics = MetricCalculator()
+
+    def evaluate_gold_dataset(
+        self,
+        gold_dataset: list[dict[str, Any]] | str | Path,
+        *,
+        strategy: str,
+        k: int = 5,
+        use_query_rewrite: bool = True,
+        use_body_evidence: bool = True,
+        chunking_mode: str = "hybrid_hierarchical",
+        trace_level: str = "basic",
+    ) -> dict[str, Any]:
+        cases = self.loader.load(gold_dataset)
+        case_rows: list[dict[str, Any]] = []
+
+        for case in cases:
+            run = self.retrieval_runner.run_case(
+                case,
+                strategy=strategy,
+                k=k,
+                use_query_rewrite=use_query_rewrite,
+                use_body_evidence=use_body_evidence,
+                chunking_mode=chunking_mode,
+                trace_level=trace_level,
+            )
+            case_eval = self.relevance.evaluate_case(case, run.get("results") or [], k=k)
+            row = {
+                "id": case.get("id"),
+                "query": case.get("query"),
+                "priority": case.get("priority"),
+                "matched": case_eval["matched"],
+                "matched_at_rank": case_eval["matched_at_rank"],
+                "strict_match": case_eval["strict_match"],
+                "strict_matched_at_rank": case_eval["strict_matched_at_rank"],
+                "top_results": case_eval["top_results"],
+                "retrieval_strategy": strategy,
+                "dense_query": run.get("dense_query"),
+                "rewrite_used": run.get("rewrite_used"),
+                "body_evidence_used": run.get("body_evidence_used"),
+                "retrieved_articles": case_eval["retrieved_articles"],
+                "retrieved_chunk_ids": case_eval["retrieved_chunk_ids"],
+                "expected_targets": case_eval["expected_targets"],
+                "acceptable_chunk_ids": case_eval["acceptable_chunk_ids"],
+                "negative_violation": case_eval["negative_violation"],
+                "must_not_return_articles": case_eval["must_not_return_articles"],
+                "selection_stage": run.get("selection_stage"),
+                "trace": run.get("trace"),
+                "loose_recall": case_eval["loose_recall"],
+                "strict_recall": case_eval["strict_recall"],
+                "loose_mrr": case_eval["loose_mrr"],
+                "strict_mrr": case_eval["strict_mrr"],
+                "loose_ndcg": case_eval["loose_ndcg"],
+                "strict_ndcg": case_eval["strict_ndcg"],
+            }
+            case_rows.append(row)
+
+        summary = self.metrics.summarize(case_rows, k=k)
+        return {
+            "strategy": strategy,
+            "k": k,
+            "rewrite_used": use_query_rewrite,
+            "body_evidence_used": use_body_evidence,
+            "chunking_mode": chunking_mode,
+            **summary,
+            "cases": case_rows,
+        }
+
+    def compare_retrieval_strategies(
+        self,
+        gold_dataset: list[dict[str, Any]] | str | Path,
+        *,
+        k: int = 5,
+        use_query_rewrite: bool = True,
+        use_body_evidence: bool = True,
+        chunking_mode: str = "hybrid_hierarchical",
+    ) -> dict[str, Any]:
+        out: dict[str, Any] = {}
+        for strategy in RETRIEVAL_STRATEGIES:
+            out[strategy] = self.evaluate_gold_dataset(
+                gold_dataset,
+                strategy=strategy,
+                k=k,
+                use_query_rewrite=use_query_rewrite,
+                use_body_evidence=use_body_evidence,
+                chunking_mode=chunking_mode,
+            )
+        return out
+
+    def compare_query_rewrite(
+        self,
+        gold_dataset: list[dict[str, Any]] | str | Path,
+        *,
+        strategy: str = "hybrid_rrf_rerank",
+        k: int = 5,
+        use_body_evidence: bool = True,
+        chunking_mode: str = "hybrid_hierarchical",
+    ) -> dict[str, Any]:
+        return {
+            "rewrite_on": self.evaluate_gold_dataset(
+                gold_dataset,
+                strategy=strategy,
+                k=k,
+                use_query_rewrite=True,
+                use_body_evidence=use_body_evidence,
+                chunking_mode=chunking_mode,
+            ),
+            "rewrite_off": self.evaluate_gold_dataset(
+                gold_dataset,
+                strategy=strategy,
+                k=k,
+                use_query_rewrite=False,
+                use_body_evidence=use_body_evidence,
+                chunking_mode=chunking_mode,
+            ),
+        }
+
+    def compare_chunking_modes(
+        self,
+        gold_dataset: list[dict[str, Any]] | str | Path,
+        *,
+        strategy: str = "hybrid_rrf_rerank",
+        k: int = 5,
+        use_query_rewrite: bool = True,
+        use_body_evidence: bool = True,
+    ) -> dict[str, Any]:
+        out: dict[str, Any] = {}
+        for mode in CHUNKING_MODES:
+            out[mode] = self.evaluate_gold_dataset(
+                gold_dataset,
+                strategy=strategy,
+                k=k,
+                use_query_rewrite=use_query_rewrite,
+                use_body_evidence=use_body_evidence,
+                chunking_mode=mode,
+            )
+        return out
+
+    def debug_single_case(
+        self,
+        case_id: str,
+        gold_dataset: list[dict[str, Any]] | str | Path,
+        *,
+        strategy: str = "hybrid_rrf_rerank",
+        k: int = 5,
+        use_query_rewrite: bool = True,
+        use_body_evidence: bool = True,
+        chunking_mode: str = "hybrid_hierarchical",
+    ) -> dict[str, Any]:
+        cases = self.loader.load(gold_dataset)
+        target = next((c for c in cases if str(c.get("id")) == str(case_id)), None)
+        if target is None:
+            raise ValueError(f"Case not found: {case_id}")
+
+        run = self.retrieval_runner.run_case(
+            target,
+            strategy=strategy,
+            k=k,
+            use_query_rewrite=use_query_rewrite,
+            use_body_evidence=use_body_evidence,
+            chunking_mode=chunking_mode,
+            trace_level="full",
+        )
+        case_eval = self.relevance.evaluate_case(target, run.get("results") or [], k=k)
+        return {
+            "id": target.get("id"),
+            "query": target.get("query"),
+            "retrieval_strategy": strategy,
+            "dense_query": run.get("dense_query"),
+            "rewrite_used": use_query_rewrite,
+            "body_evidence_used": use_body_evidence,
+            "retrieval_trace": run.get("trace"),
+            "top_candidates": (run.get("trace") or {}).get("stages", {}).get("bm25_candidates", []),
+            "rerank_results": (run.get("trace") or {}).get("stages", {}).get("reranked_candidates", []),
+            "final_results": run.get("results") or [],
+            "strict_vs_loose": {
+                "loose_recall": case_eval["loose_recall"],
+                "strict_recall": case_eval["strict_recall"],
+                "loose_mrr": case_eval["loose_mrr"],
+                "strict_mrr": case_eval["strict_mrr"],
+                "loose_ndcg": case_eval["loose_ndcg"],
+                "strict_ndcg": case_eval["strict_ndcg"],
+                "matched_at_rank": case_eval["matched_at_rank"],
+                "strict_matched_at_rank": case_eval["strict_matched_at_rank"],
+            },
+            "expected_targets": case_eval["expected_targets"],
+            "acceptable_chunk_ids": case_eval["acceptable_chunk_ids"],
+            "retrieved_articles": case_eval["retrieved_articles"],
+            "retrieved_chunk_ids": case_eval["retrieved_chunk_ids"],
+        }
+
+
+# --- Public wrappers ---
+
+def run_retrieval_strategy(
+    db: Session,
+    body_evidence: dict[str, Any],
+    *,
+    strategy: str = "hybrid_rrf_rerank",
+    chunking_mode: str = "hybrid_hierarchical",
+    limit: int = 5,
+    use_query_rewrite: bool = True,
+    use_body_evidence: bool = True,
+) -> dict[str, Any]:
+    """Backward-compatible wrapper."""
+    runner = RetrievalRunner(db)
+    fake_case = {
+        "id": "single",
+        "query": "",
+        "case_type": body_evidence.get("case_type"),
+        "body_evidence": body_evidence,
+        "expected_targets": [{"article": "제14조", "clause": "", "weight": 1.0}],
+        "acceptable_chunk_ids": [],
+        "priority": "P2",
     }
+    return runner.run_case(
+        fake_case,
+        strategy=strategy,
+        k=limit,
+        use_query_rewrite=use_query_rewrite,
+        use_body_evidence=use_body_evidence,
+        chunking_mode=chunking_mode,
+    )
+
+
+def evaluate_gold_dataset(
+    gold_dataset: list[dict[str, Any]] | str | Path,
+    strategy: str,
+    k: int = 5,
+    use_query_rewrite: bool = True,
+    use_body_evidence: bool = True,
+    *,
+    db: Session | None = None,
+    chunking_mode: str = "hybrid_hierarchical",
+) -> dict[str, Any]:
+    """요구 스펙의 대표 평가 함수."""
+    if db is not None:
+        runner = ExperimentRunner(db)
+        return runner.evaluate_gold_dataset(
+            gold_dataset,
+            strategy=strategy,
+            k=k,
+            use_query_rewrite=use_query_rewrite,
+            use_body_evidence=use_body_evidence,
+            chunking_mode=chunking_mode,
+        )
+
+    engine = create_engine(settings.database_url, future=True)
+    with Session(engine) as session:
+        runner = ExperimentRunner(session)
+        return runner.evaluate_gold_dataset(
+            gold_dataset,
+            strategy=strategy,
+            k=k,
+            use_query_rewrite=use_query_rewrite,
+            use_body_evidence=use_body_evidence,
+            chunking_mode=chunking_mode,
+        )
 
 
 def compare_retrieval_strategies(
-    db: Any,
-    body_evidence: dict[str, Any],
+    gold_dataset: list[dict[str, Any]] | str | Path,
     *,
-    strategies: list[str] | None = None,
+    db: Session | None = None,
+    k: int = 5,
+    use_query_rewrite: bool = True,
+    use_body_evidence: bool = True,
     chunking_mode: str = "hybrid_hierarchical",
-    limit: int = 5,
 ) -> dict[str, Any]:
-    """
-    단일 케이스에서 전략별 결과를 비교한다.
-    """
-    chosen_strategies = strategies or list(RETRIEVAL_STRATEGIES)
-    runs: list[dict[str, Any]] = []
-    for strategy in chosen_strategies:
-        run = run_retrieval_strategy(
-            db,
-            body_evidence,
-            strategy=strategy,
+    if db is not None:
+        return ExperimentRunner(db).compare_retrieval_strategies(
+            gold_dataset,
+            k=k,
+            use_query_rewrite=use_query_rewrite,
+            use_body_evidence=use_body_evidence,
             chunking_mode=chunking_mode,
-            limit=limit,
         )
-        top = (run.get("results") or [None])[0]
-        runs.append(
-            {
-                "strategy": strategy,
-                "chunking_mode": chunking_mode,
-                "result_count": len(run.get("results") or []),
-                "selection_stage": run.get("selection_stage"),
-                "fallback_used": run.get("fallback_used"),
-                "reranker_used": run.get("reranker_used"),
-                "reranker_type": run.get("reranker_type"),
-                "top_result": top,
-                "results": run.get("results") or [],
-            }
+    engine = create_engine(settings.database_url, future=True)
+    with Session(engine) as session:
+        return ExperimentRunner(session).compare_retrieval_strategies(
+            gold_dataset,
+            k=k,
+            use_query_rewrite=use_query_rewrite,
+            use_body_evidence=use_body_evidence,
+            chunking_mode=chunking_mode,
         )
 
-    return {
-        "comparison_ready": True,
-        "run_count": len(runs),
-        "runs": runs,
-    }
+
+def compare_query_rewrite(
+    gold_dataset: list[dict[str, Any]] | str | Path,
+    *,
+    db: Session | None = None,
+    strategy: str = "hybrid_rrf_rerank",
+    k: int = 5,
+    use_body_evidence: bool = True,
+    chunking_mode: str = "hybrid_hierarchical",
+) -> dict[str, Any]:
+    if db is not None:
+        return ExperimentRunner(db).compare_query_rewrite(
+            gold_dataset,
+            strategy=strategy,
+            k=k,
+            use_body_evidence=use_body_evidence,
+            chunking_mode=chunking_mode,
+        )
+    engine = create_engine(settings.database_url, future=True)
+    with Session(engine) as session:
+        return ExperimentRunner(session).compare_query_rewrite(
+            gold_dataset,
+            strategy=strategy,
+            k=k,
+            use_body_evidence=use_body_evidence,
+            chunking_mode=chunking_mode,
+        )
+
+
+def compare_chunking_modes(
+    gold_dataset: list[dict[str, Any]] | str | Path,
+    *,
+    db: Session | None = None,
+    strategy: str = "hybrid_rrf_rerank",
+    k: int = 5,
+    use_query_rewrite: bool = True,
+    use_body_evidence: bool = True,
+) -> dict[str, Any]:
+    if db is not None:
+        return ExperimentRunner(db).compare_chunking_modes(
+            gold_dataset,
+            strategy=strategy,
+            k=k,
+            use_query_rewrite=use_query_rewrite,
+            use_body_evidence=use_body_evidence,
+        )
+    engine = create_engine(settings.database_url, future=True)
+    with Session(engine) as session:
+        return ExperimentRunner(session).compare_chunking_modes(
+            gold_dataset,
+            strategy=strategy,
+            k=k,
+            use_query_rewrite=use_query_rewrite,
+            use_body_evidence=use_body_evidence,
+        )
+
+
+def debug_single_case(
+    case_id: str,
+    gold_dataset: list[dict[str, Any]] | str | Path,
+    *,
+    db: Session | None = None,
+    strategy: str = "hybrid_rrf_rerank",
+    k: int = 5,
+    use_query_rewrite: bool = True,
+    use_body_evidence: bool = True,
+    chunking_mode: str = "hybrid_hierarchical",
+) -> dict[str, Any]:
+    if db is not None:
+        return ExperimentRunner(db).debug_single_case(
+            case_id,
+            gold_dataset,
+            strategy=strategy,
+            k=k,
+            use_query_rewrite=use_query_rewrite,
+            use_body_evidence=use_body_evidence,
+            chunking_mode=chunking_mode,
+        )
+    engine = create_engine(settings.database_url, future=True)
+    with Session(engine) as session:
+        return ExperimentRunner(session).debug_single_case(
+            case_id,
+            gold_dataset,
+            strategy=strategy,
+            k=k,
+            use_query_rewrite=use_query_rewrite,
+            use_body_evidence=use_body_evidence,
+            chunking_mode=chunking_mode,
+        )
 
 
 def load_gold_dataset(path: str | Path) -> list[dict[str, Any]]:
-    """
-    gold dataset 로더.
-    지원 형식:
-    - .json: list[object]
-    - .jsonl: line-delimited JSON objects
-    """
-    p = Path(path)
-    if not p.exists():
-        raise FileNotFoundError(f"Dataset file not found: {p}")
-
-    if p.suffix.lower() == ".jsonl":
-        out: list[dict[str, Any]] = []
-        for line in p.read_text(encoding="utf-8").splitlines():
-            row = line.strip()
-            if not row:
-                continue
-            parsed = json.loads(row)
-            if not isinstance(parsed, dict):
-                raise ValueError("Each JSONL row must be an object")
-            out.append(parsed)
-        return out
-
-    raw = json.loads(p.read_text(encoding="utf-8"))
-    if isinstance(raw, list):
-        if not all(isinstance(v, dict) for v in raw):
-            raise ValueError("JSON dataset must be list[object]")
-        return raw
-    raise ValueError("Unsupported dataset format: expected .json(list) or .jsonl")
+    return GoldDatasetLoader().load(path)
 
 
 def retrieval_quality_comparison(
@@ -888,22 +1287,113 @@ def retrieval_quality_comparison(
     result_a: list[dict[str, Any]],
     result_b: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    """
-    하위 호환용 비교 함수.
-    기존 count 비교를 유지하면서, top-k overlap 지표를 추가한다.
-    """
-    ids_a = [_extract_chunk_id(v) for v in result_a]
-    ids_b = [_extract_chunk_id(v) for v in result_b]
-    set_a = {v for v in ids_a if v is not None}
-    set_b = {v for v in ids_b if v is not None}
-    overlap = len(set_a & set_b)
-    union = len(set_a | set_b)
-    jaccard = (overlap / union) if union > 0 else 0.0
+    """하위 호환 비교 함수."""
+    ids_a = {_extract_chunk_id(v) for v in result_a if _extract_chunk_id(v) is not None}
+    ids_b = {_extract_chunk_id(v) for v in result_b if _extract_chunk_id(v) is not None}
+    overlap = len(ids_a & ids_b)
+    union = len(ids_a | ids_b)
     return {
         "strategy_a_count": len(result_a),
         "strategy_b_count": len(result_b),
         "overlap_count": overlap,
-        "jaccard_topk": round(jaccard, 6),
+        "jaccard_topk": round((overlap / union) if union > 0 else 0.0, 6),
         "comparison_ready": True,
         "case_type": body_evidence.get("case_type"),
     }
+
+
+def _default_dataset_path() -> str:
+    return str(Path("docs/Edu/retrieval_gold_template.jsonl"))
+
+
+def _write_or_print(payload: dict[str, Any], output: str | None) -> None:
+    text = json.dumps(payload, ensure_ascii=False, indent=2)
+    if output:
+        Path(output).write_text(text, encoding="utf-8")
+        print(f"[OK] report saved: {output}")
+    else:
+        print(text)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="RAG retrieval quality evaluator")
+    parser.add_argument("--dataset", default=_default_dataset_path(), help="gold dataset path (.json/.jsonl)")
+    parser.add_argument("--strategy", default="hybrid_rrf_rerank", choices=RETRIEVAL_STRATEGIES)
+    parser.add_argument("--k", type=int, default=5)
+    parser.add_argument("--chunking-mode", default="hybrid_hierarchical", choices=CHUNKING_MODES)
+    parser.add_argument("--rewrite", dest="rewrite", action="store_true", default=True)
+    parser.add_argument("--no-rewrite", dest="rewrite", action="store_false")
+    parser.add_argument("--body-evidence", dest="body_evidence", action="store_true", default=True)
+    parser.add_argument("--no-body-evidence", dest="body_evidence", action="store_false")
+    parser.add_argument("--evaluate", action="store_true", help="run evaluate_gold_dataset")
+    parser.add_argument("--compare-strategies", action="store_true", help="compare base retrieval strategies")
+    parser.add_argument("--compare-rewrite", action="store_true", help="compare rewrite on/off")
+    parser.add_argument("--compare-chunking", action="store_true", help="compare chunking modes")
+    parser.add_argument("--debug-case", default="", help="debug single case id")
+    parser.add_argument("--output", default="", help="optional output json path")
+    args = parser.parse_args()
+
+    dataset = args.dataset
+    output = args.output or None
+
+    # 실행 모드 선택
+    if args.debug_case:
+        payload = debug_single_case(
+            args.debug_case,
+            dataset,
+            strategy=args.strategy,
+            k=args.k,
+            use_query_rewrite=args.rewrite,
+            use_body_evidence=args.body_evidence,
+            chunking_mode=args.chunking_mode,
+        )
+        _write_or_print(payload, output)
+        return
+
+    if args.compare_strategies:
+        payload = compare_retrieval_strategies(
+            dataset,
+            k=args.k,
+            use_query_rewrite=args.rewrite,
+            use_body_evidence=args.body_evidence,
+            chunking_mode=args.chunking_mode,
+        )
+        _write_or_print(payload, output)
+        return
+
+    if args.compare_rewrite:
+        payload = compare_query_rewrite(
+            dataset,
+            strategy=args.strategy,
+            k=args.k,
+            use_body_evidence=args.body_evidence,
+            chunking_mode=args.chunking_mode,
+        )
+        _write_or_print(payload, output)
+        return
+
+    if args.compare_chunking:
+        payload = compare_chunking_modes(
+            dataset,
+            strategy=args.strategy,
+            k=args.k,
+            use_query_rewrite=args.rewrite,
+            use_body_evidence=args.body_evidence,
+        )
+        _write_or_print(payload, output)
+        return
+
+    if args.evaluate or True:
+        payload = evaluate_gold_dataset(
+            dataset,
+            strategy=args.strategy,
+            k=args.k,
+            use_query_rewrite=args.rewrite,
+            use_body_evidence=args.body_evidence,
+            chunking_mode=args.chunking_mode,
+        )
+        _write_or_print(payload, output)
+
+
+if __name__ == "__main__":
+    main()
