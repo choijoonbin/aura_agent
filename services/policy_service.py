@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date
+import json
 import re
 from typing import Any
 
@@ -717,11 +718,15 @@ def _enrich_with_parent_context(
     db: Session,
     chunks: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """CLAUSE 노드에 부모 ARTICLE 청크 맥락 prepend."""
+    """CLAUSE/ITEM 노드에 부모 청크 맥락 prepend.
+
+    - CLAUSE: 부모 ARTICLE chunk_text prepend
+    - ITEM: 부모 CLAUSE의 chunk_id를 context_chunk_ids에 추가 (chunk_text는 contextual_header가 이미 포함)
+    """
     parent_ids = [
         c.get("parent_id")
         for c in chunks
-        if c.get("node_type") == "CLAUSE" and c.get("parent_id")
+        if c.get("node_type") in ("CLAUSE", "ITEM") and c.get("parent_id")
     ]
     if not parent_ids:
         return chunks
@@ -739,8 +744,10 @@ def _enrich_with_parent_context(
 
     enriched = []
     for chunk in chunks:
-        if chunk.get("node_type") == "CLAUSE" and chunk.get("parent_id") in parent_map:
-            parent = parent_map[chunk["parent_id"]]
+        node_type = chunk.get("node_type")
+        parent_id = chunk.get("parent_id")
+        if node_type == "CLAUSE" and parent_id in parent_map:
+            parent = parent_map[parent_id]
             chunk = dict(chunk)
             chunk["context_chunk_ids"] = [parent["chunk_id"]]
             if chunk.get("chunk_text") and parent.get("parent_title") and not chunk["chunk_text"].strip().startswith("["):
@@ -748,6 +755,10 @@ def _enrich_with_parent_context(
                     f"[{parent.get('regulation_article', '')} {parent.get('parent_title', '')}] "
                     + chunk["chunk_text"]
                 )
+        elif node_type == "ITEM" and parent_id in parent_map:
+            # ITEM의 부모는 CLAUSE — chunk_text는 이미 contextual_header 포함, context_chunk_ids만 설정
+            chunk = dict(chunk)
+            chunk["context_chunk_ids"] = [parent_id]
         else:
             chunk = dict(chunk)
             if "context_chunk_ids" not in chunk:
@@ -926,10 +937,20 @@ def search_policy_chunks(db: Session, body_evidence: dict[str, Any], limit: int 
 
     results = []
     for item in enriched[:limit]:
+        # metadata_json에서 regulation_item 추출 (ITEM 노드 전용 필드)
+        meta = item.get("metadata_json")
+        if isinstance(meta, str):
+            try:
+                meta = json.loads(meta)
+            except Exception:
+                meta = {}
+        regulation_item = (meta or {}).get("regulation_item") if meta else None
         results.append({
             "doc_id": item.get("doc_id"),
             "article": item.get("regulation_article"),
             "clause": item.get("regulation_clause"),
+            "item": regulation_item,
+            "node_type": item.get("node_type"),
             "parent_title": item.get("parent_title"),
             "chunk_text": item.get("chunk_text"),
             "version": item.get("version"),

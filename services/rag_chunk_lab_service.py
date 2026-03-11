@@ -9,6 +9,10 @@ from typing import Any
 _ARTICLE_PATTERN = re.compile(r"^(제\s*\d+\s*조(?:\s*\([^)]+\))?)\s*(.*)$", re.MULTILINE)
 _CHAPTER_PATTERN = re.compile(r"^(제\s*\d+\s*장[^\n]*)", re.MULTILINE)
 _SECTION_PATTERN = re.compile(r"^(제\s*\d+\s*절[^\n]*)", re.MULTILINE)
+# 호(號) 마커 패턴: 줄 시작에서만 매칭 (문장 내부 "표 1. 참조" 오매칭 방지)
+_ITEM_PATTERN = re.compile(
+    r"(?:^|\n)\s*(\d+\.\s+|[가나다라마바사아자차카타파하]\.\s+)"
+)
 
 
 RULEBOOK_ROOT = Path("/Users/joonbinchoi/Work/AuraAgent/규정집")
@@ -101,7 +105,7 @@ PARENT_MIN = 200  # 이 길이 미만인 ARTICLE은 다음 조문과 병합
 @dataclass
 class ChunkNode:
     """계층적 청크 노드."""
-    node_type: str  # "ARTICLE" | "CLAUSE" | "PARAGRAPH"
+    node_type: str  # "ARTICLE" | "CLAUSE" | "ITEM"
     regulation_article: str | None
     regulation_clause: str | None
     parent_title: str | None
@@ -115,6 +119,8 @@ class ChunkNode:
     merged_with: str | None = None  # 병합된 조문 번호 (ARTICLE 병합 시)
     merged_articles: list[str] = field(default_factory=list)  # 병합에 포함된 원본 조문 번호 목록
     current_section: str = ""  # 절(節) 헤더 (검색/필터용 metadata 저장)
+    regulation_item: str | None = None  # 호(號) 마커 (예: "1.", "가.") — ITEM 노드 전용
+    parent_clause_chunk_index: int = -1  # ITEM 노드의 부모 CLAUSE chunk_index (DB 링크용)
 
 
 def _extract_article_title(header_line: str) -> tuple[str, str]:
@@ -128,8 +134,11 @@ def _extract_article_title(header_line: str) -> tuple[str, str]:
 
 
 def _split_into_clauses(article_body: str) -> list[tuple[str, str]]:
-    """조문 본문을 항/호 단위로 분리. 반환: [(clause_marker, clause_text), ...]."""
-    pattern = re.compile(r"([①②③④⑤⑥⑦⑧⑨⑩]|\d+\.\s|[가나다라마바사아자차카타파하]\.\s)")
+    """조문 본문을 항(①②③) 단위로만 분리. 반환: [(clause_marker, clause_text), ...]
+
+    호(1. / 가.) 마커는 포함하지 않는다. _split_into_items()에서 ITEM 노드로 별도 처리.
+    """
+    pattern = re.compile(r"([①②③④⑤⑥⑦⑧⑨⑩])")
     parts = pattern.split(article_body)
     clauses: list[tuple[str, str]] = []
     marker = ""
@@ -145,6 +154,26 @@ def _split_into_clauses(article_body: str) -> list[tuple[str, str]]:
     if buffer and "".join(buffer).strip():
         clauses.append((marker, "".join(buffer).strip()))
     return clauses
+
+
+def _split_into_items(clause_text: str) -> list[tuple[str, str]]:
+    """항(clause) 본문을 호(1. / 가.) 단위로 분리.
+
+    반환: [(item_marker, item_text), ...]
+    호 패턴이 없으면 빈 리스트 반환 (ITEM 노드 미생성).
+    """
+    matches = list(_ITEM_PATTERN.finditer(clause_text))
+    if not matches:
+        return []
+    items: list[tuple[str, str]] = []
+    for i, match in enumerate(matches):
+        marker = match.group(1).strip()  # "1." 또는 "가."
+        content_start = match.end()
+        content_end = matches[i + 1].start() if i + 1 < len(matches) else len(clause_text)
+        item_text = clause_text[content_start:content_end].strip()
+        if item_text:
+            items.append((marker, item_text))
+    return items
 
 
 def _build_contextual_header(
@@ -163,6 +192,33 @@ def _build_contextual_header(
         parts.append(article)
     if title:
         parts.append(title)
+    if parts:
+        return f"[{' > '.join(parts)}] "
+    return ""
+
+
+def _build_item_contextual_header(
+    article: str,
+    title: str,
+    clause_marker: str,
+    chapter_context: str = "",
+    section_context: str = "",
+) -> str:
+    """ITEM 노드용 contextual header. 항(clause) 마커까지 포함.
+
+    예: [제7장 계정별 세부 집행 기준 > 제23조 > (식대) > ③]
+    """
+    parts = []
+    if chapter_context:
+        parts.append(chapter_context)
+    if section_context:
+        parts.append(section_context)
+    if article:
+        parts.append(article)
+    if title:
+        parts.append(title)
+    if clause_marker:
+        parts.append(clause_marker)
     if parts:
         return f"[{' > '.join(parts)}] "
     return ""
@@ -394,7 +450,43 @@ def hierarchical_chunk(text: str) -> list[ChunkNode]:
                 chunk_index += 1
                 article_node.children.append(clause_node)
                 nodes.append(clause_node)
-            nodes.insert(len(nodes) - len(article_node.children), article_node)
+
+                # ITEM 노드 생성: 호(1./가.) 단위 분리
+                # marker 여부와 무관하게 항상 실행 — 빈 marker clause에도 1./가. 항목이 존재할 수 있음
+                items = _split_into_items(clause_text)
+                if items:
+                    for item_marker, item_text in items:
+                        item_contextual_header = _build_item_contextual_header(
+                            src_article,
+                            source_title,
+                            clause_marker=marker,
+                            chapter_context=art.get("current_chapter") or "",
+                            section_context=art.get("current_section") or "",
+                        )
+                        item_chunk_text = f"{item_contextual_header}{item_marker} {item_text}".strip()
+                        item_node = ChunkNode(
+                            node_type="ITEM",
+                            regulation_article=src_article or regulation_article,
+                            regulation_clause=marker or None,
+                            regulation_item=item_marker,
+                            parent_clause_chunk_index=clause_node.chunk_index,
+                            parent_title=source_title,
+                            chunk_text=item_chunk_text,
+                            search_text=item_text,
+                            contextual_header=item_contextual_header,
+                            chunk_index=chunk_index,
+                            semantic_group=semantic_group,
+                            current_section=current_section,
+                        )
+                        chunk_index += 1
+                        clause_node.children.append(item_node)
+                        nodes.append(item_node)
+
+            # ARTICLE을 모든 자손(CLAUSE + ITEM) 앞에 삽입
+            total_desc = len(article_node.children) + sum(
+                len(c.children) for c in article_node.children
+            )
+            nodes.insert(len(nodes) - total_desc, article_node)
         else:
             nodes.append(article_node)
 
@@ -412,10 +504,15 @@ def preview_chunks_hierarchical(text: str) -> list[dict[str, Any]]:
             "contextual_header": node.contextual_header,
             "length": len(node.chunk_text),
             "strategy": "hierarchical_parent_child",
-            "chunk_type": "parent" if node.node_type == "ARTICLE" else "leaf",
+            "chunk_type": (
+                "parent" if node.node_type == "ARTICLE"
+                else "leaf" if node.node_type == "ITEM"
+                else "child"  # CLAUSE는 중간 계층
+            ),
             "node_type": node.node_type,
             "regulation_article": node.regulation_article,
             "regulation_clause": node.regulation_clause,
+            "regulation_item": getattr(node, "regulation_item", None),
         }
         for node in nodes
     ]

@@ -172,9 +172,11 @@ def save_hierarchical_chunks(
     )
 
     article_nodes = [n for n in nodes if n.node_type == "ARTICLE"]
-    clause_nodes = [n for n in nodes if n.node_type != "ARTICLE"]
+    clause_nodes  = [n for n in nodes if n.node_type == "CLAUSE"]
+    item_nodes    = [n for n in nodes if n.node_type == "ITEM"]
 
     article_chunk_id_map: dict[str, int] = {}
+    clause_chunk_id_map: dict[int, int] = {}  # chunk_index → DB chunk_id (ITEM 부모 링크용)
     use_search_tokens = _embedding_column_exists(db, "search_tokens")
 
     if use_search_tokens:
@@ -297,8 +299,47 @@ def save_hierarchical_chunks(
             clause_params["search_tokens"] = _expand_tokens(node.search_text or "")
         row = db.execute(insert_sql, clause_params).fetchone()
         chunk_id = row[0]
+        clause_chunk_id_map[node.chunk_index] = chunk_id  # ITEM 부모 링크용
         saved_chunks.append(
             {"chunk_id": chunk_id, "search_text": node.search_text, "node_type": "CLAUSE"}
+        )
+
+    for node in item_nodes:
+        parent_clause_idx = getattr(node, "parent_clause_chunk_index", -1)
+        parent_clause_db_id = clause_chunk_id_map.get(parent_clause_idx)
+        meta = {
+            "semantic_group": getattr(node, "semantic_group", "") or "",
+            "regulation_article": node.regulation_article or "",
+            "regulation_clause": node.regulation_clause or "",
+            "regulation_item": getattr(node, "regulation_item", "") or "",
+            "parent_article": node.regulation_article or "",
+            "current_section": getattr(node, "current_section", "") or "",
+        }
+        item_params: dict[str, Any] = {
+            "tenant_id": tenant_id,
+            "doc_id": doc_id,
+            "chunk_text": node.chunk_text,
+            "search_text": node.search_text,
+            "regulation_article": node.regulation_article,
+            "regulation_clause": node.regulation_clause,
+            "parent_title": node.parent_title,
+            "node_type": "ITEM",
+            "parent_id": parent_clause_db_id,
+            "parent_chunk_id": str(parent_clause_db_id) if parent_clause_db_id else None,
+            "chunk_level": "leaf",
+            "chunk_index": node.chunk_index,
+            "page_no": node.page_no,
+            "version": version,
+            "effective_from": effective_from,
+            "effective_to": effective_to,
+            "metadata_json": json.dumps(meta, ensure_ascii=False),
+        }
+        if use_search_tokens:
+            item_params["search_tokens"] = _expand_tokens(node.search_text or "")
+        row = db.execute(insert_sql, item_params).fetchone()
+        chunk_id = row[0]
+        saved_chunks.append(
+            {"chunk_id": chunk_id, "search_text": node.search_text, "node_type": "ITEM"}
         )
 
     search_texts = [c["search_text"] for c in saved_chunks]
@@ -366,6 +407,7 @@ def save_hierarchical_chunks(
         "total_chunks": len(saved_chunks),
         "article_chunks": len(article_nodes),
         "clause_chunks": len(clause_nodes),
+        "item_chunks": len(item_nodes),
         "embedding_saved": vectors is not None,
         "short_chunk_rate": short_chunk_rate,
     }
