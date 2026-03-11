@@ -301,6 +301,7 @@ def _merge_short_articles(
             prev = merged[-1]
             prev["body"] = (prev.get("body") or "") + "\n\n" + body
             prev["full_title"] = f"{prev.get('full_title', '')} ~ {art.get('full_title') or art_article}"
+            prev["article_header"] = prev["full_title"]
             prev["clauses"] = list(prev.get("clauses") or []) + art_clauses
             prev["merged_articles"] = list(prev.get("merged_articles") or []) + ([art_article] if art_article else [])
             source_title_map = dict(prev.get("source_title_map") or {})
