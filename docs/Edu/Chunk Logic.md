@@ -42,10 +42,10 @@ flowchart LR
 
 
 
-### 발표 시 강조 포인트
+### 강조 포인트
 
 1. **왜 3단계가 필요한가**: 조문(ARTICLE)만으로는 근거가 거칠고, 항/호 단위까지 내려가야 설명가능성이 올라간다.
-2. **왜 필터가 중요한가**: semantic_group/effective_date 필터로 잡음을 줄여서, 같은 모델로도 정확도를 높일 수 있다.
+2. **왜 필터가 중요한가**: semantic_group(**장/절 그룹**)/effective_date(**시행 기간)** 필터로 잡음을 줄여서, 같은 모델로도 정확도를 높일 수 있다.
 3. **왜 후처리가 필요한가**: RRF·Rerank·중복 제거가 없으면 “비슷한 근거 반복 채택”이 늘고, 판단 요약 품질이 흔들린다.
 
 ---
@@ -176,9 +176,10 @@ flowchart LR
 ### 5.1 검색 파이프라인 (단계)
 
 1. **키워드 생성**: `build_policy_keywords(body_evidence)` — case_type, 휴일, 한도, MCC, 전표 항목(sgtxt, hkont) 등.
-2. **BM25**: `rag_chunk.search_tsv`에 대한 `to_tsquery` 검색, `ts_rank_cd`로 정렬.
-3. **Dense**: 쿼리 텍스트를 임베딩한 뒤 `embedding_az <=> query_vector` (cosine distance)로 유사도 검색.
+2. **BM25**: `rag_chunk.search_tsv`에 대한 `to_tsquery` 검색, `ts_rank_cd`로 정렬.(키워드가 많이 나오는 문장을 잘 찾음)
+3. **Dense**: 쿼리 텍스트를 임베딩한 뒤 `embedding_az <=> query_vector` (cosine distance)로 유사도 검색.(의미가 비슷한 문장을 잘 찾음)
 4. **RRF (Reciprocal Rank Fusion)**: BM25 순위와 Dense 순위를 `weight/(k+rank)` (k=60)로 융합.
+  (BM25 순위와 Dense 순위를 **등수(rank)** 만으로 `1/(k+rank)` 점수를 매겨서 **더한 뒤**, 그 합으로 다시 순위를 매기는 방법.)
 5. **Contextual 보강**: `_enrich_with_parent_context()` — CLAUSE는 부모 ARTICLE의 `parent_title`을 chunk_text에 prepend하고 `context_chunk_ids` 설정. **ITEM**은 chunk_text에 이미 `_build_item_contextual_header`가 포함되므로 prepend 없이 **부모 CLAUSE의 chunk_id를 context_chunk_ids에만** 설정.
 6. **Cross-Encoder Rerank**: (선택) `sentence-transformers`의 `Dongjin-kr/ko-reranker`로 query–chunk 쌍 재정렬. 미설치 시 RRF 순위 유지.
 7. **Fallback**: BM25·Dense 모두 실패 시 LIKE 기반 lexical 검색.
@@ -207,6 +208,23 @@ flowchart LR
 - **원인**: 한 조문(예: 제23조 식대)은 계층 청킹 시 **ARTICLE 1개 + CLAUSE N개 + ITEM M개**로 저장된다. 검색 시 동일 조문의 여러 청크가 상위에 올라오면 채택 인용 목록에 제23조가 중복 노출될 수 있다.
 - **대응**: policy_rulebook_probe(agent_tools)에서 **채택 인용(policy_refs)** 을 만들 때 **조문(regulation_article) 단위로 중복 제거**한다. 후보를 점수 순으로 보되, 이미 채택한 조문은 건너뛰고 **서로 다른 조문만 최대 4~5건** 채택한다. ITEM 노드가 상위에 있어도 동일 조문이면 한 건만 선택되며, 화면에는 제23조가 한 번만 표시된다.
 - **그 외 근거(제39조, 제38조 등)**: 서로 다른 조문이므로 각각 1건씩 유지된다.
+
+### 5.4 검색 추적(Trace) 기반 설명가능성
+
+최근 `policy_service`에 **단계형 파이프라인 + 구조화된 trace**를 추가해, “왜 이 조항이 채택됐는지”를 운영/설명회에서 그대로 보여줄 수 있게 했다.
+
+- **단계 분리**: `rewrite_query → retrieve_candidates → fuse_candidates → rerank_candidates → finalize_context`
+- **호환성 유지**: `search_policy_chunks()` 기본 반환은 기존과 동일(리스트), `debug=True`일 때만 `chunks + trace` 반환
+- **추적 포인트**:
+  - search-level: `selection_stage`, `fallback_used`, `fallback_reason`, `reranker_used`, `reranker_type`, `weights`, `decision_summary`
+  - chunk-level: `bm25_candidates`, `dense_candidates`, `fused_candidates`, `reranked_candidates`, `selected_candidates`
+  - selected chunk: `why_selected`, `selected_by`, `score_detail(bm25/dense/rrf/cross_encoder/llm_rerank)`
+
+#### 발표 시 바로 쓰는 설명 문장(예시)
+
+- “이 근거는 `reranked_cross_encoder` 단계에서 상위로 선택됐고, `why_selected`가 cross-encoder 점수 기반으로 기록되어 있습니다.”
+- “이번 건은 `fallback_used=false`라서 BM25+Dense+RRF 경로에서 정상 선택됐습니다.”
+- “선정된 조항별로 `selected_by`, `selection_stage`, `scores`가 남아 재현성과 감사추적이 가능합니다.”
 
 > 참고: `[services/policy_service.py](services/policy_service.py)` — `search_policy_chunks()`, `_search_bm25()`, `_search_dense()`, `_reciprocal_rank_fusion()`, `_enrich_with_parent_context()`  
 > 참고: `[services/retrieval_quality.py](services/retrieval_quality.py)` — `rerank_with_cross_encoder()`  
@@ -336,6 +354,7 @@ sequenceDiagram
 - **계층**: 장(章) → 조(條) → 항(①②③, CLAUSE) → 호(1./가., ITEM) 파싱. 200자 미만 조문은 다음 조문과 병합. 검색 시 CLAUSE/ITEM에 부모 맥락(context_chunk_ids·contextual_header) 적용.
 - **파이프라인**: hierarchical_chunk → save_hierarchical_chunks(비활성화 → ARTICLE → CLAUSE → ITEM INSERT → search_text 기준 임베딩 → search_tsv 갱신).
 - **하이브리드 RAG 검색**: BM25(키워드) + Dense(의미)를 RRF(순위 기반 융합)로 융합하고, 케이스 유형별 가중치·(선택) Cross-Encoder Rerank를 적용. 검색 결과에 node_type·item(호 마커) 포함, _enrich_with_parent_context로 CLAUSE/ITEM 문맥 보강.
+- **설명가능성(신규 강조)**: debug trace에서 검색 단계별 후보/점수/선정사유(`why_selected`, `selected_by`, `selection_stage`)를 구조적으로 제공해 발표·운영·감사 대응에 바로 활용 가능.
 - **테이블**: `dwp_aura.rag_chunk`에 chunk_text, search_text, node_type(ARTICLE/CLAUSE/ITEM), parent_id, chunk_level(root/child/leaf), metadata_json.regulation_item(ITEM) 등 저장. 재색인 시 기존 청크는 is_active=false 후 새로 INSERT.
 
 ---
@@ -364,7 +383,7 @@ sequenceDiagram
 1. 문제 정의: “규정 RAG에서 정확도가 흔들리는 실제 원인(청킹/검색 노이즈)”
 2. 핵심 설계: 3단계 청킹(`ARTICLE→CLAUSE→ITEM`)과 왜 필요한지
 3. 정확도 메커니즘: 필터 체인 + RRF + Rerank + 중복 제거
-4. 보완 이력: 누락 버그/파싱 버그/metadata 보강과 개선 결과
-5. 데모 화면: 같은 케이스에서 채택 근거가 어떻게 안정화되는지
-6. 운영 가이드: 문서 추가 시 점검 체크리스트(청킹 미리보기, ITEM 생성 여부, 시행일 필터)
-
+4. 설명가능성: trace(`selection_stage`, `fallback_used`, `why_selected`)로 근거 채택 이유 시연
+5. 보완 이력: 누락 버그/파싱 버그/metadata 보강과 개선 결과
+6. 데모 화면: 같은 케이스에서 채택 근거가 어떻게 안정화되는지
+7. 운영 가이드: 문서 추가 시 점검 체크리스트(청킹 미리보기, ITEM 생성 여부, 시행일 필터)

@@ -613,6 +613,7 @@ def _search_dense(
     embed_column: str = settings.rag_embedding_column,
     use_hyde: bool = False,
     llm_client: Any = None,
+    query_text_override: str | None = None,
 ) -> list[dict[str, Any]]:
     """Dense 벡터 검색. 자연어 쿼리 사용, 선택 시 HyDE 적용. group_filter 있으면 해당 장(章) 내에서만 검색."""
     if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", str(embed_column or "")):
@@ -625,7 +626,9 @@ def _search_dense(
     except ImportError:
         return []
 
-    if use_hyde:
+    if query_text_override is not None:
+        query_text = str(query_text_override).strip()
+    elif use_hyde:
         query_text = _build_dense_query_with_hyde(body_evidence, llm_client=llm_client)
     else:
         query_text = _build_dense_query(body_evidence)
@@ -825,33 +828,132 @@ def _rerank_groups(groups: list[dict[str, Any]], body_evidence: dict[str, Any], 
     return sorted(groups, key=lambda item: item.get("retrieval_score", 0), reverse=True)
 
 
-def search_policy_chunks(db: Session, body_evidence: dict[str, Any], limit: int = 5) -> list[dict[str, Any]]:
-    """
-    메인 검색 함수 (기존 인터페이스 유지).
-
-    파이프라인: BM25 → Dense → RRF 융합 → Contextual 보강 → Cross-Encoder 재정렬.
-    BM25/Dense 모두 실패 시 LIKE 기반 legacy fallback.
-    """
-    effective_date = None
-    occurred_at = body_evidence.get("occurredAt")
-    if occurred_at:
+def _parse_metadata_json(raw_meta: Any) -> dict[str, Any]:
+    if isinstance(raw_meta, dict):
+        return raw_meta
+    if isinstance(raw_meta, str):
         try:
-            effective_date = date.fromisoformat(str(occurred_at)[:10])
+            parsed = json.loads(raw_meta)
+            if isinstance(parsed, dict):
+                return parsed
         except Exception:
-            pass
+            return {}
+    return {}
 
-    candidate_limit = max(limit * 6, 20)
-    bm25_weight, dense_weight = _get_rrf_weights(body_evidence)
-    group_filter = _get_semantic_group_filter(body_evidence)
 
+def _get_regulation_item(item: dict[str, Any]) -> str | None:
+    meta = _parse_metadata_json(item.get("metadata_json"))
+    value = meta.get("regulation_item")
+    return str(value) if value is not None else None
+
+
+def _to_trace_candidate(
+    item: dict[str, Any],
+    *,
+    rank: int,
+    stage: str,
+    selected_by: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "rank": rank,
+        "chunk_id": item.get("chunk_id"),
+        "doc_id": item.get("doc_id"),
+        "article": item.get("regulation_article"),
+        "clause": item.get("regulation_clause"),
+        "item": _get_regulation_item(item),
+        "node_type": item.get("node_type"),
+        "parent_title": item.get("parent_title"),
+        "selected_by": selected_by or item.get("selected_by"),
+        "scores": {
+            "bm25": item.get("bm25_score"),
+            "dense": item.get("dense_score"),
+            "rrf": item.get("rrf_score"),
+            "cross_encoder": item.get("cross_encoder_score"),
+            "llm_rerank": item.get("llm_rerank_score"),
+        },
+        "stage": stage,
+    }
+
+
+def _build_why_selected(item: dict[str, Any], selection_stage: str) -> str:
+    ce_score = item.get("cross_encoder_score")
+    llm_score = item.get("llm_rerank_score")
+    bm25_score = item.get("bm25_score")
+    dense_score = item.get("dense_score")
+    rrf_score = item.get("rrf_score")
+
+    if selection_stage == "reranked_cross_encoder":
+        if isinstance(ce_score, (int, float)):
+            return f"cross-encoder 재정렬 상위 ({float(ce_score):.4f})"
+        return "cross-encoder 재정렬 상위"
+    if selection_stage == "reranked_llm_fallback":
+        if isinstance(llm_score, (int, float)):
+            return f"LLM rerank fallback 상위 ({float(llm_score):.2f})"
+        return "LLM rerank fallback 상위"
+    if selection_stage == "fused_rrf":
+        if isinstance(rrf_score, (int, float)):
+            return f"BM25+DENSE RRF 상위 ({float(rrf_score):.6f})"
+        return "BM25+DENSE RRF 상위"
+    if selection_stage == "bm25_only":
+        if isinstance(bm25_score, (int, float)):
+            return f"BM25 상위 ({float(bm25_score):.6f})"
+        return "BM25 상위"
+    if selection_stage == "dense_only":
+        if isinstance(dense_score, (int, float)):
+            return f"Dense 상위 ({float(dense_score):.6f})"
+        return "Dense 상위"
+    if selection_stage == "lexical_fallback":
+        return "BM25/Dense 결과 부재로 lexical fallback 상위"
+    return "하이브리드 검색 상위"
+
+
+def _rewrite_query(
+    body_evidence: dict[str, Any],
+    *,
+    limit: int,
+    effective_date: date | None,
+    candidate_limit: int,
+    group_filter: list[str] | None,
+    bm25_weight: float,
+    dense_weight: float,
+) -> dict[str, Any]:
+    rewritten = query_rewrite_for_retrieval(body_evidence)
+    rerank_query = _build_dense_query(body_evidence)
+    return {
+        "original_query": rewritten,
+        "rewritten_query": rerank_query,
+        "effective_date": str(effective_date) if effective_date else None,
+        "limit": limit,
+        "candidate_limit": candidate_limit,
+        "group_filter": group_filter or [],
+        "weights": {"bm25": bm25_weight, "dense": dense_weight},
+    }
+
+
+def _retrieve_candidates(
+    db: Session,
+    body_evidence: dict[str, Any],
+    *,
+    candidate_limit: int,
+    effective_date: date | None,
+    group_filter: list[str] | None,
+) -> dict[str, Any]:
     bm25_results = _search_bm25_with_group_filter(
-        db, body_evidence,
+        db,
+        body_evidence,
         limit=candidate_limit,
         effective_date=effective_date,
         group_filter=group_filter,
     )
-    if group_filter and len(bm25_results) < limit:
-        bm25_fallback = _search_bm25(db, body_evidence, limit=candidate_limit, effective_date=effective_date)
+    bm25_group_relaxed = False
+    if group_filter and len(bm25_results) < candidate_limit:
+        bm25_group_relaxed = True
+        bm25_fallback = _search_bm25(
+            db,
+            body_evidence,
+            limit=candidate_limit,
+            effective_date=effective_date,
+        )
         existing_ids = {r["chunk_id"] for r in bm25_results}
         for r in bm25_fallback:
             if r.get("chunk_id") not in existing_ids:
@@ -866,7 +968,9 @@ def search_policy_chunks(db: Session, body_evidence: dict[str, Any], limit: int 
         group_filter=group_filter,
         use_hyde=getattr(settings, "enable_hyde_query", False),
     )
-    if group_filter and len(dense_results) < limit:
+    dense_group_relaxed = False
+    if group_filter and len(dense_results) < candidate_limit:
+        dense_group_relaxed = True
         dense_fallback = _search_dense(
             db,
             body_evidence,
@@ -881,74 +985,195 @@ def search_policy_chunks(db: Session, body_evidence: dict[str, Any], limit: int 
                 dense_results.append(r)
                 existing_ids.add(r["chunk_id"])
 
+    return {
+        "bm25_results": bm25_results,
+        "dense_results": dense_results,
+        "bm25_group_relaxed": bm25_group_relaxed,
+        "dense_group_relaxed": dense_group_relaxed,
+    }
+
+
+def _fuse_candidates(
+    db: Session,
+    body_evidence: dict[str, Any],
+    *,
+    bm25_results: list[dict[str, Any]],
+    dense_results: list[dict[str, Any]],
+    candidate_limit: int,
+    effective_date: date | None,
+    bm25_weight: float,
+    dense_weight: float,
+) -> dict[str, Any]:
+    fallback_used = False
+    fallback_reason: str | None = None
+
     if bm25_results and dense_results:
         fused = _reciprocal_rank_fusion(
-            bm25_results, dense_results,
+            bm25_results,
+            dense_results,
             k=60,
             bm25_weight=bm25_weight,
             dense_weight=dense_weight,
         )
+        selection_stage = "fused_rrf"
     elif bm25_results:
         fused = [dict(r, rrf_score=r.get("bm25_score", 0)) for r in bm25_results]
         fused.sort(key=lambda x: x.get("rrf_score", 0), reverse=True)
+        selection_stage = "bm25_only"
     elif dense_results:
         fused = [dict(r, rrf_score=r.get("dense_score", 0)) for r in dense_results]
         fused.sort(key=lambda x: x.get("rrf_score", 0), reverse=True)
+        selection_stage = "dense_only"
     else:
-        fused = _search_lexical_legacy(db, body_evidence, limit=candidate_limit, effective_date=effective_date)
+        fused = _search_lexical_legacy(
+            db,
+            body_evidence,
+            limit=candidate_limit,
+            effective_date=effective_date,
+        )
         for r in fused:
             r.setdefault("rrf_score", r.get("bm25_score", 0))
+        selection_stage = "lexical_fallback"
+        fallback_used = True
+        fallback_reason = "no_bm25_dense_hits"
+
+    for idx, item in enumerate(fused, start=1):
+        item["selected_by"] = selection_stage
+        item["selection_rank"] = idx
 
     enriched = _enrich_with_parent_context(db, fused[:candidate_limit])
+    return {
+        "enriched": enriched,
+        "selection_stage": selection_stage,
+        "fallback_used": fallback_used,
+        "fallback_reason": fallback_reason,
+    }
 
-    rerank_query = _build_dense_query(body_evidence)
-    RERANK_INPUT_LIMIT = min(len(enriched), 25)
-    rerank_input = enriched[:RERANK_INPUT_LIMIT]
+
+def _rerank_candidates(
+    enriched: list[dict[str, Any]],
+    *,
+    rerank_query: str,
+    selection_stage: str,
+    body_evidence: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    reranker_used = False
+    reranker_type = "none"
+    rerank_input_limit = min(len(enriched), 25)
+    rerank_input = enriched[:rerank_input_limit]
+    rerank_exception: str | None = None
+
     try:
         from services.retrieval_quality import rerank_with_cross_encoder
+
         reranked = rerank_with_cross_encoder(rerank_input, rerank_query)
-        reranked_ids = {r.get("chunk_id") for r in reranked if r.get("chunk_id") is not None}
-        remaining = [r for r in enriched[RERANK_INPUT_LIMIT:] if r.get("chunk_id") not in reranked_ids]
+        reranked_ids = {
+            r.get("chunk_id") for r in reranked if r.get("chunk_id") is not None
+        }
+        remaining = [
+            r
+            for r in enriched[rerank_input_limit:]
+            if r.get("chunk_id") not in reranked_ids
+        ]
         enriched = reranked + remaining
+
+        cross_encoder_available = any(
+            r.get("cross_encoder_available") is True for r in reranked
+        )
         model_unavailable = bool(reranked) and all(
             r.get("cross_encoder_available") is False for r in reranked[:1]
         )
+        if cross_encoder_available:
+            reranker_used = True
+            reranker_type = "cross_encoder"
+            selection_stage = "reranked_cross_encoder"
+            for idx, item in enumerate(enriched[:rerank_input_limit], start=1):
+                item["selected_by"] = selection_stage
+                item["selection_rank"] = idx
+
         if model_unavailable and getattr(settings, "enable_llm_rerank_fallback", True):
             try:
                 from services.retrieval_quality import rerank_with_llm_fallback
+
                 reranked_llm = rerank_with_llm_fallback(
-                    rerank_input, rerank_query, body_evidence=body_evidence
+                    rerank_input,
+                    rerank_query,
+                    body_evidence=body_evidence,
                 )
-                llm_ids = {r.get("chunk_id") for r in reranked_llm if r.get("chunk_id") is not None}
-                tail = [r for r in enriched[RERANK_INPUT_LIMIT:] if r.get("chunk_id") not in llm_ids]
+                llm_ids = {
+                    r.get("chunk_id")
+                    for r in reranked_llm
+                    if r.get("chunk_id") is not None
+                }
+                tail = [
+                    r
+                    for r in enriched[rerank_input_limit:]
+                    if r.get("chunk_id") not in llm_ids
+                ]
                 enriched = reranked_llm + tail
-            except Exception:
-                pass
-    except Exception:
+                reranker_used = True
+                reranker_type = "llm_fallback"
+                selection_stage = "reranked_llm_fallback"
+                for idx, item in enumerate(enriched[:rerank_input_limit], start=1):
+                    item["selected_by"] = selection_stage
+                    item["selection_rank"] = idx
+            except Exception as llm_ex:
+                rerank_exception = f"llm_fallback_failed:{llm_ex.__class__.__name__}"
+    except Exception as ce_ex:
+        rerank_exception = f"cross_encoder_failed:{ce_ex.__class__.__name__}"
         if getattr(settings, "enable_llm_rerank_fallback", True):
             try:
                 from services.retrieval_quality import rerank_with_llm_fallback
-                reranked_llm = rerank_with_llm_fallback(
-                    rerank_input, rerank_query, body_evidence=body_evidence
-                )
-                llm_ids = {r.get("chunk_id") for r in reranked_llm if r.get("chunk_id") is not None}
-                tail = [r for r in enriched[RERANK_INPUT_LIMIT:] if r.get("chunk_id") not in llm_ids]
-                enriched = reranked_llm + tail
-            except Exception:
-                pass
-        else:
-            pass
 
-    results = []
+                reranked_llm = rerank_with_llm_fallback(
+                    rerank_input,
+                    rerank_query,
+                    body_evidence=body_evidence,
+                )
+                llm_ids = {
+                    r.get("chunk_id")
+                    for r in reranked_llm
+                    if r.get("chunk_id") is not None
+                }
+                tail = [
+                    r
+                    for r in enriched[rerank_input_limit:]
+                    if r.get("chunk_id") not in llm_ids
+                ]
+                enriched = reranked_llm + tail
+                reranker_used = True
+                reranker_type = "llm_fallback"
+                selection_stage = "reranked_llm_fallback"
+                for idx, item in enumerate(enriched[:rerank_input_limit], start=1):
+                    item["selected_by"] = selection_stage
+                    item["selection_rank"] = idx
+            except Exception as llm_ex:
+                rerank_exception = f"{rerank_exception}|llm_fallback_failed:{llm_ex.__class__.__name__}"
+
+    return {
+        "enriched": enriched,
+        "selection_stage": selection_stage,
+        "reranker_used": reranker_used,
+        "reranker_type": reranker_type,
+        "rerank_input_limit": rerank_input_limit,
+        "rerank_exception": rerank_exception,
+    }
+
+
+def _finalize_context(
+    enriched: list[dict[str, Any]],
+    *,
+    limit: int,
+    selection_stage: str,
+    reranker_used: bool,
+    reranker_type: str,
+    fallback_used: bool,
+    fallback_reason: str | None,
+) -> list[dict[str, Any]]:
+    results: list[dict[str, Any]] = []
     for item in enriched[:limit]:
-        # metadata_json에서 regulation_item 추출 (ITEM 노드 전용 필드)
-        meta = item.get("metadata_json")
-        if isinstance(meta, str):
-            try:
-                meta = json.loads(meta)
-            except Exception:
-                meta = {}
-        regulation_item = (meta or {}).get("regulation_item") if meta else None
+        regulation_item = _get_regulation_item(item)
+        why_selected = _build_why_selected(item, selection_stage)
         results.append({
             "doc_id": item.get("doc_id"),
             "article": item.get("regulation_article"),
@@ -969,6 +1194,192 @@ def search_policy_chunks(db: Session, body_evidence: dict[str, Any], limit: int 
                 "dense_score": item.get("dense_score"),
                 "rrf_score": item.get("rrf_score"),
                 "cross_encoder_score": item.get("cross_encoder_score"),
+                "llm_rerank_score": item.get("llm_rerank_score"),
             },
+            "why_selected": why_selected,
+            "fallback_used": fallback_used,
+            "fallback_reason": fallback_reason,
+            "reranker_used": reranker_used,
+            "reranker_type": reranker_type,
+            "selection_stage": selection_stage,
+            "selected_by": item.get("selected_by", selection_stage),
         })
     return results
+
+
+def _run_search_policy_chunks_pipeline(
+    db: Session,
+    body_evidence: dict[str, Any],
+    *,
+    limit: int,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """검색 파이프라인 실행 + structured trace 생성."""
+    effective_date = None
+    occurred_at = body_evidence.get("occurredAt")
+    if occurred_at:
+        try:
+            effective_date = date.fromisoformat(str(occurred_at)[:10])
+        except Exception:
+            pass
+
+    candidate_limit = max(limit * 6, 20)
+    bm25_weight, dense_weight = _get_rrf_weights(body_evidence)
+    group_filter = _get_semantic_group_filter(body_evidence)
+    rewrite_trace = _rewrite_query(
+        body_evidence,
+        limit=limit,
+        effective_date=effective_date,
+        candidate_limit=candidate_limit,
+        group_filter=group_filter,
+        bm25_weight=bm25_weight,
+        dense_weight=dense_weight,
+    )
+
+    retrieve_out = _retrieve_candidates(
+        db,
+        body_evidence,
+        candidate_limit=candidate_limit,
+        effective_date=effective_date,
+        group_filter=group_filter,
+    )
+    bm25_results = retrieve_out["bm25_results"]
+    dense_results = retrieve_out["dense_results"]
+
+    fuse_out = _fuse_candidates(
+        db,
+        body_evidence,
+        bm25_results=bm25_results,
+        dense_results=dense_results,
+        candidate_limit=candidate_limit,
+        effective_date=effective_date,
+        bm25_weight=bm25_weight,
+        dense_weight=dense_weight,
+    )
+    enriched = fuse_out["enriched"]
+    fused_snapshot = [dict(item) for item in enriched[:candidate_limit]]
+    selection_stage = str(fuse_out["selection_stage"])
+    fallback_used = bool(fuse_out["fallback_used"])
+    fallback_reason = fuse_out.get("fallback_reason")
+
+    rerank_out = _rerank_candidates(
+        enriched,
+        rerank_query=rewrite_trace["rewritten_query"],
+        selection_stage=selection_stage,
+        body_evidence=body_evidence,
+    )
+    enriched = rerank_out["enriched"]
+    selection_stage = str(rerank_out["selection_stage"])
+    reranker_used = bool(rerank_out["reranker_used"])
+    reranker_type = str(rerank_out["reranker_type"] or "none")
+    rerank_input_limit = int(rerank_out["rerank_input_limit"])
+    rerank_exception = rerank_out.get("rerank_exception")
+
+    results = _finalize_context(
+        enriched,
+        limit=limit,
+        selection_stage=selection_stage,
+        reranker_used=reranker_used,
+        reranker_type=reranker_type,
+        fallback_used=fallback_used,
+        fallback_reason=fallback_reason,
+    )
+
+    trace = {
+        "trace_version": "policy_search.v1",
+        "search": {
+            **rewrite_trace,
+            "selection_stage": selection_stage,
+            "fallback_used": fallback_used,
+            "fallback_reason": fallback_reason,
+            "reranker_used": reranker_used,
+            "reranker_type": reranker_type,
+            "rerank_input_limit": rerank_input_limit,
+            "rerank_exception": rerank_exception,
+            "group_filter_relaxed": {
+                "bm25": bool(retrieve_out["bm25_group_relaxed"]),
+                "dense": bool(retrieve_out["dense_group_relaxed"]),
+            },
+            "decision_summary": (
+                f"{selection_stage}로 {len(results)}건 선택"
+                + (f", reranker={reranker_type}" if reranker_used else ", reranker=none")
+                + (f", fallback={fallback_reason}" if fallback_used else "")
+            ),
+        },
+        "stages": {
+            "bm25_candidates": [
+                _to_trace_candidate(item, rank=i, stage="bm25")
+                for i, item in enumerate(bm25_results[:candidate_limit], start=1)
+            ],
+            "dense_candidates": [
+                _to_trace_candidate(item, rank=i, stage="dense")
+                for i, item in enumerate(dense_results[:candidate_limit], start=1)
+            ],
+            "fused_candidates": [
+                _to_trace_candidate(item, rank=i, stage="fused", selected_by=fuse_out["selection_stage"])
+                for i, item in enumerate(fused_snapshot, start=1)
+            ],
+            "reranked_candidates": [
+                _to_trace_candidate(item, rank=i, stage="reranked", selected_by=selection_stage)
+                for i, item in enumerate(enriched[:candidate_limit], start=1)
+            ],
+            "selected_candidates": [
+                {
+                    "rank": i,
+                    "article": item.get("article"),
+                    "clause": item.get("clause"),
+                    "item": item.get("item"),
+                    "node_type": item.get("node_type"),
+                    "chunk_ids": item.get("chunk_ids"),
+                    "selected_by": item.get("selected_by"),
+                    "selection_stage": item.get("selection_stage"),
+                    "why_selected": item.get("why_selected"),
+                    "scores": {
+                        "bm25": item.get("score_detail", {}).get("bm25_score"),
+                        "dense": item.get("score_detail", {}).get("dense_score"),
+                        "rrf": item.get("score_detail", {}).get("rrf_score"),
+                        "cross_encoder": item.get("score_detail", {}).get("cross_encoder_score"),
+                        "llm_rerank": item.get("score_detail", {}).get("llm_rerank_score"),
+                    },
+                }
+                for i, item in enumerate(results, start=1)
+            ],
+        },
+    }
+    return results, trace
+
+
+def search_policy_chunks_with_trace(
+    db: Session,
+    body_evidence: dict[str, Any],
+    limit: int = 5,
+) -> dict[str, Any]:
+    """디버그/설명용 검색 결과. chunks + trace를 함께 반환."""
+    chunks, trace = _run_search_policy_chunks_pipeline(
+        db,
+        body_evidence,
+        limit=limit,
+    )
+    return {"chunks": chunks, "trace": trace}
+
+
+def search_policy_chunks(
+    db: Session,
+    body_evidence: dict[str, Any],
+    limit: int = 5,
+    *,
+    debug: bool = False,
+) -> list[dict[str, Any]] | dict[str, Any]:
+    """
+    메인 검색 함수.
+
+    기본 동작은 기존과 동일하게 chunks(list)만 반환한다.
+    debug=True일 때만 chunks + trace(dict)를 반환한다.
+    """
+    chunks, trace = _run_search_policy_chunks_pipeline(
+        db,
+        body_evidence,
+        limit=limit,
+    )
+    if debug:
+        return {"chunks": chunks, "trace": trace}
+    return chunks

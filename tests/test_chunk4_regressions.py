@@ -77,3 +77,39 @@ def test_cross_encoder_absence_marks_unavailable(monkeypatch):
     groups = [{"chunk_id": 1, "chunk_text": "제23조 식대"}]
     out = rerank_with_cross_encoder(groups, "식대 규정")
     assert out[0].get("cross_encoder_available") is False
+
+
+def test_search_policy_chunks_keeps_default_return_type(monkeypatch):
+    fake_chunks = [{"article": "제14조"}]
+    fake_trace = {"trace_version": "policy_search.v1"}
+
+    monkeypatch.setattr(
+        policy_service,
+        "_run_search_policy_chunks_pipeline",
+        lambda *_a, **_k: (fake_chunks, fake_trace),
+    )
+
+    out = policy_service.search_policy_chunks(None, {"case_type": "HOLIDAY_USAGE"}, limit=3)
+    assert isinstance(out, list)
+    assert out == fake_chunks
+
+
+def test_search_policy_chunks_debug_returns_chunks_and_trace(monkeypatch):
+    fake_chunks = [{"article": "제14조"}]
+    fake_trace = {"trace_version": "policy_search.v1", "search": {"selection_stage": "fused_rrf"}}
+
+    monkeypatch.setattr(
+        policy_service,
+        "_run_search_policy_chunks_pipeline",
+        lambda *_a, **_k: (fake_chunks, fake_trace),
+    )
+
+    out = policy_service.search_policy_chunks(
+        None,
+        {"case_type": "HOLIDAY_USAGE"},
+        limit=3,
+        debug=True,
+    )
+    assert isinstance(out, dict)
+    assert out.get("chunks") == fake_chunks
+    assert out.get("trace") == fake_trace
