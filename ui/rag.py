@@ -615,12 +615,25 @@ def render_rag_library_page() -> None:
                             json_body={"raw_text": text},
                             timeout=600,
                         )
-                        msg = (
-                            f"완료: 청크 {out.get('total_chunks', 0)}개 "
-                            f"(ARTICLE {out.get('article_chunks', 0)}, CLAUSE {out.get('clause_chunks', 0)}), "
-                            f"임베딩 저장={'예' if out.get('embedding_saved') else '아니오'}"
-                        )
-                        st.success(msg)
+                        total = out.get("total_chunks", 0)
+                        article = out.get("article_chunks", 0)
+                        clause = out.get("clause_chunks", 0)
+                        item = out.get("item_chunks", 0)
+                        parts = [f"ARTICLE {article}", f"CLAUSE {clause}"]
+                        if item is not None and int(item) > 0:
+                            parts.append(f"ITEM {item}")
+                        chunk_summary = f"청크 {total}개 (" + ", ".join(parts) + ")"
+                        if out.get("embedding_saved"):
+                            emb_model = out.get("embedding_model") or "text-embedding-3-large"
+                            emb_col = out.get("embed_column") or "embedding_az"
+                            emb_summary = f"임베딩: {emb_model} (컬럼 {emb_col})"
+                        else:
+                            emb_summary = "임베딩 미저장"
+                        st.success(f"완료: {chunk_summary} · {emb_summary}")
+                        short_rate = out.get("short_chunk_rate")
+                        if short_rate is not None and article:
+                            short_pct = short_rate * 100
+                            st.caption(f"초단편 ARTICLE 비율: {short_pct:.1f}% (200자 미만 조문 {int(short_rate * article)}개)")
                         if not out.get("embedding_saved") and out.get("embedding_skip_reason"):
                             st.caption(f"임베딩 생략 사유: {out['embedding_skip_reason']}")
                     except Exception as e:

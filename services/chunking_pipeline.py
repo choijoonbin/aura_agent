@@ -409,6 +409,8 @@ def save_hierarchical_chunks(
         "clause_chunks": len(clause_nodes),
         "item_chunks": len(item_nodes),
         "embedding_saved": vectors is not None,
+        "embedding_model": getattr(settings, "openai_embedding_model", "text-embedding-3-large"),
+        "embed_column": col,
         "short_chunk_rate": short_chunk_rate,
     }
     if vectors is None and _last_embedding_error:
