@@ -52,14 +52,14 @@ class Settings:
     # Reasoning note LLM label (shown in UI when note_source is "llm")
     reasoning_llm_label: str = os.getenv("REASONING_LLM_LABEL", "LLM")
     enable_reasoning_live_llm: bool = os.getenv("ENABLE_REASONING_LIVE_LLM", "true").lower() == "true"
-    reasoning_llm_model: str = os.getenv("REASONING_LLM_MODEL", "gpt-5")
+    reasoning_llm_model: str = os.getenv("REASONING_LLM_MODEL", "gpt-4o-mini")
     reasoning_stream_max_chars: int = int(os.getenv("REASONING_STREAM_MAX_CHARS", "5000"))
     reasoning_stream_max_sentences: int = int(os.getenv("REASONING_STREAM_MAX_SENTENCES", "10"))
 
     # Screening mode: rule | hybrid (LLM + deterministic guardrail)
     screening_mode: str = os.getenv("SCREENING_MODE", "hybrid")
-    screening_llm_model: str = os.getenv("SCREENING_LLM_MODEL", "gpt-5")
-    screening_llm_fallback_model: str = os.getenv("SCREENING_LLM_FALLBACK_MODEL", "gpt-5")
+    screening_llm_model: str = os.getenv("SCREENING_LLM_MODEL", "gpt-4o-mini")
+    screening_llm_fallback_model: str = os.getenv("SCREENING_LLM_FALLBACK_MODEL", "gpt-4o-mini")
     screening_llm_temperature: float = float(os.getenv("SCREENING_LLM_TEMPERATURE", "0"))
     screening_llm_max_tokens: int = int(os.getenv("SCREENING_LLM_MAX_TOKENS", "1024"))
     screening_llm_timeout_seconds: float = float(os.getenv("SCREENING_LLM_TIMEOUT_SECONDS", "8"))

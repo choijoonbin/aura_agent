@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from sqlalchemy import BigInteger, Date, DateTime, Numeric, String, Text, Time
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from db.session import Base
@@ -71,6 +72,7 @@ class AgentCase(Base):
     score: Mapped[float | None] = mapped_column(Numeric(6, 4))
     reason_text: Mapped[str | None] = mapped_column(Text)
     status: Mapped[str | None] = mapped_column(String(30))
+    screening_meta: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
 
 
 class CaseAnalysisResult(Base):
