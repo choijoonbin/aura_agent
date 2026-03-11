@@ -174,6 +174,7 @@ def _build_candidate_sql(keyword_count: int) -> str:
             chunk_index,
             parent_chunk_id,
             child_index,
+            metadata_json,
             ({score_expr}) as lexical_score
         from dwp_aura.rag_chunk
         where tenant_id = :tenant_id
@@ -653,6 +654,7 @@ def _search_dense(
             chunk_id, doc_id, regulation_article, regulation_clause,
             parent_title, chunk_text, search_text, node_type, parent_id,
             version, effective_from, effective_to, page_no, chunk_index,
+            metadata_json,
             1 - ({embed_column} <=> CAST(:query_vec AS {cast_type})) AS dense_score
         FROM dwp_aura.rag_chunk
         WHERE tenant_id = :tenant_id
