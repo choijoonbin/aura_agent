@@ -1443,14 +1443,19 @@ def summarize_process_timeline(events: list[dict[str, Any]]) -> list[dict[str, A
     return result
 
 
-def render_process_story(events: list[dict[str, Any]], *, debug_mode: bool = False) -> None:
+def render_process_story(
+    events: list[dict[str, Any]],
+    *,
+    debug_mode: bool = False,
+    key_prefix: str = "main",
+) -> None:
     rows = summarize_process_timeline(events)
     if not rows:
         render_empty_state("분석 완료 후 핵심 판단 흐름을 이 영역에서 단계별로 요약합니다.")
         return
     for idx, row in enumerate(rows, start=1):
         with stylable_container(
-            key=f"process_story_{idx}_{row['node']}",
+            key=f"process_story_{key_prefix}_{idx}_{row['node']}",
             css_styles="""{padding: 15px 16px; border-radius: 16px; border: 1px solid #e5e7eb; background: rgba(255,255,255,0.98); box-shadow: 0 8px 22px rgba(15,23,42,0.04); margin-bottom: 0.7rem;}""",
         ):
             top_left, top_right = st.columns([0.78, 0.22])
@@ -3400,29 +3405,111 @@ def render_workspace_results(latest_bundle: dict[str, Any], debug_mode: bool) ->
     if sb:
         st.caption(f"정책점수 {sb.get('policy_score', '-')} · 근거점수 {sb.get('evidence_score', '-')} · 최종점수 {sb.get('final_score', '-')}")
         render_score_breakdown_detail(sb)
-    quality_codes = result.get("quality_gate_codes") or []
-    if quality_codes:
-        badges_html = "".join(f'<span class="mt-badge mt-badge-amber">{code}</span>' for code in quality_codes)
-        st.markdown(
-            f'<div class="mt-section-inline"><span class="mt-section-inline-title">품질 신호</span> <span class="mt-section-inline-content">{badges_html}</span></div>',
-            unsafe_allow_html=True,
-        )
     if result.get("hitl_request"):
         st.markdown("#### 담당자 검토 상태")
         st.caption("이 run은 자동 확정이 아니라 담당자 검토 이후 재개를 전제로 진행되었습니다.")
-    if result.get("verification_summary"):
-        verification_summary = result.get("verification_summary") or {}
-        summary_text = (
-            f"게이트 판정 {verification_summary.get('gate_policy') or '-'} · "
-            f"검증 주장 근거 연결 {verification_summary.get('covered', 0)}/{verification_summary.get('total', 0)}"
-        )
-        st.markdown(
-            f'<div class="mt-section-inline"><span class="mt-section-inline-title">검증 요약</span> <span class="mt-section-inline-content">{summary_text}</span></div>',
-            unsafe_allow_html=True,
-        )
     if result.get("critique") and debug_mode:
         st.markdown("#### 검증 메모 (debug)")
         st.json(result.get("critique"))
+
+
+_UNSUPPORTED_TAXONOMY_LABELS: dict[str, str] = {
+    "no_citation": "근거 없음",
+    "weak_citation": "약한 근거",
+    "wrong_scope_citation": "범위 불일치",
+    "contradictory_evidence": "증거 충돌",
+    "missing_mandatory_evidence": "필수 증빙 누락",
+    "low_retrieval_confidence": "검색 신뢰도 낮음",
+}
+
+
+def _taxonomy_label(taxonomy: str) -> str:
+    token = str(taxonomy or "").strip().lower()
+    return _UNSUPPORTED_TAXONOMY_LABELS.get(token, token or "unknown")
+
+
+def _normalize_unsupported_claims(raw_claims: list[Any]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str, str]] = set()
+    for raw in (raw_claims or []):
+        item = raw if isinstance(raw, dict) else (raw.model_dump() if hasattr(raw, "model_dump") else {})
+        if not isinstance(item, dict):
+            continue
+        taxonomy = str(item.get("taxonomy") or "").strip().lower()
+        claim = str(item.get("claim") or "").strip()
+        reason = str(item.get("reason") or "").strip()
+        severity = str(item.get("severity") or "MEDIUM").strip().upper()
+        supporting = [str(v).strip() for v in (item.get("supporting_articles") or []) if str(v).strip()]
+        key = (taxonomy, claim, reason, severity)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(
+            {
+                "taxonomy": taxonomy,
+                "taxonomy_label": _taxonomy_label(taxonomy),
+                "claim": claim,
+                "reason": reason,
+                "severity": severity,
+                "covered": bool(item.get("covered")),
+                "citation_count": int(item.get("citation_count") or 0),
+                "supporting_articles": supporting,
+            }
+        )
+    return out
+
+
+def _extract_unsupported_claims_from_result(result: dict[str, Any]) -> list[dict[str, Any]]:
+    verifier_output = result.get("verifier_output") or {}
+    review_audit = result.get("review_audit") or verifier_output.get("review_audit") or {}
+    hitl_request = result.get("hitl_request") or {}
+    raw_claims: list[Any] = []
+    raw_claims.extend(verifier_output.get("unsupported_claims") or [])
+    raw_claims.extend(review_audit.get("unsupported_claims") or [])
+    raw_claims.extend(hitl_request.get("unsupported_claims") or [])
+    return _normalize_unsupported_claims(raw_claims)
+
+
+def _render_unsupported_claims_panel(result: dict[str, Any]) -> None:
+    unsupported_claims = _extract_unsupported_claims_from_result(result)
+    if not unsupported_claims:
+        return
+
+    taxonomy_counts: dict[str, int] = defaultdict(int)
+    for item in unsupported_claims:
+        taxonomy_counts[item["taxonomy_label"]] += 1
+
+    badges_html = "".join(
+        f'<span class="mt-badge mt-badge-red">{html.escape(label)} {count}</span>'
+        for label, count in sorted(taxonomy_counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    )
+    st.markdown(
+        f'<div class="mt-section-inline"><span class="mt-section-inline-title">Unsupported claim</span> <span class="mt-section-inline-content">{badges_html}</span></div>',
+        unsafe_allow_html=True,
+    )
+
+    with st.expander("Unsupported claim taxonomy 보기", expanded=False):
+        st.caption("리뷰 단계에서 감지된 근거 부족/범위 불일치/필수 증빙 누락 유형입니다.")
+        for i, item in enumerate(unsupported_claims, start=1):
+            sev = str(item.get("severity") or "MEDIUM").upper()
+            sev_badge = "mt-badge-red" if sev in {"HIGH", "CRITICAL"} else ("mt-badge-amber" if sev == "MEDIUM" else "mt-badge-blue")
+            covered_badge = "mt-badge-green" if item.get("covered") else "mt-badge-amber"
+            st.markdown(
+                (
+                    f"**{i}. {item.get('claim') or '(주장 없음)'}**  \n"
+                    f'<span class="mt-badge mt-badge-red">{html.escape(item.get("taxonomy_label") or "-")}</span> '
+                    f'<span class="mt-badge {sev_badge}">{html.escape(sev)}</span> '
+                    f'<span class="mt-badge {covered_badge}">citation {int(item.get("citation_count") or 0)}건</span>'
+                ),
+                unsafe_allow_html=True,
+            )
+            if item.get("reason"):
+                st.caption(f"사유: {item['reason']}")
+            supporting = item.get("supporting_articles") or []
+            if supporting:
+                st.caption("연결 조항: " + ", ".join(supporting[:6]))
+            if i < len(unsupported_claims):
+                st.markdown("<hr style='margin:0.35rem 0 0.55rem 0; border:none; border-top:1px solid #e5e7eb;'>", unsafe_allow_html=True)
 
 
 def render_workspace_evidence_map(latest_bundle: dict[str, Any], debug_mode: bool) -> None:
@@ -3601,7 +3688,7 @@ def render_workspace_execution_review(latest_bundle: dict[str, Any], debug_mode:
 
     if debug_mode and timeline:
         with st.expander("원본 타임라인 보기", expanded=False):
-            render_process_story(timeline, debug_mode=True)
+            render_process_story(timeline, debug_mode=True, key_prefix="timeline_raw")
 
 
 def render_workspace_review_history(latest_bundle: dict[str, Any]) -> None:
@@ -3715,7 +3802,7 @@ def render_ai_workspace_page() -> None:
                         timeline = latest_bundle.get("timeline") or []
                         if timeline:
                             with st.expander("판단 흐름 요약", expanded=False):
-                                render_process_story(timeline, debug_mode=debug_mode)
+                                render_process_story(timeline, debug_mode=debug_mode, key_prefix="summary")
                     with tabs[1]:
                         render_workspace_evidence_map(latest_bundle, debug_mode)
                     with tabs[2]:
@@ -3739,21 +3826,33 @@ def render_ai_workspace_page() -> None:
                                         diag2 = get(f"/api/v1/analysis-runs/{compare_run_id}/diagnostics")
                                         st.caption(f"왼쪽: 현재 Run ({run_id[:8]}…) · 오른쪽: 비교 Run ({compare_run_id[:8]}…)")
                                         col_a, col_b = st.columns(2)
+                                        diag_tax_a = diag.get("unsupported_taxonomy_counts") or {}
+                                        diag_tax_b = diag2.get("unsupported_taxonomy_counts") or {}
+                                        tax_preview_a = ", ".join(f"{k}:{v}" for k, v in sorted(diag_tax_a.items(), key=lambda kv: (-kv[1], kv[0]))[:3]) if diag_tax_a else "-"
+                                        tax_preview_b = ", ".join(f"{k}:{v}" for k, v in sorted(diag_tax_b.items(), key=lambda kv: (-kv[1], kv[0]))[:3]) if diag_tax_b else "-"
                                         with col_a:
                                             st.metric("Tool 성공률", f"{(diag.get('tool_call_success_rate') or 0) * 100:.1f}%" if diag.get("tool_call_success_rate") is not None else "-", f"{diag.get('tool_call_ok', 0)}/{diag.get('tool_call_total', 0)}")
                                             st.metric("Citation coverage", f"{(diag.get('citation_coverage') or 0) * 100:.1f}%" if diag.get("citation_coverage") is not None else "-", "")
                                             st.metric("HITL 요청", "예" if diag.get("hitl_requested") else "아니오", "재개 성공" if diag.get("resume_success") else "")
                                             st.metric("Fallback 비율", f"{(diag.get('fallback_usage_rate') or 0) * 100:.1f}%" if diag.get("fallback_usage_rate") is not None else "-", f"이벤트 {diag.get('event_count', 0)}건")
+                                            st.metric("Unsupported claim", str(diag.get("unsupported_claim_count") or 0), "fail-closed" if diag.get("fail_closed_unsupported") else "")
+                                            st.caption(f"taxonomy: {tax_preview_a}")
                                         with col_b:
                                             st.metric("Tool 성공률", f"{(diag2.get('tool_call_success_rate') or 0) * 100:.1f}%" if diag2.get("tool_call_success_rate") is not None else "-", f"{diag2.get('tool_call_ok', 0)}/{diag2.get('tool_call_total', 0)}")
                                             st.metric("Citation coverage", f"{(diag2.get('citation_coverage') or 0) * 100:.1f}%" if diag2.get("citation_coverage") is not None else "-", "")
                                             st.metric("HITL 요청", "예" if diag2.get("hitl_requested") else "아니오", "재개 성공" if diag2.get("resume_success") else "")
                                             st.metric("Fallback 비율", f"{(diag2.get('fallback_usage_rate') or 0) * 100:.1f}%" if diag2.get("fallback_usage_rate") is not None else "-", f"이벤트 {diag2.get('event_count', 0)}건")
+                                            st.metric("Unsupported claim", str(diag2.get("unsupported_claim_count") or 0), "fail-closed" if diag2.get("fail_closed_unsupported") else "")
+                                            st.caption(f"taxonomy: {tax_preview_b}")
                                     else:
-                                        c1, c2, c3, c4 = st.columns(4)
+                                        c1, c2, c3, c4, c5 = st.columns(5)
+                                        diag_tax = diag.get("unsupported_taxonomy_counts") or {}
+                                        tax_preview = ", ".join(f"{k}:{v}" for k, v in sorted(diag_tax.items(), key=lambda kv: (-kv[1], kv[0]))[:3]) if diag_tax else "-"
                                         c1.metric("Tool 성공률", f"{(diag.get('tool_call_success_rate') or 0) * 100:.1f}%" if diag.get("tool_call_success_rate") is not None else "-", f"{diag.get('tool_call_ok', 0)}/{diag.get('tool_call_total', 0)}")
                                         c2.metric("Citation coverage", f"{(diag.get('citation_coverage') or 0) * 100:.1f}%" if diag.get("citation_coverage") is not None else "-", "")
                                         c3.metric("HITL 요청", "예" if diag.get("hitl_requested") else "아니오", "재개 성공" if diag.get("resume_success") else "")
                                         c4.metric("Fallback 비율", f"{(diag.get('fallback_usage_rate') or 0) * 100:.1f}%" if diag.get("fallback_usage_rate") is not None else "-", f"이벤트 {diag.get('event_count', 0)}건")
+                                        c5.metric("Unsupported claim", str(diag.get("unsupported_claim_count") or 0), "fail-closed" if diag.get("fail_closed_unsupported") else "")
+                                        st.caption(f"taxonomy: {tax_preview}")
                                 except Exception:
                                     st.caption("진단 API를 불러올 수 없습니다.")

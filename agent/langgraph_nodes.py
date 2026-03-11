@@ -190,6 +190,7 @@ class AgentState(TypedDict, total=False):
     critic_output: dict[str, Any]
     verifier_output: dict[str, Any]
     reporter_output: dict[str, Any]
+    review_audit: dict[str, Any]
     critic_loop_count: int
     replan_context: dict[str, Any] | None
     plan_achievement: dict[str, Any]

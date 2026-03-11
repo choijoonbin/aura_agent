@@ -9,7 +9,6 @@ MENU_OPTIONS = [
     ("AI 워크스페이스", "grid", ""),
     ("에이전트 스튜디오", "cpu", "Agent model, prompt, tool, knowledge"),
     ("규정문서 라이브러리", "journal-text", "RAG document governance and quality"),
-    ("운영 대시보드", "graph-up", "Run diagnostics, compare, observability"),
     ("시연 데이터 제어", "sliders", "Scenario data generator"),
 ]
 
@@ -25,10 +24,11 @@ MENU_OPTIONS = [
 def render_sidebar() -> str:
     with st.sidebar:
         options = [item[0] for item in MENU_OPTIONS]
+        icons = [item[1] for item in MENU_OPTIONS]
         selected = option_menu(
             menu_title=None,
             options=options,
-            icons=["grid", "cpu", "journal-text", "sliders"],
+            icons=icons,
             default_index=options.index(st.session_state.get("mt_menu", options[0])) if st.session_state.get("mt_menu", options[0]) in options else 0,
             key="mt_menu_option",
             styles={

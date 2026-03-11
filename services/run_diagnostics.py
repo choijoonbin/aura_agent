@@ -8,6 +8,29 @@ from typing import Any
 from services.citation_metrics import citation_coverage
 
 
+def _extract_unsupported_claims(res: dict[str, Any]) -> list[dict[str, Any]]:
+    verifier_output = res.get("verifier_output") or {}
+    claims = verifier_output.get("unsupported_claims") or []
+    if not claims:
+        review_audit = (verifier_output.get("review_audit") or res.get("review_audit") or {})
+        claims = review_audit.get("unsupported_claims") or []
+    out: list[dict[str, Any]] = []
+    for c in claims:
+        if isinstance(c, dict):
+            out.append(c)
+        elif hasattr(c, "model_dump"):
+            out.append(c.model_dump())
+    return out
+
+
+def _unsupported_taxonomy_counts(unsupported_claims: list[dict[str, Any]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for c in unsupported_claims:
+        key = str(c.get("taxonomy") or "unknown").strip().lower() or "unknown"
+        counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
 def get_run_diagnostics(
     *,
     result: dict[str, Any] | None,
@@ -31,6 +54,9 @@ def get_run_diagnostics(
             "citation_coverage": None,
             "fallback_usage_rate": None,
             "event_count": len(timeline),
+            "unsupported_claim_count": 0,
+            "unsupported_taxonomy_counts": {},
+            "fail_closed_unsupported": False,
         }
     tool_results = res.get("tool_results") or []
     tool_total = len(tool_results)
@@ -46,6 +72,14 @@ def get_run_diagnostics(
     total_notes = len(with_meta)
     fallback_count = sum(1 for p in with_meta if (p.get("metadata") or {}).get("note_source") == "fallback")
     fallback_rate = round(fallback_count / total_notes, 4) if total_notes else None
+    unsupported_claims = _extract_unsupported_claims(res)
+    unsupported_count = len(unsupported_claims)
+    unsupported_counts = _unsupported_taxonomy_counts(unsupported_claims)
+    quality_codes = [str(v).upper() for v in (res.get("quality_gate_codes") or [])]
+    fail_closed_unsupported = (
+        "FAIL_CLOSED_UNSUPPORTED" in quality_codes
+        or any(str(k).lower() in {"no_citation", "contradictory_evidence", "missing_mandatory_evidence", "low_retrieval_confidence"} for k in unsupported_counts.keys())
+    )
 
     return {
         "run_id": result.get("run_id") if result else None,
@@ -59,6 +93,9 @@ def get_run_diagnostics(
         "event_count": len(timeline),
         "lineage_mode": (lineage or {}).get("mode"),
         "parent_run_id": (lineage or {}).get("parent_run_id"),
+        "unsupported_claim_count": unsupported_count,
+        "unsupported_taxonomy_counts": unsupported_counts,
+        "fail_closed_unsupported": fail_closed_unsupported,
     }
 
 

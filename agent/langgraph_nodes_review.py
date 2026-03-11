@@ -5,10 +5,269 @@ import re
 from typing import Any, Awaitable, Callable
 
 from agent.event_schema import AgentEvent
-from agent.output_models import ClaimVerificationResult, CriticOutput, VerifierGate, VerifierOutput
+from agent.output_models import (
+    ClaimVerificationResult,
+    CriticOutput,
+    UnsupportedClaimIssue,
+    VerifierGate,
+    VerifierOutput,
+)
 
 logger = logging.getLogger(__name__)
 _WORD_RE = re.compile(r"[0-9A-Za-z가-힣]{2,}")
+_ARTICLE_RE = re.compile(r"제\s*(\d+)\s*조")
+
+_UNSUPPORTED_TAXONOMY_BLOCKING = {
+    "no_citation",
+    "contradictory_evidence",
+    "missing_mandatory_evidence",
+    "low_retrieval_confidence",
+}
+
+
+def _extract_article_tokens(text: str) -> list[str]:
+    if not text:
+        return []
+    out: list[str] = []
+    for m in _ARTICLE_RE.findall(text):
+        token = f"제{m}조"
+        if token not in out:
+            out.append(token)
+    return out
+
+
+def _extract_chunk_id(value: Any) -> int | None:
+    try:
+        return int(value) if value is not None else None
+    except Exception:
+        return None
+
+
+def _build_review_audit_payload(
+    *,
+    state: dict[str, Any],
+    verification_targets: list[str],
+    retrieved_chunks: list[dict[str, Any]],
+    cited_article_clauses: list[dict[str, str]],
+    unsupported_claims: list[dict[str, Any]],
+    verification_summary: dict[str, Any],
+) -> dict[str, Any]:
+    plan_steps = state.get("plan") or []
+    tool_results = state.get("tool_results") or []
+    execute_out = state.get("execute_output") or {}
+    score = state.get("score_breakdown") or {}
+    flags = state.get("flags") or {}
+    quality = state.get("verification") or {}
+
+    retrieved_evidence_ids: list[int] = []
+    for chunk in retrieved_chunks:
+        cid = _extract_chunk_id(chunk.get("chunk_id"))
+        if cid is None:
+            chunk_ids = chunk.get("chunk_ids") or []
+            cid = _extract_chunk_id(chunk_ids[0] if chunk_ids else None)
+        if cid is not None and cid not in retrieved_evidence_ids:
+            retrieved_evidence_ids.append(cid)
+
+    executed_tool_results: list[dict[str, Any]] = []
+    for r in tool_results:
+        facts = r.get("facts") or {}
+        tool_name = str((r.get("tool") or r.get("skill") or "")).strip()
+        executed_tool_results.append(
+            {
+                "tool": tool_name,
+                "status": "failed" if tool_name in (execute_out.get("failed_tools") or []) else "ok",
+                "fact_keys": sorted([str(k) for k in facts.keys()])[:12],
+            }
+        )
+
+    confidence_risk_signals = {
+        "severity": score.get("severity"),
+        "policy_score": score.get("policy_score"),
+        "evidence_score": score.get("evidence_score"),
+        "final_score": score.get("final_score"),
+        "compound_multiplier": score.get("compound_multiplier"),
+        "coverage_ratio": verification_summary.get("coverage_ratio"),
+        "covered_claims": verification_summary.get("covered"),
+        "total_claims": verification_summary.get("total"),
+        "gate_policy": verification_summary.get("gate_policy"),
+        "quality_signals": quality.get("quality_signals") or [],
+        "failed_tools": execute_out.get("failed_tools") or [],
+        "missing_fields": ((state.get("body_evidence") or {}).get("dataQuality") or {}).get("missingFields") or [],
+        "has_hitl_response": bool(flags.get("hasHitlResponse")),
+        "verification_target_count": len(verification_targets),
+    }
+
+    return {
+        "plan": plan_steps if isinstance(plan_steps, list) else [],
+        "executed_tool_results": executed_tool_results,
+        "retrieved_evidence_ids": retrieved_evidence_ids,
+        "cited_article_clauses": cited_article_clauses,
+        "unsupported_claims": unsupported_claims,
+        "confidence_risk_signals": confidence_risk_signals,
+    }
+
+
+def _classify_unsupported_claims(
+    *,
+    verification_targets: list[str],
+    verification_summary: dict[str, Any],
+    claim_results: list[ClaimVerificationResult],
+    retrieved_chunks: list[dict[str, Any]],
+    missing_fields: list[str],
+    required_inputs: list[dict[str, Any]],
+    execute_failed_tools: list[str],
+) -> list[UnsupportedClaimIssue]:
+    issues: list[UnsupportedClaimIssue] = []
+    details = verification_summary.get("details") or []
+
+    # claim 단위 분류: no/weak/wrong_scope
+    for i, claim in enumerate(verification_targets or []):
+        detail = details[i] if i < len(details) and isinstance(details[i], dict) else {}
+        cr = claim_results[i] if i < len(claim_results) else None
+        covered = bool(detail.get("covered")) if detail else bool(getattr(cr, "covered", False))
+        citation_count = int(detail.get("citation_count") or 0) if detail else 0
+        supporting_articles = list((getattr(cr, "supporting_articles", None) or [])) if cr else []
+        claim_article_tokens = _extract_article_tokens(claim)
+        supporting_norm = {str(a).replace(" ", "") for a in supporting_articles}
+
+        if not covered or citation_count <= 0:
+            issues.append(
+                UnsupportedClaimIssue(
+                    claim=claim,
+                    taxonomy="no_citation",
+                    reason="주장에 대응되는 citation을 찾지 못했습니다.",
+                    severity="HIGH",
+                    covered=False,
+                    citation_count=citation_count,
+                    supporting_articles=supporting_articles,
+                )
+            )
+            continue
+
+        if citation_count == 1:
+            issues.append(
+                UnsupportedClaimIssue(
+                    claim=claim,
+                    taxonomy="weak_citation",
+                    reason="단일 citation만 연결되어 근거 강도가 약합니다.",
+                    severity="MEDIUM",
+                    covered=True,
+                    citation_count=citation_count,
+                    supporting_articles=supporting_articles,
+                )
+            )
+
+        if claim_article_tokens and supporting_articles:
+            mismatch = all(t.replace(" ", "") not in supporting_norm for t in claim_article_tokens)
+            if mismatch:
+                issues.append(
+                    UnsupportedClaimIssue(
+                        claim=claim,
+                        taxonomy="wrong_scope_citation",
+                        reason=f"주장 조문({', '.join(claim_article_tokens)})과 연결 조문 범위가 다릅니다.",
+                        severity="HIGH",
+                        covered=True,
+                        citation_count=citation_count,
+                        supporting_articles=supporting_articles,
+                    )
+                )
+
+    # 필수 증빙/입력 누락
+    for field in (missing_fields or []):
+        issues.append(
+            UnsupportedClaimIssue(
+                claim=f"필수 입력 누락: {field}",
+                taxonomy="missing_mandatory_evidence",
+                reason="필수 입력값 누락으로 근거 검증을 완료할 수 없습니다.",
+                severity="HIGH",
+                covered=False,
+                citation_count=0,
+                supporting_articles=[],
+            )
+        )
+    for req in (required_inputs or []):
+        f = str(req.get("field") or "").strip()
+        if not f:
+            continue
+        issues.append(
+            UnsupportedClaimIssue(
+                claim=f"필수 증빙/입력 필요: {f}",
+                taxonomy="missing_mandatory_evidence",
+                reason=str(req.get("reason") or "필수 증빙/입력값 보완 필요"),
+                severity="HIGH",
+                covered=False,
+                citation_count=0,
+                supporting_articles=[],
+            )
+        )
+
+    # retrieval 신뢰도 저하
+    if not retrieved_chunks:
+        issues.append(
+            UnsupportedClaimIssue(
+                claim="검색된 규정 근거 없음",
+                taxonomy="low_retrieval_confidence",
+                reason="retrieval 결과가 비어 있어 근거 신뢰도가 낮습니다.",
+                severity="HIGH",
+                covered=False,
+                citation_count=0,
+                supporting_articles=[],
+            )
+        )
+    else:
+        scores: list[float] = []
+        for chunk in retrieved_chunks[:10]:
+            score_detail = chunk.get("score_detail") or {}
+            score_val = (
+                score_detail.get("cross_encoder_score")
+                or score_detail.get("rrf_score")
+                or score_detail.get("bm25_score")
+                or score_detail.get("dense_score")
+                or chunk.get("retrieval_score")
+            )
+            try:
+                if score_val is not None:
+                    scores.append(float(score_val))
+            except Exception:
+                pass
+        if scores:
+            avg_score = sum(scores) / max(len(scores), 1)
+            if avg_score < 0.03:
+                issues.append(
+                    UnsupportedClaimIssue(
+                        claim="retrieval 점수 저하",
+                        taxonomy="low_retrieval_confidence",
+                        reason=f"상위 근거 평균 점수({avg_score:.4f})가 낮습니다.",
+                        severity="MEDIUM",
+                        covered=False,
+                        citation_count=0,
+                        supporting_articles=[],
+                    )
+                )
+
+    if execute_failed_tools:
+        issues.append(
+            UnsupportedClaimIssue(
+                claim="도구 실행 실패",
+                taxonomy="contradictory_evidence",
+                reason=f"핵심 도구 실패: {execute_failed_tools}",
+                severity="HIGH",
+                covered=False,
+                citation_count=0,
+                supporting_articles=[],
+            )
+        )
+
+    # taxonomy/claim 중복 제거
+    dedup: list[UnsupportedClaimIssue] = []
+    seen: set[tuple[str, str]] = set()
+    for issue in issues:
+        key = (issue.taxonomy, issue.claim)
+        if key in seen:
+            continue
+        seen.add(key)
+        dedup.append(issue)
+    return dedup
 
 
 async def critic_node_impl(
@@ -70,6 +329,69 @@ async def critic_node_impl(
             "previous_tool_results": [tool_result_key(r) for r in state.get("tool_results", [])],
         }
     verification_targets = build_verification_targets(state)
+    probe_facts = (
+        next((r.get("facts") or {} for r in tool_results if tool_result_key(r) == "policy_rulebook_probe"), {})
+        or {}
+    )
+    retrieved_chunks = probe_facts.get("retrieval_candidates") or probe_facts.get("policy_refs") or []
+    cited_article_clauses: list[dict[str, str]] = []
+    for ch in retrieved_chunks[:20]:
+        article = str(ch.get("article") or ch.get("regulation_article") or "").strip()
+        clause = str(ch.get("clause") or ch.get("regulation_clause") or "").strip()
+        if not article:
+            continue
+        pair = {"article": article, "clause": clause}
+        if pair not in cited_article_clauses:
+            cited_article_clauses.append(pair)
+
+    precheck_unsupported: list[dict[str, Any]] = []
+    for field in missing:
+        precheck_unsupported.append(
+            UnsupportedClaimIssue(
+                claim=f"필수 입력 누락: {field}",
+                taxonomy="missing_mandatory_evidence",
+                reason="입력 누락으로 주장 검증이 불완전합니다.",
+                severity="HIGH",
+                covered=False,
+                citation_count=0,
+                supporting_articles=[],
+            ).model_dump()
+        )
+    if critical_tool_failed:
+        precheck_unsupported.append(
+            UnsupportedClaimIssue(
+                claim="핵심 도구 실패",
+                taxonomy="contradictory_evidence",
+                reason=f"핵심 도구 실패: {[t for t in failed_tools if t in {'policy_rulebook_probe', 'document_evidence_probe'}]}",
+                severity="HIGH",
+                covered=False,
+                citation_count=0,
+                supporting_articles=[],
+            ).model_dump()
+        )
+    if not retrieved_chunks:
+        precheck_unsupported.append(
+            UnsupportedClaimIssue(
+                claim="retrieval 결과 없음",
+                taxonomy="low_retrieval_confidence",
+                reason="규정 근거 청크를 찾지 못했습니다.",
+                severity="HIGH",
+                covered=False,
+                citation_count=0,
+                supporting_articles=[],
+            ).model_dump()
+        )
+
+    review_audit = _build_review_audit_payload(
+        state=state,
+        verification_targets=verification_targets,
+        retrieved_chunks=retrieved_chunks,
+        cited_article_clauses=cited_article_clauses,
+        unsupported_claims=precheck_unsupported,
+        verification_summary={},
+    )
+    hold_required = bool(critique["recommend_hold"])
+    human_review_required = bool(hold_required and not state["flags"].get("hasHitlResponse"))
     critic_output = CriticOutput(
         overclaim_risk=critique["risk_of_overclaim"],
         contradictions=[],
@@ -80,6 +402,11 @@ async def critic_node_impl(
         verification_targets=verification_targets,
         replan_required=replan_required,
         replan_reason=replan_reason,
+        hold_required=hold_required,
+        human_review_required=human_review_required,
+        citation_regeneration_required=False,
+        risk_of_overclaim=critique["risk_of_overclaim"],
+        review_audit=review_audit,
     )
     rationale = critic_output.rationale
     reasoning_parts = [rationale]
@@ -93,6 +420,8 @@ async def critic_node_impl(
         "missing_fields": missing,
         "recommend_hold": critique.get("recommend_hold"),
         "replan_required": replan_required,
+        "unsupported_claims": precheck_unsupported[:8],
+        "confidence_risk_signals": (review_audit.get("confidence_risk_signals") or {}),
         "last_node_summary": state.get("last_node_summary", "없음"),
     }
     reasoning_text, reasoning_events, note_source = await stream_reasoning_events_with_llm("critic", reasoning_text, context=critic_context)
@@ -127,6 +456,7 @@ async def critic_node_impl(
         "critic_output": critic_output_dict,
         "critic_loop_count": loop_count + 1 if replan_required else loop_count,
         "replan_context": replan_context,
+        "review_audit": review_audit,
         "last_node_summary": last_node_summary,
         "pending_events": pending,
     }
@@ -154,6 +484,8 @@ async def verify_node_impl(
     probe_facts = (find_tool_result(state["tool_results"], "policy_rulebook_probe") or {}).get("facts", {}) or {}
     retrieved_chunks = probe_facts.get("retrieval_candidates") or probe_facts.get("policy_refs") or []
     verification_summary: dict[str, Any] = {}
+    execute_out = state.get("execute_output") or {}
+    execute_failed_tools = execute_out.get("failed_tools") or []
     score_bd = state.get("score_breakdown") or {}
     severity = score_bd.get("severity", "MEDIUM")
     final_score = float(score_bd.get("final_score") or 0)
@@ -236,6 +568,80 @@ async def verify_node_impl(
             gap=gap_text,
         ))
 
+    required_inputs_from_reg = (regulation_driven.get("required_inputs") or []) if isinstance(regulation_driven, dict) else []
+    missing_fields = ((state.get("body_evidence") or {}).get("dataQuality") or {}).get("missingFields") or []
+    unsupported_claim_issues = _classify_unsupported_claims(
+        verification_targets=verification_targets,
+        verification_summary=verification_summary,
+        claim_results=claim_results,
+        retrieved_chunks=retrieved_chunks,
+        missing_fields=missing_fields,
+        required_inputs=required_inputs_from_reg,
+        execute_failed_tools=execute_failed_tools,
+    )
+    unsupported_claims_dicts = [u.model_dump() for u in unsupported_claim_issues]
+    taxonomy_codes = [f"UNSUPPORTED_{u.taxonomy.upper()}" for u in unsupported_claim_issues]
+    if taxonomy_codes:
+        verification["quality_signals"] = sorted(set(list(verification.get("quality_signals") or []) + taxonomy_codes))
+
+    cited_article_clauses: list[dict[str, str]] = []
+    for ch in retrieved_chunks[:20]:
+        article = str(ch.get("article") or ch.get("regulation_article") or "").strip()
+        clause = str(ch.get("clause") or ch.get("regulation_clause") or "").strip()
+        if not article:
+            continue
+        pair = {"article": article, "clause": clause}
+        if pair not in cited_article_clauses:
+            cited_article_clauses.append(pair)
+
+    has_blocking_unsupported = any(u.taxonomy in _UNSUPPORTED_TAXONOMY_BLOCKING for u in unsupported_claim_issues)
+    citation_regeneration_required = (
+        str(verification_summary.get("gate_policy") or "").lower() == "regenerate_citations"
+        or any(u.taxonomy in {"weak_citation", "wrong_scope_citation"} for u in unsupported_claim_issues)
+    )
+    # Fail-closed: unsupported claim이 blocking taxonomy로 감지되면 HITL로 강제.
+    if has_blocking_unsupported and not state["flags"].get("hasHitlResponse"):
+        needs_hitl = True
+        verification["needs_hitl"] = True
+        verification["quality_signals"] = sorted(
+            set(["HITL_REQUIRED", "FAIL_CLOSED_UNSUPPORTED"] + list(verification.get("quality_signals") or []))
+        )
+        gate = VerifierGate.HITL_REQUIRED
+        if not hitl_request:
+            first_reason = unsupported_claim_issues[0].reason if unsupported_claim_issues else "근거 부족 주장이 감지되었습니다."
+            hitl_request = {
+                "required": True,
+                "handoff": "FINANCE_REVIEWER",
+                "why_hitl": f"unsupported claim 검출로 자동 확정을 중단했습니다. {first_reason}",
+                "blocking_gate": "HITL_REQUIRED",
+                "blocking_reason": first_reason,
+                "reasons": [u.reason for u in unsupported_claim_issues[:5] if u.reason],
+                "unresolved_claims": [f"[{u.taxonomy}] {u.claim}" for u in unsupported_claim_issues[:5]],
+                "review_questions": ["근거가 약하거나 누락된 주장에 대해 추가 증빙을 제출했는가?"],
+                "questions": ["근거가 약하거나 누락된 주장에 대해 추가 증빙을 제출했는가?"],
+                "required_inputs": required_inputs_from_reg[:5],
+                "evidence_snapshot": [],
+                "candidate_outcomes": ["APPROVE_AFTER_HITL", "HOLD_AFTER_HITL"],
+                "unsupported_claims": unsupported_claims_dicts,
+            }
+
+    review_audit = _build_review_audit_payload(
+        state=state,
+        verification_targets=verification_targets,
+        retrieved_chunks=retrieved_chunks,
+        cited_article_clauses=cited_article_clauses,
+        unsupported_claims=unsupported_claims_dicts,
+        verification_summary=verification_summary,
+    )
+
+    hold_required = bool(
+        str(verification_summary.get("gate_policy") or "").lower() == EVIDENCE_GATE_HOLD
+        or has_blocking_unsupported
+        or ((state.get("critic_output") or {}).get("recommend_hold") is True)
+    )
+    human_review_required = bool(needs_hitl or hold_required)
+    risk_of_overclaim = bool((state.get("critic_output") or {}).get("overclaim_risk")) or has_blocking_unsupported
+
     rationale = hitl_request.get("why_hitl") if hitl_request else "자동 확정 가능한 상태로 검증이 완료되었습니다."
     verifier_output = VerifierOutput(
         grounded=not needs_hitl,
@@ -245,6 +651,13 @@ async def verify_node_impl(
         rationale=rationale,
         quality_signals=verification["quality_signals"],
         claim_results=claim_results,
+        unsupported_claims=unsupported_claim_issues,
+        replan_required=bool((state.get("critic_output") or {}).get("replan_required")),
+        hold_required=hold_required,
+        human_review_required=human_review_required,
+        citation_regeneration_required=citation_regeneration_required,
+        risk_of_overclaim=risk_of_overclaim,
+        review_audit=review_audit,
     )
     reasoning_parts = [rationale]
     reasoning_parts.append("담당자 검토 필요" if needs_hitl else "자동 진행 가능")
@@ -254,6 +667,8 @@ async def verify_node_impl(
         "gate_result": gate.value,
         "needs_hitl": needs_hitl,
         "verification_targets": verification_targets,
+        "unsupported_claims": unsupported_claims_dicts[:8],
+        "confidence_risk_signals": (review_audit.get("confidence_risk_signals") or {}),
         "last_node_summary": state.get("last_node_summary", "없음"),
     }
     reasoning_text, reasoning_events, note_source = await stream_reasoning_events_with_llm("verify", reasoning_text, context=verify_context)
@@ -261,6 +676,7 @@ async def verify_node_impl(
     verifier_output_dict["reasoning"] = reasoning_text
 
     if hitl_request:
+        hitl_request["unsupported_claims"] = unsupported_claims_dicts
         claim_results_dicts = [c.model_dump() if hasattr(c, "model_dump") else c for c in claim_results]
         llm_review = await generate_hitl_review_content(
             hitl_request,
@@ -290,6 +706,8 @@ async def verify_node_impl(
                 hitl_request["review_questions"] = retry_result["review_questions"]
                 hitl_request["questions"] = retry_result["review_questions"]
         final_reasons = [str(x).strip() for x in (hitl_request.get("unresolved_claims") or []) if str(x).strip()]
+        if not final_reasons:
+            final_reasons = [f"[{u.taxonomy}] {u.reason or u.claim}" for u in unsupported_claim_issues[:5]]
         final_questions = [str(x).strip() for x in (hitl_request.get("review_questions") or hitl_request.get("questions") or []) if str(x).strip()]
         hitl_request["unresolved_claims"] = final_reasons[:5]
         hitl_request["review_questions"] = final_questions[:3]
@@ -346,6 +764,7 @@ async def verify_node_impl(
         "verification": verification,
         "verifier_output": verifier_output_dict,
         "hitl_request": hitl_request,
+        "review_audit": review_audit,
         "last_node_summary": last_node_summary,
         "pending_events": events,
     }

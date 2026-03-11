@@ -9,7 +9,6 @@ try:
 except TypeError:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s", datefmt="%H:%M:%S")
 
-from ui.dashboard import render_dashboard_page
 from ui.demo import render_demo_control_page
 from ui.rag import render_rag_library_page
 from ui.shared import inject_css
@@ -34,7 +33,5 @@ elif selected_menu == "에이전트 스튜디오":
     render_agent_studio_page()
 elif selected_menu == "규정문서 라이브러리":
     render_rag_library_page()
-elif selected_menu == "운영 대시보드":
-    render_dashboard_page()
 else:
     render_demo_control_page()

@@ -58,6 +58,30 @@ class CriticOutput(BaseModel):
         default="",
         description="재계획이 필요한 이유",
     )
+    hold_required: bool = Field(
+        default=False,
+        description="현재 단계에서 보류(hold) 처리 필요 여부",
+    )
+    human_review_required: bool = Field(
+        default=False,
+        description="사람 검토(HITL) 필요 여부",
+    )
+    citation_regeneration_required: bool = Field(
+        default=False,
+        description="인용/근거 재생성 필요 여부",
+    )
+    risk_of_overclaim: bool = Field(
+        default=False,
+        description="과잉 주장 위험 여부(기존 overclaim_risk와 호환용 중복 필드)",
+    )
+    review_audit: dict[str, Any] = Field(
+        default_factory=dict,
+        description=(
+            "critic/review 입력 감사 객체. "
+            "plan, executed_tool_results, retrieved_evidence_ids, cited_article_clauses, "
+            "unsupported_claims, confidence_risk_signals 포함."
+        ),
+    )
     reasoning: str = Field(default="", description="비판 근거 추론 과정 서술(스트리밍용)")
 
 
@@ -85,6 +109,23 @@ class ClaimVerificationResult(BaseModel):
     )
 
 
+class UnsupportedClaimIssue(BaseModel):
+    """unsupported claim taxonomy 분류 결과."""
+
+    claim: str = Field(description="검증 대상 주장 문장")
+    taxonomy: str = Field(
+        description=(
+            "no_citation | weak_citation | wrong_scope_citation | contradictory_evidence | "
+            "missing_mandatory_evidence | low_retrieval_confidence"
+        )
+    )
+    reason: str = Field(default="", description="분류 근거")
+    severity: str = Field(default="MEDIUM", description="LOW | MEDIUM | HIGH")
+    covered: bool = Field(default=False, description="원본 claim coverage 여부")
+    citation_count: int = Field(default=0, description="연결 citation 수")
+    supporting_articles: list[str] = Field(default_factory=list, description="연결된 조항 목록")
+
+
 class VerifierOutput(BaseModel):
     """검증 노드 출력. 근거 충족·HITL 필요·게이트."""
 
@@ -97,6 +138,38 @@ class VerifierOutput(BaseModel):
     claim_results: list[ClaimVerificationResult] = Field(
         default_factory=list,
         description="주장(claim)별 개별 검증 결과 목록 (신규)",
+    )
+    unsupported_claims: list[UnsupportedClaimIssue] = Field(
+        default_factory=list,
+        description="unsupported claim taxonomy 분류 결과",
+    )
+    replan_required: bool = Field(
+        default=False,
+        description="재계획(planner 재실행) 필요 여부",
+    )
+    hold_required: bool = Field(
+        default=False,
+        description="보류(hold) 필요 여부",
+    )
+    human_review_required: bool = Field(
+        default=False,
+        description="사람 검토(HITL) 필요 여부",
+    )
+    citation_regeneration_required: bool = Field(
+        default=False,
+        description="인용/근거 재생성 필요 여부",
+    )
+    risk_of_overclaim: bool = Field(
+        default=False,
+        description="과잉 주장 위험 여부",
+    )
+    review_audit: dict[str, Any] = Field(
+        default_factory=dict,
+        description=(
+            "verify/review 입력 감사 객체. "
+            "plan, executed_tool_results, retrieved_evidence_ids, cited_article_clauses, "
+            "unsupported_claims, confidence_risk_signals 포함."
+        ),
     )
     reasoning: str = Field(default="", description="검증 판단 과정 서술(스트리밍용)")
 
