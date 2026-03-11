@@ -314,8 +314,15 @@ async def _run_analysis_task(
                                 reason_text=str(data.get("observation") or data.get("message") or ""),
                                 screening_meta=meta.get("screening_meta"),
                             )
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        logger.warning(
+                            "[analysis] SCREENING_RESULT persistence failed run_id=%s voucher_key=%s case_type=%s error=%s",
+                            run_id,
+                            voucher_key,
+                            ct,
+                            exc,
+                            exc_info=True,
+                        )
 
             try:
                 from db.session import SessionLocal

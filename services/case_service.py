@@ -161,8 +161,9 @@ def run_case_screening(
         existing.score = result["score"] / 100.0
         existing.reason_text = result["reason_text"]
         existing.status = "NEW"
-        if screening_meta is not None:
-            existing.screening_meta = screening_meta
+        # Always overwrite to keep lane/meta aligned with the latest screening run.
+        # Fast lane will explicitly clear stale deep metadata with None.
+        existing.screening_meta = screening_meta
     else:
         case = AgentCase(
             case_id=_case_id_from_voucher(tenant_id, bukrs, belnr, gjahr),
@@ -224,8 +225,9 @@ def upsert_agent_case_from_screening_result(
         existing.score = score
         existing.reason_text = reason_text
         existing.status = "NEW"
-        if screening_meta is not None:
-            existing.screening_meta = screening_meta
+        # Always overwrite to keep lane/meta aligned with the latest screening run.
+        # Fast lane will explicitly clear stale deep metadata with None.
+        existing.screening_meta = screening_meta
     else:
         case = AgentCase(
             case_id=_case_id_from_voucher(tenant_id, bukrs, belnr, gjahr),

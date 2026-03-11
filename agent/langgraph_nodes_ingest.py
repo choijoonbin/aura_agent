@@ -151,6 +151,9 @@ async def screener_node_impl(
             # ── Deep lane ───────────────────────────────────────────────────
             try:
                 deep_graph = get_deep_screening_graph()
+                deep_timeout_sec = float(
+                    getattr(settings, "screening_llm_timeout_seconds", 8.0)
+                ) + 2.0
                 deep_input: dict[str, Any] = {
                     "body_evidence": body,
                     "fast_result": fast_result,
@@ -161,7 +164,10 @@ async def screener_node_impl(
                     "final_result": {},
                     "decision_path": [],
                 }
-                deep_output = await deep_graph.ainvoke(deep_input)
+                deep_output = await asyncio.wait_for(
+                    deep_graph.ainvoke(deep_input),
+                    timeout=deep_timeout_sec,
+                )
                 deep_final = deep_output.get("final_result") or {}
                 if deep_final.get("case_type"):
                     screening = deep_final
@@ -178,6 +184,11 @@ async def screener_node_impl(
                     logger.warning(
                         "screener_node: deep lane returned empty final_result → fast fallback"
                     )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "screener_node: deep lane timeout(%.1fs) → fast fallback",
+                    deep_timeout_sec,
+                )
             except Exception as exc:
                 logger.warning(
                     "screener_node: deep lane failed (%s) → fast fallback", exc
@@ -230,6 +241,8 @@ async def screener_node_impl(
                     "severity": severity,
                     "score": score,
                     "reasons": screening.get("reasons", []),
+                    "reasonText": reason_text,
+                    "reason_text": reason_text,
                     "lane": lane_used,
                     "screening_mode": screening.get("screening_mode"),
                     "screening_source": screening.get("screening_source"),
