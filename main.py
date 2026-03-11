@@ -312,6 +312,7 @@ async def _run_analysis_task(
                                 severity=str(sev),
                                 score=float(sc) / 100.0,
                                 reason_text=str(data.get("observation") or data.get("message") or ""),
+                                screening_meta=meta.get("screening_meta"),
                             )
                     except Exception:
                         pass

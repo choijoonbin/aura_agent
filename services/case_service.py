@@ -143,6 +143,7 @@ def run_case_screening(
                 + f" (voucher_key={voucher_key})"
             )
     result = run_screening(screening_body)
+    screening_meta: dict | None = result.get("screening_meta")
 
     # Upsert AgentCase with screening result
     existing = db.scalar(
@@ -160,6 +161,8 @@ def run_case_screening(
         existing.score = result["score"] / 100.0
         existing.reason_text = result["reason_text"]
         existing.status = "NEW"
+        if screening_meta is not None:
+            existing.screening_meta = screening_meta
     else:
         case = AgentCase(
             case_id=_case_id_from_voucher(tenant_id, bukrs, belnr, gjahr),
@@ -174,6 +177,7 @@ def run_case_screening(
             score=result["score"] / 100.0,
             reason_text=result["reason_text"],
             status="NEW",
+            screening_meta=screening_meta,
         )
         db.add(case)
     if commit:
@@ -192,10 +196,12 @@ def upsert_agent_case_from_screening_result(
     severity: str,
     score: float,
     reason_text: str,
+    screening_meta: dict | None = None,
 ) -> None:
     """
     스크리닝 결과만으로 AgentCase를 생성/갱신 (스크리닝 로직 재실행 없음).
     분석 실행 중 screener_node 결과를 DB에 반영할 때 사용.
+    screening_meta: Deep lane 결과가 있을 경우 optional로 전달.
     """
     tenant_id = settings.default_tenant_id
     parts = voucher_key.split("-")
@@ -218,6 +224,8 @@ def upsert_agent_case_from_screening_result(
         existing.score = score
         existing.reason_text = reason_text
         existing.status = "NEW"
+        if screening_meta is not None:
+            existing.screening_meta = screening_meta
     else:
         case = AgentCase(
             case_id=_case_id_from_voucher(tenant_id, bukrs, belnr, gjahr),
@@ -232,6 +240,7 @@ def upsert_agent_case_from_screening_result(
             score=score,
             reason_text=reason_text,
             status="NEW",
+            screening_meta=screening_meta,
         )
         db.add(case)
     db.commit()

@@ -2,12 +2,72 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from typing import Any, Awaitable, Callable
 
 from agent.event_schema import AgentEvent
 from agent.output_models import PlanStep, PlannerOutput
 from utils.config import settings
 from utils.llm_azure import completion_kwargs_for_azure
+
+logger = logging.getLogger(__name__)
+
+# 위험 신호 키 — screener._extract_signals와 동일 집합
+_DEEP_RISK_SIGNAL_KEYS = (
+    "is_holiday",
+    "is_leave",
+    "is_night",
+    "budget_exceeded",
+    "mcc_high_risk",
+    "mcc_leisure",
+)
+
+
+def _should_promote_to_deep(fast_result: dict[str, Any]) -> tuple[bool, str]:
+    """Fast(hybrid) 결과를 보고 Deep lane 승격 여부를 결정한다.
+
+    문서 B안 승격 기준:
+      1. rule_case_type != llm_case_type
+      2. llm_confidence < min_override_conf (기본 0.75)
+      3. final_score ∈ [45, 65]  (경계 점수 구간)
+      4. NORMAL_BASELINE + 위험 신호 ≥ 2
+
+    LLM이 호출되지 않은 경우(rule-only / hybrid_fallback_rule)는 승격하지 않는다.
+    Returns (should_promote: bool, reason: str).
+    """
+    mode = fast_result.get("screening_mode", "")
+    source = fast_result.get("screening_source", "")
+
+    # LLM이 실제로 호출된 hybrid 결과에만 승격 판단을 적용한다.
+    if mode != "hybrid" or source == "hybrid_fallback_rule":
+        return False, "fast_rule_only_no_promote"
+
+    rule_case = fast_result.get("case_type", "")
+    llm_case = fast_result.get("llm_case_type")
+    llm_confidence = fast_result.get("llm_confidence")
+    score = int(fast_result.get("score", 0))
+    signals = fast_result.get("signals") or {}
+    min_conf = float(getattr(settings, "screening_llm_override_min_confidence", 0.75))
+
+    # 조건 1: LLM-규칙 불일치
+    if llm_case and rule_case != llm_case:
+        return True, f"rule_llm_mismatch(rule={rule_case},llm={llm_case})"
+
+    # 조건 2: LLM 저신뢰도
+    if llm_confidence is not None and llm_confidence < min_conf:
+        return True, f"llm_low_confidence({llm_confidence:.2f}<{min_conf})"
+
+    # 조건 3: 경계 점수 구간
+    if 45 <= score <= 65:
+        return True, f"boundary_score({score})"
+
+    # 조건 4: NORMAL_BASELINE + 위험 신호 과다
+    if rule_case == "NORMAL_BASELINE":
+        risk_count = sum(1 for k in _DEEP_RISK_SIGNAL_KEYS if signals.get(k))
+        if risk_count >= 2:
+            return True, f"normal_baseline_with_risk_signals({risk_count})"
+
+    return False, "fast_sufficient"
 
 
 async def start_router_node_impl(
@@ -40,25 +100,94 @@ async def screener_node_impl(
     run_screening: Callable[[dict[str, Any]], dict[str, Any]],
 ) -> dict[str, Any]:
     """
-    Phase 0 — Screening.
-    Runs deterministic signal analysis on raw body_evidence to classify
-    the case_type BEFORE the agent begins deep analysis.
+    Phase 0 — Screening (Dual-Lane Agentic Screening).
+
+    Fast lane: 현재 hybrid(규칙+LLM 보정) 스크리닝을 asyncio.to_thread로 실행.
+    Deep lane: 승격 조건 충족 시 LangGraph 4노드 서브그래프를 ainvoke로 실행.
+               실패/타임아웃 시 Fast 결과로 즉시 fallback.
+
+    승격 조건 (문서 B안):
+      1. rule_case_type != llm_case_type
+      2. llm_confidence < min_override_conf (0.75)
+      3. final_score ∈ [45, 65]
+      4. NORMAL_BASELINE + 위험 신호 ≥ 2
     """
+    from agent.screening_subgraph import get_deep_screening_graph
+
     body = state["body_evidence"]
 
+    # 이미 유효한 스크리닝 결과가 있으면 재스크리닝 없이 그대로 사용
     pre_classified = body.get("case_type") or body.get("intended_risk_type")
     if is_valid_screening_case_type(pre_classified) and str(pre_classified).upper() != "NORMAL_BASELINE":
-        screening = {
+        screening: dict[str, Any] = {
             "case_type": pre_classified,
             "severity": body.get("severity") or "MEDIUM",
             "score": body.get("screening_score") or 0,
             "reasons": ["기존 스크리닝 결과를 사용합니다."],
             "reason_text": f"기존 분류: {pre_classified}",
+            "screening_mode": "prescreened",
+            "screening_source": "prescreened",
         }
+        lane_used = "prescreened"
     else:
-        screening = await asyncio.to_thread(run_screening, body)
+        # ── Fast lane ──────────────────────────────────────────────────────
+        fast_result: dict[str, Any] = await asyncio.to_thread(run_screening, body)
+        screening = fast_result
+        lane_used = "fast"
 
-    updated_body = {**body, "case_type": screening["case_type"], "intended_risk_type": screening["case_type"]}
+        # ── Deep 승격 판단 ──────────────────────────────────────────────────
+        should_promote, promotion_reason = _should_promote_to_deep(fast_result)
+        logger.info(
+            "screener_node: fast_case_type=%s score=%s llm_confidence=%s "
+            "promote=%s promotion_reason=%s",
+            fast_result.get("case_type"),
+            fast_result.get("score"),
+            fast_result.get("llm_confidence"),
+            should_promote,
+            promotion_reason,
+        )
+
+        if should_promote:
+            # ── Deep lane ───────────────────────────────────────────────────
+            try:
+                deep_graph = get_deep_screening_graph()
+                deep_input: dict[str, Any] = {
+                    "body_evidence": body,
+                    "fast_result": fast_result,
+                    "promotion_reason": promotion_reason,
+                    "signals": fast_result.get("signals") or {},
+                    "alt_hypotheses": [],
+                    "guardrail_decision": {},
+                    "final_result": {},
+                    "decision_path": [],
+                }
+                deep_output = await deep_graph.ainvoke(deep_input)
+                deep_final = deep_output.get("final_result") or {}
+                if deep_final.get("case_type"):
+                    screening = deep_final
+                    lane_used = "deep"
+                    logger.info(
+                        "screener_node: deep lane completed: "
+                        "final_case_type=%s severity=%s score=%s promotion_reason=%s",
+                        screening.get("case_type"),
+                        screening.get("severity"),
+                        screening.get("score"),
+                        promotion_reason,
+                    )
+                else:
+                    logger.warning(
+                        "screener_node: deep lane returned empty final_result → fast fallback"
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "screener_node: deep lane failed (%s) → fast fallback", exc
+                )
+
+    updated_body = {
+        **body,
+        "case_type": screening["case_type"],
+        "intended_risk_type": screening["case_type"],
+    }
 
     label_map = {
         "HOLIDAY_USAGE": "휴일/휴무 중 사용 의심",
@@ -71,6 +200,7 @@ async def screener_node_impl(
     severity = screening.get("severity", "MEDIUM")
     score = screening.get("score", 0)
     reason_text = screening.get("reason_text", "")
+    screening_meta = screening.get("screening_meta")  # Deep lane에서만 채워짐
 
     return {
         "body_evidence": updated_body,
@@ -85,13 +215,13 @@ async def screener_node_impl(
                 thought="원시 전표 데이터에서 위반 유형을 식별합니다.",
                 action="전표 데이터 추출 및 점수 산정",
                 observation="근태 상태, 업종 코드, 전표 기준일, 입력 시각 등 핵심 필드를 분석합니다.",
-                metadata={"role": "screener"},
+                metadata={"role": "screener", "lane": lane_used},
             ).to_payload(),
             AgentEvent(
                 event_type="SCREENING_RESULT",
                 node="screener",
                 phase="screen",
-                message=f"스크리닝 완료: [{label}] — 중요도 {severity} / 점수 {score}",
+                message=f"스크리닝 완료 [{lane_used.upper()}]: [{label}] — 중요도 {severity} / 점수 {score}",
                 thought=f"전표 데이터를 바탕으로 '{screening['case_type']}' 유형으로 분류되었습니다.",
                 action="케이스 유형 분류 완료",
                 observation=reason_text,
@@ -100,6 +230,13 @@ async def screener_node_impl(
                     "severity": severity,
                     "score": score,
                     "reasons": screening.get("reasons", []),
+                    "lane": lane_used,
+                    "screening_mode": screening.get("screening_mode"),
+                    "screening_source": screening.get("screening_source"),
+                    "llm_case_type": screening.get("llm_case_type"),
+                    "llm_confidence": screening.get("llm_confidence"),
+                    "hybrid_case_align_reason": screening.get("hybrid_case_align_reason"),
+                    "screening_meta": screening_meta,
                 },
             ).to_payload(),
             AgentEvent(
@@ -111,6 +248,7 @@ async def screener_node_impl(
                     "case_type": screening["case_type"],
                     "severity": severity,
                     "score": score,
+                    "lane": lane_used,
                 },
             ).to_payload(),
         ],
