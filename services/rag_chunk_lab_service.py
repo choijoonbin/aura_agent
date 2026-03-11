@@ -6,12 +6,14 @@ from pathlib import Path
 from typing import Any
 
 # 계층적 청킹용 패턴
-_ARTICLE_PATTERN = re.compile(r"^(제\s*\d+\s*조(?:\s*\([^)]+\))?)\s*(.*)$", re.MULTILINE)
+# [^\S\n]* : 수평 공백(스페이스/탭)만 소비 — \s*는 개행(\n)까지 소비해 다음 줄의 ①을 group(2)에 흡수하는 버그 발생
+_ARTICLE_PATTERN = re.compile(r"^(제\s*\d+\s*조(?:\s*\([^)]+\))?)[^\S\n]*(.*)$", re.MULTILINE)
 _CHAPTER_PATTERN = re.compile(r"^(제\s*\d+\s*장[^\n]*)", re.MULTILINE)
 _SECTION_PATTERN = re.compile(r"^(제\s*\d+\s*절[^\n]*)", re.MULTILINE)
 # 호(號) 마커 패턴: 줄 시작에서만 매칭 (문장 내부 "표 1. 참조" 오매칭 방지)
+# 1. 2. 형식 + 1) 2) 형식 + 가. 나. 형식 + 가) 나) 형식 지원
 _ITEM_PATTERN = re.compile(
-    r"(?:^|\n)\s*(\d+\.\s+|[가나다라마바사아자차카타파하]\.\s+)"
+    r"(?:^|\n)\s*(\d+\.\s+|\d+\)\s+|[가나다라마바사아자차카타파하]\.\s+|[가나다라마바사아자차카타파하]\)\s+)"
 )
 
 
@@ -99,7 +101,7 @@ def _expand_tokens(text: str) -> str:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-PARENT_MIN = 200  # 이 길이 미만인 ARTICLE은 다음 조문과 병합
+PARENT_MIN = 120  # 이 길이 미만인 ARTICLE은 다음 조문과 병합 (Fix 1 후 body에 ① 포함 → 기존 200에서 조정)
 
 
 @dataclass

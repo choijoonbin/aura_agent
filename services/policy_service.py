@@ -318,6 +318,7 @@ def _search_bm25(
                 chunk_id, doc_id, regulation_article, regulation_clause,
                 parent_title, chunk_text, search_text, node_type, parent_id,
                 version, effective_from, effective_to, page_no, chunk_index,
+                metadata_json,
                 ts_rank_cd(
                     setweight(search_tsv, 'A') || setweight(to_tsvector('simple', coalesce(search_tokens, '')), 'B'),
                     query
@@ -338,6 +339,7 @@ def _search_bm25(
                 chunk_id, doc_id, regulation_article, regulation_clause,
                 parent_title, chunk_text, search_text, node_type, parent_id,
                 version, effective_from, effective_to, page_no, chunk_index,
+                metadata_json,
                 ts_rank_cd(search_tsv, query) AS bm25_score
             FROM dwp_aura.rag_chunk,
                  to_tsquery('simple', :ts_query) AS query
