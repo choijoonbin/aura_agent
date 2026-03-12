@@ -19,6 +19,84 @@ _CLAIM_PRIORITY: dict[str, int] = {
     "policy_ref_direct": 5,
 }
 
+# 전 케이스 공통 제외 대상(required_inputs로 올리지 않음)
+# 요청 항목: 거래일시, 가맹점/사업자번호, 품목/서비스, 공급가액·세액·총액, 결제수단, 업무 관련성
+_EXCLUDED_REQUIRED_INPUT_KEYWORDS = (
+    "공통 증빙 의무",
+    "모든 경비 지출은",
+    "증빙을 구비",
+    "법적·내부 기준",
+    "증빙",
+    "거래일시",
+    "발생일시",
+    "발생 시각",
+    "거래처명",
+    "가맹점",
+    "사업자등록번호",
+    "품목",
+    "서비스",
+    "내역",
+    "공급가액",
+    "세액",
+    "합계금액",
+    "총 결제 금액",
+    "결제수단",
+    "법인카드",
+    "계좌이체",
+    "현금",
+    "업무 목적",
+    "업무관련성",
+    "프로젝트",
+    "코스트센터",
+)
+
+
+def _is_present_value(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, (list, dict, tuple, set)):
+        return len(value) > 0
+    return True
+
+
+def _filter_required_inputs_by_presence_fallback(required_inputs: list[dict[str, str]], body: dict[str, Any]) -> list[dict[str, str]]:
+    """LLM 실패 시 최소 안전 필터: body_evidence에서 명백히 존재하는 항목은 제거."""
+    if not required_inputs:
+        return []
+    present_keys = {
+        "occurredat": _is_present_value(body.get("occurredAt")),
+        "transaction_datetime": _is_present_value(body.get("occurredAt")),
+        "merchantname": _is_present_value(body.get("merchantName")),
+        "amount": _is_present_value(body.get("amount")),
+        "mcccode": _is_present_value(body.get("mccCode")),
+        "budgetexceeded": _is_present_value(body.get("budgetExceeded")),
+        "hrstatus": _is_present_value(body.get("hrStatus")),
+    }
+    missing: list[dict[str, str]] = []
+    for req in required_inputs:
+        field = str(req.get("field", "")).strip()
+        key = field.replace("_", "").lower()
+        if key and present_keys.get(key):
+            continue
+        missing.append(req)
+    return missing
+
+
+def _is_excluded_required_input(req: dict[str, str]) -> bool:
+    text = " ".join(
+        [
+            str(req.get("field", "")).strip(),
+            str(req.get("reason", "")).strip(),
+            str(req.get("guide", "")).strip(),
+        ]
+    )
+    if not text:
+        return False
+    lowered = text.lower()
+    return any(kw.lower() in lowered for kw in _EXCLUDED_REQUIRED_INPUT_KEYWORDS)
+
 
 def _build_verification_targets(state: dict[str, Any]) -> list[str]:
     """
@@ -220,8 +298,72 @@ async def _derive_hitl_from_regulation(state: dict[str, Any]) -> dict[str, Any]:
             {"field": str(x.get("field", "")), "reason": str(x.get("reason", "")), "guide": str(x.get("guide", ""))}
             for x in required_inputs if isinstance(x, dict)
         ]
+        required_inputs = [x for x in required_inputs if not _is_excluded_required_input(x)]
         review_questions = [str(q).strip() for q in review_questions if str(q).strip()][:3]
-        return {"required_inputs": required_inputs, "review_questions": review_questions}
+        if not required_inputs:
+            return {"required_inputs": [], "review_questions": review_questions}
+
+        # 2차 필터(LLM): 추출 체크리스트 중 body_evidence에 이미 값이 존재하는 항목을 제거하고,
+        # 실제 누락으로 판단되는 필드만 required_inputs로 남긴다.
+        presence_prompt_sys = (
+            "당신은 입력값 존재 여부를 판별하는 검증기다. "
+            "required_inputs 항목마다 case_data에 이미 값이 존재하는지 판단해, "
+            "실제로 누락된 항목만 missing_required_inputs로 반환하라. "
+            "값이 명확히 있으면 제외하고, 없거나 불명확하면 포함한다. "
+            "반드시 JSON만 응답: {\"missing_required_inputs\": [{\"field\":\"...\",\"reason\":\"...\",\"guide\":\"...\"}]}"
+        )
+        presence_payload = {
+            "required_inputs": required_inputs,
+            "case_data": {
+                "occurredAt": body.get("occurredAt"),
+                "merchantName": body.get("merchantName"),
+                "amount": body.get("amount"),
+                "mccCode": body.get("mccCode"),
+                "budgetExceeded": body.get("budgetExceeded"),
+                "hrStatus": body.get("hrStatus"),
+                "isHoliday": body.get("isHoliday"),
+                "document": body.get("document"),
+            },
+        }
+        filtered_required_inputs = required_inputs
+        try:
+            response2 = await client.chat.completions.create(
+                **completion_kwargs_for_azure(
+                    base_url,
+                    model=getattr(settings, "reasoning_llm_model", "gpt-4o-mini"),
+                    response_format={"type": "json_object"},
+                    messages=[
+                        {"role": "system", "content": presence_prompt_sys},
+                        {"role": "user", "content": json.dumps(presence_payload, ensure_ascii=False)},
+                    ],
+                    **tok_kw,
+                ),
+            )
+            raw2 = (response2.choices[0].message.content or "").strip()
+            parsed2 = json.loads(raw2)
+            missing_required = parsed2.get("missing_required_inputs") or []
+            if isinstance(missing_required, list):
+                filtered_required_inputs = [
+                    {"field": str(x.get("field", "")), "reason": str(x.get("reason", "")), "guide": str(x.get("guide", ""))}
+                    for x in missing_required
+                    if isinstance(x, dict) and str(x.get("field", "")).strip()
+                ]
+                filtered_required_inputs = [x for x in filtered_required_inputs if not _is_excluded_required_input(x)]
+            logger.info(
+                "derive_hitl_from_regulation required_inputs filtered: before=%s after=%s",
+                len(required_inputs),
+                len(filtered_required_inputs),
+            )
+        except Exception:
+            filtered_required_inputs = _filter_required_inputs_by_presence_fallback(required_inputs, body)
+            filtered_required_inputs = [x for x in filtered_required_inputs if not _is_excluded_required_input(x)]
+            logger.info(
+                "derive_hitl_from_regulation required_inputs fallback filter applied: before=%s after=%s",
+                len(required_inputs),
+                len(filtered_required_inputs),
+            )
+
+        return {"required_inputs": filtered_required_inputs, "review_questions": review_questions}
     except Exception:
         return {}
 

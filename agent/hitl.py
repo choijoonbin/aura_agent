@@ -162,8 +162,6 @@ def build_hitl_request(
         review_questions.extend(reg_questions)
     # review_questions는 규정 기반(regulation_driven) 또는 verify_node에서 LLM이 생성한 값만 사용. 하드코딩/폴백 없음.
 
-    # 정상 비교군(NORMAL_BASELINE): 검증 연결률/게이트/비판·규정 추출 필수입력(reg_required)만으로는 HITL 부여하지 않음.
-    # 실제 결격(전표 필드 누락 missing_fields, 라인 없음 document_items, missing_evidence)이 있을 때만 HITL.
     is_normal_baseline = str(case_type or "").upper() == "NORMAL_BASELINE"
     critical_required = [r for r in required_inputs if (r.get("field") or "").strip() in ("missing_fields", "document_items")]
     logger.info(
@@ -207,7 +205,6 @@ def build_hitl_request(
 
     # 검토 필요(REVIEW_REQUIRED)인데 HITL 요청이 없으면 UI에 담당자 검토 패널이 안 뜸.
     # 규정 적용·위험 유형이 있으면 최소한의 hitl_request를 만들어 run이 hitl_pause에서 멈추도록 함.
-    # 정상 비교군(NORMAL_BASELINE)은 분석 결과가 양호하면 HITL 없이 완료: enable_hitl 체크해도 팝업이 뜨지 않음.
     if not blocking_reasons and not unresolved_claims and not missing_evidence:
         is_normal_baseline = str(case_type or "").upper() == "NORMAL_BASELINE"
         risk_case_or_reg = (case_type and not is_normal_baseline) or severity or reg_required or reg_questions

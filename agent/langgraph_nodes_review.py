@@ -24,6 +24,49 @@ _UNSUPPORTED_TAXONOMY_BLOCKING = {
     "low_retrieval_confidence",
 }
 
+_EXCLUDED_REQUIRED_INPUT_KEYWORDS = (
+    "공통 증빙 의무",
+    "모든 경비 지출은",
+    "증빙을 구비",
+    "법적·내부 기준",
+    "증빙",
+    "거래일시",
+    "발생일시",
+    "발생 시각",
+    "거래처명",
+    "가맹점",
+    "사업자등록번호",
+    "품목",
+    "서비스",
+    "내역",
+    "공급가액",
+    "세액",
+    "합계금액",
+    "총 결제 금액",
+    "결제수단",
+    "법인카드",
+    "계좌이체",
+    "현금",
+    "업무 목적",
+    "업무관련성",
+    "프로젝트",
+    "코스트센터",
+)
+
+
+def _is_excluded_required_input(req: dict[str, Any]) -> bool:
+    text = " ".join(
+        [
+            str(req.get("field", "")).strip(),
+            str(req.get("reason", "")).strip(),
+            str(req.get("guide", "")).strip(),
+        ]
+    )
+    if not text:
+        return False
+    lowered = text.lower()
+    return any(kw.lower() in lowered for kw in _EXCLUDED_REQUIRED_INPUT_KEYWORDS)
+
 
 def _extract_article_tokens(text: str) -> list[str]:
     if not text:
@@ -186,6 +229,8 @@ def _classify_unsupported_claims(
             )
         )
     for req in (required_inputs or []):
+        if _is_excluded_required_input(req):
+            continue
         f = str(req.get("field") or "").strip()
         if not f:
             continue
@@ -594,7 +639,8 @@ async def verify_node_impl(
         if pair not in cited_article_clauses:
             cited_article_clauses.append(pair)
 
-    has_blocking_unsupported = any(u.taxonomy in _UNSUPPORTED_TAXONOMY_BLOCKING for u in unsupported_claim_issues)
+    blocking_unsupported_issues = [u for u in unsupported_claim_issues if u.taxonomy in _UNSUPPORTED_TAXONOMY_BLOCKING]
+    has_blocking_unsupported = bool(blocking_unsupported_issues)
     citation_regeneration_required = (
         str(verification_summary.get("gate_policy") or "").lower() == "regenerate_citations"
         or any(u.taxonomy in {"weak_citation", "wrong_scope_citation"} for u in unsupported_claim_issues)
@@ -608,15 +654,19 @@ async def verify_node_impl(
         )
         gate = VerifierGate.HITL_REQUIRED
         if not hitl_request:
-            first_reason = unsupported_claim_issues[0].reason if unsupported_claim_issues else "근거 부족 주장이 감지되었습니다."
+            first_reason = (
+                blocking_unsupported_issues[0].reason
+                if blocking_unsupported_issues
+                else "근거 부족 주장이 감지되었습니다."
+            )
             hitl_request = {
                 "required": True,
                 "handoff": "FINANCE_REVIEWER",
                 "why_hitl": f"unsupported claim 검출로 자동 확정을 중단했습니다. {first_reason}",
                 "blocking_gate": "HITL_REQUIRED",
                 "blocking_reason": first_reason,
-                "reasons": [u.reason for u in unsupported_claim_issues[:5] if u.reason],
-                "unresolved_claims": [f"[{u.taxonomy}] {u.claim}" for u in unsupported_claim_issues[:5]],
+                "reasons": [u.reason for u in blocking_unsupported_issues[:5] if u.reason],
+                "unresolved_claims": [f"[{u.taxonomy}] {u.claim}" for u in blocking_unsupported_issues[:5]],
                 "review_questions": ["근거가 약하거나 누락된 주장에 대해 추가 증빙을 제출했는가?"],
                 "questions": ["근거가 약하거나 누락된 주장에 대해 추가 증빙을 제출했는가?"],
                 "required_inputs": required_inputs_from_reg[:5],
