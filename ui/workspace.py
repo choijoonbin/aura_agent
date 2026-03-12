@@ -3,6 +3,7 @@ from __future__ import annotations
 import html
 import json
 import logging
+import math
 import queue
 import re
 import threading
@@ -14,6 +15,7 @@ import requests
 
 logger = logging.getLogger(__name__)
 import streamlit as st
+import plotly.graph_objects as go
 from ui.shared import stylable_container
 
 from ui.api_client import API, get, post, post_multipart
@@ -3930,6 +3932,355 @@ def render_workspace_review_history(latest_bundle: dict[str, Any]) -> None:
     render_hitl_history(latest_bundle.get("history") or [])
 
 
+def _render_explain_graph_plotly(nodes: list[dict[str, Any]], edges: list[dict[str, Any]], *, key: str) -> None:
+    if not nodes:
+        render_empty_state("표시할 그래프 노드가 없습니다.")
+        return
+
+    type_order = {"Case": 0, "Run": 1, "Claim": 2, "Policy": 3}
+    type_color = {
+        "Case": "#2563eb",
+        "Run": "#0ea5e9",
+        "Claim": "#f59e0b",
+        "Policy": "#16a34a",
+    }
+
+    groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for n in nodes:
+        groups[str(n.get("type") or "Etc")].append(n)
+
+    pos: dict[str, tuple[float, float]] = {}
+    for t, arr in sorted(groups.items(), key=lambda kv: type_order.get(kv[0], 99)):
+        x = float(type_order.get(t, 4))
+        total = len(arr)
+        for i, n in enumerate(arr):
+            y = 0.0 if total == 1 else (i - (total - 1) / 2) * 1.2
+            pos[str(n.get("id"))] = (x, y)
+
+    edge_x: list[float] = []
+    edge_y: list[float] = []
+    for e in edges:
+        f = str(e.get("from") or "")
+        t = str(e.get("to") or "")
+        if f not in pos or t not in pos:
+            continue
+        x0, y0 = pos[f]
+        x1, y1 = pos[t]
+        edge_x.extend([x0, x1, None])
+        edge_y.extend([y0, y1, None])
+
+    edge_trace = go.Scatter(
+        x=edge_x,
+        y=edge_y,
+        mode="lines",
+        line=dict(width=1.5, color="#94a3b8"),
+        hoverinfo="none",
+        showlegend=False,
+    )
+
+    node_x: list[float] = []
+    node_y: list[float] = []
+    node_text: list[str] = []
+    node_color: list[str] = []
+    for n in nodes:
+        nid = str(n.get("id") or "")
+        if nid not in pos:
+            continue
+        x, y = pos[nid]
+        typ = str(n.get("type") or "Etc")
+        lbl = str(n.get("label") or nid)
+        node_x.append(x)
+        node_y.append(y)
+        node_color.append(type_color.get(typ, "#64748b"))
+        node_text.append(f"[{typ}] {lbl}")
+
+    node_trace = go.Scatter(
+        x=node_x,
+        y=node_y,
+        mode="markers+text",
+        text=[t if len(t) <= 46 else t[:43] + "..." for t in node_text],
+        textposition="top center",
+        textfont=dict(size=12, color="#111827"),
+        hovertext=node_text,
+        hoverinfo="text",
+        marker=dict(size=16, color=node_color, line=dict(width=1, color="#0f172a")),
+        showlegend=False,
+    )
+
+    fig = go.Figure(data=[edge_trace, node_trace])
+    fig.update_layout(
+        height=420,
+        margin=dict(l=20, r=20, t=10, b=10),
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        xaxis=dict(visible=False),
+        yaxis=dict(visible=False),
+    )
+    st.plotly_chart(fig, use_container_width=True, key=key)
+
+
+def _render_related_graph_plotly(selected_key: str, items: list[dict[str, Any]], *, key: str) -> None:
+    if not items:
+        render_empty_state("연결 규칙에 매칭되는 연관 케이스가 없습니다.")
+        return
+
+    center_x, center_y = 0.0, 0.0
+    radius = 2.5
+    n = len(items)
+    pos: dict[str, tuple[float, float]] = {selected_key: (center_x, center_y)}
+    for idx, row in enumerate(items):
+        theta = (2 * math.pi * idx) / max(n, 1)
+        x = radius * math.cos(theta)
+        y = radius * math.sin(theta)
+        pos[str(row.get("voucher_key") or f"node-{idx}")] = (x, y)
+
+    edge_x: list[float] = []
+    edge_y: list[float] = []
+    edge_text_x: list[float] = []
+    edge_text_y: list[float] = []
+    edge_text: list[str] = []
+    for row in items:
+        vk = str(row.get("voucher_key") or "")
+        if vk not in pos:
+            continue
+        x0, y0 = pos[selected_key]
+        x1, y1 = pos[vk]
+        edge_x.extend([x0, x1, None])
+        edge_y.extend([y0, y1, None])
+        edge_text_x.append((x0 + x1) / 2)
+        edge_text_y.append((y0 + y1) / 2)
+        edge_text.append(f"{int(row.get('link_score') or 0)}")
+
+    edge_trace = go.Scatter(
+        x=edge_x,
+        y=edge_y,
+        mode="lines",
+        line=dict(width=1.5, color="#94a3b8"),
+        hoverinfo="none",
+        showlegend=False,
+    )
+    edge_label_trace = go.Scatter(
+        x=edge_text_x,
+        y=edge_text_y,
+        mode="text",
+        text=edge_text,
+        textfont=dict(size=11, color="#111827"),
+        hoverinfo="none",
+        showlegend=False,
+    )
+
+    node_x: list[float] = []
+    node_y: list[float] = []
+    node_text: list[str] = []
+    node_size: list[int] = []
+    node_color: list[str] = []
+    for vk, (x, y) in pos.items():
+        node_x.append(x)
+        node_y.append(y)
+        if vk == selected_key:
+            node_text.append(f"[선택] {vk}")
+            node_size.append(24)
+            node_color.append("#2563eb")
+        else:
+            row = next((r for r in items if str(r.get("voucher_key") or "") == vk), {})
+            node_text.append(
+                f"{vk}<br>{case_type_display_name(row.get('case_type'))} · {status_display_name(row.get('status'))}"
+            )
+            node_size.append(16)
+            node_color.append("#14b8a6")
+
+    node_trace = go.Scatter(
+        x=node_x,
+        y=node_y,
+        mode="markers+text",
+        text=[t if len(t) <= 42 else t[:39] + "..." for t in node_text],
+        textposition="top center",
+        textfont=dict(size=12, color="#111827"),
+        hovertext=node_text,
+        hoverinfo="text",
+        marker=dict(size=node_size, color=node_color, line=dict(width=1, color="#0f172a")),
+        showlegend=False,
+    )
+
+    fig = go.Figure(data=[edge_trace, edge_label_trace, node_trace])
+    fig.update_layout(
+        height=420,
+        margin=dict(l=20, r=20, t=10, b=10),
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        xaxis=dict(visible=False),
+        yaxis=dict(visible=False),
+    )
+    st.plotly_chart(fig, use_container_width=True, key=key)
+
+
+def render_workspace_graph_insights(selected_key: str | None, latest_bundle: dict[str, Any]) -> None:
+    st.markdown(
+        """
+        <style>
+        .mt-graph-note { color: #111827 !important; font-size: 0.92rem; line-height: 1.5; }
+        .mt-graph-note b { color: #0f172a !important; }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+    if not selected_key:
+        render_empty_state("선택된 케이스가 없습니다.")
+        return
+
+    run_id = latest_bundle.get("run_id")
+    try:
+        enabled_info = get("/api/v1/graph/enabled") or {}
+    except Exception as e:
+        st.warning(f"그래프 기능 상태를 조회하지 못했습니다: {e}")
+        return
+
+    if not enabled_info.get("enabled"):
+        render_panel_header("그래프 인사이트", "근거 경로(Explainability)와 연관 케이스 탐지 결과를 확인합니다.")
+        st.info("Graph DB(Neo4j)가 비활성화 상태입니다. `.env`의 `ENABLE_GRAPH_DB=true`로 활성화하세요.")
+        return
+
+    uri = enabled_info.get("uri") or "-"
+    db_name = enabled_info.get("database") or "-"
+    render_panel_header(
+        "그래프 인사이트",
+        f"근거 경로(Explainability)와 연관 케이스 탐지 결과를 확인합니다. (Neo4j 연결: {uri} · DB: {db_name})",
+    )
+
+    st.markdown("#### 근거 경로")
+    try:
+        path = f"/api/v1/graph/cases/{selected_key}/explain"
+        if run_id:
+            path = f"{path}?run_id={run_id}"
+        explain = get(path) or {}
+    except Exception as e:
+        st.warning(f"근거 경로 조회 실패: {e}")
+        explain = {}
+
+    summary = explain.get("summary") or {}
+    nodes = explain.get("nodes") or []
+    edges = explain.get("edges") or []
+    if not nodes:
+        render_empty_state("아직 그래프 데이터가 없습니다. 분석을 1회 실행해 주세요.")
+    else:
+        st.markdown(
+            "<div class='mt-graph-note'>"
+            f"<b>run_id</b>={summary.get('run_id') or '-'} · "
+            f"<b>status</b>={summary.get('status') or '-'} · "
+            f"<b>case_type</b>={summary.get('case_type') or '-'}"
+            "</div>",
+            unsafe_allow_html=True,
+        )
+        st.markdown(
+            "<div class='mt-graph-note'>"
+            + " · ".join(
+                [
+                    f"노드 {len(nodes)}",
+                    f"관계 {len(edges)}",
+                    f"Claim {len([n for n in nodes if n.get('type') == 'Claim'])}",
+                ]
+            )
+            + "</div>",
+            unsafe_allow_html=True,
+        )
+
+        claim_nodes = [n for n in nodes if n.get("type") == "Claim"]
+        policy_nodes = {str(n.get("id")): n for n in nodes if n.get("type") == "Policy"}
+        claim_support: dict[str, list[str]] = {}
+        for e in edges:
+            if e.get("type") != "SUPPORTED_BY":
+                continue
+            frm = str(e.get("from") or "")
+            to = str(e.get("to") or "")
+            if not frm or not to:
+                continue
+            claim_support.setdefault(frm, []).append(to)
+
+        if claim_nodes:
+            st.markdown("**핵심 근거 경로**")
+            shown = 0
+            for c in claim_nodes:
+                claim_id = str(c.get("id") or "")
+                claim_label = str(c.get("label") or "").strip()
+                if not claim_label:
+                    continue
+                policies = claim_support.get(claim_id) or []
+                policy_labels: list[str] = []
+                for pid in policies[:3]:
+                    p = policy_nodes.get(pid) or {}
+                    pl = str(p.get("label") or pid).strip()
+                    if pl:
+                        policy_labels.append(pl)
+                if policy_labels:
+                    st.markdown(
+                        "<div class='mt-graph-note'>"
+                        f"• 주장: {claim_label[:90]}{'…' if len(claim_label) > 90 else ''}  →  "
+                        + ", ".join(policy_labels)
+                        + "</div>",
+                        unsafe_allow_html=True,
+                    )
+                else:
+                    st.markdown(
+                        f"<div class='mt-graph-note'>• 주장: {claim_label[:90]}{'…' if len(claim_label) > 90 else ''}</div>",
+                        unsafe_allow_html=True,
+                    )
+                shown += 1
+                if shown >= 4:
+                    break
+
+        _render_explain_graph_plotly(
+            nodes,
+            edges,
+            key=f"mt_explain_graph_{selected_key}_{summary.get('run_id') or 'none'}",
+        )
+
+        with st.expander("근거 경로 상세(노드/관계)", expanded=True):
+            st.markdown("**노드**")
+            for n in nodes[:30]:
+                st.caption(
+                    f"- [{n.get('type')}] {str(n.get('id') or '-')[:48]} · {str(n.get('label') or '-')[:110]}"
+                )
+            if len(nodes) > 30:
+                st.caption(f"... 외 {len(nodes) - 30}건")
+            st.markdown("**관계**")
+            for e in edges[:40]:
+                st.caption(
+                    f"- {str(e.get('from') or '-')[:28]} --{e.get('type') or '-'}--> {str(e.get('to') or '-')[:28]}"
+                )
+            if len(edges) > 40:
+                st.caption(f"... 외 {len(edges) - 40}건")
+
+    st.markdown("---")
+    st.markdown("#### 연관 케이스")
+    try:
+        related = get(f"/api/v1/graph/cases/{selected_key}/related?limit=10") or {}
+    except Exception as e:
+        st.warning(f"연관 케이스 조회 실패: {e}")
+        related = {}
+
+    items = related.get("items") or []
+    if not items:
+        render_empty_state("연결 규칙에 매칭되는 연관 케이스가 없습니다.")
+    else:
+        st.metric("연관 케이스 수", str(len(items)))
+        _render_related_graph_plotly(
+            selected_key,
+            items[:10],
+            key=f"mt_related_graph_{selected_key}_{run_id or 'none'}",
+        )
+        for i, row in enumerate(items[:10], start=1):
+            st.markdown(
+                f"**{i}. {row.get('voucher_key') or '-'}**  \n"
+                f"유형: {case_type_display_name(row.get('case_type'))} · "
+                f"상태: {status_display_name(row.get('status'))} · "
+                f"심각도: {severity_display_name(row.get('severity'))} · "
+                f"연결점수: {row.get('link_score') or 0}  \n"
+                f"사유: {', '.join(row.get('reasons') or []) or '-'}"
+            )
+            if i < min(len(items), 10):
+                st.markdown("---")
+
+
 def render_ai_workspace_page() -> None:
     render_page_header("AI 워크스페이스", "전표 기반 자율형 에이전트가 실제로 추론하고, 도구를 호출하고, 규정 근거를 바탕으로 판단하는 메인 시연 화면입니다.")
     items = get("/api/v1/vouchers?queue=all&limit=50").get("items") or []
@@ -4030,7 +4381,7 @@ def render_ai_workspace_page() -> None:
                 if not selected_key:
                     render_empty_state("케이스를 선택하면 AI 워크스페이스가 표시됩니다.")
                 else:
-                    tabs = st.tabs(["판단 요약", "근거 맵", "실행 내역", "검토 이력"])
+                    tabs = st.tabs(["판단 요약", "근거 맵", "그래프 인사이트", "실행 내역", "검토 이력"])
                     with tabs[0]:
                         render_workspace_results(latest_bundle, debug_mode)
                         timeline = latest_bundle.get("timeline") or []
@@ -4040,8 +4391,10 @@ def render_ai_workspace_page() -> None:
                     with tabs[1]:
                         render_workspace_evidence_map(latest_bundle, debug_mode)
                     with tabs[2]:
-                        render_workspace_execution_review(latest_bundle, debug_mode)
+                        render_workspace_graph_insights(selected_key, latest_bundle)
                     with tabs[3]:
+                        render_workspace_execution_review(latest_bundle, debug_mode)
+                    with tabs[4]:
                         render_workspace_review_history(latest_bundle)
                         run_id = latest_bundle.get("run_id")
                         if run_id:

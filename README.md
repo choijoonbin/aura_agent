@@ -187,6 +187,7 @@ AuraAgent/
 
 ### 데이터베이스
 - **PostgreSQL**: 기존 `dwp_aura` 스키마 재사용
+- **Neo4j (선택)**: 근거 경로(Explainability)·연관 케이스 탐지용 그래프 저장소
 
 | 코드 참고 | [`requirements.txt`](requirements.txt) |
 |-----------|---------------------------------------|
@@ -284,6 +285,12 @@ pip install -r requirements-checkpoint-postgres.txt
 ```bash
 # Python/torch 호환 환경에서만 (예: Python 3.10~3.12 권장)
 pip install -r requirements-optional.txt
+```
+
+#### (선택) Neo4j 그래프 DB 실행
+
+```bash
+docker compose -f docker-compose.neo4j.yml up -d
 ```
 
 | 코드 참고 | [`services/retrieval_quality.py`](services/retrieval_quality.py), [`services/policy_service.py`](services/policy_service.py) |
@@ -395,6 +402,13 @@ RAG_EMBEDDING_COLUMN=embedding_az
 RAG_EMBEDDING_CAST_TYPE=halfvec
 OPENAI_EMBEDDING_BATCH_SIZE=64
 OPENAI_EMBEDDING_MAX_RETRIES=3
+
+# Graph DB (선택): Explainability/연관 케이스
+ENABLE_GRAPH_DB=false
+NEO4J_URI=bolt://localhost:7687
+NEO4J_USER=neo4j
+NEO4J_PASSWORD=neo4j12345
+NEO4J_DATABASE=neo4j
 ```
 
 ### 주요 환경 변수 설명
@@ -422,6 +436,11 @@ OPENAI_EMBEDDING_MAX_RETRIES=3
 | `RAG_EMBEDDING_COLUMN` | rag_chunk 임베딩 컬럼 | embedding_az |
 | `RAG_EMBEDDING_CAST_TYPE` | 쿼리/저장 캐스팅 타입(`vector`/`halfvec`) | halfvec |
 | `CHECKPOINTER_BACKEND` | LangGraph 체크포인트 저장소. `memory`(기본)=프로세스 메모리(동일 프로세스에서만 HITL 재개). `postgres`=DB 저장(안정적 PoC 시 권장, 재시작 후에도 hitl_pause 직후부터 재개) | memory |
+| `ENABLE_GRAPH_DB` | Neo4j 그래프 동기화 활성화 | false |
+| `NEO4J_URI` | Neo4j Bolt URI | bolt://localhost:7687 |
+| `NEO4J_USER` | Neo4j 사용자 | neo4j |
+| `NEO4J_PASSWORD` | Neo4j 비밀번호 | neo4j12345 |
+| `NEO4J_DATABASE` | Neo4j DB 이름 | neo4j |
 
 | 코드 참고 | [`.env.example`](.env.example), [`utils/config.py`](utils/config.py) |
 |-----------|---------------------------------------------------------------------|
@@ -459,6 +478,11 @@ OPENAI_EMBEDDING_MAX_RETRIES=3
 - **GET** `/api/v1/rag/documents/{doc_id}` — RAG 문서 상세
 - **GET** `/api/v1/agents` — 에이전트 목록
 - **GET** `/api/v1/agents/{agent_id}` — 에이전트 상세
+
+### Graph (선택)
+- **GET** `/api/v1/graph/enabled` — 그래프 기능 활성화 여부
+- **GET** `/api/v1/graph/cases/{voucher_key}/explain` — 케이스 근거 경로 그래프
+- **GET** `/api/v1/graph/cases/{voucher_key}/related?limit=10` — 연관 케이스 조회
 
 ### 시연 데이터
 - **GET** `/api/v1/demo/scenarios` — 시연 시나리오 목록

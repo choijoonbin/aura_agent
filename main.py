@@ -27,6 +27,12 @@ from services.case_service import (
 from services.evidence_compare_service import compare_evidence_to_voucher
 from services.evidence_extraction import extract_from_bytes
 from services.demo_data_service import clear_demo_data, list_demo_scenarios, list_seeded_demo_cases, seed_demo_scenarios
+from services.graph_db_service import (
+    get_case_explain_graph,
+    get_related_cases_graph,
+    graph_enabled,
+    sync_analysis_graph,
+)
 from services.persistence_service import persist_analysis_result
 from services.chunking_pipeline import run_chunking_pipeline
 from services.rag_library_service import get_rag_document_detail, list_rag_documents
@@ -113,6 +119,31 @@ def health() -> dict[str, Any]:
         "enable_multi_agent": settings.enable_multi_agent,
         "enable_langgraph_if_available": settings.enable_langgraph_if_available,
     }
+
+
+@app.get("/api/v1/graph/enabled")
+def get_graph_enabled() -> dict[str, Any]:
+    return {
+        "enabled": graph_enabled(),
+        "uri": settings.neo4j_uri if settings.enable_graph_db else None,
+        "database": settings.neo4j_database if settings.enable_graph_db else None,
+    }
+
+
+@app.get("/api/v1/graph/cases/{voucher_key}/explain")
+def get_graph_case_explain(
+    voucher_key: str,
+    run_id: str | None = Query(None),
+) -> dict[str, Any]:
+    return get_case_explain_graph(voucher_key=voucher_key, run_id=run_id)
+
+
+@app.get("/api/v1/graph/cases/{voucher_key}/related")
+def get_graph_related_cases(
+    voucher_key: str,
+    limit: int = Query(10, ge=1, le=50),
+) -> dict[str, Any]:
+    return get_related_cases_graph(voucher_key=voucher_key, limit=limit)
 
 
 @app.get("/api/v1/vouchers")
@@ -450,6 +481,17 @@ async def _run_analysis_task(
                     update_agent_case_status_from_run(persist_db, voucher_key, run_status)
             except Exception as e:
                 logger.warning("persist_analysis_result failed run_id=%s case_id=%s error=%s", run_id, case_id, e)
+            try:
+                if graph_enabled():
+                    sync_analysis_graph(
+                        voucher_key=voucher_key,
+                        case_id=case_id,
+                        run_id=run_id,
+                        body_evidence=body_evidence,
+                        result_payload=last_payload,
+                    )
+            except Exception as e:
+                logger.warning("graph sync failed run_id=%s case_id=%s error=%s", run_id, case_id, e)
 
             try:
                 if last_payload.get("result", {}).get("status") != "HITL_REQUIRED":
@@ -775,6 +817,18 @@ async def evidence_resume(run_id: str, db: Session = Depends(get_db)) -> dict[st
         persist_analysis_result(db, run_id=run_id, result_payload=result_payload)
         update_agent_case_status_from_run(db, voucher_key, status)
         runtime.set_result(run_id, result_payload)
+        if graph_enabled():
+            try:
+                payload = build_analysis_payload(db, voucher_key)
+                sync_analysis_graph(
+                    voucher_key=voucher_key,
+                    case_id=case_id,
+                    run_id=run_id,
+                    body_evidence=payload.get("body_evidence") or {},
+                    result_payload=result_payload,
+                )
+            except Exception as e:
+                logger.warning("graph sync skipped in evidence_resume run_id=%s voucher_key=%s error=%s", run_id, voucher_key, e)
     except Exception as e:
         logger.exception("evidence_resume persist failed run_id=%s", run_id)
         raise HTTPException(status_code=500, detail=str(e)) from e
@@ -951,6 +1005,18 @@ async def review_submit(
             persist_analysis_result(db, run_id=run_id, result_payload=result_payload)
             update_agent_case_status_from_run(db, voucher_key, status)
             runtime.set_result(run_id, result_payload)
+            if graph_enabled():
+                try:
+                    payload = build_analysis_payload(db, voucher_key)
+                    sync_analysis_graph(
+                        voucher_key=voucher_key,
+                        case_id=case_id,
+                        run_id=run_id,
+                        body_evidence=payload.get("body_evidence") or {},
+                        result_payload=result_payload,
+                    )
+                except Exception as e:
+                    logger.warning("graph sync skipped in review_submit run_id=%s voucher_key=%s error=%s", run_id, voucher_key, e)
         except Exception as e:
             logger.exception("review_submit evidence_resume persist failed run_id=%s", run_id)
             raise HTTPException(status_code=500, detail=str(e)) from e

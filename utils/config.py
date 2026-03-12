@@ -101,6 +101,13 @@ class Settings:
     enable_parallel_tool_execution: bool = os.getenv("ENABLE_PARALLEL_TOOL_EXECUTION", "true").lower() == "true"
     checkpointer_backend: str = os.getenv("CHECKPOINTER_BACKEND", "memory")
 
+    # Graph DB (Neo4j): Explainability Path / Related Case 탐지
+    enable_graph_db: bool = os.getenv("ENABLE_GRAPH_DB", "false").lower() == "true"
+    neo4j_uri: str = os.getenv("NEO4J_URI", "bolt://localhost:7687")
+    neo4j_user: str = os.getenv("NEO4J_USER", "neo4j")
+    neo4j_password: str = os.getenv("NEO4J_PASSWORD", "neo4j12345")
+    neo4j_database: str = os.getenv("NEO4J_DATABASE", "neo4j")
+
     # RAG: Dense 검색 HyDE (가설 문서 임베딩), Rerank LLM fallback
     enable_hyde_query: bool = os.getenv("ENABLE_HYDE_QUERY", "false").lower() == "true"
     enable_llm_rerank_fallback: bool = os.getenv("ENABLE_LLM_RERANK_FALLBACK", "true").lower() == "true"
