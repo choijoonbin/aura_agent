@@ -1074,6 +1074,232 @@ def get_tool_execution_graph_mermaid() -> str:
     return _TOOL_EXECUTION_MERMAID
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Plotly 기반 인터랙티브 그래프
+# CDN 없이 동작 (Plotly는 Streamlit에 번들 포함).
+# 우측 상단 카메라 아이콘 → PNG 내보내기 → 보고서/발표 자료로 바로 활용 가능.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _draw_graph_plotly(
+    nodes: list[tuple[str, str, str]],
+    edges: list[tuple[str, str, str]],
+    pos: dict[str, tuple[float, float]],
+    hitl_nodes: set[str] | None = None,
+    skill_nodes: set[str] | None = None,
+    height: int = 400,
+):
+    """Plotly Figure로 노드/엣지를 그려 반환. st.plotly_chart()로 표시.
+
+    우측 상단 카메라 아이콘으로 PNG 내보내기 가능 — 보고서·발표 자료 캡처에 활용.
+    """
+    import plotly.graph_objects as go  # type: ignore[import]
+
+    hitl_nodes = hitl_nodes or set()
+    skill_nodes = skill_nodes or set()
+    node_w, node_h = 1.8, 0.46
+
+    def _colors(key: str) -> tuple[str, str]:
+        if key in hitl_nodes:
+            return "#fffbeb", "#f59e0b"
+        if key in {"__start__", "start", "__end__", "end"}:
+            return "#f0fdf4", "#22c55e"
+        if key in skill_nodes:
+            return "#eff6ff", "#93c5fd"
+        return "#f5f3ff", "#a78bfa"
+
+    shapes: list[dict] = []
+    annotations: list[dict] = []
+
+    # ── 노드 (사각형 + 텍스트) ────────────────────────────────────────────────
+    node_hover_x: list[float] = []
+    node_hover_y: list[float] = []
+    node_hover_txt: list[str] = []
+
+    for key, label, _ in nodes:
+        if key not in pos:
+            continue
+        x, y = pos[key]
+        fc, ec = _colors(key)
+        shapes.append(dict(
+            type="rect",
+            x0=x - node_w / 2, y0=y - node_h / 2,
+            x1=x + node_w / 2, y1=y + node_h / 2,
+            fillcolor=fc,
+            line=dict(color=ec, width=2.0, dash="dash" if key in hitl_nodes else "solid"),
+            layer="above",
+        ))
+        annotations.append(dict(
+            x=x, y=y,
+            text=f"<b>{label}</b>",
+            showarrow=False,
+            font=dict(size=10, color="#1e293b", family="Inter, Arial, sans-serif"),
+            xanchor="center", yanchor="middle",
+        ))
+        node_hover_x.append(x)
+        node_hover_y.append(y)
+        ltype = "HITL" if key in hitl_nodes else ("스킬" if key in skill_nodes else "에이전트")
+        node_hover_txt.append(f"<b>{label}</b><br><i style='color:#6b7280'>{ltype}</i>")
+
+    # ── 엣지 (화살표 어노테이션) ───────────────────────────────────────────────
+    for src, dst, elabel in edges:
+        if src not in pos or dst not in pos:
+            continue
+        sx, sy = pos[src]
+        dx, dy = pos[dst]
+        delta_x = dx - sx
+        delta_y = dy - sy
+
+        # 방향에 따라 노드 면(face) 중심 연결점 계산
+        if abs(delta_x) >= abs(delta_y):
+            if delta_x >= 0:
+                ax_pt, ay_pt = sx + node_w / 2, sy
+                tip_x, tip_y = dx - node_w / 2, dy
+            else:
+                ax_pt, ay_pt = sx - node_w / 2, sy
+                tip_x, tip_y = dx + node_w / 2, dy
+        else:
+            if delta_y >= 0:
+                ax_pt, ay_pt = sx, sy + node_h / 2
+                tip_x, tip_y = dx, dy - node_h / 2
+            else:
+                ax_pt, ay_pt = sx, sy - node_h / 2
+                tip_x, tip_y = dx, dy + node_h / 2
+
+        annotations.append(dict(
+            x=tip_x, y=tip_y,
+            ax=ax_pt, ay=ay_pt,
+            xref="x", yref="y", axref="x", ayref="y",
+            showarrow=True,
+            arrowhead=2, arrowsize=0.9, arrowwidth=1.6, arrowcolor="#94a3b8",
+            text="",
+        ))
+
+        if elabel:
+            mid_x = (ax_pt + tip_x) / 2
+            mid_y = (ay_pt + tip_y) / 2
+            off = 0.15 if abs(delta_y) < 0.2 else 0.0
+            annotations.append(dict(
+                x=mid_x, y=mid_y + off,
+                text=f"<i>{elabel}</i>",
+                showarrow=False,
+                font=dict(size=8, color="#64748b"),
+                xanchor="center",
+            ))
+
+    xs = [p[0] for p in pos.values()]
+    ys = [p[1] for p in pos.values()]
+
+    fig = go.Figure()
+    # 노드 호버 트레이스 (투명 마커 — 모양은 shape로 그림)
+    fig.add_trace(go.Scatter(
+        x=node_hover_x, y=node_hover_y,
+        mode="markers",
+        marker=dict(size=node_w * 28, opacity=0, symbol="square"),
+        text=node_hover_txt,
+        hovertemplate="%{text}<extra></extra>",
+        showlegend=False,
+    ))
+
+    fig.update_layout(
+        shapes=shapes,
+        annotations=annotations,
+        height=height,
+        paper_bgcolor="#f8fafc",
+        plot_bgcolor="#f8fafc",
+        xaxis=dict(range=[min(xs) - 1.4, max(xs) + 1.4], visible=False),
+        yaxis=dict(range=[min(ys) - 0.85, max(ys) + 0.85], visible=False),
+        margin=dict(l=10, r=10, t=15, b=10),
+        hoverlabel=dict(bgcolor="white", bordercolor="#e2e8f0", font_size=12),
+        dragmode="pan",
+    )
+    return fig
+
+
+def draw_agent_graph_plotly():
+    """메인 오케스트레이션 그래프 Plotly Figure."""
+    step = 2.0
+    x = [i * step for i in range(11)]
+    keys_main = [
+        "__start__", "start_router", "screener", "intake", "planner",
+        "execute", "critic", "verify", "reporter", "finalizer", "__end__",
+    ]
+    pos = {k: (x[i], 0.0) for i, k in enumerate(keys_main)}
+    pos["hitl_pause"]    = (x[7], 1.5)
+    pos["hitl_validate"] = (x[8], 1.5)
+
+    label_map = {
+        "__start__": "START", "__end__": "END",
+        "start_router": "Start Router", "screener": "Screener",
+        "intake": "Intake Agent", "planner": "Planner Agent",
+        "execute": "Execute Agent", "critic": "Critic Agent",
+        "verify": "Verifier Agent", "hitl_pause": "HITL Pause",
+        "hitl_validate": "HITL Validate", "reporter": "Reporter Agent",
+        "finalizer": "Finalizer",
+    }
+    nodes = [(k, label_map.get(k, k), "") for k in pos]
+    edges = [
+        ("__start__", "start_router", ""),
+        ("start_router", "screener", "else"),
+        ("start_router", "intake", "if prescreened"),
+        ("screener", "intake", ""),
+        ("intake", "planner", ""),
+        ("planner", "execute", ""),
+        ("execute", "critic", ""),
+        ("critic", "verify", ""),
+        ("verify", "hitl_pause", "if needed"),
+        ("verify", "reporter", "continue"),
+        ("hitl_pause", "hitl_validate", ""),
+        ("hitl_validate", "reporter", "resume"),
+        ("hitl_validate", "hitl_pause", "re-request"),
+        ("reporter", "finalizer", ""),
+        ("finalizer", "__end__", ""),
+    ]
+    return _draw_graph_plotly(nodes, edges, pos,
+                              hitl_nodes={"hitl_pause", "hitl_validate"}, height=420)
+
+
+def draw_deep_screening_graph_plotly():
+    """딥 레인 스크리닝 서브그래프 Plotly Figure."""
+    keys = ["__start__", "intake_normalize", "hypothesis_generate",
+            "rule_guardrail", "finalize_screening", "__end__"]
+    label_map = {
+        "__start__": "START", "__end__": "END",
+        "intake_normalize": "Intake Normalize",
+        "hypothesis_generate": "Hypothesis Generate",
+        "rule_guardrail": "Rule Guardrail",
+        "finalize_screening": "Finalize Screening",
+    }
+    step = 2.4
+    pos = {k: (i * step, 0.0) for i, k in enumerate(keys)}
+    nodes = [(k, label_map.get(k, k), "") for k in keys]
+    edges = [(keys[i], keys[i + 1], "") for i in range(len(keys) - 1)]
+    return _draw_graph_plotly(nodes, edges, pos, height=260)
+
+
+def draw_tool_execution_graph_plotly():
+    """스킬 실행 흐름 Plotly Figure."""
+    tool_keys = ["holiday", "budget", "merchant", "document", "policy", "legacy"]
+    label_map = {
+        "execute": "execute",
+        "holiday": "holiday_compliance_probe",
+        "budget": "budget_risk_probe",
+        "merchant": "merchant_risk_probe",
+        "document": "document_evidence_probe",
+        "policy": "policy_rulebook_probe",
+        "legacy": "legacy_aura_deep_audit",
+        "score": "score_breakdown",
+    }
+    xs = [-5.5, -3.3, -1.1, 1.1, 3.3, 5.5]
+    pos: dict[str, tuple[float, float]] = {"execute": (0.0, 2.2), "score": (0.0, -2.2)}
+    for i, k in enumerate(tool_keys):
+        pos[k] = (xs[i], 0.0)
+    nodes = [(k, label_map.get(k, k), "") for k in pos]
+    edges = ([("execute", k, "cond." if k == "legacy" else "") for k in tool_keys]
+             + [(k, "score", "") for k in tool_keys])
+    return _draw_graph_plotly(nodes, edges, pos,
+                              skill_nodes=set(tool_keys) | {"execute", "score"}, height=480)
+
+
 _TOOL_EXECUTION_MERMAID = """graph TD
     execute(execute)
     holiday(holiday_compliance_probe)

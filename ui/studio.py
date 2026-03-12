@@ -8,8 +8,11 @@ from agent.agent_tools import TOOL_REGISTRY, get_langchain_tools
 from ui.api_client import get
 from ui.shared import (
     draw_agent_graph_langgraph,
+    draw_agent_graph_plotly,
     draw_deep_screening_graph_langgraph,
+    draw_deep_screening_graph_plotly,
     draw_tool_execution_graph,
+    draw_tool_execution_graph_plotly,
     fmt_dt,
     get_agent_graph_mermaid,
     get_deep_screening_graph_mermaid,
@@ -131,17 +134,32 @@ def render_agent_studio_page() -> None:
         with tabs[4]:
             graph_tabs = st.tabs(["메인 오케스트레이션", "딥 레인 스크리닝", "스킬 실행 흐름"])
             with graph_tabs[0]:
-                st.caption("실제 컴파일된 LangGraph 객체에서 자동 추출한 그래프입니다. 코드 변경 시 다이어그램이 자동으로 갱신됩니다.")
-                render_graph_image(
-                    "메인 오케스트레이션 그래프",
-                    draw_agent_graph_langgraph(),
-                    None,
-                    "메인 오케스트레이션: 전체 노드 흐름. 하위는 '스킬 실행 흐름' 탭에서 execute 노드 내부 도구 순서를 확인할 수 있습니다.",
+                st.caption(
+                    "실제 컴파일된 LangGraph 객체에서 자동 추출한 그래프입니다. "
+                    "코드 변경 시 다이어그램이 자동으로 갱신됩니다. "
+                    "그래프 우측 상단 **카메라 아이콘**으로 PNG 내보내기 후 보고서·발표 자료에 활용하세요."
                 )
+                try:
+                    st.plotly_chart(
+                        draw_agent_graph_plotly(),
+                        use_container_width=True,
+                        config={
+                            "displayModeBar": True,
+                            "modeBarButtonsToRemove": ["lasso2d", "select2d", "autoScale2d"],
+                            "toImageButtonOptions": {"filename": "aura_orchestration_graph", "scale": 2},
+                        },
+                    )
+                except Exception:
+                    render_graph_image(
+                        "메인 오케스트레이션 그래프",
+                        draw_agent_graph_langgraph(), None,
+                        "메인 오케스트레이션: 전체 노드 흐름.",
+                    )
                 mermaid_src = get_agent_graph_mermaid()
                 if mermaid_src:
-                    with st.expander("Mermaid 소스 보기", expanded=False):
+                    with st.expander("Mermaid 소스 보기 (발표 자료·문서용 — mermaid.live에 붙여넣기)", expanded=False):
                         st.code(mermaid_src, language="text")
+                        st.caption("👆 위 텍스트를 복사해 mermaid.live / Notion / GitHub README에 붙여넣으면 다이어그램으로 렌더링됩니다.")
                 st.markdown("""
 **단계별 설명**
 
@@ -158,12 +176,22 @@ def render_agent_studio_page() -> None:
 """)
             with graph_tabs[1]:
                 st.caption("Screener 노드 내부 Deep Lane 서브그래프입니다. 승격 조건 충족 시에만 실행되며, 실패 또는 타임아웃 시 Fast 결과로 폴백합니다.")
-                render_graph_image(
-                    "딥 레인 스크리닝 서브그래프",
-                    draw_deep_screening_graph_langgraph(),
-                    None,
-                    "Deep Lane: 4단계 LLM 재검증 서브그래프. intake_normalize → hypothesis_generate(LLM Top-2) → rule_guardrail → finalize_screening",
-                )
+                try:
+                    st.plotly_chart(
+                        draw_deep_screening_graph_plotly(),
+                        use_container_width=True,
+                        config={
+                            "displayModeBar": True,
+                            "modeBarButtonsToRemove": ["lasso2d", "select2d", "autoScale2d"],
+                            "toImageButtonOptions": {"filename": "aura_deep_screening_graph", "scale": 2},
+                        },
+                    )
+                except Exception:
+                    render_graph_image(
+                        "딥 레인 스크리닝 서브그래프",
+                        draw_deep_screening_graph_langgraph(), None,
+                        "Deep Lane: 4단계 LLM 재검증 서브그래프.",
+                    )
                 deep_mermaid = get_deep_screening_graph_mermaid()
                 if deep_mermaid:
                     with st.expander("Mermaid 소스 보기", expanded=False):
@@ -181,12 +209,22 @@ def render_agent_studio_page() -> None:
 **폴백**: 타임아웃 또는 에러 발생 시 Fast Lane 결과 사용. `screening_meta.lane = "fast"`로 기록.
 """)
             with graph_tabs[2]:
-                render_graph_image(
-                    "스킬 실행 도구 그래프",
-                    draw_tool_execution_graph(),
-                    None,
-                    "하위 실행 도구 그래프: execute 노드 내부에서 호출되는 LangChain tool 순서입니다.",
-                )
+                try:
+                    st.plotly_chart(
+                        draw_tool_execution_graph_plotly(),
+                        use_container_width=True,
+                        config={
+                            "displayModeBar": True,
+                            "modeBarButtonsToRemove": ["lasso2d", "select2d", "autoScale2d"],
+                            "toImageButtonOptions": {"filename": "aura_skill_execution_graph", "scale": 2},
+                        },
+                    )
+                except Exception:
+                    render_graph_image(
+                        "스킬 실행 도구 그래프",
+                        draw_tool_execution_graph(), None,
+                        "하위 실행 도구 그래프: execute 노드 내부에서 호출되는 LangChain tool 순서입니다.",
+                    )
                 st.markdown("""
 **단계별 설명**
 
