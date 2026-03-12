@@ -102,7 +102,10 @@ def inject_css() -> None:
         .mt-panel-header .mt-panel-sub.mt-panel-trailing {{ white-space:nowrap; flex-shrink:0; text-align:right; font-size:0.8rem; }}
         /* 에이전트 대화 영역: trailing 텍스트가 카드 경계 안에서만 표시되도록 */
         [class*="st-key-workspace_chat_card"] {{ overflow: hidden !important; max-width: 100% !important; }}
-        [class*="st-key-workspace_chat_card"] .mt-panel-header {{ overflow: visible !important; flex-wrap: wrap; gap: 4px 10px; align-items:flex-start; }}
+        [class*="st-key-workspace_chat_card"] .mt-panel-header {{ overflow: visible !important; flex-wrap: wrap; gap: 4px 10px; align-items:flex-start; margin-bottom: 0 !important; }}
+        [class*="st-key-workspace_chat_card"] .mt-panel-sub {{ margin-top: 2px !important; }}
+        /* A(헤더/설명)와 B(배지·분석시작) 사이 간격 축소 */
+        [class*="st-key-workspace_chat_cta_row"] {{ margin-top: -20px !important; }}
         [class*="st-key-workspace_chat_card"] .mt-panel-sub.mt-panel-trailing {{
           white-space: normal !important;
           flex: 0 1 34% !important;

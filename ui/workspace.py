@@ -949,7 +949,77 @@ def _fmt_score_points(points: Any) -> str:
     return f"{p:g}"
 
 
+@st.dialog("점수 계산 로직", width="large")
+def _render_score_logic_dialog(kind: str, score_breakdown: dict[str, Any]) -> None:
+    if kind == "policy":
+        st.markdown("### policy 점수 계산 로직")
+        st.markdown(
+            "`policy_score = min(100, (base_policy + tool_policy_delta) × compound_multiplier × amount_multiplier)`"
+        )
+        st.markdown("**base_policy 신호**")
+        st.table(
+            [
+                {"항목": "휴일/주말 사용", "조건": "isHoliday=true", "점수": "+35"},
+                {"항목": "근태 충돌", "조건": "hrStatus in {LEAVE, OFF, VACATION}", "점수": "+20"},
+                {"항목": "심야 시간", "조건": "isNight=true", "점수": "+10"},
+                {"항목": "예산 초과", "조건": "budgetExceeded=true", "점수": "+15"},
+            ]
+        )
+        st.markdown("**tool_policy_delta 신호**")
+        st.table(
+            [
+                {"항목": "holidayRisk HIGH", "점수": "+10"},
+                {"항목": "holidayRisk MEDIUM", "점수": "+5"},
+                {"항목": "merchantRisk HIGH", "점수": "+20"},
+                {"항목": "merchantRisk MEDIUM", "점수": "+10"},
+                {"항목": "merchantRisk LOW", "점수": "+3"},
+            ]
+        )
+        st.markdown("**승수**")
+        st.table(
+            [
+                {"항목": "compound_multiplier", "규칙": "고위험 신호 2개=1.15, 3개=1.30, 4개+=설정 최대값"},
+                {"항목": "amount_multiplier", "규칙": "금액 구간별 가중 (10만원 이하~200만원 초과)"},
+            ]
+        )
+        st.caption(
+            f"이번 run 결과: policy_score={score_breakdown.get('policy_score', '-')}, "
+            f"compound_multiplier={score_breakdown.get('compound_multiplier', '-')}, "
+            f"amount_weight={score_breakdown.get('amount_weight', '-')}"
+        )
+    else:
+        st.markdown("### evidence 점수 계산 로직")
+        st.markdown(
+            "`evidence_score = base_evidence(20) + tool_evidence_delta + 성공률/계획 보정 + HITL 보정`"
+        )
+        st.markdown("**tool_evidence_delta 신호**")
+        st.table(
+            [
+                {"항목": "규정 조항 수", "규칙": "5건=+30, 3건=+22, 2건=+15, 1건=+10"},
+                {"항목": "전표 라인 수", "규칙": "3건=+20, 2건=+15, 1건=+10"},
+                {"항목": "심층 감사 결과", "규칙": "legacy_aura_deep_audit 존재 시 +15"},
+                {"항목": "HITL 응답 확보", "규칙": "hasHitlResponse=true 시 +10"},
+            ]
+        )
+        st.markdown("**실행 보정**")
+        st.table(
+            [
+                {"항목": "성공률 패널티", "규칙": "도구 성공률 < 50%면 감점"},
+                {"항목": "전체 성공 보너스", "규칙": "도구 3개 이상 + 전부 성공 시 +5"},
+                {"항목": "HITL 승인 보정", "규칙": "_score_with_hitl_adjustment 경로에서 승인 시 +10"},
+            ]
+        )
+        st.caption(
+            f"이번 run 결과: evidence_score={score_breakdown.get('evidence_score', '-')}, "
+            f"final_score={score_breakdown.get('final_score', '-')}"
+        )
+
+
 def render_score_breakdown_detail(score_breakdown: dict[str, Any]) -> None:
+    dialog_kind = st.session_state.pop("mt_score_logic_dialog_kind", None)
+    if dialog_kind in {"policy", "evidence"}:
+        _render_score_logic_dialog(dialog_kind, score_breakdown)
+
     with st.expander("점수 산정 근거 보기", expanded=False):
         # 판단 흐름 요약과 동일한 expander 내부 가독성(밝은 카드/진한 텍스트) 적용
         with stylable_container(
@@ -965,49 +1035,192 @@ def render_score_breakdown_detail(score_breakdown: dict[str, Any]) -> None:
             if trace:
                 st.markdown(f"`{trace}`")
 
-            policy_weight = score_breakdown.get("policy_weight")
-            evidence_weight = score_breakdown.get("evidence_weight")
-            compound_multiplier = score_breakdown.get("compound_multiplier")
-            amount_weight = score_breakdown.get("amount_weight")
-            weight_parts: list[str] = []
-            if isinstance(policy_weight, (int, float)):
-                weight_parts.append(f"정책 가중치 {float(policy_weight):.2f}")
-            if isinstance(evidence_weight, (int, float)):
-                weight_parts.append(f"근거 가중치 {float(evidence_weight):.2f}")
-            if isinstance(compound_multiplier, (int, float)):
-                weight_parts.append(f"복합 위험 승수 {float(compound_multiplier):.2f}")
-            if isinstance(amount_weight, (int, float)):
-                weight_parts.append(f"금액 승수 {float(amount_weight):.2f}")
-            if weight_parts:
-                st.caption(" · ".join(weight_parts))
-
-            reasons = score_breakdown.get("reasons") or []
-            if isinstance(reasons, list) and reasons:
-                st.markdown("**가산/감점 사유**")
-                for idx, reason in enumerate(reasons, start=1):
-                    text = str(reason or "").strip()
-                    if text:
-                        st.caption(f"{idx}. {text}")
-
             signals = score_breakdown.get("signals") or []
             if isinstance(signals, list) and signals:
-                rows: list[dict[str, str]] = []
+                policy_rows: list[dict[str, str]] = []
+                evidence_rows: list[dict[str, str]] = []
+                policy_signal_points = 0.0
+                evidence_signal_points = 0.0
                 for sig in signals:
                     if not isinstance(sig, dict):
                         continue
-                    category = _SCORE_CATEGORY_LABELS.get(str(sig.get("category") or "").strip().lower(), "기타")
-                    label = str(sig.get("label") or sig.get("signal") or "-").strip()
-                    rows.append(
-                        {
-                            "구분": category,
-                            "항목": label or "-",
-                            "값": _fmt_score_signal_value(sig.get("raw_value")),
-                            "점수 영향": _fmt_score_points(sig.get("points")),
+                    category = str(sig.get("category") or "").strip().lower()
+                    label = str(sig.get("label") or sig.get("signal") or "-").strip() or "-"
+                    try:
+                        points_val = float(sig.get("points") or 0.0)
+                    except Exception:
+                        points_val = 0.0
+                    row = {
+                        "항목": label,
+                        "값": _fmt_score_signal_value(sig.get("raw_value")),
+                        "점수 영향": _fmt_score_points(sig.get("points")),
+                    }
+                    # 정책 점수는 정책 신호 + 승수 신호(복합위험/금액)를 함께 보여주어 산정 흐름을 이해할 수 있게 한다.
+                    if category in {"policy", "multiplier", "amount"}:
+                        policy_rows.append(row)
+                        if category == "policy":
+                            policy_signal_points += points_val
+                    elif category == "evidence":
+                        evidence_rows.append(row)
+                        evidence_signal_points += points_val
+
+                policy_score = score_breakdown.get("policy_score")
+                evidence_score = score_breakdown.get("evidence_score")
+
+                policy_btn_text = "policy 로직 보기"
+                try:
+                    compound_multiplier = float(score_breakdown.get("compound_multiplier") or 1.0)
+                except Exception:
+                    compound_multiplier = 1.0
+                try:
+                    amount_weight = float(score_breakdown.get("amount_weight") or 1.0)
+                except Exception:
+                    amount_weight = 1.0
+                policy_calc = min(100.0, policy_signal_points * compound_multiplier * amount_weight)
+                policy_final = float(policy_score if policy_score is not None else policy_calc)
+                policy_calc_text = (
+                    f"계산: 정책 신호합 {policy_signal_points:g} × 복합승수 {compound_multiplier:.2f} × 금액승수 {amount_weight:.2f}"
+                    f" = {policy_calc:.1f} → {int(round(policy_final))}점"
+                )
+                with stylable_container(
+                    key="score_logic_row_policy",
+                    css_styles=[
+                        """{}""",
+                        """
+                        > [data-testid="stHorizontalBlock"] {
+                            align-items: center !important;
                         }
-                    )
-                if rows:
-                    st.markdown("**항목별 신호 점수**")
-                    st.table(rows)
+                        """,
+                    ],
+                ):
+                    p_text_col, p_btn_col = st.columns([0.80, 0.20])
+                    with p_text_col:
+                        st.caption(policy_calc_text)
+                    with p_btn_col:
+                        with stylable_container(
+                            key="score_logic_link_policy",
+                            css_styles=[
+                                """{margin:0 !important; padding:0 !important;}""",
+                                """
+                                > [data-testid="stButton"] {
+                                    margin: 0 !important;
+                                    display: flex !important;
+                                    justify-content: flex-end !important;
+                                }
+                                """,
+                                """
+                                > [data-testid="stButton"] > button {
+                                    background: transparent !important;
+                                    border: none !important;
+                                    box-shadow: none !important;
+                                    color: #2563eb !important;
+                                    padding: 0 !important;
+                                    margin: 0 !important;
+                                    text-decoration: underline !important;
+                                    font-weight: 700 !important;
+                                    text-align: right !important;
+                                    justify-content: flex-end !important;
+                                    width: 100% !important;
+                                }
+                                """,
+                                """
+                                > [data-testid="stButton"] > button:hover { color: #1d4ed8 !important; }
+                                """,
+                            ],
+                        ):
+                            if st.button(policy_btn_text, key="score_logic_policy_open_btn"):
+                                st.session_state["mt_score_logic_dialog_kind"] = "policy"
+                                st.rerun()
+                if policy_rows:
+                    st.table(policy_rows)
+                else:
+                    st.caption("정책 점수 상세 신호 데이터가 없습니다.")
+
+                evidence_btn_text = "evidence 로직 보기"
+                reasons = [str(r).strip() for r in (score_breakdown.get("reasons") or []) if str(r).strip()]
+                # evidence는 기본점수(20) + 근거 신호점수 + (도구성공/실패 보정) + (HITL 승인 보정)으로 합산된다.
+                evidence_base = 20.0
+                plan_bonus = 0.0
+                fail_penalty = 0.0
+                for reason in reasons:
+                    if ("전체 성공" in reason or "계획한" in reason) and "evidence_score" in reason:
+                        m = re.search(r"evidence_score\s*([+-]?\d+(?:\.\d+)?)", reason)
+                        if m:
+                            plan_bonus = float(m.group(1))
+                            break
+                for reason in reasons:
+                    if "도구 실행 성공률" in reason and "evidence_score" in reason:
+                        m = re.search(r"evidence_score\s*([+-]?\d+(?:\.\d+)?)", reason)
+                        if m:
+                            fail_penalty = float(m.group(1))
+                            break
+                hitl_bonus = 10.0 if any("담당자 검토 승인 의견 반영" in r for r in reasons) else 0.0
+                evidence_known = evidence_base + evidence_signal_points + plan_bonus + fail_penalty + hitl_bonus
+                evidence_final = float(evidence_score if evidence_score is not None else evidence_known)
+                evidence_unknown = evidence_final - evidence_known
+                calc_parts = [f"기본 {evidence_base:g}", f"근거 신호합 {evidence_signal_points:g}"]
+                if abs(plan_bonus) > 0:
+                    calc_parts.append(f"도구성공 보정 {plan_bonus:+g}")
+                if abs(fail_penalty) > 0:
+                    calc_parts.append(f"성공률 보정 {fail_penalty:+g}")
+                if abs(hitl_bonus) > 0:
+                    calc_parts.append(f"HITL 승인 보정 {hitl_bonus:+g}")
+                if abs(evidence_unknown) >= 0.5:
+                    calc_parts.append(f"기타 보정 {evidence_unknown:+.1f}")
+                evidence_calc_text = f"계산: {' + '.join(calc_parts)} = {evidence_final:.1f} → {int(round(evidence_final))}점"
+                with stylable_container(
+                    key="score_logic_row_evidence",
+                    css_styles=[
+                        """{}""",
+                        """
+                        > [data-testid="stHorizontalBlock"] {
+                            align-items: center !important;
+                        }
+                        """,
+                    ],
+                ):
+                    e_text_col, e_btn_col = st.columns([0.80, 0.20])
+                    with e_text_col:
+                        st.caption(evidence_calc_text)
+                    with e_btn_col:
+                        with stylable_container(
+                            key="score_logic_link_evidence",
+                            css_styles=[
+                                """{margin:0 !important; padding:0 !important;}""",
+                                """
+                                > [data-testid="stButton"] {
+                                    margin: 0 !important;
+                                    display: flex !important;
+                                    justify-content: flex-end !important;
+                                }
+                                """,
+                                """
+                                > [data-testid="stButton"] > button {
+                                    background: transparent !important;
+                                    border: none !important;
+                                    box-shadow: none !important;
+                                    color: #2563eb !important;
+                                    padding: 0 !important;
+                                    margin: 0 !important;
+                                    text-decoration: underline !important;
+                                    font-weight: 700 !important;
+                                    text-align: right !important;
+                                    justify-content: flex-end !important;
+                                    width: 100% !important;
+                                }
+                                """,
+                                """
+                                > [data-testid="stButton"] > button:hover { color: #1d4ed8 !important; }
+                                """,
+                            ],
+                        ):
+                            if st.button(evidence_btn_text, key="score_logic_evidence_open_btn"):
+                                st.session_state["mt_score_logic_dialog_kind"] = "evidence"
+                                st.rerun()
+                if evidence_rows:
+                    st.table(evidence_rows)
+                else:
+                    st.caption("근거 점수 상세 신호 데이터가 없습니다.")
 
 
 def _thinking_row_html(label: str, icon: str, content: str, row_class: str, border_color: str) -> str:
@@ -2935,27 +3148,32 @@ def render_workspace_chat_panel(selected: dict[str, Any], latest_bundle: dict[st
     # </div>
     # """
     # st.markdown(summary_html, unsafe_allow_html=True)
-    # strip_text는 좌측, HITL 확인·분석 시작은 우측 끝에 나란히 정렬
+    # strip_text는 좌측, 분석 시작은 우측 끝에 배치
     # 주의: render_workspace_chat_panel는 상위 컬럼 내부에서 호출되므로 중첩 columns는 1단계까지만 허용됨.
     pending_stream: dict[str, str] | None = None
+    enable_hitl = True
     with stylable_container(
         key=f"workspace_chat_cta_row_{vkey}",
         css_styles=[
             """{padding: 0; margin: 0;}""",
             """> [data-testid="stHorizontalBlock"] {align-items: center !important; min-height: 0 !important;}""",
-            """> [data-testid="stHorizontalBlock"] > [data-testid="column"] {min-height: 0 !important; align-self: stretch !important;}""",
-            """> [data-testid="stHorizontalBlock"] > [data-testid="stColumn"] {min-height: 0 !important; align-self: stretch !important;}""",
+            """> [data-testid="stHorizontalBlock"] > [data-testid="column"] {min-height: 0 !important; align-self: center !important;}""",
+            """> [data-testid="stHorizontalBlock"] > [data-testid="stColumn"] {min-height: 0 !important; align-self: center !important;}""",
         ],
     ):
-        strip_col, cta_spacer_col, cta_hitl_col, cta_btn_col = st.columns([0.50, 0.08, 0.14, 0.28])
+        strip_col, cta_btn_col = st.columns([0.72, 0.28])
         with strip_col:
             st.markdown(f'<div class="mt-workspace-strip-inline">{strip_text}</div>', unsafe_allow_html=True)
-        with cta_spacer_col:
-            st.markdown("&nbsp;", unsafe_allow_html=True)
-        with cta_hitl_col:
-            enable_hitl = st.checkbox("HITL 확인", key=f"workspace_hitl_check_{vkey}", value=True)
         with cta_btn_col:
-            with stylable_container(key="workspace_cta_right_1", css_styles=["{}"]):
+            with stylable_container(
+                key="workspace_cta_right_1",
+                css_styles=[
+                    """{}""",
+                    """> [data-testid="stElementContainer"] {margin: 0 !important; display:flex !important; justify-content:flex-end !important; align-items:center !important;}""",
+                    """> [data-testid="stElementContainer"] [data-testid="stButton"] {margin: 0 !important; width:auto !important;}""",
+                    """> [data-testid="stElementContainer"] [data-testid="stButton"] > button {margin: 0 0 0 auto !important;}""",
+                ],
+            ):
                 run_clicked = st.button("분석 시작", key=f"workspace_run_{vkey}", type="primary")
     if run_clicked:
         # 분석 시작 시 스트림/타임라인 패널을 자동으로 펼침
@@ -2963,8 +3181,8 @@ def render_workspace_chat_panel(selected: dict[str, Any], latest_bundle: dict[st
         response = post(f"/api/v1/cases/{vkey}/analysis-runs", json_body={"enable_hitl": enable_hitl})
         run_id = response["run_id"]
         st.session_state.pop(f"mt_run_terminal_status_{run_id}", None)
-        # run 단위로 HITL UI 노출 여부를 고정한다. (체크 해제 시 팝업/배너 비노출)
-        st.session_state[f"mt_hitl_ui_enabled_{run_id}"] = bool(enable_hitl)
+        # HITL은 항상 활성화하여 run 단위 UI 노출 여부도 True로 고정한다.
+        st.session_state[f"mt_hitl_ui_enabled_{run_id}"] = True
         st.session_state.pop(_hitl_state_key("dismissed", run_id), None)
         st.session_state.pop(_hitl_state_key("open", run_id), None)
         st.session_state.pop(_hitl_state_key("shown", run_id), None)
@@ -3097,7 +3315,15 @@ def render_workspace_chat_panel(selected: dict[str, Any], latest_bundle: dict[st
                 unsafe_allow_html=True,
             )
         with hitl_btn_col:
-            with stylable_container(key="workspace_cta_right_2", css_styles=["{}"]):
+            with stylable_container(
+                key="workspace_cta_right_2",
+                css_styles=[
+                    """{}""",
+                    """> [data-testid="stElementContainer"] {margin: 0 !important; display:flex !important; justify-content:flex-end !important; align-items:center !important;}""",
+                    """> [data-testid="stElementContainer"] [data-testid="stButton"] {margin: 0 !important; width:auto !important;}""",
+                    """> [data-testid="stElementContainer"] [data-testid="stButton"] > button {margin: 0 0 0 auto !important;}""",
+                ],
+            ):
                 if st.button("HITL 팝업 열기", key=f"workspace_hitl_open_{vkey}"):
                     st.session_state[dismissed_key] = False
                     st.session_state[open_key] = True
@@ -3128,7 +3354,15 @@ def render_workspace_chat_panel(selected: dict[str, Any], latest_bundle: dict[st
         with _msg_col:
             st.info("검토가 반영되었습니다. 오른쪽 버튼을 눌러 분석을 이어가세요.")
         with _btn_col:
-            with stylable_container(key="workspace_cta_right_3", css_styles=["{}"]):
+            with stylable_container(
+                key="workspace_cta_right_3",
+                css_styles=[
+                    """{}""",
+                    """> [data-testid="stElementContainer"] {margin: 0 !important; display:flex !important; justify-content:flex-end !important; align-items:center !important;}""",
+                    """> [data-testid="stElementContainer"] [data-testid="stButton"] {margin: 0 !important; width:auto !important;}""",
+                    """> [data-testid="stElementContainer"] [data-testid="stButton"] > button {margin: 0 0 0 auto !important;}""",
+                ],
+            ):
                 if st.button("분석 이어가기 실행", key=f"hitl_resume_trigger_{_pending_run_id}_{selected_vkey or ''}"):
                     st.rerun()
 
@@ -3293,8 +3527,8 @@ def render_workspace_chat_panel(selected: dict[str, Any], latest_bundle: dict[st
                         if _stream_was_resume == run_id:
                             logger.info("[ui] 재개 스트림 종료 run_id=%s → open_key 설정 생략 (팝업 재오픈 방지)", run_id)
                         else:
-                            # HITL 확인 체크하고 분석한 경우에만 최초 인터럽트 시 팝업 자동 오픈
-                            if st.session_state.get(f"mt_hitl_ui_enabled_{_rid}", False):
+                            # HITL은 항상 활성화 상태이므로 최초 인터럽트 시 팝업을 자동 오픈한다.
+                            if st.session_state.get(f"mt_hitl_ui_enabled_{_rid}", True):
                                 st.session_state[_hitl_state_key("open", _rid)] = True
                                 logger.info("[ui] HITL 인터럽트 + mt_hitl_ui_enabled → open_key=True 설정 run_id=%s", _rid)
                 except Exception as e:
