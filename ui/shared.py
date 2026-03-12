@@ -873,10 +873,12 @@ def _langgraph_to_png(
     hitl_node_names: set[str] | None = None,
     skill_node_names: set[str] | None = None,
     manual_pos: dict[str, tuple[float, float]] | None = None,
+    label_map: dict[str, str] | None = None,
 ) -> bytes:
     """컴파일된 LangGraph 객체에서 노드/엣지를 추출해 matplotlib PNG로 변환한다.
 
     manual_pos가 없으면 위상 정렬 기반 좌→우 자동 레이아웃을 사용한다.
+    label_map이 제공되면 node_id → 표시 이름으로 재정의한다.
     """
     from collections import deque
 
@@ -921,13 +923,18 @@ def _langgraph_to_png(
     else:
         pos = manual_pos
 
-    # ── 표시 이름: __start__ → START, __end__ → END ──────────────────────────
+    # ── 표시 이름 결정 ────────────────────────────────────────────────────────
+    _lmap = label_map or {}
+
     def _display(nid: str) -> str:
+        if nid in _lmap:
+            return _lmap[nid]
         if nid == "__start__":
             return "START"
         if nid == "__end__":
             return "END"
-        return nid.replace("_", " ")
+        # node_id → Title Case (밑줄 제거, 각 단어 첫 글자 대문자)
+        return nid.replace("_", " ").title()
 
     hitl_names = hitl_node_names or set()
     skill_names = skill_node_names or set()
@@ -977,6 +984,23 @@ def draw_agent_graph_langgraph() -> bytes:
     manual_pos["hitl_pause"]    = (x[7], 1.4)
     manual_pos["hitl_validate"] = (x[8], 1.4)
 
+    # node_id → 표시 라벨 명시적 매핑 (LangGraph ID는 소문자이므로 가독성 향상)
+    _label_map = {
+        "__start__":    "START",
+        "__end__":      "END",
+        "start_router": "Start Router",
+        "screener":     "Screener",
+        "intake":       "Intake Agent",
+        "planner":      "Planner Agent",
+        "execute":      "Execute Agent",
+        "critic":       "Critic Agent",
+        "verify":       "Verifier Agent",
+        "hitl_pause":   "HITL Pause",
+        "hitl_validate":"HITL Validate",
+        "reporter":     "Reporter Agent",
+        "finalizer":    "Finalizer",
+    }
+
     try:
         from agent.langgraph_agent import build_agent_graph
         return _langgraph_to_png(
@@ -984,6 +1008,7 @@ def draw_agent_graph_langgraph() -> bytes:
             figsize=(22, 4.5),
             hitl_node_names={"hitl_pause", "hitl_validate"},
             manual_pos=manual_pos,
+            label_map=_label_map,
         )
     except Exception:
         return draw_agent_graph()  # fallback: 기존 하드코딩 버전
@@ -992,11 +1017,20 @@ def draw_agent_graph_langgraph() -> bytes:
 @st.cache_data(show_spinner=False)
 def draw_deep_screening_graph_langgraph() -> bytes:
     """Deep Lane 서브그래프 PNG — 실제 LangGraph 객체에서 자동 추출."""
+    _label_map = {
+        "__start__":          "START",
+        "__end__":            "END",
+        "intake_normalize":   "Intake Normalize",
+        "hypothesis_generate":"Hypothesis Generate",
+        "rule_guardrail":     "Rule Guardrail",
+        "finalize_screening": "Finalize Screening",
+    }
     try:
         from agent.screening_subgraph import get_deep_screening_graph
         return _langgraph_to_png(
             get_deep_screening_graph(),
-            figsize=(12, 3.0),
+            figsize=(14, 3.0),
+            label_map=_label_map,
         )
     except Exception:
         # fallback: 정적 레이아웃
