@@ -149,6 +149,9 @@ async def screener_node_impl(
 
         if should_promote:
             # ── Deep lane ───────────────────────────────────────────────────
+            # 전체 타임아웃 = LLM 타임아웃 + 2 s (노드 오버헤드 여유)
+            _llm_timeout = float(getattr(settings, "screening_llm_timeout_seconds", 8.0))
+            _deep_timeout = _llm_timeout + 2.0
             try:
                 deep_graph = get_deep_screening_graph()
                 deep_input: dict[str, Any] = {
@@ -161,7 +164,10 @@ async def screener_node_impl(
                     "final_result": {},
                     "decision_path": [],
                 }
-                deep_output = await deep_graph.ainvoke(deep_input)
+                deep_output = await asyncio.wait_for(
+                    deep_graph.ainvoke(deep_input),
+                    timeout=_deep_timeout,
+                )
                 deep_final = deep_output.get("final_result") or {}
                 if deep_final.get("case_type"):
                     screening = deep_final
@@ -178,6 +184,12 @@ async def screener_node_impl(
                     logger.warning(
                         "screener_node: deep lane returned empty final_result → fast fallback"
                     )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "screener_node: deep lane timeout (%.1fs) → fast fallback "
+                    "promotion_reason=%s fast_case_type=%s",
+                    _deep_timeout, promotion_reason, fast_result.get("case_type"),
+                )
             except Exception as exc:
                 logger.warning(
                     "screener_node: deep lane failed (%s) → fast fallback", exc

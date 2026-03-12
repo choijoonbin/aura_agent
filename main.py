@@ -315,7 +315,10 @@ async def _run_analysis_task(
                                 screening_meta=meta.get("screening_meta"),
                             )
                     except Exception:
-                        pass
+                        logger.exception(
+                            "SCREENING_RESULT DB upsert 실패 — voucher_key=%s case_type=%s lane=%s",
+                            voucher_key, ct, meta.get("lane"),
+                        )
 
             try:
                 from db.session import SessionLocal

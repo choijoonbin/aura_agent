@@ -161,8 +161,7 @@ def run_case_screening(
         existing.score = result["score"] / 100.0
         existing.reason_text = result["reason_text"]
         existing.status = "NEW"
-        if screening_meta is not None:
-            existing.screening_meta = screening_meta
+        existing.screening_meta = screening_meta  # 항상 최신 실행 결과로 덮어씀 (None = Fast lane)
     else:
         case = AgentCase(
             case_id=_case_id_from_voucher(tenant_id, bukrs, belnr, gjahr),
@@ -224,8 +223,7 @@ def upsert_agent_case_from_screening_result(
         existing.score = score
         existing.reason_text = reason_text
         existing.status = "NEW"
-        if screening_meta is not None:
-            existing.screening_meta = screening_meta
+        existing.screening_meta = screening_meta  # 항상 최신 실행 결과로 덮어씀 (None = Fast lane)
     else:
         case = AgentCase(
             case_id=_case_id_from_voucher(tenant_id, bukrs, belnr, gjahr),
