@@ -9,6 +9,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from services.chunking_pipeline import _embedding_column_exists
+from services.policy_ref_normalizer import normalize_policy_parent_title
 from utils.config import settings
 from utils.llm_azure import completion_kwargs_for_azure
 
@@ -854,15 +855,17 @@ def _to_trace_candidate(
     stage: str,
     selected_by: str | None = None,
 ) -> dict[str, Any]:
+    article = item.get("regulation_article")
+    parent_title = normalize_policy_parent_title(article, item.get("parent_title"))
     return {
         "rank": rank,
         "chunk_id": item.get("chunk_id"),
         "doc_id": item.get("doc_id"),
-        "article": item.get("regulation_article"),
+        "article": article,
         "clause": item.get("regulation_clause"),
         "item": _get_regulation_item(item),
         "node_type": item.get("node_type"),
-        "parent_title": item.get("parent_title"),
+        "parent_title": parent_title,
         "selected_by": selected_by or item.get("selected_by"),
         "scores": {
             "bm25": item.get("bm25_score"),
@@ -1239,14 +1242,16 @@ def _finalize_context(
         why_selected = _build_why_selected(item, selection_stage)
         domain_match_hints = _build_domain_match_hints(item, body_evidence)
         chunk_id = item.get("chunk_id")
+        article = item.get("regulation_article")
+        normalized_parent_title = normalize_policy_parent_title(article, item.get("parent_title"))
         results.append({
             "chunk_id": chunk_id,
             "doc_id": item.get("doc_id"),
-            "article": item.get("regulation_article"),
+            "article": article,
             "clause": item.get("regulation_clause"),
             "item": regulation_item,
             "node_type": item.get("node_type"),
-            "parent_title": item.get("parent_title"),
+            "parent_title": normalized_parent_title,
             "chunk_text": item.get("chunk_text"),
             "version": item.get("version"),
             "effective_from": str(item.get("effective_from")) if item.get("effective_from") else None,

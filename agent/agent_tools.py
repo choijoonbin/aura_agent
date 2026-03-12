@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 
 from agent.aura_bridge import run_legacy_aura_analysis
 from agent.tool_schemas import ToolContextInput
+from services.policy_ref_normalizer import normalize_policy_parent_title
 from services.policy_service import search_policy_chunks
 from utils.config import get_mcc_sets, settings
 
@@ -135,7 +136,7 @@ def _adoption_reason_for_ref(ref: dict[str, Any], body_evidence: dict[str, Any])
     """규칙 + retrieval context 기반 채택 이유 한 줄 (발표용)."""
     case_type = str(body_evidence.get("case_type") or body_evidence.get("intended_risk_type") or "")
     article = ref.get("article") or ""
-    parent_title = str(ref.get("parent_title") or "")[:40]
+    parent_title = normalize_policy_parent_title(article, ref.get("parent_title"))[:40]
     direct_match_case_types = {"HOLIDAY_USAGE", "LIMIT_EXCEED", "PRIVATE_USE_RISK", "UNUSUAL_PATTERN"}
     if case_type in direct_match_case_types and article:
         return f"{case_type} 조건과 직접 일치하는 조항({article})이어서 채택"
@@ -159,7 +160,7 @@ def _is_common_evidence_article(ref: dict[str, Any]) -> bool:
 
 def _ref_log_label(ref: dict[str, Any]) -> str:
     article = str(ref.get("article") or ref.get("regulation_article") or "-").strip() or "-"
-    title = str(ref.get("parent_title") or "-").strip() or "-"
+    title = normalize_policy_parent_title(article, ref.get("parent_title")) or "-"
     score = ref.get("retrieval_score")
     if isinstance(score, (int, float)):
         return f"{article}/{title}({float(score):.2f})"

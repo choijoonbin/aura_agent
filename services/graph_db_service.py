@@ -4,6 +4,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
+from services.policy_ref_normalizer import normalize_policy_parent_title, policy_display_label
 from utils.config import settings
 
 logger = logging.getLogger(__name__)
@@ -205,7 +206,8 @@ class GraphDBService:
             for ref in policy_refs:
                 article = str(ref.get("article") or "").strip()
                 clause = str(ref.get("clause") or "").strip()
-                title = str(ref.get("parent_title") or ref.get("title") or "").strip() or None
+                title_raw = str(ref.get("parent_title") or ref.get("title") or "").strip()
+                title = normalize_policy_parent_title(article, title_raw) or None
                 if not article:
                     continue
                 policy_key = f"{article}:{clause}" if clause else article
@@ -300,11 +302,12 @@ class GraphDBService:
 
             for p in policies:
                 pid = p.get("policy_key")
+                label = policy_display_label(p.get("article"), p.get("clause"), p.get("title"))
                 nodes.append(
                     {
                         "id": pid,
                         "type": "Policy",
-                        "label": f"{p.get('article') or '-'} {p.get('clause') or ''}".strip(),
+                        "label": label,
                         "props": p,
                     }
                 )

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import random
 from datetime import date, datetime, time, timezone
 from typing import Any
 
@@ -98,7 +99,7 @@ SCENARIO_PROFILES: dict[str, dict[str, Any]] = {
     },
 }
 
-# OCR 검증/시연 일관성을 위한 고정 생성값
+# OCR 검증/시연 일관성을 위한 고정 생성값(비정상 시나리오 전용)
 _FIXED_WEEKEND_DATE = date(2026, 3, 14)  # 2026-03-14 (토)
 _FIXED_OCCUR_TIME = time(19, 45, 0)
 _FIXED_AMOUNT_KRW = 97042
@@ -239,6 +240,18 @@ def seed_demo_scenarios(db: Session, scenario: str, count: int = 5) -> dict[str,
             continue
 
         seq = start_index + i
+        is_normal_baseline = scenario == "NORMAL_BASELINE"
+        occur_time = (
+            time(
+                hour=random.choice(profile["hour_candidates"]),
+                minute=random.randint(0, 59),
+                second=random.randint(0, 59),
+            )
+            if is_normal_baseline
+            else _FIXED_OCCUR_TIME
+        )
+        amount_krw = random.randint(*profile["amount_range"]) if is_normal_baseline else _FIXED_AMOUNT_KRW
+
         header = FiDocHeader(
             tenant_id=tenant_id,
             bukrs="1000",
@@ -248,13 +261,7 @@ def seed_demo_scenarios(db: Session, scenario: str, count: int = 5) -> dict[str,
             doc_source="POC",
             budat=target_day,
             cpudt=target_day,
-            cputm=_FIXED_OCCUR_TIME,
-            # 기존 시간 랜덤 로직(원복 참고용):
-            # cputm=time(
-            #     hour=random.choice(profile["hour_candidates"]),
-            #     minute=random.randint(0, 59),
-            #     second=random.randint(0, 59),
-            # ),
+            cputm=occur_time,
             blart=profile["blart"],
             waers="KRW",
             bktxt=f"{profile['label']}{_eul_reul(profile['label'])} 위한 테스트 데이터 ({belnr})",
@@ -275,9 +282,7 @@ def seed_demo_scenarios(db: Session, scenario: str, count: int = 5) -> dict[str,
             gjahr=gjahr_str,
             buzei="001",
             hkont="0000601000",
-            wrbtr=_FIXED_AMOUNT_KRW,
-            # 기존 금액 랜덤 로직(원복 참고용):
-            # wrbtr=random.randint(*profile["amount_range"]),
+            wrbtr=amount_krw,
             waers="KRW",
             lifnr=f"C{1000+i}",
             sgtxt=profile["item_text"],
@@ -357,7 +362,8 @@ def list_seeded_demo_cases(db: Session) -> list[dict[str, Any]]:
         # 스크리닝/분석 후 갱신된 case_type·case_status 반영 (없으면 시나리오 risk_type·신규)
         case_type = ac_case_type if ac_case_type else (header.intended_risk_type or "UNSCREENED")
         case_status = ac_status if ac_status else "NEW"
-        scenario = (header.xblnr or "").replace("DEMO-", "").split("-")[0] if header.xblnr else "-"
+        raw_scenario = (header.xblnr or "").replace("DEMO-", "") if header.xblnr else "-"
+        scenario = raw_scenario.rsplit("-", 1)[0] if "-" in raw_scenario else raw_scenario
         profile = SCENARIO_PROFILES.get(scenario) if scenario else None
         out.append(
             {

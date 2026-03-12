@@ -4237,9 +4237,10 @@ def render_workspace_graph_insights(selected_key: str | None, latest_bundle: dic
         with st.expander("근거 경로 상세(노드/관계)", expanded=True):
             st.markdown("**노드**")
             for n in nodes[:30]:
-                st.caption(
-                    f"- [{n.get('type')}] {str(n.get('id') or '-')[:48]} · {str(n.get('label') or '-')[:110]}"
-                )
+                nid = str(n.get("id") or "-")[:48]
+                lbl = str(n.get("label") or "-")[:110]
+                body = f"- [{n.get('type')}] {nid}" if nid == lbl else f"- [{n.get('type')}] {nid} · {lbl}"
+                st.caption(body)
             if len(nodes) > 30:
                 st.caption(f"... 외 {len(nodes) - 30}건")
             st.markdown("**관계**")
