@@ -137,29 +137,34 @@ def render_agent_studio_page() -> None:
                 st.caption(
                     "실제 컴파일된 LangGraph 객체에서 자동 추출한 그래프입니다. "
                     "코드 변경 시 다이어그램이 자동으로 갱신됩니다. "
-                    "그래프 우측 상단 **카메라 아이콘**으로 PNG 내보내기 후 보고서·발표 자료에 활용하세요."
+                    "그래프 우측 상단 카메라 아이콘으로 PNG 내보내기 후 보고서·발표 자료에 활용하세요."
                 )
+                _plotly_err = None
                 try:
-                    st.plotly_chart(
-                        draw_agent_graph_plotly(),
-                        use_container_width=True,
-                        config={
-                            "displayModeBar": True,
-                            "modeBarButtonsToRemove": ["lasso2d", "select2d", "autoScale2d"],
-                            "toImageButtonOptions": {"filename": "aura_orchestration_graph", "scale": 2},
-                        },
-                    )
-                except Exception:
+                    _fig = draw_agent_graph_plotly()
+                    try:
+                        st.plotly_chart(_fig, use_container_width=True,
+                                        config={"displayModeBar": True,
+                                                "modeBarButtonsToRemove": ["lasso2d", "select2d", "autoScale2d"],
+                                                "toImageButtonOptions": {"filename": "aura_orchestration_graph", "scale": 2}})
+                    except TypeError:
+                        st.plotly_chart(_fig, config={"displayModeBar": True,
+                                                      "toImageButtonOptions": {"filename": "aura_orchestration_graph", "scale": 2}})
+                except Exception as _e:
+                    _plotly_err = _e
                     render_graph_image(
                         "메인 오케스트레이션 그래프",
                         draw_agent_graph_langgraph(), None,
                         "메인 오케스트레이션: 전체 노드 흐름.",
                     )
+                if _plotly_err:
+                    with st.expander("⚠️ Plotly 렌더링 오류 상세", expanded=False):
+                        st.code(str(_plotly_err), language="text")
                 mermaid_src = get_agent_graph_mermaid()
                 if mermaid_src:
                     with st.expander("Mermaid 소스 보기 (발표 자료·문서용 — mermaid.live에 붙여넣기)", expanded=False):
                         st.code(mermaid_src, language="text")
-                        st.caption("👆 위 텍스트를 복사해 mermaid.live / Notion / GitHub README에 붙여넣으면 다이어그램으로 렌더링됩니다.")
+                        st.caption("위 텍스트를 복사해 mermaid.live / Notion / GitHub README에 붙여넣으면 다이어그램으로 렌더링됩니다.")
                 st.markdown("""
 **단계별 설명**
 
@@ -177,21 +182,22 @@ def render_agent_studio_page() -> None:
             with graph_tabs[1]:
                 st.caption("Screener 노드 내부 Deep Lane 서브그래프입니다. 승격 조건 충족 시에만 실행되며, 실패 또는 타임아웃 시 Fast 결과로 폴백합니다.")
                 try:
-                    st.plotly_chart(
-                        draw_deep_screening_graph_plotly(),
-                        use_container_width=True,
-                        config={
-                            "displayModeBar": True,
-                            "modeBarButtonsToRemove": ["lasso2d", "select2d", "autoScale2d"],
-                            "toImageButtonOptions": {"filename": "aura_deep_screening_graph", "scale": 2},
-                        },
-                    )
-                except Exception:
+                    _fig2 = draw_deep_screening_graph_plotly()
+                    try:
+                        st.plotly_chart(_fig2, use_container_width=True,
+                                        config={"displayModeBar": True,
+                                                "toImageButtonOptions": {"filename": "aura_deep_screening_graph", "scale": 2}})
+                    except TypeError:
+                        st.plotly_chart(_fig2, config={"displayModeBar": True,
+                                                       "toImageButtonOptions": {"filename": "aura_deep_screening_graph", "scale": 2}})
+                except Exception as _e2:
                     render_graph_image(
                         "딥 레인 스크리닝 서브그래프",
                         draw_deep_screening_graph_langgraph(), None,
                         "Deep Lane: 4단계 LLM 재검증 서브그래프.",
                     )
+                    with st.expander("⚠️ Plotly 오류", expanded=False):
+                        st.code(str(_e2), language="text")
                 deep_mermaid = get_deep_screening_graph_mermaid()
                 if deep_mermaid:
                     with st.expander("Mermaid 소스 보기", expanded=False):
@@ -210,21 +216,22 @@ def render_agent_studio_page() -> None:
 """)
             with graph_tabs[2]:
                 try:
-                    st.plotly_chart(
-                        draw_tool_execution_graph_plotly(),
-                        use_container_width=True,
-                        config={
-                            "displayModeBar": True,
-                            "modeBarButtonsToRemove": ["lasso2d", "select2d", "autoScale2d"],
-                            "toImageButtonOptions": {"filename": "aura_skill_execution_graph", "scale": 2},
-                        },
-                    )
-                except Exception:
+                    _fig3 = draw_tool_execution_graph_plotly()
+                    try:
+                        st.plotly_chart(_fig3, use_container_width=True,
+                                        config={"displayModeBar": True,
+                                                "toImageButtonOptions": {"filename": "aura_skill_execution_graph", "scale": 2}})
+                    except TypeError:
+                        st.plotly_chart(_fig3, config={"displayModeBar": True,
+                                                       "toImageButtonOptions": {"filename": "aura_skill_execution_graph", "scale": 2}})
+                except Exception as _e3:
                     render_graph_image(
                         "스킬 실행 도구 그래프",
                         draw_tool_execution_graph(), None,
                         "하위 실행 도구 그래프: execute 노드 내부에서 호출되는 LangChain tool 순서입니다.",
                     )
+                    with st.expander("⚠️ Plotly 오류", expanded=False):
+                        st.code(str(_e3), language="text")
                 st.markdown("""
 **단계별 설명**
 
