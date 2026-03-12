@@ -859,3 +859,256 @@ def render_graph_image(title: str, image_bytes: bytes | None, fallback_graph: by
         else:
             st.caption("그래프를 표시할 수 없습니다.")
         st.caption(caption)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# LangGraph 네이티브 Mermaid 렌더링
+# get_graph().draw_mermaid() → 실제 컴파일된 그래프 구조 자동 추출
+# st.components.v1.html() → 브라우저에서 Mermaid.js 인터랙티브 렌더링
+# ─────────────────────────────────────────────────────────────────────────────
+
+import streamlit.components.v1 as _st_components
+
+
+def render_mermaid_graph(
+    title: str,
+    mermaid_text: str,
+    caption: str = "",
+    height: int = 520,
+) -> None:
+    """Mermaid 다이어그램을 브라우저에서 인터랙티브하게 렌더링한다.
+
+    Mermaid.js를 CDN에서 로드해 `st.components.v1.html()` 아이프레임 안에서 렌더링.
+    서버 측 Chromium / Playwright 없이 동작하며, 브라우저가 Mermaid.js를 로드한다.
+    """
+    if not mermaid_text:
+        st.caption("그래프 데이터를 불러올 수 없습니다.")
+        return
+
+    # Mermaid 텍스트를 JS 문자열로 안전하게 이스케이프
+    escaped = mermaid_text.replace("\\", "\\\\").replace("`", "\\`").replace("$", "\\$")
+
+    html_content = f"""<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  body {{
+    margin: 0;
+    background: #f8fafc;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  }}
+  h3 {{
+    color: #1e293b;
+    font-size: 14px;
+    font-weight: 600;
+    margin: 10px 0 6px 0;
+    letter-spacing: -0.01em;
+  }}
+  #graph-container {{
+    width: 100%;
+    overflow-x: auto;
+    display: flex;
+    justify-content: center;
+    padding: 8px 0;
+  }}
+  .mermaid {{
+    background: transparent;
+    border-radius: 10px;
+  }}
+  .mermaid svg {{
+    max-width: 100%;
+    height: auto;
+    border-radius: 8px;
+    filter: drop-shadow(0 2px 8px rgba(0,0,0,0.08));
+  }}
+  .caption {{
+    font-size: 11px;
+    color: #94a3b8;
+    margin-top: 4px;
+    text-align: center;
+  }}
+</style>
+</head>
+<body>
+{"<h3>" + html.escape(title) + "</h3>" if title else ""}
+<div id="graph-container">
+  <div class="mermaid" id="mermaid-diagram">{escaped}</div>
+</div>
+{"<p class='caption'>" + html.escape(caption) + "</p>" if caption else ""}
+<script type="module">
+  import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+  mermaid.initialize({{
+    startOnLoad: true,
+    theme: 'base',
+    themeVariables: {{
+      primaryColor: '#ede9fe',
+      primaryTextColor: '#1e293b',
+      primaryBorderColor: '#a78bfa',
+      lineColor: '#94a3b8',
+      secondaryColor: '#f0fdf4',
+      tertiaryColor: '#fef9c3',
+      background: '#f8fafc',
+      mainBkg: '#f5f3ff',
+      nodeBorder: '#a78bfa',
+      clusterBkg: '#fafafa',
+      titleColor: '#1e293b',
+      edgeLabelBackground: '#ffffff',
+      fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
+      fontSize: '13px',
+    }},
+    flowchart: {{
+      curve: 'basis',
+      padding: 20,
+      useMaxWidth: true,
+    }},
+    securityLevel: 'loose',
+  }});
+</script>
+</body>
+</html>"""
+    _st_components.html(html_content, height=height, scrolling=True)
+
+
+@st.cache_data(show_spinner=False)
+def get_agent_graph_mermaid() -> str:
+    """메인 오케스트레이션 그래프의 Mermaid 텍스트를 반환.
+
+    실제 컴파일된 LangGraph 객체에서 draw_mermaid()로 추출하므로
+    코드 변경 시 자동으로 다이어그램이 갱신된다.
+    """
+    try:
+        from agent.langgraph_agent import build_agent_graph
+        graph = build_agent_graph()
+        return graph.get_graph(xray=False).draw_mermaid()
+    except Exception:
+        # 에이전트 초기화 실패 시 (DB 미연결 등) 정적 fallback
+        return _AGENT_GRAPH_MERMAID_FALLBACK
+
+
+@st.cache_data(show_spinner=False)
+def get_deep_screening_graph_mermaid() -> str:
+    """Deep Lane 스크리닝 서브그래프의 Mermaid 텍스트를 반환."""
+    try:
+        from agent.screening_subgraph import get_deep_screening_graph
+        graph = get_deep_screening_graph()
+        return graph.get_graph(xray=False).draw_mermaid()
+    except Exception:
+        return _DEEP_SCREENING_MERMAID_FALLBACK
+
+
+@st.cache_data(show_spinner=False)
+def get_tool_execution_graph_mermaid() -> str:
+    """스킬 실행 흐름 그래프의 Mermaid 텍스트를 반환 (수동 정의)."""
+    return _TOOL_EXECUTION_MERMAID
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Mermaid 정적 fallback 다이어그램
+# ─────────────────────────────────────────────────────────────────────────────
+
+_AGENT_GRAPH_MERMAID_FALLBACK = """---
+config:
+  flowchart:
+    curve: basis
+---
+graph LR
+    __start__([START]):::first
+    start_router(start_router)
+    screener(screener)
+    intake(intake)
+    planner(planner)
+    execute(execute)
+    critic(critic)
+    verify(verify)
+    hitl_pause(hitl_pause):::hitl
+    hitl_validate(hitl_validate):::hitl
+    reporter(reporter)
+    finalizer(finalizer)
+    __end__([END]):::last
+
+    __start__ --> start_router
+    start_router -->|if prescreened| intake
+    start_router -->|else| screener
+    screener --> intake
+    intake --> planner
+    planner --> execute
+    execute --> critic
+    critic -->|approved| verify
+    critic -->|retry| planner
+    verify -->|if needed| hitl_pause
+    verify -->|continue| reporter
+    hitl_pause --> hitl_validate
+    hitl_validate -->|resume| reporter
+    hitl_validate -->|re-request| hitl_pause
+    reporter --> finalizer
+    finalizer --> __end__
+
+    classDef first fill-opacity:0,stroke:#a78bfa,stroke-dasharray:4
+    classDef last fill:#bfb6fc,stroke:#7c3aed
+    classDef hitl fill:#fffbeb,stroke:#f59e0b,stroke-dasharray:4
+    classDef default fill:#f5f3ff,stroke:#a78bfa,color:#1e293b
+"""
+
+_DEEP_SCREENING_MERMAID_FALLBACK = """---
+config:
+  flowchart:
+    curve: basis
+---
+graph TD
+    __start__([START]):::first
+    intake_normalize(intake_normalize)
+    hypothesis_generate(hypothesis_generate)
+    rule_guardrail(rule_guardrail)
+    finalize_screening(finalize_screening)
+    __end__([END]):::last
+
+    __start__ --> intake_normalize
+    intake_normalize --> hypothesis_generate
+    hypothesis_generate --> rule_guardrail
+    rule_guardrail --> finalize_screening
+    finalize_screening --> __end__
+
+    classDef first fill-opacity:0,stroke:#a78bfa,stroke-dasharray:4
+    classDef last fill:#bfb6fc,stroke:#7c3aed
+    classDef default fill:#f5f3ff,stroke:#a78bfa,color:#1e293b
+"""
+
+_TOOL_EXECUTION_MERMAID = """---
+config:
+  flowchart:
+    curve: basis
+---
+graph TD
+    execute(execute):::hub
+
+    holiday(holiday_compliance_probe):::tool
+    budget(budget_risk_probe):::tool
+    merchant(merchant_risk_probe):::tool
+    document(document_evidence_probe):::tool
+    policy(policy_rulebook_probe):::tool
+    legacy(legacy_aura_deep_audit):::tool
+
+    score(score_breakdown):::output
+
+    execute --> holiday
+    execute --> budget
+    execute --> merchant
+    execute --> document
+    execute --> policy
+    execute -->|"조건부"| legacy
+
+    holiday --> score
+    budget --> score
+    merchant --> score
+    document --> score
+    policy --> score
+    legacy --> score
+
+    classDef hub fill:#dbeafe,stroke:#3b82f6,color:#1e293b,font-weight:bold
+    classDef tool fill:#eff6ff,stroke:#93c5fd,color:#1e293b
+    classDef output fill:#f0fdf4,stroke:#86efac,color:#1e293b,font-weight:bold
+"""
