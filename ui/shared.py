@@ -862,12 +862,87 @@ def render_graph_image(title: str, image_bytes: bytes | None, fallback_graph: by
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# LangGraph 네이티브 Mermaid 렌더링
-# get_graph().draw_mermaid() → 실제 컴파일된 그래프 구조 자동 추출
-# st.components.v1.html() → 브라우저에서 Mermaid.js 인터랙티브 렌더링
+# LangGraph 네이티브 그래프 시각화
+# get_graph() → 실제 컴파일된 노드/엣지 자동 추출 → matplotlib PNG
+# CDN/Playwright 없이 동작, 코드 변경 시 다이어그램 자동 갱신
 # ─────────────────────────────────────────────────────────────────────────────
 
-import streamlit.components.v1 as _st_components
+def _langgraph_to_png(
+    compiled_graph,
+    figsize: tuple[float, float],
+    hitl_node_names: set[str] | None = None,
+    skill_node_names: set[str] | None = None,
+    manual_pos: dict[str, tuple[float, float]] | None = None,
+) -> bytes:
+    """컴파일된 LangGraph 객체에서 노드/엣지를 추출해 matplotlib PNG로 변환한다.
+
+    manual_pos가 없으면 위상 정렬 기반 좌→우 자동 레이아웃을 사용한다.
+    """
+    from collections import deque
+
+    dg = compiled_graph.get_graph(xray=False)
+    node_ids = list(dg.nodes.keys())
+    edges_raw = list(dg.edges)
+
+    # ── 위상 정렬 기반 레이어 배정 (자동 레이아웃) ───────────────────────────
+    if manual_pos is None:
+        in_deg: dict[str, int] = {n: 0 for n in node_ids}
+        adj: dict[str, list[str]] = {n: [] for n in node_ids}
+        for e in edges_raw:
+            adj[e.source].append(e.target)
+            in_deg[e.target] = in_deg.get(e.target, 0) + 1
+
+        layer: dict[str, int] = {}
+        q = deque(n for n in node_ids if in_deg.get(n, 0) == 0)
+        while q:
+            n = q.popleft()
+            for nb in adj[n]:
+                in_deg[nb] -= 1
+                layer[nb] = max(layer.get(nb, 0), layer.get(n, 0) + 1)
+                if in_deg[nb] == 0:
+                    q.append(nb)
+            if n not in layer:
+                layer[n] = 0
+
+        # 레이어별 노드 목록 → y 위치 균등 배분
+        from collections import defaultdict
+        layer_nodes: dict[int, list[str]] = defaultdict(list)
+        for n, lv in layer.items():
+            layer_nodes[lv].append(n)
+        max_layer = max(layer_nodes.keys(), default=0)
+        step_x = 2.2
+        pos: dict[str, tuple[float, float]] = {}
+        for lv in range(max_layer + 1):
+            nodes_in_layer = layer_nodes[lv]
+            n_count = len(nodes_in_layer)
+            for j, n in enumerate(nodes_in_layer):
+                y = (j - (n_count - 1) / 2.0) * 1.1
+                pos[n] = (lv * step_x, y)
+    else:
+        pos = manual_pos
+
+    # ── 표시 이름: __start__ → START, __end__ → END ──────────────────────────
+    def _display(nid: str) -> str:
+        if nid == "__start__":
+            return "START"
+        if nid == "__end__":
+            return "END"
+        return nid.replace("_", " ")
+
+    hitl_names = hitl_node_names or set()
+    skill_names = skill_node_names or set()
+
+    nodes_arg = [(n, _display(n), "") for n in node_ids if n in pos]
+    edges_arg = [
+        (e.source, e.target, e.data or "")
+        for e in edges_raw
+        if e.source in pos and e.target in pos
+    ]
+
+    return _draw_graph_png(
+        nodes_arg, edges_arg, pos, figsize=figsize,
+        hitl_nodes=hitl_names, skill_nodes=skill_names,
+    )
 
 
 def render_mermaid_graph(
@@ -876,239 +951,114 @@ def render_mermaid_graph(
     caption: str = "",
     height: int = 520,
 ) -> None:
-    """Mermaid 다이어그램을 브라우저에서 인터랙티브하게 렌더링한다.
+    """하위 호환 래퍼: Mermaid 텍스트를 받아 st.code로 표시한다.
 
-    Mermaid.js를 CDN에서 로드해 `st.components.v1.html()` 아이프레임 안에서 렌더링.
-    서버 측 Chromium / Playwright 없이 동작하며, 브라우저가 Mermaid.js를 로드한다.
+    CDN 없이 동작하는 대체 표시 방식으로 전환됨.
+    그래프 탭은 draw_*_langgraph() PNG 함수를 사용할 것을 권장.
     """
-    if not mermaid_text:
-        st.caption("그래프 데이터를 불러올 수 없습니다.")
-        return
+    if caption:
+        st.caption(caption)
+    if mermaid_text:
+        with st.expander("Mermaid 소스 보기", expanded=False):
+            st.code(mermaid_text, language="text")
 
-    # Mermaid 텍스트를 JS 문자열로 안전하게 이스케이프
-    escaped = mermaid_text.replace("\\", "\\\\").replace("`", "\\`").replace("$", "\\$")
 
-    html_content = f"""<!DOCTYPE html>
-<html>
-<head>
-<meta charset="utf-8">
-<style>
-  body {{
-    margin: 0;
-    background: #f8fafc;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-  }}
-  h3 {{
-    color: #1e293b;
-    font-size: 14px;
-    font-weight: 600;
-    margin: 10px 0 6px 0;
-    letter-spacing: -0.01em;
-  }}
-  #graph-container {{
-    width: 100%;
-    overflow-x: auto;
-    display: flex;
-    justify-content: center;
-    padding: 8px 0;
-  }}
-  .mermaid {{
-    background: transparent;
-    border-radius: 10px;
-  }}
-  .mermaid svg {{
-    max-width: 100%;
-    height: auto;
-    border-radius: 8px;
-    filter: drop-shadow(0 2px 8px rgba(0,0,0,0.08));
-  }}
-  .caption {{
-    font-size: 11px;
-    color: #94a3b8;
-    margin-top: 4px;
-    text-align: center;
-  }}
-</style>
-</head>
-<body>
-{"<h3>" + html.escape(title) + "</h3>" if title else ""}
-<div id="graph-container">
-  <div class="mermaid" id="mermaid-diagram">{escaped}</div>
-</div>
-{"<p class='caption'>" + html.escape(caption) + "</p>" if caption else ""}
-<script type="module">
-  import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
-  mermaid.initialize({{
-    startOnLoad: true,
-    theme: 'base',
-    themeVariables: {{
-      primaryColor: '#ede9fe',
-      primaryTextColor: '#1e293b',
-      primaryBorderColor: '#a78bfa',
-      lineColor: '#94a3b8',
-      secondaryColor: '#f0fdf4',
-      tertiaryColor: '#fef9c3',
-      background: '#f8fafc',
-      mainBkg: '#f5f3ff',
-      nodeBorder: '#a78bfa',
-      clusterBkg: '#fafafa',
-      titleColor: '#1e293b',
-      edgeLabelBackground: '#ffffff',
-      fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
-      fontSize: '13px',
-    }},
-    flowchart: {{
-      curve: 'basis',
-      padding: 20,
-      useMaxWidth: true,
-    }},
-    securityLevel: 'loose',
-  }});
-</script>
-</body>
-</html>"""
-    _st_components.html(html_content, height=height, scrolling=True)
+@st.cache_data(show_spinner=False)
+def draw_agent_graph_langgraph() -> bytes:
+    """메인 오케스트레이션 그래프 PNG — 실제 LangGraph 객체에서 자동 추출."""
+    # 수동 레이아웃: HITL 분기를 메인 라인 위에 배치
+    step = 2.0
+    x = [i * step for i in range(11)]
+    keys_main = [
+        "__start__", "start_router", "screener", "intake", "planner",
+        "execute", "critic", "verify", "reporter", "finalizer", "__end__",
+    ]
+    manual_pos = {k: (x[i], 0.0) for i, k in enumerate(keys_main)}
+    manual_pos["hitl_pause"]    = (x[7], 1.4)
+    manual_pos["hitl_validate"] = (x[8], 1.4)
+
+    try:
+        from agent.langgraph_agent import build_agent_graph
+        return _langgraph_to_png(
+            build_agent_graph(),
+            figsize=(22, 4.5),
+            hitl_node_names={"hitl_pause", "hitl_validate"},
+            manual_pos=manual_pos,
+        )
+    except Exception:
+        return draw_agent_graph()  # fallback: 기존 하드코딩 버전
+
+
+@st.cache_data(show_spinner=False)
+def draw_deep_screening_graph_langgraph() -> bytes:
+    """Deep Lane 서브그래프 PNG — 실제 LangGraph 객체에서 자동 추출."""
+    try:
+        from agent.screening_subgraph import get_deep_screening_graph
+        return _langgraph_to_png(
+            get_deep_screening_graph(),
+            figsize=(12, 3.0),
+        )
+    except Exception:
+        # fallback: 정적 레이아웃
+        nodes = [
+            ("__start__", "START", ""),
+            ("intake_normalize", "intake normalize", ""),
+            ("hypothesis_generate", "hypothesis generate", ""),
+            ("rule_guardrail", "rule guardrail", ""),
+            ("finalize_screening", "finalize screening", ""),
+            ("__end__", "END", ""),
+        ]
+        step = 2.2
+        pos = {k: (i * step, 0.0) for i, (k, _, _) in enumerate(nodes)}
+        edges = [(nodes[i][0], nodes[i + 1][0], "") for i in range(len(nodes) - 1)]
+        return _draw_graph_png(nodes, edges, pos, figsize=(14, 2.8))
 
 
 @st.cache_data(show_spinner=False)
 def get_agent_graph_mermaid() -> str:
-    """메인 오케스트레이션 그래프의 Mermaid 텍스트를 반환.
-
-    실제 컴파일된 LangGraph 객체에서 draw_mermaid()로 추출하므로
-    코드 변경 시 자동으로 다이어그램이 갱신된다.
-    """
+    """메인 오케스트레이션 그래프 Mermaid 텍스트 (draw_mermaid_png 미사용, 참조용)."""
     try:
         from agent.langgraph_agent import build_agent_graph
-        graph = build_agent_graph()
-        return graph.get_graph(xray=False).draw_mermaid()
+        return build_agent_graph().get_graph(xray=False).draw_mermaid()
     except Exception:
-        # 에이전트 초기화 실패 시 (DB 미연결 등) 정적 fallback
-        return _AGENT_GRAPH_MERMAID_FALLBACK
+        return ""
 
 
 @st.cache_data(show_spinner=False)
 def get_deep_screening_graph_mermaid() -> str:
-    """Deep Lane 스크리닝 서브그래프의 Mermaid 텍스트를 반환."""
+    """Deep Lane 서브그래프 Mermaid 텍스트 (참조용)."""
     try:
         from agent.screening_subgraph import get_deep_screening_graph
-        graph = get_deep_screening_graph()
-        return graph.get_graph(xray=False).draw_mermaid()
+        return get_deep_screening_graph().get_graph(xray=False).draw_mermaid()
     except Exception:
-        return _DEEP_SCREENING_MERMAID_FALLBACK
+        return ""
 
 
 @st.cache_data(show_spinner=False)
 def get_tool_execution_graph_mermaid() -> str:
-    """스킬 실행 흐름 그래프의 Mermaid 텍스트를 반환 (수동 정의)."""
+    """스킬 실행 흐름 Mermaid 텍스트 (참조용, 수동 정의)."""
     return _TOOL_EXECUTION_MERMAID
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Mermaid 정적 fallback 다이어그램
-# ─────────────────────────────────────────────────────────────────────────────
-
-_AGENT_GRAPH_MERMAID_FALLBACK = """---
-config:
-  flowchart:
-    curve: basis
----
-graph LR
-    __start__([START]):::first
-    start_router(start_router)
-    screener(screener)
-    intake(intake)
-    planner(planner)
+_TOOL_EXECUTION_MERMAID = """graph TD
     execute(execute)
-    critic(critic)
-    verify(verify)
-    hitl_pause(hitl_pause):::hitl
-    hitl_validate(hitl_validate):::hitl
-    reporter(reporter)
-    finalizer(finalizer)
-    __end__([END]):::last
-
-    __start__ --> start_router
-    start_router -->|if prescreened| intake
-    start_router -->|else| screener
-    screener --> intake
-    intake --> planner
-    planner --> execute
-    execute --> critic
-    critic -->|approved| verify
-    critic -->|retry| planner
-    verify -->|if needed| hitl_pause
-    verify -->|continue| reporter
-    hitl_pause --> hitl_validate
-    hitl_validate -->|resume| reporter
-    hitl_validate -->|re-request| hitl_pause
-    reporter --> finalizer
-    finalizer --> __end__
-
-    classDef first fill-opacity:0,stroke:#a78bfa,stroke-dasharray:4
-    classDef last fill:#bfb6fc,stroke:#7c3aed
-    classDef hitl fill:#fffbeb,stroke:#f59e0b,stroke-dasharray:4
-    classDef default fill:#f5f3ff,stroke:#a78bfa,color:#1e293b
-"""
-
-_DEEP_SCREENING_MERMAID_FALLBACK = """---
-config:
-  flowchart:
-    curve: basis
----
-graph TD
-    __start__([START]):::first
-    intake_normalize(intake_normalize)
-    hypothesis_generate(hypothesis_generate)
-    rule_guardrail(rule_guardrail)
-    finalize_screening(finalize_screening)
-    __end__([END]):::last
-
-    __start__ --> intake_normalize
-    intake_normalize --> hypothesis_generate
-    hypothesis_generate --> rule_guardrail
-    rule_guardrail --> finalize_screening
-    finalize_screening --> __end__
-
-    classDef first fill-opacity:0,stroke:#a78bfa,stroke-dasharray:4
-    classDef last fill:#bfb6fc,stroke:#7c3aed
-    classDef default fill:#f5f3ff,stroke:#a78bfa,color:#1e293b
-"""
-
-_TOOL_EXECUTION_MERMAID = """---
-config:
-  flowchart:
-    curve: basis
----
-graph TD
-    execute(execute):::hub
-
-    holiday(holiday_compliance_probe):::tool
-    budget(budget_risk_probe):::tool
-    merchant(merchant_risk_probe):::tool
-    document(document_evidence_probe):::tool
-    policy(policy_rulebook_probe):::tool
-    legacy(legacy_aura_deep_audit):::tool
-
-    score(score_breakdown):::output
-
+    holiday(holiday_compliance_probe)
+    budget(budget_risk_probe)
+    merchant(merchant_risk_probe)
+    document(document_evidence_probe)
+    policy(policy_rulebook_probe)
+    legacy(legacy_aura_deep_audit)
+    score(score_breakdown)
     execute --> holiday
     execute --> budget
     execute --> merchant
     execute --> document
     execute --> policy
-    execute -->|"조건부"| legacy
-
+    execute --> legacy
     holiday --> score
     budget --> score
     merchant --> score
     document --> score
     policy --> score
     legacy --> score
-
-    classDef hub fill:#dbeafe,stroke:#3b82f6,color:#1e293b,font-weight:bold
-    classDef tool fill:#eff6ff,stroke:#93c5fd,color:#1e293b
-    classDef output fill:#f0fdf4,stroke:#86efac,color:#1e293b,font-weight:bold
 """

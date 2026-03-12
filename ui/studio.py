@@ -7,21 +7,23 @@ from agent.langgraph_agent import build_agent_graph
 from agent.agent_tools import TOOL_REGISTRY, get_langchain_tools
 from ui.api_client import get
 from ui.shared import (
+    draw_agent_graph_langgraph,
+    draw_deep_screening_graph_langgraph,
+    draw_tool_execution_graph,
     fmt_dt,
     get_agent_graph_mermaid,
     get_deep_screening_graph_mermaid,
     get_tool_display_summary_ko,
-    get_tool_execution_graph_mermaid,
     render_empty_state,
+    render_graph_image,
     render_legend,
-    render_mermaid_graph,
     render_page_header,
     render_panel_header,
     stylable_container,
 )
 
-# 그래프는 LangGraph 네이티브 draw_mermaid()로 추출해 브라우저에서 Mermaid.js로 렌더링.
-# @st.cache_data로 캐싱되므로 최초 1회만 그래프 객체 접근, 이후 즉시 반환.
+# 그래프는 LangGraph get_graph()로 실제 노드/엣지를 추출해 matplotlib PNG로 렌더링.
+# CDN/Playwright 없이 동작. @st.cache_data 캐싱으로 최초 1회만 렌더링.
 
 
 @st.cache_data(ttl=60, show_spinner=False)
@@ -37,10 +39,10 @@ def _get_agent_detail(agent_id: int) -> dict:
 
 
 def render_agent_studio_page() -> None:
-    # Mermaid 텍스트를 미리 캐싱 (첫 방문 이후엔 즉시 반환)
-    get_agent_graph_mermaid()
-    get_deep_screening_graph_mermaid()
-    get_tool_execution_graph_mermaid()
+    # 그래프 PNG를 미리 캐싱 (첫 방문 이후엔 즉시 반환)
+    draw_agent_graph_langgraph()
+    draw_deep_screening_graph_langgraph()
+    draw_tool_execution_graph()
 
     render_page_header("에이전트 스튜디오", "에이전트 구조, 프롬프트, 런타임 스킬, 연결 지식을 한 화면에서 점검합니다.")
     agents = _get_agents()
@@ -130,12 +132,16 @@ def render_agent_studio_page() -> None:
             graph_tabs = st.tabs(["메인 오케스트레이션", "딥 레인 스크리닝", "스킬 실행 흐름"])
             with graph_tabs[0]:
                 st.caption("실제 컴파일된 LangGraph 객체에서 자동 추출한 그래프입니다. 코드 변경 시 다이어그램이 자동으로 갱신됩니다.")
-                render_mermaid_graph(
-                    title="",
-                    mermaid_text=get_agent_graph_mermaid(),
-                    caption="메인 오케스트레이션: 전체 노드 흐름. 하위는 '스킬 실행 흐름' 탭에서 execute 노드 내부 도구 순서를 확인할 수 있습니다.",
-                    height=480,
+                render_graph_image(
+                    "메인 오케스트레이션 그래프",
+                    draw_agent_graph_langgraph(),
+                    None,
+                    "메인 오케스트레이션: 전체 노드 흐름. 하위는 '스킬 실행 흐름' 탭에서 execute 노드 내부 도구 순서를 확인할 수 있습니다.",
                 )
+                mermaid_src = get_agent_graph_mermaid()
+                if mermaid_src:
+                    with st.expander("Mermaid 소스 보기", expanded=False):
+                        st.code(mermaid_src, language="text")
                 st.markdown("""
 **단계별 설명**
 
@@ -152,12 +158,16 @@ def render_agent_studio_page() -> None:
 """)
             with graph_tabs[1]:
                 st.caption("Screener 노드 내부 Deep Lane 서브그래프입니다. 승격 조건 충족 시에만 실행되며, 실패 또는 타임아웃 시 Fast 결과로 폴백합니다.")
-                render_mermaid_graph(
-                    title="",
-                    mermaid_text=get_deep_screening_graph_mermaid(),
-                    caption="Deep Lane: 4단계 LLM 재검증 서브그래프. intake_normalize → hypothesis_generate(LLM Top-2) → rule_guardrail → finalize_screening",
-                    height=420,
+                render_graph_image(
+                    "딥 레인 스크리닝 서브그래프",
+                    draw_deep_screening_graph_langgraph(),
+                    None,
+                    "Deep Lane: 4단계 LLM 재검증 서브그래프. intake_normalize → hypothesis_generate(LLM Top-2) → rule_guardrail → finalize_screening",
                 )
+                deep_mermaid = get_deep_screening_graph_mermaid()
+                if deep_mermaid:
+                    with st.expander("Mermaid 소스 보기", expanded=False):
+                        st.code(deep_mermaid, language="text")
                 st.markdown("""
 **Deep Lane 승격 조건** (4가지 중 하나 충족 시 Deep Lane 실행)
 
@@ -171,11 +181,11 @@ def render_agent_studio_page() -> None:
 **폴백**: 타임아웃 또는 에러 발생 시 Fast Lane 결과 사용. `screening_meta.lane = "fast"`로 기록.
 """)
             with graph_tabs[2]:
-                render_mermaid_graph(
-                    title="",
-                    mermaid_text=get_tool_execution_graph_mermaid(),
-                    caption="하위 실행 도구 그래프: execute 노드 내부에서 호출되는 LangChain tool 순서입니다.",
-                    height=520,
+                render_graph_image(
+                    "스킬 실행 도구 그래프",
+                    draw_tool_execution_graph(),
+                    None,
+                    "하위 실행 도구 그래프: execute 노드 내부에서 호출되는 LangChain tool 순서입니다.",
                 )
                 st.markdown("""
 **단계별 설명**
