@@ -314,14 +314,13 @@ async def _run_analysis_task(
                                 reason_text=str(data.get("observation") or data.get("message") or ""),
                                 screening_meta=meta.get("screening_meta"),
                             )
-                    except Exception as exc:
-                        logger.warning(
-                            "[analysis] SCREENING_RESULT persistence failed run_id=%s voucher_key=%s case_type=%s error=%s",
+                    except Exception:
+                        logger.exception(
+                            "[analysis] SCREENING_RESULT persistence failed run_id=%s voucher_key=%s case_type=%s lane=%s",
                             run_id,
                             voucher_key,
                             ct,
-                            exc,
-                            exc_info=True,
+                            meta.get("lane"),
                         )
 
             try:
