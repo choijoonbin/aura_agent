@@ -84,7 +84,7 @@ def render_agent_studio_page() -> None:
         with stylable_container(key=f"studio_hero_{selected_id}", css_styles="""{padding: 18px 20px; border-radius: 18px; border: 1px solid #e5e7eb; background: rgba(255,255,255,0.98); box-shadow: 0 10px 24px rgba(15,23,42,0.05); margin-bottom: 12px;}"""):
             st.markdown(f"## {detail.get('name') or '-'}")
             st.caption(f"agent_key={detail.get('agent_key') or '-'} / domain={detail.get('domain') or '-'}")
-        tabs = st.tabs(["모델", "프롬프트", "도구", "지식", "그래프"])
+        tabs = st.tabs(["모델", "프롬프트", "도구", "워크플로우", "지식"])
         with tabs[0]:
             c1, c2, c3 = st.columns(3)
             c1.metric("모델", str(detail.get("model_name") or "-"))
@@ -124,14 +124,6 @@ def render_agent_studio_page() -> None:
                             except Exception:
                                 st.caption("스키마를 불러올 수 없습니다.")
         with tabs[3]:
-            render_panel_header("연결 지식", "이 에이전트가 참조하는 문서와 지식 자산입니다.")
-            docs = detail.get("documents") or []
-            if docs:
-                for doc in docs:
-                    st.markdown(f"- **{doc.get('title')}** · status={doc.get('status')} · doc_id={doc.get('doc_id')}")
-            else:
-                render_empty_state("연결된 지식 문서가 없습니다.")
-        with tabs[4]:
             graph_tabs = st.tabs(["스크리닝", "분석 흐름", "스킬 실행 흐름"])
             with graph_tabs[1]:
                 st.caption(
@@ -165,25 +157,54 @@ def render_agent_studio_page() -> None:
                     with st.expander("Mermaid 소스 보기 (mermaid.live에 붙여넣기)", expanded=False):
                         st.code(mermaid_src, language="text")
                         st.caption("위 텍스트를 복사해 mermaid.live / Notion / GitHub README에 붙여넣으면 다이어그램으로 렌더링됩니다.")
-                st.markdown("""
-**Workflow nodes (step-by-step)**
+                with stylable_container(
+                    key="studio_analysis_workflow_table",
+                    css_styles="""
+                    {
+                      border-radius: 12px;
+                    }
+                    table {
+                      width: 100%;
+                      border-collapse: collapse !important;
+                      border: 1px solid #cbd5e1 !important;
+                      background: #ffffff !important;
+                    }
+                    thead tr {
+                      background: #f8fafc !important;
+                    }
+                    th, td {
+                      border: 1px solid #cbd5e1 !important;
+                      padding: 10px 12px !important;
+                      vertical-align: top !important;
+                    }
+                    th {
+                      color: #0f172a !important;
+                      font-weight: 800 !important;
+                    }
+                    td {
+                      color: #0f172a !important;
+                    }
+                    """
+                ):
+                    st.markdown("""
+**분석 Workflow**
 
 ※ 각 항목은 **단일 워크플로(single workflow)** 내 **노드(node)**의 역할입니다. 여러 독립 에이전트가 협업하는 구조가 아닙니다.
 
 | Step | Node | 설명 |
 |------|------|------|
-| 1 | **START** → **Start Router** | 사전 스크리닝 여부에 따라 **if prescreened** → Intake, **else** → Screener |
-| 2 | **Screener** | 전표 기반 케이스 유형 분류(rule/hybrid). Fast Lane / **Deep Lane** 승격 판단 |
-| 3 | **Intake** | 전표 입력·위험 지표 정규화 |
-| 4 | **Planner** | 조사 계획·tool 순서 수립 |
-| 5 | **Execute** | LangChain tool 호출(휴일/예산/업종/규정/증빙 등) |
-| 6 | **Critic** | 과잉 주장·반례 검토. **retry** → Planner, **approved** → Verifier |
-| 7 | **Verifier** | 자동 판정 가능 여부 검증. **if needed** → HITL Pause, **continue** → Reporter |
-| 8 | **HITL Pause** | 검토 필요 시 workflow 중단(interrupt). 담당자 검토 요청·응답 대기 |
-| 9 | **HITL Validate** | 담당자 응답 검증. **re-request** → HITL Pause, **resume** → Reporter |
-| 10 | **Reporter** | 설명 문장·최종 요약 생성(verdict LLM 포함) |
-| 11 | **Finalizer** | 상태/점수/이력 최종 확정 |
-| 12 | **END** | 저장·조회 가능한 결과로 종료 |
+| 1 | **START** → **Start Router** | 전표가 사전분류(prescreened)인지 확인해 분기. 사전분류가 있으면 Intake로 직행, 없으면 Screener에서 1차 분류부터 시작 |
+| 2 | **Screener** | 규칙+LLM 하이브리드로 케이스 유형/점수/심각도 산출. 경계구간·불일치·저신뢰 조건이면 Deep Lane 재검증 수행 |
+| 3 | **Intake** | 전표 원본(body_evidence)을 표준 스키마로 정규화. 시간/금액/근태/업종 등 핵심 신호를 이후 노드가 공통 사용 가능하게 정리 |
+| 4 | **Planner** | 현재 위험 유형과 상태를 기준으로 조사 계획 수립. 도구 선택/순서 기준은 ① case_type 우선(예: HOLIDAY_USAGE면 holiday/policy 우선) ② 결측 보완 우선(누락 필드 확인용 도구 선행) ③ 고위험 신호 선확인(MCC/한도/근태) ④ 마지막에 규정 매핑·점수 집계 순으로 결정 |
+| 5 | **Execute** | Planner 계획대로 도구 실행. holiday/budget/merchant/policy/document probe를 호출해 증거(evidence), 규정 후보, 점수 신호 수집 |
+| 6 | **Critic** | 실행 결과의 과잉 주장/근거 약함/반례를 점검. 기준: 주장-인용 범위 일치 여부(과잉 주장), 인용 수/정합성/신뢰도(근거 약함), 결론과 충돌하는 도구 신호 존재 여부(반례). 문제 있으면 Planner 재계획(retry), 수용 가능하면 Verifier로 진행 |
+| 7 | **Verifier** | 최종 자동판정 가능 여부를 검증. 핵심 주장마다 근거 인용이 충분한지, 주장과 증거가 서로 모순되지 않는지, 필수 입력/증빙이 충족되는지를 확인하고 통과 시 다음 단계로 진행, 미충족 시 HITL 요청 |
+| 8 | **HITL Pause** | 담당자 검토가 필요한 경우 인터럽트로 일시 중지. 검토 사유/질문/증빙 요청을 생성하고 응답이 올 때까지 대기 |
+| 9 | **HITL Validate** | 담당자 응답(승인/의견/증빙)을 검증. 입력 부족 시 재요청, 유효하면 동일 run_id로 분석 재개(resume) |
+| 10 | **Reporter** | 사용자에게 보여줄 판단 문장 생성. 전표 요약, 적용 규정, 점수(정책/근거/최종), 조치 권고를 읽기 쉬운 형태로 구성 |
+| 11 | **Finalizer** | 상태값(REVIEW_REQUIRED/COMPLETED_AFTER_HITL 등), 점수, 근거맵, 이력 데이터를 DB에 최종 반영 |
+| 12 | **END** | 분석 run 종료. 워크스페이스 목록/상세에서 결과 조회 가능 상태로 전환 |
 """)
             with graph_tabs[0]:
                 st.caption("Screener **node** 내부의 Deep Lane **subgraph**. 승격 조건 충족 시에만 실행되며, 실패/타임아웃 시 Fast Lane 결과로 폴백합니다.")
@@ -209,19 +230,46 @@ def render_agent_studio_page() -> None:
                     with st.expander("Mermaid 소스 보기", expanded=False):
                         st.code(deep_mermaid, language="text")
                 st.markdown("""
-**스크리닝 내부 단계 (step-by-step)**
+**스크리닝 단계**
 
 | Step | Node | 설명 |
 |------|------|------|
-| 1 | **Fast Lane (run_screening)** | 규칙+LLM 하이브리드로 1차 분류(case_type/score/severity) 수행 |
-| 2 | **Promote Check** | 경계 점수·불일치·저신뢰 등 조건을 평가해 Deep Lane 승격 여부 결정 |
-| 3 | **intake_normalize** | 전표 신호를 표준화하고 Deep Lane 판단용 컨텍스트 구성 |
-| 4 | **hypothesis_generate** | LLM이 상위 가설(Top-2) 및 근거를 생성 |
-| 5 | **rule_guardrail** | 결정론 보정(가드레일)으로 과탐/오판을 교정 |
+| 1 | **Fast Lane (run_screening)** | 규칙+LLM 하이브리드로 1차 분류(case_type/score/severity) 수행. 규칙 예: 휴일 사용(+35), 근태 LEAVE(+20), 심야(23~06시, +10), 고위험 MCC(+30) 등 신호 점수 합산 후 LLM 제안과 정렬 |
+| 2 | **Promote Check** | Deep Lane 재검증 필요 여부 판단. 대표 조건: 규칙/LLM 유형 불일치, LLM 신뢰도 임계치 미만(기본 0.75), 경계 점수(45~65), NORMAL_BASELINE인데 위험 신호 2개 이상 |
+| 3 | **intake_normalize** | Deep Lane 판단용 컨텍스트 구성(신호 표준화 + 메타). 예: isHoliday=true, hrStatus=LEAVE, mcc=5813, amount=97042, Fast 분류/점수/승격사유를 하나의 입력 객체로 정리 |
+| 4 | **hypothesis_generate** | LLM이 상위 가설(Top-2)과 근거를 생성. 예: 1순위 HOLIDAY_USAGE(휴일+근태 충돌), 2순위 PRIVATE_USE_RISK(업종/시간대 정황)처럼 대안 시나리오를 함께 제시 |
+| 5 | **rule_guardrail** | 가드레일 기준으로 과탐/오판 교정. 예: LLM 신뢰도가 낮으면 규칙 우선, 고위험 신호(휴일·LEAVE·고위험 MCC) 다중 충족 시 상향 유지, 증거 부족 시 보수적 유형으로 정렬 |
 | 6 | **finalize_screening** | Fast/Deep 결과 병합, 최종 screening_meta 기록 |
-
-**스크리닝 승격 조건** (4가지 중 하나 충족 시 subgraph 실행)
-
+""")
+                with stylable_container(
+                    key="studio_deeplane_conditions",
+                    css_styles="""
+                    {
+                      border-radius: 12px;
+                    }
+                    [data-testid="stExpanderDetails"] {
+                      background: #ffffff !important;
+                      color: #0f172a !important;
+                    }
+                    [data-testid="stExpanderDetails"] * {
+                      background: transparent !important;
+                      color: #0f172a !important;
+                    }
+                    [data-testid="stExpanderDetails"] pre,
+                    [data-testid="stExpanderDetails"] code,
+                    [data-testid="stExpanderDetails"] table,
+                    [data-testid="stExpanderDetails"] tbody,
+                    [data-testid="stExpanderDetails"] thead,
+                    [data-testid="stExpanderDetails"] tr,
+                    [data-testid="stExpanderDetails"] td,
+                    [data-testid="stExpanderDetails"] th {
+                      background: transparent !important;
+                      color: #0f172a !important;
+                    }
+                    """
+                ):
+                    with st.expander("Deep Lane 승격조건 (4가지 중 하나 충족 시 subgraph 실행)", expanded=False):
+                        st.markdown("""
 | Condition | 기준 |
 |-----------|------|
 | **rule_llm_mismatch** | 규칙 판정 case_type ≠ LLM 판정 case_type |
@@ -229,7 +277,7 @@ def render_agent_studio_page() -> None:
 | **boundary_score** | 점수 45 ≤ score ≤ 65 (경계 구간) |
 | **normal_baseline_with_risk_signals** | NORMAL_BASELINE + 위험 신호 ≥ 2개 |
 
-**Fallback**: 타임아웃/에러 시 Fast Lane 결과 사용. `screening_meta.lane = "fast"` 로 기록.
+**Fallback**: 타임아웃/에러 시 Fast Lane 결과 사용. screening_meta.lane = "fast" 로 기록.
 """)
             with graph_tabs[2]:
                 try:
@@ -249,17 +297,54 @@ def render_agent_studio_page() -> None:
                     )
                     with st.expander("⚠️ Plotly 오류", expanded=False):
                         st.code(str(_e3), language="text")
-                st.markdown("""
-**Workflow steps (Execute node — tool order)**
+                with stylable_container(
+                    key="studio_skill_flow_table",
+                    css_styles="""
+                    {
+                      border-radius: 12px;
+                    }
+                    table {
+                      width: 100%;
+                      border-collapse: collapse !important;
+                      border: 1px solid #cbd5e1 !important;
+                      background: #ffffff !important;
+                    }
+                    thead tr {
+                      background: #f8fafc !important;
+                    }
+                    th, td {
+                      border: 1px solid #cbd5e1 !important;
+                      padding: 10px 12px !important;
+                      vertical-align: top !important;
+                    }
+                    th {
+                      color: #0f172a !important;
+                      font-weight: 800 !important;
+                    }
+                    td {
+                      color: #0f172a !important;
+                    }
+                    """
+                ):
+                    st.markdown("""
+**스킬 실행 흐름**
 
 | Step | Node / Tool | 설명 |
 |------|-------------|------|
-| 1 | **execute** | 조사 계획 실행 허브 |
-| 2 | **holiday_compliance_probe** | 휴일/휴무/시간대 검증 |
-| 3 | **budget_risk_probe** | 예산 초과·금액 리스크 확인 |
-| 4 | **merchant_risk_probe** | 가맹점(MCC)/거래처 기반 업종 리스크 |
-| 5 | **document_evidence_probe** | 전표 라인·문서 증거 수집 |
-| 6 | **policy_rulebook_probe** | 규정 조항 검색·연결 |
-| 7 | **legacy_aura_deep_audit** | 필요 시 specialist 심층 감사 |
-| 8 | **score_breakdown** | 정량 점수·품질 지표 집계 |
+| 1 | **execute** | Planner가 만든 실행 계획(plan)을 읽고 도구 실행 순서를 오케스트레이션하는 허브 노드. 각 도구 결과를 누적해 다음 도구 입력으로 전달 |
+| 2 | **holiday_compliance_probe** | 발생일시/휴일 여부/근태를 결합해 휴일·주말·심야 사용 신호를 검증. 예: isHoliday=true, hrStatus=LEAVE면 고위험 신호 강화 |
+| 3 | **budget_risk_probe** | 전표 금액과 예산 상태를 확인해 한도 초과/임계 구간 리스크를 계산. 예: budgetExceeded=true 또는 금액 임계치 초과 시 위험도 상향 |
+| 4 | **merchant_risk_probe** | 가맹점명·MCC·거래처 메타를 바탕으로 업종 위험도를 판정. 예: 고위험 MCC(주점/유흥 등)일 때 규정상 강화 승인 필요 신호 생성 |
+| 5 | **document_evidence_probe** | 전표 라인, 증빙 추출 결과, 필수 입력 충족 여부를 점검해 근거 객체를 수집. 누락 항목은 이후 HITL 질문/요청 후보로 전달 |
+| 6 | **policy_rulebook_probe** | 하이브리드 RAG(BM25 + Dense + RRF + rerank)로 관련 조항을 검색·채택. 조문/항/호 단위 인용 근거를 claim과 연결 |
+| 7 | **legacy_aura_deep_audit** | 필요 시 추가 심층 감사 규칙을 호출해 반례/특이패턴을 재점검. 기본 경로에서는 생략 가능하며 고위험/불확실 케이스에서 보조 신호 제공 |
+| 8 | **score_breakdown** | 수집된 정책 신호·근거 신호를 합산해 policy/evidence/final score를 계산하고, 가산·감점 사유 및 품질 지표를 최종 집계 |
 """)
+        with tabs[4]:
+            render_panel_header("연결 지식", "이 에이전트가 참조하는 문서와 지식 자산입니다.")
+            docs = detail.get("documents") or []
+            if docs:
+                for doc in docs:
+                    st.markdown(f"- **{doc.get('title')}** · status={doc.get('status')} · doc_id={doc.get('doc_id')}")
+            else:
+                render_empty_state("연결된 지식 문서가 없습니다.")

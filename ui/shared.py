@@ -255,6 +255,7 @@ def inject_css() -> None:
         .mt-workspace-action-value {{ color:#0f172a; font-weight:600; }}
         .mt-workspace-strip {{ margin-top:12px; padding:10px 12px; border-radius:14px; border:1px solid #bfdbfe; background:#eff6ff; font-size:0.82rem; color:#1e3a8a; font-weight:700; }}
         .mt-workspace-strip-inline {{ margin-top:0 !important; padding:6px 12px !important; border-radius:14px; border:1px solid #bfdbfe; background:#eff6ff; font-size:0.82rem; color:#1e3a8a; font-weight:700; display:inline-flex; align-items:center; min-height:36px; box-sizing:border-box; }}
+        .mt-workspace-strip-inline-wrap {{ display:flex; align-items:center; min-height:48px; }}
         .mt-workspace-case-stats {{ display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:10px; margin:8px 0 14px 0; }}
         .mt-workspace-case-stat {{ padding:10px 12px; border-radius:14px; border:1px solid #e5e7eb; background:#f8fafc; }}
         .mt-workspace-case-stat-value {{ font-size:1rem; font-weight:800; color:#0f172a; }}

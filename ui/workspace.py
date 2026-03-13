@@ -100,6 +100,43 @@ NODE_DISPLAY_LABEL: dict[str, str] = {
 }
 
 
+_ARTICLE_HEADER_RE = re.compile(r"제\s*(\d+)\s*조")
+
+
+def _slice_chunk_text_by_article(chunk_text: str | None, article: str | None) -> str:
+    """
+    병합 저장된 chunk_text에서 요청 article(예: 제39조) 구간만 잘라 반환한다.
+    - 병합/비병합 모두 안전하게 동작
+    - article 매칭 실패 시 원문 그대로 반환
+    """
+    text = str(chunk_text or "").strip()
+    article_token = str(article or "").strip()
+    if not text or not article_token:
+        return text
+
+    m_num = re.search(r"제\s*(\d+)\s*조", article_token)
+    if not m_num:
+        return text
+    target_num = m_num.group(1)
+
+    matches = list(_ARTICLE_HEADER_RE.finditer(text))
+    if not matches:
+        return text
+
+    start_idx = None
+    end_idx = None
+    for i, m in enumerate(matches):
+        if m.group(1) == target_num:
+            start_idx = m.start()
+            end_idx = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+            break
+    if start_idx is None:
+        return text
+
+    sliced = text[start_idx:end_idx].strip()
+    return sliced or text
+
+
 STREAM_TERM_MAP: dict[str, str] = {
     "policy_rulebook_probe": "규정 조항 조회 도구",
     "holiday_compliance_probe": "휴일/휴무 적격성 점검 도구",
@@ -951,7 +988,7 @@ def _fmt_score_points(points: Any) -> str:
     return f"{p:g}"
 
 
-@st.dialog("점수 계산 로직", width="large")
+@st.dialog("점수 계산 로직", width="medium")
 def _render_score_logic_dialog(kind: str, score_breakdown: dict[str, Any]) -> None:
     if kind == "policy":
         st.markdown("### policy 점수 계산 로직")
@@ -981,7 +1018,10 @@ def _render_score_logic_dialog(kind: str, score_breakdown: dict[str, Any]) -> No
         st.table(
             [
                 {"항목": "복합 위험 승수", "규칙": "고위험 신호 2개=1.15, 3개=1.30, 4개+=설정 최대값"},
-                {"항목": "금액 승수", "규칙": "금액 구간별 가중 (10만원 이하~200만원 초과)"},
+                {"항목": "금액 승수", "규칙": "10만원 이하: 1.00~1.07 (금액 비례)"},
+                {"항목": "금액 승수", "규칙": "10만원~50만원: 1.07~1.15 (금액 비례)"},
+                {"항목": "금액 승수", "규칙": "50만원~200만원: 1.15~1.30 (금액 비례)"},
+                {"항목": "금액 승수", "규칙": "200만원 초과: 1.30 (상한, 설정 최대값 적용)"},
             ]
         )
         st.caption(
@@ -1080,10 +1120,11 @@ def render_score_breakdown_detail(score_breakdown: dict[str, Any]) -> None:
                     amount_weight = 1.0
                 policy_calc = min(100.0, policy_signal_points * compound_multiplier * amount_weight)
                 policy_final = float(policy_score if policy_score is not None else policy_calc)
-                policy_calc_text = (
-                    f"계산: 정책 신호합 {policy_signal_points:g} × 복합승수 {compound_multiplier:.2f} × 금액승수 {amount_weight:.2f}"
+                policy_calc_formula = (
+                    f"정책 신호합 {policy_signal_points:g} × 복합승수 {compound_multiplier:.2f} × 금액승수 {amount_weight:.2f}"
                     f" = {policy_calc:.1f} → {int(round(policy_final))}점"
                 )
+                policy_calc_text = f"정책 계산 ({policy_calc_formula})"
                 with stylable_container(
                     key="score_logic_row_policy",
                     css_styles=[
@@ -1169,7 +1210,8 @@ def render_score_breakdown_detail(score_breakdown: dict[str, Any]) -> None:
                     calc_parts.append(f"HITL 승인 보정 {hitl_bonus:+g}")
                 if abs(evidence_unknown) >= 0.5:
                     calc_parts.append(f"기타 보정 {evidence_unknown:+.1f}")
-                evidence_calc_text = f"계산: {' + '.join(calc_parts)} = {evidence_final:.1f} → {int(round(evidence_final))}점"
+                evidence_calc_formula = f"{' + '.join(calc_parts)} = {evidence_final:.1f} → {int(round(evidence_final))}점"
+                evidence_calc_text = f"근거 계산 ({evidence_calc_formula})"
                 with stylable_container(
                     key="score_logic_row_evidence",
                     css_styles=[
@@ -3163,7 +3205,10 @@ def render_workspace_chat_panel(selected: dict[str, Any], latest_bundle: dict[st
     ):
         strip_col, cta_btn_col = st.columns([0.72, 0.28])
         with strip_col:
-            st.markdown(f'<div class="mt-workspace-strip-inline">{strip_text}</div>', unsafe_allow_html=True)
+            st.markdown(
+                f'<div class="mt-workspace-strip-inline-wrap"><div class="mt-workspace-strip-inline">{strip_text}</div></div>',
+                unsafe_allow_html=True,
+            )
         with cta_btn_col:
             with stylable_container(
                 key="workspace_cta_right_1",
@@ -3795,7 +3840,7 @@ def render_workspace_evidence_map(latest_bundle: dict[str, Any], debug_mode: boo
                     meta.append(str(ref.get("adoption_reason")))
                 if meta:
                     st.caption(" · ".join(meta))
-                st.write(ref.get("chunk_text") or "")
+                st.write(_slice_chunk_text_by_article(ref.get("chunk_text"), ref.get("article") or ref.get("regulation_article")))
                 if debug_mode:
                     st.json(ref)
 

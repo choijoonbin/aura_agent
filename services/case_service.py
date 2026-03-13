@@ -46,6 +46,15 @@ def _merchant_name_for_header(header: FiDocHeader) -> str:
     return header.bktxt or header.xblnr or ""
 
 
+def _scenario_for_header(header: FiDocHeader) -> str | None:
+    """DEMO xblnr 형식(DEMO-<SCENARIO>-<SEQ>)에서 시나리오 키를 추출."""
+    xblnr = header.xblnr or ""
+    if not xblnr.startswith("DEMO-"):
+        return None
+    raw = xblnr.replace("DEMO-", "")
+    return raw.rsplit("-", 1)[0] if "-" in raw else raw
+
+
 def _build_screening_body(header: FiDocHeader, amount: float | None) -> dict:
     """
     Build body for screening — BE DetectBatchService.buildFlattenedBatchItem와 동일한 핵심 필드.
@@ -484,6 +493,9 @@ def build_analysis_payload(db: Session, voucher_key: str) -> dict:
         for it in items
     ]
 
+    scenario = _scenario_for_header(header)
+    is_normal_demo = scenario == "NORMAL_BASELINE"
+
     body_evidence = {
         "doc_id": f"{bukrs}-{belnr}-{gjahr}",
         "item_id": item.buzei if item else "001",
@@ -529,6 +541,33 @@ def build_analysis_payload(db: Session, voucher_key: str) -> dict:
             ],
         },
     }
+
+    # 정상 비교군 테스트 데이터는 규정 "필수 입력/증빙" 항목을 사전 충족 상태로 채워 전달한다.
+    # (업무 목적, 참석자(내부/외부), 일시/장소, 결제수단, 적격 증빙 여부)
+    if is_normal_demo:
+        attendees = [
+            {"name": "내부참석자A", "type": "INTERNAL", "org": "재무팀"},
+            {"name": "내부참석자B", "type": "INTERNAL", "org": "재무팀"},
+            {"name": "외부참석자C", "type": "EXTERNAL", "org": "거래처A"},
+        ]
+        body_evidence.update(
+            {
+                "businessPurpose": "업무 협의 식대",
+                "attendees": attendees,
+                "attendeeCount": len(attendees),
+                "location": "서울 본사 인근 식당",
+                "paymentMethod": "법인카드",
+                "evidenceProvided": True,
+            }
+        )
+        document = body_evidence.get("document") or {}
+        document["businessPurpose"] = body_evidence["businessPurpose"]
+        document["attendees"] = attendees
+        document["attendeeCount"] = len(attendees)
+        document["location"] = body_evidence["location"]
+        document["paymentMethod"] = body_evidence["paymentMethod"]
+        document["receiptQualified"] = True
+        body_evidence["document"] = document
 
     case_id_int = _case_id_from_voucher(tenant_id, bukrs, belnr, gjahr)
     return {

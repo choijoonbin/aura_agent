@@ -20,8 +20,6 @@ _ARTICLE_RE = re.compile(r"제\s*(\d+)\s*조")
 _UNSUPPORTED_TAXONOMY_BLOCKING = {
     "no_citation",
     "contradictory_evidence",
-    "missing_mandatory_evidence",
-    "low_retrieval_confidence",
 }
 
 _EXCLUDED_REQUIRED_INPUT_KEYWORDS = (
@@ -31,6 +29,11 @@ _EXCLUDED_REQUIRED_INPUT_KEYWORDS = (
     "법적·내부 기준",
     "증빙",
     "거래일시",
+    "거래의 일시",
+    "거래의일시",
+    "거래 일시",
+    "거래의 일시를",
+    "거래일시를",
     "발생일시",
     "발생 시각",
     "거래처명",
@@ -51,6 +54,13 @@ _EXCLUDED_REQUIRED_INPUT_KEYWORDS = (
     "업무관련성",
     "프로젝트",
     "코스트센터",
+    "참석자 수",
+    "참석자",
+    "내부/외부 구분",
+    "외부 참석자",
+    "외부 참석자 소속",
+    "소속 정보",
+    "접대 목적",
 )
 
 
@@ -65,7 +75,11 @@ def _is_excluded_required_input(req: dict[str, Any]) -> bool:
     if not text:
         return False
     lowered = text.lower()
-    return any(kw.lower() in lowered for kw in _EXCLUDED_REQUIRED_INPUT_KEYWORDS)
+    lowered_compact = re.sub(r"\s+", "", lowered)
+    return any(
+        (kw.lower() in lowered) or (re.sub(r"\s+", "", kw.lower()) in lowered_compact)
+        for kw in _EXCLUDED_REQUIRED_INPUT_KEYWORDS
+    )
 
 
 def _extract_article_tokens(text: str) -> list[str]:
@@ -84,6 +98,53 @@ def _extract_chunk_id(value: Any) -> int | None:
         return int(value) if value is not None else None
     except Exception:
         return None
+
+
+def _has_value(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, (list, tuple, set, dict)):
+        return len(value) > 0
+    return True
+
+
+def _is_required_input_satisfied(body_evidence: dict[str, Any], req: dict[str, Any]) -> bool:
+    """규정 추출 required_input이 실제 body_evidence에서 이미 충족되는지 판단."""
+    doc = body_evidence.get("document") or {}
+    attendees = body_evidence.get("attendees") or doc.get("attendees") or []
+    text = " ".join(
+        [
+            str(req.get("field", "")).strip(),
+            str(req.get("reason", "")).strip(),
+            str(req.get("guide", "")).strip(),
+        ]
+    ).lower()
+    compact = re.sub(r"\s+", "", text)
+
+    checks: list[bool] = []
+    if any(k in compact for k in ("거래일시", "거래의일시", "발생일시", "일시")):
+        checks.append(_has_value(body_evidence.get("occurredAt")))
+    if any(k in compact for k in ("가맹점", "거래처명", "사업자등록번호")):
+        checks.append(_has_value(body_evidence.get("merchantName")))
+    if any(k in compact for k in ("공급가액", "세액", "합계금액", "총결제금액", "금액")):
+        checks.append(_has_value(body_evidence.get("amount")))
+    if any(k in compact for k in ("결제수단", "법인카드", "계좌이체", "현금")):
+        checks.append(_has_value(body_evidence.get("paymentMethod") or doc.get("paymentMethod")))
+    if "업무목적" in compact:
+        checks.append(_has_value(body_evidence.get("businessPurpose") or doc.get("businessPurpose")))
+    if "참석자" in compact:
+        checks.append(_has_value(attendees) or _has_value(body_evidence.get("attendeeCount") or doc.get("attendeeCount")))
+    if "장소" in compact:
+        checks.append(_has_value(body_evidence.get("location") or doc.get("location")))
+    if "증빙" in compact:
+        checks.append(_has_value(body_evidence.get("evidenceProvided") or doc.get("receiptQualified")))
+
+    if checks:
+        return all(checks)
+    # 매핑 불가 항목은 미충족으로 취급 (보수적)
+    return False
 
 
 def _build_review_audit_payload(
@@ -159,6 +220,7 @@ def _classify_unsupported_claims(
     missing_fields: list[str],
     required_inputs: list[dict[str, Any]],
     execute_failed_tools: list[str],
+    body_evidence: dict[str, Any],
 ) -> list[UnsupportedClaimIssue]:
     issues: list[UnsupportedClaimIssue] = []
     details = verification_summary.get("details") or []
@@ -229,7 +291,7 @@ def _classify_unsupported_claims(
             )
         )
     for req in (required_inputs or []):
-        if _is_excluded_required_input(req):
+        if _is_required_input_satisfied(body_evidence, req):
             continue
         f = str(req.get("field") or "").strip()
         if not f:
@@ -261,7 +323,13 @@ def _classify_unsupported_claims(
         )
     else:
         scores: list[float] = []
-        for chunk in retrieved_chunks[:10]:
+        top_chunks = retrieved_chunks[:3]
+        cited_articles = {
+            str(chunk.get("article") or chunk.get("regulation_article") or "").strip()
+            for chunk in retrieved_chunks[:10]
+            if str(chunk.get("article") or chunk.get("regulation_article") or "").strip()
+        }
+        for chunk in top_chunks:
             score_detail = chunk.get("score_detail") or {}
             score_val = (
                 score_detail.get("cross_encoder_score")
@@ -276,13 +344,19 @@ def _classify_unsupported_claims(
             except Exception:
                 pass
         if scores:
-            avg_score = sum(scores) / max(len(scores), 1)
-            if avg_score < 0.03:
+            avg_top3 = sum(scores) / max(len(scores), 1)
+            coverage_ratio = float(verification_summary.get("coverage_ratio") or 0.0)
+            cited_article_count = len(cited_articles)
+            # 복합 판정: top3 점수 저하 + 커버리지 낮음 + 인용 조문 부족일 때만 저신뢰로 간주
+            if avg_top3 < 0.02 and coverage_ratio < 0.45 and cited_article_count < 2:
                 issues.append(
                     UnsupportedClaimIssue(
                         claim="retrieval 점수 저하",
                         taxonomy="low_retrieval_confidence",
-                        reason=f"상위 근거 평균 점수({avg_score:.4f})가 낮습니다.",
+                        reason=(
+                            f"상위 3개 평균 점수({avg_top3:.4f})/커버리지({coverage_ratio:.2f})/"
+                            f"인용 조문 수({cited_article_count}) 기준으로 근거 신뢰도가 낮습니다."
+                        ),
                         severity="MEDIUM",
                         covered=False,
                         citation_count=0,
@@ -615,6 +689,7 @@ async def verify_node_impl(
 
     required_inputs_from_reg = (regulation_driven.get("required_inputs") or []) if isinstance(regulation_driven, dict) else []
     missing_fields = ((state.get("body_evidence") or {}).get("dataQuality") or {}).get("missingFields") or []
+    body_evidence = state.get("body_evidence") or {}
     unsupported_claim_issues = _classify_unsupported_claims(
         verification_targets=verification_targets,
         verification_summary=verification_summary,
@@ -623,6 +698,7 @@ async def verify_node_impl(
         missing_fields=missing_fields,
         required_inputs=required_inputs_from_reg,
         execute_failed_tools=execute_failed_tools,
+        body_evidence=body_evidence,
     )
     unsupported_claims_dicts = [u.model_dump() for u in unsupported_claim_issues]
     taxonomy_codes = [f"UNSUPPORTED_{u.taxonomy.upper()}" for u in unsupported_claim_issues]
@@ -662,7 +738,7 @@ async def verify_node_impl(
             hitl_request = {
                 "required": True,
                 "handoff": "FINANCE_REVIEWER",
-                "why_hitl": f"unsupported claim 검출로 자동 확정을 중단했습니다. {first_reason}",
+                "why_hitl": f"근거 미검증 주장 검출(unsupported claim)로 자동 확정을 중단했습니다. {first_reason}",
                 "blocking_gate": "HITL_REQUIRED",
                 "blocking_reason": first_reason,
                 "reasons": [u.reason for u in blocking_unsupported_issues[:5] if u.reason],
@@ -674,6 +750,26 @@ async def verify_node_impl(
                 "candidate_outcomes": ["APPROVE_AFTER_HITL", "HOLD_AFTER_HITL"],
                 "unsupported_claims": unsupported_claims_dicts,
             }
+
+    # NORMAL_BASELINE은 치명(blocking) 이슈가 없고 핵심 입력 누락/핵심 도구 실패가 없으면 자동 확정 경로를 우선한다.
+    screening_case_type = str((state.get("screening_result") or {}).get("case_type") or body_evidence.get("case_type") or "").upper()
+    is_normal_baseline = screening_case_type == "NORMAL_BASELINE"
+    if (
+        is_normal_baseline
+        and not has_blocking_unsupported
+        and not missing_fields
+        and not execute_failed_tools
+        and not state["flags"].get("hasHitlResponse")
+    ):
+        if hitl_request is not None:
+            logger.info(
+                "verify_node: NORMAL_BASELINE auto-ready override applied "
+                "(non-blocking unsupported only)."
+            )
+            hitl_request = None
+            needs_hitl = False
+            verification["needs_hitl"] = False
+            gate = VerifierGate.READY
 
     review_audit = _build_review_audit_payload(
         state=state,
@@ -691,6 +787,20 @@ async def verify_node_impl(
     )
     human_review_required = bool(needs_hitl or hold_required)
     risk_of_overclaim = bool((state.get("critic_output") or {}).get("overclaim_risk")) or has_blocking_unsupported
+
+    coverage_ratio_dbg = float(verification_summary.get("coverage_ratio") or 0.0)
+    cited_article_count_dbg = len(cited_article_clauses)
+    logger.info(
+        "verifier gate decision: gate=%s needs_hitl=%s case_type=%s "
+        "blocking=%s non_blocking=%s coverage_ratio=%.2f cited_article_count=%s",
+        gate.value,
+        needs_hitl,
+        screening_case_type or "-",
+        [u.taxonomy for u in blocking_unsupported_issues],
+        [u.taxonomy for u in unsupported_claim_issues if u.taxonomy not in _UNSUPPORTED_TAXONOMY_BLOCKING],
+        coverage_ratio_dbg,
+        cited_article_count_dbg,
+    )
 
     rationale = hitl_request.get("why_hitl") if hitl_request else "자동 확정 가능한 상태로 검증이 완료되었습니다."
     verifier_output = VerifierOutput(

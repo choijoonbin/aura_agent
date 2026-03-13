@@ -48,6 +48,13 @@ _EXCLUDED_REQUIRED_INPUT_KEYWORDS = (
     "업무관련성",
     "프로젝트",
     "코스트센터",
+    "참석자 수",
+    "참석자",
+    "내부/외부 구분",
+    "외부 참석자",
+    "외부 참석자 소속",
+    "소속 정보",
+    "접대 목적",
 )
 
 
@@ -65,6 +72,8 @@ def _filter_required_inputs_by_presence_fallback(required_inputs: list[dict[str,
     """LLM 실패 시 최소 안전 필터: body_evidence에서 명백히 존재하는 항목은 제거."""
     if not required_inputs:
         return []
+    doc = body.get("document") or {}
+    attendees = body.get("attendees") or doc.get("attendees") or []
     present_keys = {
         "occurredat": _is_present_value(body.get("occurredAt")),
         "transaction_datetime": _is_present_value(body.get("occurredAt")),
@@ -73,12 +82,36 @@ def _filter_required_inputs_by_presence_fallback(required_inputs: list[dict[str,
         "mcccode": _is_present_value(body.get("mccCode")),
         "budgetexceeded": _is_present_value(body.get("budgetExceeded")),
         "hrstatus": _is_present_value(body.get("hrStatus")),
+        "businesspurpose": _is_present_value(body.get("businessPurpose") or doc.get("businessPurpose")),
+        "attendees": _is_present_value(attendees),
+        "attendeecount": _is_present_value(body.get("attendeeCount") or doc.get("attendeeCount")),
+        "location": _is_present_value(body.get("location") or doc.get("location")),
+        "paymentmethod": _is_present_value(body.get("paymentMethod") or doc.get("paymentMethod")),
+        "evidenceprovided": _is_present_value(body.get("evidenceProvided") or doc.get("receiptQualified")),
     }
     missing: list[dict[str, str]] = []
     for req in required_inputs:
         field = str(req.get("field", "")).strip()
-        key = field.replace("_", "").lower()
+        key = field.replace("_", "").replace(" ", "").lower()
+        combined = " ".join(
+            [
+                field,
+                str(req.get("reason", "")).strip(),
+                str(req.get("guide", "")).strip(),
+            ]
+        ).lower()
         if key and present_keys.get(key):
+            continue
+        # 한국어 표현 기반 보강 매핑 (필드명이 자유 텍스트일 때 대비)
+        if "참석자" in combined and present_keys["attendees"]:
+            continue
+        if ("업무 목적" in combined or "업무목적" in combined) and present_keys["businesspurpose"]:
+            continue
+        if "장소" in combined and present_keys["location"]:
+            continue
+        if ("결제수단" in combined or "법인카드" in combined or "계좌이체" in combined) and present_keys["paymentmethod"]:
+            continue
+        if "증빙" in combined and present_keys["evidenceprovided"]:
             continue
         missing.append(req)
     return missing
@@ -95,7 +128,11 @@ def _is_excluded_required_input(req: dict[str, str]) -> bool:
     if not text:
         return False
     lowered = text.lower()
-    return any(kw.lower() in lowered for kw in _EXCLUDED_REQUIRED_INPUT_KEYWORDS)
+    lowered_compact = "".join(lowered.split())
+    return any(
+        (kw.lower() in lowered) or ("".join(kw.lower().split()) in lowered_compact)
+        for kw in _EXCLUDED_REQUIRED_INPUT_KEYWORDS
+    )
 
 
 def _build_verification_targets(state: dict[str, Any]) -> list[str]:
@@ -298,7 +335,6 @@ async def _derive_hitl_from_regulation(state: dict[str, Any]) -> dict[str, Any]:
             {"field": str(x.get("field", "")), "reason": str(x.get("reason", "")), "guide": str(x.get("guide", ""))}
             for x in required_inputs if isinstance(x, dict)
         ]
-        required_inputs = [x for x in required_inputs if not _is_excluded_required_input(x)]
         review_questions = [str(q).strip() for q in review_questions if str(q).strip()][:3]
         if not required_inputs:
             return {"required_inputs": [], "review_questions": review_questions}
@@ -348,7 +384,6 @@ async def _derive_hitl_from_regulation(state: dict[str, Any]) -> dict[str, Any]:
                     for x in missing_required
                     if isinstance(x, dict) and str(x.get("field", "")).strip()
                 ]
-                filtered_required_inputs = [x for x in filtered_required_inputs if not _is_excluded_required_input(x)]
             logger.info(
                 "derive_hitl_from_regulation required_inputs filtered: before=%s after=%s",
                 len(required_inputs),
@@ -356,7 +391,6 @@ async def _derive_hitl_from_regulation(state: dict[str, Any]) -> dict[str, Any]:
             )
         except Exception:
             filtered_required_inputs = _filter_required_inputs_by_presence_fallback(required_inputs, body)
-            filtered_required_inputs = [x for x in filtered_required_inputs if not _is_excluded_required_input(x)]
             logger.info(
                 "derive_hitl_from_regulation required_inputs fallback filter applied: before=%s after=%s",
                 len(required_inputs),
