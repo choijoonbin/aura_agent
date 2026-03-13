@@ -83,7 +83,7 @@ class Settings:
     score_compound_multiplier_max: float = float(os.getenv("SCORE_COMPOUND_MULTIPLIER_MAX", "1.5"))
     score_amount_multiplier_max: float = float(os.getenv("SCORE_AMOUNT_MULTIPLIER_MAX", "1.3"))
     # Hybrid scoring/judge
-    llm_judge_enabled: bool = os.getenv("LLM_JUDGE_ENABLED", "true").lower() == "true"
+    llm_judge_enabled: bool = os.getenv("LLM_JUDGE_ENABLED", "false").lower() == "true"
     llm_judge_model: str = os.getenv("LLM_JUDGE_MODEL", "gpt-4o-mini")
     llm_judge_timeout_ms: int = int(os.getenv("LLM_JUDGE_TIMEOUT_MS", "3000"))
     llm_judge_slo_p95_ms: int = int(os.getenv("LLM_JUDGE_SLO_P95_MS", "3000"))

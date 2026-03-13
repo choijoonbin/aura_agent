@@ -389,11 +389,24 @@ async def invoke_llm_planner_impl(
         f"amount={flags.get('amount')}\n"
     )
     if replan_context:
+        _diag = str(replan_context.get("diagnostic_log") or "").strip()
+        _rule_s = replan_context.get("rule_score")
+        _llm_s = replan_context.get("llm_score")
+        _fidel = replan_context.get("fidelity")
+        _score_hint = ""
+        if _rule_s is not None and _llm_s is not None:
+            _score_hint = f"규칙 점수={_rule_s} / LLM 점수={_llm_s}"
+            if _fidel is not None:
+                _score_hint += f" / fidelity={_fidel}"
+            _score_hint += "\n"
         user_prompt += (
             "\n[재계획 모드]\n"
             f"이전 실행 도구: {replan_context.get('previous_tool_results', [])}\n"
             f"Critic 피드백: {replan_context.get('critic_feedback', '')}\n"
-            f"누락 필드: {replan_context.get('missing_fields', [])}\n"
+            + (f"LLM 진단 로그: {_diag}\n" if _diag else "")
+            + (_score_hint if _score_hint else "")
+            + f"누락 필드: {replan_context.get('missing_fields', [])}\n"
+            "위 피드백과 진단 로그를 참고해 이전과 다른 도구 또는 순서를 선택하라. "
             "이미 실행된 도구는 꼭 필요한 경우에만 재포함하라."
         )
     user_prompt += f"\n\n사용 가능한 도구:\n{json.dumps(available_tools, ensure_ascii=False)}"

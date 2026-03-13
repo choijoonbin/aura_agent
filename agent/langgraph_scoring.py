@@ -661,6 +661,13 @@ async def _score_hybrid(
     out["diagnostic_log"] = (
         f"LLM Judge 실패로 규칙 점수로 fallback했습니다. reason={out['fallback_reason']} detail={last_error_message[:400]}"
     )
+    logger.warning(
+        "llm_judge fallback: reason=%s retries=%s rule_score=%s detail=%s",
+        out["fallback_reason"],
+        out.get("retry_count", 0),
+        rule_score,
+        last_error_message[:200],
+    )
     out["final_decision"] = _resolve_final_decision(rule_gate=rule_gate, rule_score=rule_score, llm_score=None)
     _mark_circuit(True)
     return out
