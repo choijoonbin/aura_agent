@@ -12,7 +12,12 @@ def _override_setting(key: str, value):
     return original
 
 
-def test_merged_article_clauses_preserve_source_article():
+def test_articles_are_independent_chunks_no_cross_merge():
+    """
+    PARENT_MIN=0 이후: 조항 간 병합이 발생하지 않아야 한다.
+    제38조와 제39조는 각각 독립 ARTICLE 노드로 생성되고,
+    각 조항의 CLAUSE 자식은 해당 조항에만 귀속된다.
+    """
     text = """
 제8장 시간·금액·거래처·업종 공통 제약
 제38조 (시간대 제약)
@@ -23,11 +28,21 @@ def test_merged_article_clauses_preserve_source_article():
 ② 예외는 당직 승인 시에만 허용한다.
 """
     nodes = hierarchical_chunk(text)
-    art38 = next((n for n in nodes if n.node_type == "ARTICLE" and n.regulation_article == "제38조"), None)
-    assert art38 is not None
-    child_articles = [c.regulation_article for c in art38.children]
-    assert "제38조" in child_articles
-    assert "제39조" in child_articles
+    article_nodes = [n for n in nodes if n.node_type == "ARTICLE"]
+    article_nums = [n.regulation_article for n in article_nodes]
+
+    # 두 조항 모두 독립 ARTICLE 노드로 존재
+    assert "제38조" in article_nums
+    assert "제39조" in article_nums
+
+    # 제38조 자식은 제38조 조항만
+    art38 = next(n for n in article_nodes if n.regulation_article == "제38조")
+    assert all(c.regulation_article == "제38조" for c in art38.children)
+
+    # 제39조 자식은 제39조 조항만 (제38조 내용 없음)
+    art39 = next(n for n in article_nodes if n.regulation_article == "제39조")
+    assert all(c.regulation_article == "제39조" for c in art39.children)
+    assert len(art39.merged_articles) == 1  # 병합 없음 — 단독 조항
 
 
 def test_holiday_dense_query_includes_night_hint():

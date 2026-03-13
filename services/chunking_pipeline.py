@@ -104,7 +104,8 @@ def _embed_batch(client: Any, batch: list[str]) -> list[list[float]]:
 def embed_texts(texts: list[str], *, batch_size: int | None = None) -> list[list[float]] | None:
     """
     텍스트 목록을 배치 임베딩. 실패 시 None 반환.
-    search_text(prefix 제거된 순수 본문)를 임베딩 대상으로 사용.
+    search_text(contextual_header + 본문)를 임베딩 대상으로 사용.
+    Contextual Retrieval 패턴: 장·절·조 맥락이 포함된 search_text로 짧은 조항의 벡터 품질을 확보한다.
     """
     if not texts:
         return []

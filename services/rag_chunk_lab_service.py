@@ -101,7 +101,11 @@ def _expand_tokens(text: str) -> str:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-PARENT_MIN = 120  # 이 길이 미만인 ARTICLE은 다음 조문과 병합 (Fix 1 후 body에 ① 포함 → 기존 200에서 조정)
+# 조항 간 병합을 비활성화한다.
+# 규정 조항(조)은 의미 단위 — 길이가 짧더라도 다른 조항과 합치면 의미 오염이 발생한다.
+# 짧은 조항의 임베딩 품질은 PARENT_MIN 병합 대신 contextual_header 주입으로 보완한다.
+# (Anthropic "Contextual Retrieval" 권장 패턴)
+PARENT_MIN = 0
 
 
 @dataclass
@@ -407,13 +411,15 @@ def hierarchical_chunk(text: str) -> list[ChunkNode]:
 
         article_full_text = f"{article_header}\n{body}".strip()
         current_section = art.get("current_section") or ""
+        # Contextual Retrieval: contextual_header를 임베딩 입력(search_text)에 포함해
+        # 짧은 조항도 장·절·조 맥락 정보를 갖춰 벡터 품질을 확보한다.
         article_node = ChunkNode(
             node_type="ARTICLE",
             regulation_article=regulation_article,
             regulation_clause=None,
             parent_title=full_title,
             chunk_text=article_full_text,
-            search_text=body,
+            search_text=(contextual_header + body).strip(),
             contextual_header=contextual_header,
             chunk_index=chunk_index,
             semantic_group=semantic_group,
@@ -447,7 +453,7 @@ def hierarchical_chunk(text: str) -> list[ChunkNode]:
                     regulation_clause=marker or None,
                     parent_title=source_title,
                     chunk_text=clause_chunk_text,
-                    search_text=clause_text,
+                    search_text=(source_contextual_header + clause_text).strip(),
                     contextual_header=source_contextual_header,
                     chunk_index=chunk_index,
                     semantic_group=semantic_group,
@@ -478,7 +484,7 @@ def hierarchical_chunk(text: str) -> list[ChunkNode]:
                             parent_clause_chunk_index=clause_node.chunk_index,
                             parent_title=source_title,
                             chunk_text=item_chunk_text,
-                            search_text=item_text,
+                            search_text=(item_contextual_header + item_text).strip(),
                             contextual_header=item_contextual_header,
                             chunk_index=chunk_index,
                             semantic_group=semantic_group,
