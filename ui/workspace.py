@@ -1039,8 +1039,25 @@ def render_score_breakdown_detail(score_breakdown: dict[str, Any]) -> None:
             trace = str(score_breakdown.get("calculation_trace") or "").strip()
             if trace:
                 st.markdown(f"`{trace}`")
+
+            # LLM Judge 요약 이유 표시 (llm_judge_enabled 시 제공됨)
+            summary_reason = str(score_breakdown.get("summary_reason") or "").strip()
+            if summary_reason:
+                # 줄바꿈(\n)을 마크다운 개행으로 변환하여 가독성 유지
+                summary_lines = [line.strip() for line in summary_reason.splitlines() if line.strip()]
+                summary_md = "  \n".join(summary_lines)
+                st.info(f"**LLM 판단 요약**  \n{summary_md}")
+
             if bool(score_breakdown.get("conflict_warning")):
-                st.warning("판단 불일치 주의: 규칙 점수와 LLM 점수 편차가 큽니다.")
+                rule_s = score_breakdown.get("rule_score")
+                llm_s = score_breakdown.get("llm_score")
+                gap_hint = f" (규칙 {rule_s}점 / LLM {llm_s}점)" if rule_s is not None and llm_s is not None else ""
+                st.warning(f"판단 불일치 주의: 규칙 점수와 LLM 점수 편차가 큽니다.{gap_hint}")
+
+            if bool(score_breakdown.get("fallback_used")):
+                fb_reason = str(score_breakdown.get("fallback_reason") or "").strip()
+                fb_label = {"timeout": "타임아웃", "parse_error": "파싱 오류", "schema_error": "스키마 오류", "provider_error": "API 오류"}.get(fb_reason, fb_reason)
+                st.caption(f"ℹ️ LLM Judge 실패({fb_label}) — 규칙 기반 점수로 대체됨")
 
             signals = score_breakdown.get("signals") or []
             if isinstance(signals, list) and signals:

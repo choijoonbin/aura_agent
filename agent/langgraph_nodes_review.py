@@ -453,8 +453,18 @@ async def critic_node_impl(
     }
     replan_context: dict[str, Any] | None = None
     if replan_required:
+        # score_breakdown이 None이거나 일부 키가 없는 경우를 방어적으로 처리
+        _score_bd: dict[str, Any] = state.get("score_breakdown") or {}
+        _diagnostic_log = str(_score_bd.get("diagnostic_log") or "").strip()
+        _rule_score = _score_bd.get("rule_score") or _score_bd.get("final_score")
+        _llm_score = _score_bd.get("llm_score")
+        _fidelity = _score_bd.get("fidelity")
         replan_context = {
             "critic_feedback": replan_reason,
+            "diagnostic_log": _diagnostic_log,
+            "rule_score": _rule_score,
+            "llm_score": _llm_score,
+            "fidelity": _fidelity,
             "missing_fields": missing,
             "loop_count": loop_count + 1,
             "previous_tool_results": [tool_result_key(r) for r in state.get("tool_results", [])],
