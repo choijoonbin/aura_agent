@@ -132,12 +132,12 @@ def render_agent_studio_page() -> None:
             else:
                 render_empty_state("연결된 지식 문서가 없습니다.")
         with tabs[4]:
-            graph_tabs = st.tabs(["메인 오케스트레이션", "딥 레인 스크리닝", "스킬 실행 흐름"])
-            with graph_tabs[0]:
+            graph_tabs = st.tabs(["스크리닝", "분석 흐름", "스킬 실행 흐름"])
+            with graph_tabs[1]:
                 st.caption(
-                    "실제 컴파일된 LangGraph 객체에서 자동 추출한 그래프입니다. "
-                    "코드 변경 시 다이어그램이 자동으로 갱신됩니다. "
-                    "그래프 우측 상단 카메라 아이콘으로 PNG 내보내기 후 보고서·발표 자료에 활용하세요."
+                    "Compiled LangGraph에서 자동 추출한 그래프입니다. "
+                    "각 박스는 **노드(node)**이며, **단일 워크플로(single workflow)** 의 **스텝(step)**입니다. "
+                    "독립된 다수 에이전트가 아닙니다. 코드 변경 시 다이어그램 자동 갱신, 우측 상단으로 PNG 내보내기 가능."
                 )
                 _plotly_err = None
                 try:
@@ -153,34 +153,40 @@ def render_agent_studio_page() -> None:
                 except Exception as _e:
                     _plotly_err = _e
                     render_graph_image(
-                        "메인 오케스트레이션 그래프",
+                        "분석 흐름 그래프",
                         draw_agent_graph_langgraph(), None,
-                        "메인 오케스트레이션: 전체 노드 흐름.",
+                        "Main orchestration: workflow nodes and edges (single graph).",
                     )
                 if _plotly_err:
                     with st.expander("⚠️ Plotly 렌더링 오류 상세", expanded=False):
                         st.code(str(_plotly_err), language="text")
                 mermaid_src = get_agent_graph_mermaid()
                 if mermaid_src:
-                    with st.expander("Mermaid 소스 보기 (발표 자료·문서용 — mermaid.live에 붙여넣기)", expanded=False):
+                    with st.expander("Mermaid 소스 보기 (mermaid.live에 붙여넣기)", expanded=False):
                         st.code(mermaid_src, language="text")
                         st.caption("위 텍스트를 복사해 mermaid.live / Notion / GitHub README에 붙여넣으면 다이어그램으로 렌더링됩니다.")
                 st.markdown("""
-**단계별 설명**
+**Workflow nodes (step-by-step)**
 
-1. **START** → **Start Router**: 사전 스크리닝 여부에 따라 Intake 직행 또는 Screener로 분기
-2. **Screener**: 전표 기반 케이스 유형 분류(rule/hybrid). Fast Lane + **Deep Lane** 승격 판단
-3. **Intake Agent**: 전표 입력과 위험 지표 정규화
-4. **Planner Agent**: 조사 계획과 tool 순서 수립
-5. **Execute Agent**: 실제 LangChain tool 호출
-6. **Critic Agent**: 과잉 주장과 반례 검토
-7. **Verifier Agent**: 자동 판정 가능 여부 검증 → 필요 시 **HITL Pause** → **HITL Validate** 후 Reporter로 재개
-8. **Reporter Agent**: 설명 문장과 최종 요약 생성
-9. **Finalizer**: 상태/점수/이력 최종 확정
-10. **END**: 저장/조회 가능한 결과로 종료
+※ 각 항목은 **단일 워크플로(single workflow)** 내 **노드(node)**의 역할입니다. 여러 독립 에이전트가 협업하는 구조가 아닙니다.
+
+| Step | Node | 설명 |
+|------|------|------|
+| 1 | **START** → **Start Router** | 사전 스크리닝 여부에 따라 **if prescreened** → Intake, **else** → Screener |
+| 2 | **Screener** | 전표 기반 케이스 유형 분류(rule/hybrid). Fast Lane / **Deep Lane** 승격 판단 |
+| 3 | **Intake** | 전표 입력·위험 지표 정규화 |
+| 4 | **Planner** | 조사 계획·tool 순서 수립 |
+| 5 | **Execute** | LangChain tool 호출(휴일/예산/업종/규정/증빙 등) |
+| 6 | **Critic** | 과잉 주장·반례 검토. **retry** → Planner, **approved** → Verifier |
+| 7 | **Verifier** | 자동 판정 가능 여부 검증. **if needed** → HITL Pause, **continue** → Reporter |
+| 8 | **HITL Pause** | 검토 필요 시 workflow 중단(interrupt). 담당자 검토 요청·응답 대기 |
+| 9 | **HITL Validate** | 담당자 응답 검증. **re-request** → HITL Pause, **resume** → Reporter |
+| 10 | **Reporter** | 설명 문장·최종 요약 생성(verdict LLM 포함) |
+| 11 | **Finalizer** | 상태/점수/이력 최종 확정 |
+| 12 | **END** | 저장·조회 가능한 결과로 종료 |
 """)
-            with graph_tabs[1]:
-                st.caption("Screener 노드 내부 Deep Lane 서브그래프입니다. 승격 조건 충족 시에만 실행되며, 실패 또는 타임아웃 시 Fast 결과로 폴백합니다.")
+            with graph_tabs[0]:
+                st.caption("Screener **node** 내부의 Deep Lane **subgraph**. 승격 조건 충족 시에만 실행되며, 실패/타임아웃 시 Fast Lane 결과로 폴백합니다.")
                 try:
                     _fig2 = draw_deep_screening_graph_plotly()
                     try:
@@ -192,9 +198,9 @@ def render_agent_studio_page() -> None:
                                                        "toImageButtonOptions": {"filename": "aura_deep_screening_graph", "scale": 2}})
                 except Exception as _e2:
                     render_graph_image(
-                        "딥 레인 스크리닝 서브그래프",
+                        "스크리닝 서브그래프",
                         draw_deep_screening_graph_langgraph(), None,
-                        "Deep Lane: 4단계 LLM 재검증 서브그래프.",
+                        "Deep Lane subgraph: 4-node LLM re-verification (runs inside Screener node).",
                     )
                     with st.expander("⚠️ Plotly 오류", expanded=False):
                         st.code(str(_e2), language="text")
@@ -203,16 +209,27 @@ def render_agent_studio_page() -> None:
                     with st.expander("Mermaid 소스 보기", expanded=False):
                         st.code(deep_mermaid, language="text")
                 st.markdown("""
-**Deep Lane 승격 조건** (4가지 중 하나 충족 시 Deep Lane 실행)
+**스크리닝 내부 단계 (step-by-step)**
 
-| 조건 | 기준 |
-|------|------|
+| Step | Node | 설명 |
+|------|------|------|
+| 1 | **Fast Lane (run_screening)** | 규칙+LLM 하이브리드로 1차 분류(case_type/score/severity) 수행 |
+| 2 | **Promote Check** | 경계 점수·불일치·저신뢰 등 조건을 평가해 Deep Lane 승격 여부 결정 |
+| 3 | **intake_normalize** | 전표 신호를 표준화하고 Deep Lane 판단용 컨텍스트 구성 |
+| 4 | **hypothesis_generate** | LLM이 상위 가설(Top-2) 및 근거를 생성 |
+| 5 | **rule_guardrail** | 결정론 보정(가드레일)으로 과탐/오판을 교정 |
+| 6 | **finalize_screening** | Fast/Deep 결과 병합, 최종 screening_meta 기록 |
+
+**스크리닝 승격 조건** (4가지 중 하나 충족 시 subgraph 실행)
+
+| Condition | 기준 |
+|-----------|------|
 | **rule_llm_mismatch** | 규칙 판정 case_type ≠ LLM 판정 case_type |
 | **llm_low_confidence** | LLM 신뢰도 < 0.70 |
 | **boundary_score** | 점수 45 ≤ score ≤ 65 (경계 구간) |
 | **normal_baseline_with_risk_signals** | NORMAL_BASELINE + 위험 신호 ≥ 2개 |
 
-**폴백**: 타임아웃 또는 에러 발생 시 Fast Lane 결과 사용. `screening_meta.lane = "fast"`로 기록.
+**Fallback**: 타임아웃/에러 시 Fast Lane 결과 사용. `screening_meta.lane = "fast"` 로 기록.
 """)
             with graph_tabs[2]:
                 try:
@@ -228,19 +245,21 @@ def render_agent_studio_page() -> None:
                     render_graph_image(
                         "스킬 실행 도구 그래프",
                         draw_tool_execution_graph(), None,
-                        "하위 실행 도구 그래프: execute 노드 내부에서 호출되는 LangChain tool 순서입니다.",
+                        "Skill execution graph: LangChain tools invoked from the Execute node (step order).",
                     )
                     with st.expander("⚠️ Plotly 오류", expanded=False):
                         st.code(str(_e3), language="text")
                 st.markdown("""
-**단계별 설명**
+**Workflow steps (Execute node — tool order)**
 
-1. **execute**: 조사 계획의 실제 실행 허브
-2. **holiday_compliance_probe**: 휴일/휴무/시간대 검증
-3. **budget_risk_probe**: 예산 초과 및 금액 리스크 확인
-4. **merchant_risk_probe**: 가맹점 업종 코드(MCC)/거래처 기반 업종 리스크 판별
-5. **document_evidence_probe**: 전표 라인/문서 증거 수집
-6. **policy_rulebook_probe**: 규정 조항 검색 및 연결
-7. **legacy_aura_deep_audit**: 필요 시 specialist 심층 감사 호출
-8. **score_breakdown**: 정량 점수와 품질 지표 집계
+| Step | Node / Tool | 설명 |
+|------|-------------|------|
+| 1 | **execute** | 조사 계획 실행 허브 |
+| 2 | **holiday_compliance_probe** | 휴일/휴무/시간대 검증 |
+| 3 | **budget_risk_probe** | 예산 초과·금액 리스크 확인 |
+| 4 | **merchant_risk_probe** | 가맹점(MCC)/거래처 기반 업종 리스크 |
+| 5 | **document_evidence_probe** | 전표 라인·문서 증거 수집 |
+| 6 | **policy_rulebook_probe** | 규정 조항 검색·연결 |
+| 7 | **legacy_aura_deep_audit** | 필요 시 specialist 심층 감사 |
+| 8 | **score_breakdown** | 정량 점수·품질 지표 집계 |
 """)

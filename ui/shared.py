@@ -725,11 +725,15 @@ def _draw_graph_png(
 
     node_w, node_h = 1.8, 0.46
 
+    first_last_nodes = {"start", "end"}
+
     def _node_color(key: str) -> tuple[str, str]:
         if key in hitl_nodes:
             return "#fffbeb", "#f59e0b"
         if key in skill_nodes:
             return "#eff6ff", "#93c5fd"
+        if key in first_last_nodes:
+            return "#ecfdf5", "#059669" if key == "start" else "#d1fae5"
         return "#f5f3ff", "#a78bfa"
 
     label_map = {k: lbl for k, lbl, _ in nodes}
@@ -781,30 +785,31 @@ def draw_agent_graph() -> bytes:
         ("start", "START", ""),
         ("start_router", "Start Router", ""),
         ("screener", "Screener", ""),
-        ("intake", "Intake Agent", ""),
-        ("planner", "Planner Agent", ""),
-        ("executor", "Execute Agent", ""),
-        ("critic", "Critic Agent", ""),
-        ("verifier", "Verifier Agent", ""),
+        ("intake", "Intake", ""),
+        ("planner", "Planner", ""),
+        ("executor", "Execute", ""),
+        ("critic", "Critic", ""),
+        ("verifier", "Verifier", ""),
         ("hitl_pause", "HITL Pause", ""),
         ("hitl_validate", "HITL Validate", ""),
-        ("reporter", "Reporter Agent", ""),
+        ("reporter", "Reporter", ""),
         ("finalizer", "Finalizer", ""),
         ("end", "END", ""),
     ]
     # 메인 라인: 동일 간격(1.8)으로 좌→우 정렬. HITL 분기는 메인 라인 위쪽(y=1.35)에 수평 정렬
     step = 1.8
-    x_main = [i * step for i in range(11)]  # 0 .. 18.0
+    x_main = [i * step for i in range(11)]
     keys_main = ["start", "start_router", "screener", "intake", "planner", "executor", "critic", "verifier", "reporter", "finalizer", "end"]
     pos = {k: (x_main[i], 0.0) for i, k in enumerate(keys_main)}
-    pos["hitl_pause"] = (x_main[7], 1.35)   # verifier 위
-    pos["hitl_validate"] = (x_main[8], 1.35)  # reporter 위
+    pos["hitl_pause"] = (x_main[7], 1.35)
+    pos["hitl_validate"] = (x_main[8], 1.35)
 
     edges = [
         ("start", "start_router", ""),
         ("start_router", "screener", "else"), ("start_router", "intake", "if prescreened"),
         ("screener", "intake", ""), ("intake", "planner", ""), ("planner", "executor", ""),
-        ("executor", "critic", ""), ("critic", "verifier", ""),
+        ("executor", "critic", ""),
+        ("critic", "planner", "retry"), ("critic", "verifier", "approved"),
         ("verifier", "hitl_pause", "if needed"), ("verifier", "reporter", "continue"),
         ("hitl_pause", "hitl_validate", ""), ("hitl_validate", "reporter", "resume"), ("hitl_validate", "hitl_pause", "re-request"),
         ("reporter", "finalizer", ""), ("finalizer", "end", ""),
@@ -990,14 +995,14 @@ def draw_agent_graph_langgraph() -> bytes:
         "__end__":      "END",
         "start_router": "Start Router",
         "screener":     "Screener",
-        "intake":       "Intake Agent",
-        "planner":      "Planner Agent",
-        "execute":      "Execute Agent",
-        "critic":       "Critic Agent",
-        "verify":       "Verifier Agent",
+        "intake":       "Intake",
+        "planner":      "Planner",
+        "execute":      "Execute",
+        "critic":       "Critic",
+        "verify":       "Verifier",
         "hitl_pause":   "HITL Pause",
         "hitl_validate":"HITL Validate",
-        "reporter":     "Reporter Agent",
+        "reporter":     "Reporter",
         "finalizer":    "Finalizer",
     }
 
@@ -1230,10 +1235,10 @@ def draw_agent_graph_plotly():
     label_map = {
         "__start__": "START", "__end__": "END",
         "start_router": "Start Router", "screener": "Screener",
-        "intake": "Intake Agent", "planner": "Planner Agent",
-        "execute": "Execute Agent", "critic": "Critic Agent",
-        "verify": "Verifier Agent", "hitl_pause": "HITL Pause",
-        "hitl_validate": "HITL Validate", "reporter": "Reporter Agent",
+        "intake": "Intake", "planner": "Planner",
+        "execute": "Execute", "critic": "Critic",
+        "verify": "Verifier", "hitl_pause": "HITL Pause",
+        "hitl_validate": "HITL Validate", "reporter": "Reporter",
         "finalizer": "Finalizer",
     }
     nodes = [(k, label_map.get(k, k), "") for k in pos]
@@ -1245,7 +1250,8 @@ def draw_agent_graph_plotly():
         ("intake", "planner", ""),
         ("planner", "execute", ""),
         ("execute", "critic", ""),
-        ("critic", "verify", ""),
+        ("critic", "planner", "retry"),
+        ("critic", "verify", "approved"),
         ("verify", "hitl_pause", "if needed"),
         ("verify", "reporter", "continue"),
         ("hitl_pause", "hitl_validate", ""),
