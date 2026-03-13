@@ -98,6 +98,10 @@ class ClaimVerificationResult(BaseModel):
     """개별 검증 타겟 주장에 대한 검증 결과."""
 
     claim: str = Field(description="검증 대상 주장 문장 전체")
+    display_text: str = Field(
+        default="",
+        description="사용자 화면에 표시할 자연어 설명(LLM 생성)",
+    )
     covered: bool = Field(description="retrieval 청크로 뒷받침 가능 여부")
     supporting_articles: list[str] = Field(
         default_factory=list,

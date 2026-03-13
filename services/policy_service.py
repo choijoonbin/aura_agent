@@ -21,6 +21,8 @@ KEYWORD_HINTS: dict[str, list[str]] = {
 }
 
 TOKEN_RE = re.compile(r"[0-9A-Za-z가-힣]{2,}")
+ARTICLE_HEADER_RE = re.compile(r"제\s*(\d+)\s*조(?:\s*\([^)]+\))?")
+ARTICLE_BOUNDARY_RE = re.compile(r"(?m)(?:^|\n)\s*제\s*(\d+)\s*조(?:\s*\([^)]+\))?")
 
 FIELD_WEIGHTS = {
     "chunk_text": 3,
@@ -961,6 +963,52 @@ def _resolve_source_strategy(selection_stage: str) -> str:
     return f"policy_search:{selection_stage}"
 
 
+def _extract_article_no(article: Any) -> str | None:
+    text = str(article or "").strip()
+    if not text:
+        return None
+    match = ARTICLE_HEADER_RE.search(text)
+    if not match:
+        return None
+    return match.group(1)
+
+
+def _trim_chunk_text_to_article_scope(chunk_text: Any, article: Any) -> str:
+    """
+    최종 반환 직전 안전 정규화:
+    병합된 chunk_text(예: 제39조~제40조)에서 선택된 article 구간만 노출한다.
+    검색/랭킹 단계에는 영향이 없고, 최종 payload 가독성/정합성만 개선한다.
+    """
+    original = str(chunk_text or "")
+    if not original.strip():
+        return original
+
+    article_no = _extract_article_no(article)
+    if not article_no:
+        return original
+
+    # "제39조 ~ 제40조"처럼 한 줄 제목에 포함된 다음 조문 번호는 경계로 보지 않기 위해
+    # 줄 시작(또는 문자열 시작) 조문 헤더만 경계로 사용한다.
+    matches = list(ARTICLE_BOUNDARY_RE.finditer(original))
+    if not matches:
+        return original
+
+    start_idx = None
+    end_idx = len(original)
+    for idx, match in enumerate(matches):
+        if match.group(1) == article_no:
+            start_idx = match.start()
+            if idx + 1 < len(matches):
+                end_idx = matches[idx + 1].start()
+            break
+
+    if start_idx is None:
+        return original
+
+    sliced = original[start_idx:end_idx].strip()
+    return sliced or original
+
+
 def _rewrite_query(
     body_evidence: dict[str, Any],
     *,
@@ -1243,6 +1291,7 @@ def _finalize_context(
         domain_match_hints = _build_domain_match_hints(item, body_evidence)
         chunk_id = item.get("chunk_id")
         article = item.get("regulation_article")
+        scoped_chunk_text = _trim_chunk_text_to_article_scope(item.get("chunk_text"), article)
         normalized_parent_title = normalize_policy_parent_title(article, item.get("parent_title"))
         results.append({
             "chunk_id": chunk_id,
@@ -1252,7 +1301,7 @@ def _finalize_context(
             "item": regulation_item,
             "node_type": item.get("node_type"),
             "parent_title": normalized_parent_title,
-            "chunk_text": item.get("chunk_text"),
+            "chunk_text": scoped_chunk_text,
             "version": item.get("version"),
             "effective_from": str(item.get("effective_from")) if item.get("effective_from") else None,
             "effective_to": str(item.get("effective_to")) if item.get("effective_to") else None,

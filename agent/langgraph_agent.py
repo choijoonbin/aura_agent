@@ -18,6 +18,7 @@ from agent.langgraph_nodes import (
     _compute_plan_achievement,
     _derive_flags,
     _derive_hitl_from_regulation,
+    _generate_claim_display_texts,
     _extract_reasoning_token,
     _find_tool_result,
     _format_hitl_reason_for_stream,
@@ -93,6 +94,7 @@ def _sync_nodes_module_hooks() -> None:
     _nodes_module._build_grounded_reason = _build_grounded_reason
     _nodes_module._build_verification_targets = _build_verification_targets
     _nodes_module._derive_hitl_from_regulation = _derive_hitl_from_regulation
+    _nodes_module._generate_claim_display_texts = _generate_claim_display_texts
     _nodes_module._generate_hitl_review_content = _generate_hitl_review_content
     _nodes_module._retry_fill_hitl_review_when_empty = _retry_fill_hitl_review_when_empty
 

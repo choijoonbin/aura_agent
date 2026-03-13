@@ -9,6 +9,7 @@ from utils.config import settings
 from utils.llm_azure import completion_kwargs_for_azure
 
 logger = logging.getLogger(__name__)
+MAX_HITL_QUESTIONS = 2
 
 _CLAIM_PRIORITY: dict[str, int] = {
     "night_violation": 10,
@@ -285,7 +286,7 @@ async def _derive_hitl_from_regulation(state: dict[str, Any]) -> dict[str, Any]:
         "1. 규정에 '필수 입력', '필수 증빙', '② 필수' 등으로 열거된 항목을 required_inputs로 나열하라. "
         "각 항목은 {\"field\": \"영문식별자\", \"reason\": \"규정에서 요구하는 이유 한 줄\", \"guide\": \"사용자에게 보여줄 가이드 문구\"} 형태로.\n"
         "2. 규정에서 예외·승인·검토 시 확인하라고 한 내용을 review_questions로 짧은 질문 문장으로 나열하라. "
-        "질문은 최대 3개만. 유사·중복 질문은 제외하고, 판단에 가장 중요한 핵심만 선별하라.\n"
+        "질문은 최대 2개만. 유사·중복 질문은 제외하고, 판단에 가장 중요한 핵심만 선별하라.\n"
         "3. 현재 케이스(휴일/심야/접대 등)에 실제로 해당하는 조문만 사용하라. 해당 없으면 빈 배열을 반환하라.\n"
         "4. 반드시 JSON만 응답하라: {\"required_inputs\": [...], \"review_questions\": [...]}\n"
     )
@@ -335,7 +336,7 @@ async def _derive_hitl_from_regulation(state: dict[str, Any]) -> dict[str, Any]:
             {"field": str(x.get("field", "")), "reason": str(x.get("reason", "")), "guide": str(x.get("guide", ""))}
             for x in required_inputs if isinstance(x, dict)
         ]
-        review_questions = [str(q).strip() for q in review_questions if str(q).strip()][:3]
+        review_questions = [str(q).strip() for q in review_questions if str(q).strip()][:MAX_HITL_QUESTIONS]
         if not required_inputs:
             return {"required_inputs": [], "review_questions": review_questions}
 
@@ -431,9 +432,9 @@ async def _generate_hitl_review_content(
         "당신은 경비 감사 에이전트다. 이 전표는 담당자 검토(HITL)가 필요한 것으로 판정되었다. "
         "아래 맥락(분석 과정에서 나온 근거)만을 사용하여 다음 두 가지를 반드시 생성하라.\n"
         "1. review_reasons: 검토가 필요한 이유를 담당자가 이해할 수 있는 문장 1~5개. 분석 결과 기반으로 명확히.\n"
-        "2. review_questions: 검토자가 검토의견에 답해야 할 질문을 2~3개만 작성하라. 중복·유사 질문 없이, 판단에 가장 중요한 핵심만 선별. 분석 결과와 연결된 구체적 질문으로. 예: '휴일 사용 사전 승인 여부를 확인했는가?'\n"
+        "2. review_questions: 검토자가 검토의견에 답해야 할 질문을 1~2개만 작성하라. 중복·유사 질문 없이, 판단에 가장 중요한 핵심만 선별. 분석 결과와 연결된 구체적 질문으로. 예: '휴일 사용 사전 승인 여부를 확인했는가?'\n"
         "반드시 JSON만 응답: {\"review_reasons\": [\"...\", ...], \"review_questions\": [\"...\", ...]}\n"
-        "review_reasons는 최소 1개, review_questions는 2~3개(최대 3개) 필수."
+        "review_reasons는 최소 1개, review_questions는 1~2개(최대 2개) 필수."
     )
     user_parts = [f"검증 판단 요약: {reasoning_text[:500]}" if reasoning_text else ""]
     if why:
@@ -498,7 +499,7 @@ async def _generate_hitl_review_content(
         else:
             dedup_questions = ["검토 보류 사유를 해소할 추가 근거를 제출할 수 있는가?"]
 
-    baseline = {"review_reasons": dedup_reasons[:5], "review_questions": dedup_questions[:3]}
+    baseline = {"review_reasons": dedup_reasons[:5], "review_questions": dedup_questions[:MAX_HITL_QUESTIONS]}
 
     if not getattr(settings, "openai_api_key", None):
         return baseline
@@ -544,8 +545,115 @@ async def _generate_hitl_review_content(
         questions = [str(q).strip() for q in questions if str(q).strip()]
         merged_reasons = reasons + [s for s in baseline["review_reasons"] if s not in set(reasons)]
         merged_questions = questions + [s for s in baseline["review_questions"] if s not in set(questions)]
-        return {"review_reasons": merged_reasons[:5], "review_questions": merged_questions[:3]}
+        return {"review_reasons": merged_reasons[:5], "review_questions": merged_questions[:MAX_HITL_QUESTIONS]}
     except Exception:
+        return baseline
+
+
+async def _generate_claim_display_texts(
+    claim_results: list[dict[str, Any]],
+    body_evidence: dict[str, Any],
+) -> list[str]:
+    """
+    claim_results의 내부 표현을 사용자 친화 문장으로 변환한다.
+    반환 길이는 입력 claim_results 길이와 동일하게 맞춘다.
+    """
+    baseline = [str((r or {}).get("claim") or "").strip() for r in (claim_results or [])]
+    baseline = [b if b else "-" for b in baseline]
+    if not claim_results:
+        logger.info("claim_display_text: skip (empty claim_results)")
+        return []
+    if not getattr(settings, "openai_api_key", None):
+        logger.info("claim_display_text: fallback (openai_api_key missing)")
+        return baseline
+
+    try:
+        from openai import AsyncAzureOpenAI, AsyncOpenAI
+
+        base_url = (getattr(settings, "openai_base_url") or "").strip()
+        is_azure = ".openai.azure.com" in base_url
+        if is_azure:
+            azure_ep = base_url.rstrip("/")
+            if azure_ep.endswith("/openai/v1"):
+                azure_ep = azure_ep[: -len("/openai/v1")]
+            client = AsyncAzureOpenAI(
+                api_key=settings.openai_api_key,
+                azure_endpoint=azure_ep,
+                api_version=getattr(settings, "openai_api_version", "2024-02-15-preview"),
+            )
+        else:
+            client = AsyncOpenAI(api_key=settings.openai_api_key, base_url=base_url or None)
+
+        merchant = str(body_evidence.get("merchantName") or "거래처 미상")
+        occurred = str(body_evidence.get("occurredAt") or "")
+        amount = body_evidence.get("amount")
+        amount_text = f"{int(amount):,}원" if isinstance(amount, (int, float)) else "금액 미상"
+
+        compact_rows: list[dict[str, Any]] = []
+        for r in claim_results[:8]:
+            compact_rows.append(
+                {
+                    "claim": str((r or {}).get("claim") or ""),
+                    "covered": bool((r or {}).get("covered")),
+                    "supporting_articles": [str(a) for a in ((r or {}).get("supporting_articles") or [])][:3],
+                    "gap": str((r or {}).get("gap") or "")[:120],
+                }
+            )
+
+        system_prompt = (
+            "당신은 감사 UI 문구 작성자다. 내부 claim 문장을 사용자 관점에서 이해하기 쉬운 한국어 요약으로 바꿔라.\n"
+            "규칙:\n"
+            "1) 각 claim마다 1~2문장으로 핵심 의미를 쉽게 설명\n"
+            "2) 내부 구현 용어(policy_rulebook_probe, retrieval 등) 금지\n"
+            "3) 가능하면 조문번호(제N조)와 판단 포인트(왜 이 규정이 연결됐는지)를 포함\n"
+            "4) 판정을 과장하지 말고, 사실 기반으로 설명\n"
+            "5) 실무 사용자가 바로 이해할 수 있는 표현 사용(기술 용어 최소화)\n"
+            "JSON만 출력: {\"display_texts\": [\"...\", ...]}\n"
+        )
+        user_prompt = (
+            f"전표 요약: 거래처={merchant}, 금액={amount_text}, 발생시각={occurred}\n\n"
+            f"claim_results:\n{json.dumps(compact_rows, ensure_ascii=False)}\n\n"
+            "입력 순서와 동일한 길이의 display_texts 배열을 반환하라."
+        )
+
+        tok_kw = {"max_completion_tokens": 1200} if is_azure else {"max_tokens": 1200}
+        logger.info(
+            "claim_display_text: llm request model=%s claims=%s azure=%s",
+            getattr(settings, "reasoning_llm_model", "gpt-4o-mini"),
+            len(claim_results),
+            is_azure,
+        )
+        response = await client.chat.completions.create(
+            **completion_kwargs_for_azure(
+                base_url,
+                model=getattr(settings, "reasoning_llm_model", "gpt-4o-mini"),
+                response_format={"type": "json_object"},
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                **tok_kw,
+            ),
+        )
+        raw = (response.choices[0].message.content or "").strip()
+        parsed = json.loads(raw)
+        texts = parsed.get("display_texts") or []
+        if not isinstance(texts, list):
+            logger.warning("claim_display_text: fallback (display_texts not list)")
+            return baseline
+        cleaned = [str(t).strip() for t in texts]
+        if len(cleaned) != len(claim_results):
+            # 길이가 다르면 안전하게 baseline 사용
+            logger.warning(
+                "claim_display_text: fallback (length mismatch llm=%s claims=%s)",
+                len(cleaned),
+                len(claim_results),
+            )
+            return baseline
+        logger.info("claim_display_text: llm ok (count=%s)", len(cleaned))
+        return [c if c else b for c, b in zip(cleaned, baseline)]
+    except Exception as ex:
+        logger.exception("claim_display_text: fallback (llm error: %s)", ex)
         return baseline
 
 
@@ -588,10 +696,10 @@ async def _retry_fill_hitl_review_when_empty(
         f"그런데 현재 {missing_str} 항목이 비어 있다. "
         "아래 분석 결과(검증 판단 요약, 자동 확정 차단 사유, 주장별 검증 결과 등)를 **근거**로 다음을 반드시 수행하라.\n"
         "1. review_reasons: 검토가 필요한 이유를 담당자가 이해할 수 있는 문장 1~5개. 분석 과정에서 나온 근거 기반으로 작성.\n"
-        "2. review_questions: 검토자가 검토의견에 답해야 할 질문을 2~3개만 작성하라. 중복·유사 없이 핵심만. 분석 결과와 연결된 구체적 질문으로.\n"
+        "2. review_questions: 검토자가 검토의견에 답해야 할 질문을 1~2개만 작성하라. 중복·유사 없이 핵심만. 분석 결과와 연결된 구체적 질문으로.\n"
         "3. empty_explanation: (선택) 위 두 항목이 비어 있었을 수 있는 이유를 한 줄로.\n"
         "반드시 JSON만 응답: {\"review_reasons\": [\"...\"], \"review_questions\": [\"...\"], \"empty_explanation\": \"...\"}\n"
-        "review_reasons는 최소 1개, review_questions는 2~3개(최대 3개) 필수."
+        "review_reasons는 최소 1개, review_questions는 1~2개(최대 2개) 필수."
     )
     user_parts = [f"검증 판단 요약: {reasoning_text[:600]}" if reasoning_text else ""]
     if why:
@@ -646,6 +754,6 @@ async def _retry_fill_hitl_review_when_empty(
             questions = [str(questions)] if questions else []
         reasons = [str(s).strip() for s in reasons if str(s).strip()]
         questions = [str(q).strip() for q in questions if str(q).strip()]
-        return {"review_reasons": reasons[:5], "review_questions": questions[:3]}
+        return {"review_reasons": reasons[:5], "review_questions": questions[:MAX_HITL_QUESTIONS]}
     except Exception:
         return {"review_reasons": [], "review_questions": []}

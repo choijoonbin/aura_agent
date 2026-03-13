@@ -100,43 +100,6 @@ NODE_DISPLAY_LABEL: dict[str, str] = {
 }
 
 
-_ARTICLE_HEADER_RE = re.compile(r"제\s*(\d+)\s*조")
-
-
-def _slice_chunk_text_by_article(chunk_text: str | None, article: str | None) -> str:
-    """
-    병합 저장된 chunk_text에서 요청 article(예: 제39조) 구간만 잘라 반환한다.
-    - 병합/비병합 모두 안전하게 동작
-    - article 매칭 실패 시 원문 그대로 반환
-    """
-    text = str(chunk_text or "").strip()
-    article_token = str(article or "").strip()
-    if not text or not article_token:
-        return text
-
-    m_num = re.search(r"제\s*(\d+)\s*조", article_token)
-    if not m_num:
-        return text
-    target_num = m_num.group(1)
-
-    matches = list(_ARTICLE_HEADER_RE.finditer(text))
-    if not matches:
-        return text
-
-    start_idx = None
-    end_idx = None
-    for i, m in enumerate(matches):
-        if m.group(1) == target_num:
-            start_idx = m.start()
-            end_idx = matches[i + 1].start() if i + 1 < len(matches) else len(text)
-            break
-    if start_idx is None:
-        return text
-
-    sliced = text[start_idx:end_idx].strip()
-    return sliced or text
-
-
 STREAM_TERM_MAP: dict[str, str] = {
     "policy_rulebook_probe": "규정 조항 조회 도구",
     "holiday_compliance_probe": "휴일/휴무 적격성 점검 도구",
@@ -3715,6 +3678,74 @@ def _taxonomy_label(taxonomy: str) -> str:
     return _UNSUPPORTED_TAXONOMY_LABELS.get(token, token or "unknown")
 
 
+def _claim_display_label(claim_text: str, supporting_articles: list[str] | None = None) -> str:
+    """검증 주장 원문을 사용자 친화 라벨로 축약한다(검증 로직과 분리)."""
+    text = str(claim_text or "").strip()
+    compact = text.replace(" ", "").lower()
+    supporting = [str(v).strip() for v in (supporting_articles or []) if str(v).strip()]
+    article_hint = f" ({', '.join(supporting[:2])})" if supporting else ""
+
+    if "policy_rulebook_probe" in compact:
+        return f"정책 검색 채택 조항 검증{article_hint}"
+    if "심야" in text or "23:00" in text or "06:00" in text:
+        return f"심야 시간대 규정 적용 검증{article_hint}"
+    if "휴일" in text or "주말" in text or "근태" in text or "LEAVE" in text:
+        return f"휴일/근태 충돌 규정 적용 검증{article_hint}"
+    if "MCC" in text or "업종" in text:
+        return f"업종 위험도 규정 적용 검증{article_hint}"
+    if "예산" in text or "한도" in text:
+        return f"예산/한도 규정 적용 검증{article_hint}"
+    if "승인" in text:
+        return f"승인 기준 규정 적용 검증{article_hint}"
+    return f"규정 적용 검증{article_hint}"
+
+
+def _claim_user_facing_text(claim_text: str, supporting_articles: list[str] | None = None) -> str:
+    """원문 claim을 사용자 관점 설명 문구로 정리한다."""
+    text = str(claim_text or "").strip()
+    if not text:
+        return "-"
+    supporting = [str(v).strip() for v in (supporting_articles or []) if str(v).strip()]
+
+    # 내부 템플릿 문구를 사용자용 문장으로 치환
+    if "policy_rulebook_probe 채택 조항" in text:
+        extracted_articles = re.findall(r"제\s*\d+\s*조", text)
+        article_candidates = supporting or extracted_articles
+        dedup_articles: list[str] = []
+        seen: set[str] = set()
+        for raw in article_candidates:
+            norm = re.sub(r"\s+", "", str(raw))
+            if norm and norm not in seen:
+                seen.add(norm)
+                dedup_articles.append(norm)
+        if dedup_articles:
+            joined = ", ".join(dedup_articles[:2])
+            return f"정책 검색에서 채택된 {joined} 조항이 이 전표 판단 근거로 연결되었습니다."
+        return "정책 검색에서 채택된 조항이 이 전표 판단 근거로 연결되었습니다."
+
+    # 과도한 내부 표현 정리
+    cleaned = text.replace("직접 적용 가능한 위반 근거를 갖는다.", "판단 근거로 확인되었습니다.")
+    cleaned = cleaned.replace("policy_rulebook_probe", "정책 검색")
+    return cleaned
+
+
+def _extract_article_token(text: str) -> str:
+    m = re.search(r"제\s*(\d+)\s*조", str(text or ""))
+    return f"제{m.group(1)}조" if m else ""
+
+
+def _policy_label_compact(text: str) -> str:
+    token = _extract_article_token(text)
+    if token:
+        return token
+    return str(text or "").strip()[:24]
+
+
+def _graph_claim_label(claim_text: str, supporting_articles: list[str] | None = None) -> str:
+    label = _claim_display_label(claim_text, supporting_articles)
+    return label.replace("규정 적용 검증", "규정 검증").strip()
+
+
 def _normalize_unsupported_claims(raw_claims: list[Any]) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     seen: set[tuple[str, str, str, str]] = set()
@@ -3840,7 +3871,7 @@ def render_workspace_evidence_map(latest_bundle: dict[str, Any], debug_mode: boo
                     meta.append(str(ref.get("adoption_reason")))
                 if meta:
                     st.caption(" · ".join(meta))
-                st.write(_slice_chunk_text_by_article(ref.get("chunk_text"), ref.get("article") or ref.get("regulation_article")))
+                st.write(ref.get("chunk_text") or "")
                 if debug_mode:
                     st.json(ref)
 
@@ -3875,7 +3906,8 @@ def render_workspace_evidence_map(latest_bundle: dict[str, Any], debug_mode: boo
             supporting = item.get("supporting_articles") or []
             gap = (item.get("gap") or "").strip()
             icon = "✅" if is_covered else "❌"
-            with st.expander(f"**{icon} 주장 {i}** — {claim_text[:60]}{'…' if len(claim_text) > 60 else ''}", expanded=(i == 1)):
+            claim_label = _claim_display_label(claim_text, supporting)
+            with st.expander(f"**{icon} 주장 {i}** — {claim_label}", expanded=(i == 1)):
                 with stylable_container(
                     key=f"process_story_evidence_claim_{latest_bundle.get('run_id') or 'none'}_{i}",
                     css_styles="""{
@@ -3884,7 +3916,8 @@ def render_workspace_evidence_map(latest_bundle: dict[str, Any], debug_mode: boo
                     }""",
                 ):
                     st.markdown("**검증 주장**")
-                    st.caption(claim_text)
+                    display_text = str(item.get("display_text") or "").strip()
+                    st.caption(display_text or _claim_user_facing_text(claim_text, supporting))
                     if is_covered and supporting:
                         st.markdown("**연결된 규정**  \n" + ", ".join(f"**{a}**" for a in supporting))
                     elif not is_covered and gap:
@@ -3915,10 +3948,10 @@ def render_workspace_evidence_map(latest_bundle: dict[str, Any], debug_mode: boo
             ):
                 candidates = retrieval_snapshot.get("candidates_after_rerank") or []
                 adopted = retrieval_snapshot.get("adopted_citations") or []
-                st.caption("after rerank 후보, 최종 채택 citation, 채택 이유를 함께 표시합니다.")
+                st.caption("after rerank 후보, 최종 보고서에 반영된 근거 조항, 채택 이유를 함께 표시합니다.")
                 st.caption(f"후보 청크 {len(candidates)}건 · 채택 인용 {len(adopted)}건")
                 if adopted:
-                    st.markdown("**최종 채택 citation**")
+                    st.markdown("**최종 보고서에 반영된 근거 조항**")
                     for i, c in enumerate(adopted[:10], 1):
                         art = c.get("article") or c.get("title") or "-"
                         reason = c.get("adoption_reason") or "규정 근거로 채택"
@@ -4029,30 +4062,62 @@ def _render_explain_graph_plotly(nodes: list[dict[str, Any]], edges: list[dict[s
         showlegend=False,
     )
 
+    policy_by_id: dict[str, dict[str, Any]] = {
+        str(n.get("id") or ""): n for n in nodes if str(n.get("type") or "") == "Policy"
+    }
+    claim_support_articles: dict[str, list[str]] = {}
+    for e in edges:
+        if str(e.get("type") or "") != "SUPPORTED_BY":
+            continue
+        frm = str(e.get("from") or "")
+        to = str(e.get("to") or "")
+        if not frm or not to:
+            continue
+        p = policy_by_id.get(to) or {}
+        token = _extract_article_token(str(p.get("label") or ""))
+        if not token:
+            continue
+        claim_support_articles.setdefault(frm, [])
+        if token not in claim_support_articles[frm]:
+            claim_support_articles[frm].append(token)
+
     node_x: list[float] = []
     node_y: list[float] = []
     node_text: list[str] = []
     node_color: list[str] = []
+    node_hover: list[str] = []
     for n in nodes:
         nid = str(n.get("id") or "")
         if nid not in pos:
             continue
         x, y = pos[nid]
         typ = str(n.get("type") or "Etc")
-        lbl = str(n.get("label") or nid)
+        raw_lbl = str(n.get("label") or nid)
+        if typ == "Claim":
+            lbl = _graph_claim_label(raw_lbl, claim_support_articles.get(nid) or [])
+        elif typ == "Policy":
+            lbl = _policy_label_compact(raw_lbl)
+        elif typ == "Run":
+            short = raw_lbl[:8] + "…" if len(raw_lbl) > 8 else raw_lbl
+            lbl = f"실행 {short}"
+        elif typ == "Case":
+            lbl = f"케이스 {raw_lbl}"
+        else:
+            lbl = raw_lbl
         node_x.append(x)
         node_y.append(y)
         node_color.append(type_color.get(typ, "#64748b"))
-        node_text.append(f"[{typ}] {lbl}")
+        node_text.append(lbl)
+        node_hover.append(f"[{typ}] {raw_lbl}")
 
     node_trace = go.Scatter(
         x=node_x,
         y=node_y,
         mode="markers+text",
-        text=[t if len(t) <= 46 else t[:43] + "..." for t in node_text],
+        text=[t if len(t) <= 34 else t[:31] + "..." for t in node_text],
         textposition="top center",
         textfont=dict(size=12, color="#111827"),
-        hovertext=node_text,
+        hovertext=node_hover,
         hoverinfo="text",
         marker=dict(size=16, color=node_color, line=dict(width=1, color="#0f172a")),
         showlegend=False,
@@ -4257,22 +4322,27 @@ def render_workspace_graph_insights(selected_key: str | None, latest_bundle: dic
                     continue
                 policies = claim_support.get(claim_id) or []
                 policy_labels: list[str] = []
+                support_articles: list[str] = []
                 for pid in policies[:3]:
                     p = policy_nodes.get(pid) or {}
                     pl = str(p.get("label") or pid).strip()
                     if pl:
-                        policy_labels.append(pl)
+                        policy_labels.append(_policy_label_compact(pl))
+                        token = _extract_article_token(pl)
+                        if token and token not in support_articles:
+                            support_articles.append(token)
+                claim_text_ui = _claim_user_facing_text(claim_label, support_articles)
                 if policy_labels:
                     st.markdown(
                         "<div class='mt-graph-note'>"
-                        f"• 주장: {claim_label[:90]}{'…' if len(claim_label) > 90 else ''}  →  "
+                        f"• 주장: {claim_text_ui[:90]}{'…' if len(claim_text_ui) > 90 else ''}  →  "
                         + ", ".join(policy_labels)
                         + "</div>",
                         unsafe_allow_html=True,
                     )
                 else:
                     st.markdown(
-                        f"<div class='mt-graph-note'>• 주장: {claim_label[:90]}{'…' if len(claim_label) > 90 else ''}</div>",
+                        f"<div class='mt-graph-note'>• 주장: {claim_text_ui[:90]}{'…' if len(claim_text_ui) > 90 else ''}</div>",
                         unsafe_allow_html=True,
                     )
                 shown += 1
@@ -4285,7 +4355,7 @@ def render_workspace_graph_insights(selected_key: str | None, latest_bundle: dic
             key=f"mt_explain_graph_{selected_key}_{summary.get('run_id') or 'none'}",
         )
 
-        with st.expander("근거 경로 상세(노드/관계)", expanded=True):
+        with st.expander("근거 경로 상세(노드/관계)", expanded=False):
             st.markdown("**노드**")
             for n in nodes[:30]:
                 nid = str(n.get("id") or "-")[:48]
@@ -4302,35 +4372,38 @@ def render_workspace_graph_insights(selected_key: str | None, latest_bundle: dic
             if len(edges) > 40:
                 st.caption(f"... 외 {len(edges) - 40}건")
 
-    st.markdown("---")
-    st.markdown("#### 연관 케이스")
-    try:
-        related = get(f"/api/v1/graph/cases/{selected_key}/related?limit=10") or {}
-    except Exception as e:
-        st.warning(f"연관 케이스 조회 실패: {e}")
-        related = {}
-
-    items = related.get("items") or []
-    if not items:
-        render_empty_state("연결 규칙에 매칭되는 연관 케이스가 없습니다.")
-    else:
-        st.metric("연관 케이스 수", str(len(items)))
-        _render_related_graph_plotly(
-            selected_key,
-            items[:10],
-            key=f"mt_related_graph_{selected_key}_{run_id or 'none'}",
-        )
-        for i, row in enumerate(items[:10], start=1):
-            st.markdown(
-                f"**{i}. {row.get('voucher_key') or '-'}**  \n"
-                f"유형: {case_type_display_name(row.get('case_type'))} · "
-                f"상태: {status_display_name(row.get('status'))} · "
-                f"심각도: {severity_display_name(row.get('severity'))} · "
-                f"연결점수: {row.get('link_score') or 0}  \n"
-                f"사유: {', '.join(row.get('reasons') or []) or '-'}"
-            )
-            if i < min(len(items), 10):
-                st.markdown("---")
+    # NOTE:
+    # 하단 "연관 케이스" 영역은 사용자 요청으로 임시 비노출 처리.
+    # 필요 시 아래 블록을 복구하면 기존 동작(related API 조회 + 그래프/리스트 렌더)이 그대로 동작한다.
+    # st.markdown("---")
+    # st.markdown("#### 연관 케이스")
+    # try:
+    #     related = get(f"/api/v1/graph/cases/{selected_key}/related?limit=10") or {}
+    # except Exception as e:
+    #     st.warning(f"연관 케이스 조회 실패: {e}")
+    #     related = {}
+    #
+    # items = related.get("items") or []
+    # if not items:
+    #     render_empty_state("연결 규칙에 매칭되는 연관 케이스가 없습니다.")
+    # else:
+    #     st.metric("연관 케이스 수", str(len(items)))
+    #     _render_related_graph_plotly(
+    #         selected_key,
+    #         items[:10],
+    #         key=f"mt_related_graph_{selected_key}_{run_id or 'none'}",
+    #     )
+    #     for i, row in enumerate(items[:10], start=1):
+    #         st.markdown(
+    #             f"**{i}. {row.get('voucher_key') or '-'}**  \n"
+    #             f"유형: {case_type_display_name(row.get('case_type'))} · "
+    #             f"상태: {status_display_name(row.get('status'))} · "
+    #             f"심각도: {severity_display_name(row.get('severity'))} · "
+    #             f"연결점수: {row.get('link_score') or 0}  \n"
+    #             f"사유: {', '.join(row.get('reasons') or []) or '-'}"
+    #         )
+    #         if i < min(len(items), 10):
+    #             st.markdown("---")
 
 
 def render_ai_workspace_page() -> None:
@@ -4433,7 +4506,7 @@ def render_ai_workspace_page() -> None:
                 if not selected_key:
                     render_empty_state("케이스를 선택하면 AI 워크스페이스가 표시됩니다.")
                 else:
-                    tabs = st.tabs(["판단 요약", "근거 맵", "그래프 인사이트", "실행 내역", "검토 이력"])
+                    tabs = st.tabs(["판단 요약", "근거 맵", "실행 내역", "검토 이력"])
                     with tabs[0]:
                         render_workspace_results(latest_bundle, debug_mode)
                         timeline = latest_bundle.get("timeline") or []
@@ -4443,10 +4516,8 @@ def render_ai_workspace_page() -> None:
                     with tabs[1]:
                         render_workspace_evidence_map(latest_bundle, debug_mode)
                     with tabs[2]:
-                        render_workspace_graph_insights(selected_key, latest_bundle)
-                    with tabs[3]:
                         render_workspace_execution_review(latest_bundle, debug_mode)
-                    with tabs[4]:
+                    with tabs[3]:
                         render_workspace_review_history(latest_bundle)
                         run_id = latest_bundle.get("run_id")
                         if run_id:

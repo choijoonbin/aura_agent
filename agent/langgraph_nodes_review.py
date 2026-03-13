@@ -16,6 +16,7 @@ from agent.output_models import (
 logger = logging.getLogger(__name__)
 _WORD_RE = re.compile(r"[0-9A-Za-z가-힣]{2,}")
 _ARTICLE_RE = re.compile(r"제\s*(\d+)\s*조")
+MAX_HITL_QUESTIONS = 2
 
 _UNSUPPORTED_TAXONOMY_BLOCKING = {
     "no_citation",
@@ -586,6 +587,7 @@ async def verify_node_impl(
     *,
     find_tool_result: Callable[[list[dict[str, Any]], str], dict[str, Any] | None],
     derive_hitl_from_regulation: Callable[[dict[str, Any]], Awaitable[dict[str, Any]]],
+    generate_claim_display_texts: Callable[[list[dict[str, Any]], dict[str, Any]], Awaitable[list[str]]],
     build_hitl_request: Callable[..., dict[str, Any]],
     generate_hitl_review_content: Callable[[dict[str, Any], dict[str, Any], list[dict[str, Any]], str], Awaitable[dict[str, Any]]],
     retry_fill_hitl_review_when_empty: Callable[..., Awaitable[dict[str, Any]]],
@@ -687,9 +689,27 @@ async def verify_node_impl(
             gap=gap_text,
         ))
 
+    body_evidence = state.get("body_evidence") or {}
+    claim_results_dicts = [c.model_dump() if hasattr(c, "model_dump") else dict(c) for c in claim_results]
+    display_texts = await generate_claim_display_texts(claim_results_dicts, body_evidence)
+    logger.info(
+        "verify_node: claim display_text generation result claims=%s displays=%s",
+        len(claim_results_dicts),
+        len(display_texts or []),
+    )
+    if display_texts:
+        for idx, row in enumerate(claim_results_dicts):
+            if idx < len(display_texts):
+                row["display_text"] = str(display_texts[idx] or "").strip()
+    filled_display = sum(1 for row in claim_results_dicts if str(row.get("display_text") or "").strip())
+    logger.info(
+        "verify_node: claim display_text applied filled=%s/%s",
+        filled_display,
+        len(claim_results_dicts),
+    )
+
     required_inputs_from_reg = (regulation_driven.get("required_inputs") or []) if isinstance(regulation_driven, dict) else []
     missing_fields = ((state.get("body_evidence") or {}).get("dataQuality") or {}).get("missingFields") or []
-    body_evidence = state.get("body_evidence") or {}
     unsupported_claim_issues = _classify_unsupported_claims(
         verification_targets=verification_targets,
         verification_summary=verification_summary,
@@ -810,7 +830,7 @@ async def verify_node_impl(
         gate=gate,
         rationale=rationale,
         quality_signals=verification["quality_signals"],
-        claim_results=claim_results,
+        claim_results=claim_results_dicts,
         unsupported_claims=unsupported_claim_issues,
         replan_required=bool((state.get("critic_output") or {}).get("replan_required")),
         hold_required=hold_required,
@@ -837,7 +857,6 @@ async def verify_node_impl(
 
     if hitl_request:
         hitl_request["unsupported_claims"] = unsupported_claims_dicts
-        claim_results_dicts = [c.model_dump() if hasattr(c, "model_dump") else c for c in claim_results]
         llm_review = await generate_hitl_review_content(
             hitl_request,
             verification_summary,
@@ -870,8 +889,8 @@ async def verify_node_impl(
             final_reasons = [f"[{u.taxonomy}] {u.reason or u.claim}" for u in unsupported_claim_issues[:5]]
         final_questions = [str(x).strip() for x in (hitl_request.get("review_questions") or hitl_request.get("questions") or []) if str(x).strip()]
         hitl_request["unresolved_claims"] = final_reasons[:5]
-        hitl_request["review_questions"] = final_questions[:3]
-        hitl_request["questions"] = final_questions[:3]
+        hitl_request["review_questions"] = final_questions[:MAX_HITL_QUESTIONS]
+        hitl_request["questions"] = final_questions[:MAX_HITL_QUESTIONS]
 
     events: list[dict[str, Any]] = [
         AgentEvent(event_type="NODE_START", node="verify", phase="verify", message="근거 정합성과 추가 검토 필요 여부를 확인합니다.", metadata={}).to_payload(),

@@ -4,6 +4,7 @@ import logging
 from typing import Any
 
 logger = logging.getLogger(__name__)
+MAX_HITL_QUESTIONS = 2
 
 
 _CASE_TYPE_LABELS = {
@@ -226,6 +227,9 @@ def build_hitl_request(
         case_type,
         (why_parts[0][:80] + "…") if why_parts else "",
     )
+    # 질문은 최대 2개로 제한 (UI 과밀 방지 + 검토 집중도 향상)
+    review_questions = [str(q).strip() for q in (review_questions or []) if str(q).strip()][:MAX_HITL_QUESTIONS]
+
     return {
         "required": True,
         "handoff": "FINANCE_REVIEWER",

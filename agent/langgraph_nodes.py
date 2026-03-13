@@ -90,6 +90,7 @@ from agent.langgraph_scoring import (
 from agent.langgraph_verification_logic import (
     _build_verification_targets as _verification_build_targets,
     _derive_hitl_from_regulation as _verification_derive_hitl_from_regulation,
+    _generate_claim_display_texts as _verification_generate_claim_display_texts,
     _generate_hitl_review_content as _verification_generate_hitl_review_content,
     _retry_fill_hitl_review_when_empty as _verification_retry_fill_hitl_review_when_empty,
 )
@@ -452,6 +453,13 @@ async def _generate_hitl_review_content(
     )
 
 
+async def _generate_claim_display_texts(
+    claim_results: list[dict[str, Any]],
+    body_evidence: dict[str, Any],
+) -> list[str]:
+    return await _verification_generate_claim_display_texts(claim_results, body_evidence)
+
+
 async def _retry_fill_hitl_review_when_empty(
     hitl_request: dict[str, Any],
     verification_summary: dict[str, Any],
@@ -476,6 +484,7 @@ async def verify_node(state: AgentState) -> AgentState:
         state,
         find_tool_result=_find_tool_result,
         derive_hitl_from_regulation=_derive_hitl_from_regulation,
+        generate_claim_display_texts=_generate_claim_display_texts,
         build_hitl_request=build_hitl_request,
         generate_hitl_review_content=_generate_hitl_review_content,
         retry_fill_hitl_review_when_empty=_retry_fill_hitl_review_when_empty,
