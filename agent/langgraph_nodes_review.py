@@ -148,6 +148,17 @@ def _is_required_input_satisfied(body_evidence: dict[str, Any], req: dict[str, A
     return False
 
 
+def _should_re_evaluate(score_breakdown: dict[str, Any], retry_count: int, max_retries: int) -> bool:
+    if retry_count >= max_retries:
+        return False
+    rule_score = int(score_breakdown.get("rule_score") or score_breakdown.get("final_score") or 0)
+    llm_score = int(score_breakdown.get("llm_score") or rule_score)
+    fidelity = int(score_breakdown.get("fidelity") or 0)
+    high_gap = abs(rule_score - llm_score) >= 20
+    low_fidelity = fidelity < 40
+    return bool(high_gap or low_fidelity)
+
+
 def _build_review_audit_payload(
     *,
     state: dict[str, Any],
@@ -626,6 +637,10 @@ async def verify_node_impl(
     elif verification_targets:
         verification_summary = {"covered": 0, "total": len(verification_targets), "coverage_ratio": 0.0, "details": [], "gate_policy": EVIDENCE_GATE_HOLD, "missing_citations": verification_targets}
     verification["verification_summary"] = verification_summary
+    retry_count = int(state.get("retry_count") or score_bd.get("retry_count") or 0)
+    max_retries = int(state.get("max_retries") or score_bd.get("max_retries") or 2)
+    re_evaluate_needed = _should_re_evaluate(score_bd, retry_count, max_retries)
+    conflict_warning = bool(score_bd.get("conflict_warning"))
     regulation_driven = await derive_hitl_from_regulation(state)
     hitl_request = build_hitl_request(
         state["body_evidence"],
@@ -642,6 +657,7 @@ async def verify_node_impl(
     verification["needs_hitl"] = needs_hitl
     verification["quality_signals"] = ["HITL_REQUIRED"] if needs_hitl else ["OK"]
     gate = VerifierGate.HITL_REQUIRED if needs_hitl else VerifierGate.READY
+    verify_replan_reason = ""
 
     stop_words = {
         "이", "가", "을", "를", "의", "에", "으로", "로", "와", "과",
@@ -791,6 +807,23 @@ async def verify_node_impl(
             verification["needs_hitl"] = False
             gate = VerifierGate.READY
 
+    # 하이브리드 점수 편차/낮은 fidelity면 HITL 대신 재평가(planner 재진입) 우선 시도
+    if (
+        re_evaluate_needed
+        and not needs_hitl
+        and not state["flags"].get("hasHitlResponse")
+        and retry_count < max_retries
+    ):
+        verify_replan_reason = (
+            f"하이브리드 점수 재평가 필요(rule={score_bd.get('rule_score')}, "
+            f"llm={score_bd.get('llm_score')}, fidelity={score_bd.get('fidelity')})"
+        )
+        verification["quality_signals"] = sorted(set(list(verification.get("quality_signals") or []) + ["RE_EVALUATE_REQUIRED"]))
+        gate = VerifierGate.READY
+        needs_hitl = False
+        verification["needs_hitl"] = False
+        hitl_request = None
+
     review_audit = _build_review_audit_payload(
         state=state,
         verification_targets=verification_targets,
@@ -805,6 +838,8 @@ async def verify_node_impl(
         or has_blocking_unsupported
         or ((state.get("critic_output") or {}).get("recommend_hold") is True)
     )
+    if re_evaluate_needed and retry_count < max_retries and not state["flags"].get("hasHitlResponse"):
+        hold_required = False
     human_review_required = bool(needs_hitl or hold_required)
     risk_of_overclaim = bool((state.get("critic_output") or {}).get("overclaim_risk")) or has_blocking_unsupported
 
@@ -823,6 +858,10 @@ async def verify_node_impl(
     )
 
     rationale = hitl_request.get("why_hitl") if hitl_request else "자동 확정 가능한 상태로 검증이 완료되었습니다."
+    if verify_replan_reason:
+        rationale = f"{rationale} {verify_replan_reason}".strip()
+    if conflict_warning:
+        rationale = f"{rationale} 판단 불일치 주의: 규칙 점수와 LLM 점수 편차가 큽니다.".strip()
     verifier_output = VerifierOutput(
         grounded=not needs_hitl,
         needs_hitl=needs_hitl,
@@ -832,7 +871,7 @@ async def verify_node_impl(
         quality_signals=verification["quality_signals"],
         claim_results=claim_results_dicts,
         unsupported_claims=unsupported_claim_issues,
-        replan_required=bool((state.get("critic_output") or {}).get("replan_required")),
+        replan_required=bool((state.get("critic_output") or {}).get("replan_required")) or bool(verify_replan_reason),
         hold_required=hold_required,
         human_review_required=human_review_required,
         citation_regeneration_required=citation_regeneration_required,
@@ -846,6 +885,9 @@ async def verify_node_impl(
     verify_context = {
         "gate_result": gate.value,
         "needs_hitl": needs_hitl,
+        "re_evaluate_needed": re_evaluate_needed,
+        "retry_count": retry_count,
+        "max_retries": max_retries,
         "verification_targets": verification_targets,
         "unsupported_claims": unsupported_claims_dicts[:8],
         "confidence_risk_signals": (review_audit.get("confidence_risk_signals") or {}),
@@ -944,6 +986,22 @@ async def verify_node_impl(
         "verifier_output": verifier_output_dict,
         "hitl_request": hitl_request,
         "review_audit": review_audit,
+        "retry_count": (retry_count + 1) if verify_replan_reason else retry_count,
+        "max_retries": max_retries,
+        "replan_context": (
+            {
+                "critic_feedback": verify_replan_reason,
+                "loop_count": retry_count + 1,
+                "source": "verify_re_evaluate",
+                "score_breakdown": {
+                    "rule_score": score_bd.get("rule_score"),
+                    "llm_score": score_bd.get("llm_score"),
+                    "fidelity": score_bd.get("fidelity"),
+                },
+            }
+            if verify_replan_reason
+            else state.get("replan_context")
+        ),
         "last_node_summary": last_node_summary,
         "pending_events": events,
     }

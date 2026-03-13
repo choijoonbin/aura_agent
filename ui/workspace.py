@@ -1039,6 +1039,8 @@ def render_score_breakdown_detail(score_breakdown: dict[str, Any]) -> None:
             trace = str(score_breakdown.get("calculation_trace") or "").strip()
             if trace:
                 st.markdown(f"`{trace}`")
+            if bool(score_breakdown.get("conflict_warning")):
+                st.warning("판단 불일치 주의: 규칙 점수와 LLM 점수 편차가 큽니다.")
 
             signals = score_breakdown.get("signals") or []
             if isinstance(signals, list) and signals:
@@ -2089,6 +2091,17 @@ def render_hitl_panel(latest_bundle: dict[str, Any], *, vkey: str | None = None)
     bundle_for_hitl = dict(latest_bundle)
     bundle_for_hitl["hitl_request"] = hitl_request
     form_keys = _prime_hitl_form_state(run_id, bundle_for_hitl)
+    # 빈 목록일 때는 카드 클릭 오버레이용(음수 마진) CSS를 주입하지 않는다.
+    # 전역/잔여 스타일 간섭을 줄여 empty-state가 카드 내부 정상 위치에 고정되도록 한다.
+    filtered = grouped.get(active_filter) or []
+    if not filtered:
+        with stylable_container(
+            key=f"workspace_case_empty_state_{active_filter}",
+            css_styles="""{margin-top: 10px; max-width: 100%; overflow: hidden;}""",
+        ):
+            render_empty_state("표시할 케이스가 없습니다.")
+        return
+
     st.markdown(
         """
         <style>
@@ -2988,12 +3001,22 @@ def render_workspace_case_queue(items: list[dict[str, Any]], selected_key: str |
         if st.button(f"HITL 대기\n{hitl_count}", key=key):
             st.session_state["mt_case_filter"] = "HITL 대기"
             st.rerun()
+    filtered = grouped.get(active_filter) or []
+    if not filtered:
+        render_empty_state("표시할 케이스가 없습니다.")
+        return
+
     # 배지는 st.markdown(HTML) → 시각 레이어 (pointer-events: none)
     # 버튼은 margin-top:-55px 으로 배지 영역까지 올려 클릭 영역이 카드 전체를 커버
     st.markdown("""
     <style>
     [class*="st-key-workspace_case_scroll_"] {
-      max-height: 66vh !important; overflow-y: auto !important; padding-right: 6px !important;
+      display: block !important;
+      max-height: 66vh !important;
+      overflow-y: auto !important;
+      padding-right: 6px !important;
+      margin-top: 0 !important;
+      min-height: 0 !important;
     }
     /* 카드 컨테이너 — 시각적 카드 외형 제공, 좌우 패딩 최소화 */
     [class*="st-key-case_btn_"] {
@@ -3022,7 +3045,7 @@ def render_workspace_case_queue(items: list[dict[str, Any]], selected_key: str |
     }
     /* 버튼 element-container — 배지 바로 아래까지 끌어올려 공백 최소화 */
     [class*="st-key-case_btn_"] [data-testid="element-container"]:last-child {
-      margin-top: -28px !important;
+      margin-top: -12px !important;
       position: relative !important;
       z-index: 1 !important;
     }
@@ -3063,10 +3086,6 @@ def render_workspace_case_queue(items: list[dict[str, Any]], selected_key: str |
     </style>
     """, unsafe_allow_html=True)
     with st.container(key=f"workspace_case_scroll_{active_filter}"):
-        filtered = grouped.get(active_filter) or []
-        if not filtered:
-            render_empty_state("표시할 케이스가 없습니다.")
-            return
         for item in filtered:
             case_key = item["voucher_key"]
             is_selected = case_key == selected_key
@@ -4479,6 +4498,7 @@ def render_ai_workspace_page() -> None:
         }
         [class*="st-key-workspace_case_queue_card"] {
           min-height: 540px !important;
+          display: block !important;
         }
         @media (max-width: 1200px) {
           [class*="st-key-workspace_main_split"] > [data-testid="stHorizontalBlock"] {
@@ -4493,18 +4513,20 @@ def render_ai_workspace_page() -> None:
     with st.container(key="workspace_main_split"):
         left, right = st.columns([0.78, 1.67], gap="large")
         with left:
-            with stylable_container(key="workspace_case_queue_card", css_styles="""{padding: 18px 18px; border-radius: 20px; border: 1px solid #e5e7eb; background: rgba(255,255,255,0.96); box-shadow: 0 12px 30px rgba(15,23,42,0.05); min-height: 540px;}"""):
+            with stylable_container(key="workspace_case_queue_card", css_styles="""{padding: 18px 18px; border-radius: 20px; border: 1px solid #e5e7eb; background: rgba(255,255,255,0.96); box-shadow: 0 12px 30px rgba(15,23,42,0.05); min-height: 540px; overflow-x: hidden; overflow-y: visible; max-width: 100%; box-sizing: border-box;}"""):
                 render_workspace_case_queue(items, selected_key)
         with right:
-            with stylable_container(key="workspace_chat_card", css_styles="""{padding: 18px 20px; border-radius: 20px; border: 1px solid #e5e7eb; background: rgba(255,255,255,0.96); box-shadow: 0 12px 30px rgba(15,23,42,0.05); margin-bottom: 12px; overflow: hidden; max-width: 100%;}"""):
+            with stylable_container(key="workspace_chat_card", css_styles="""{padding: 18px 20px; border-radius: 20px; border: 1px solid #e5e7eb; background: rgba(255,255,255,0.96); box-shadow: 0 12px 30px rgba(15,23,42,0.05); margin-bottom: 12px; overflow-x: hidden; overflow-y: visible; max-width: 100%;}"""):
                 if not selected_key:
-                    render_empty_state("선택된 케이스가 없습니다.")
+                    with stylable_container(key="workspace_chat_empty_state", css_styles="""{max-width: 100%; overflow: hidden;}"""):
+                        render_empty_state("선택된 케이스가 없습니다.")
                 else:
                     selected = next((item for item in items if item["voucher_key"] == selected_key), None) or {}
                     render_workspace_chat_panel(selected, latest_bundle)
-            with stylable_container(key="workspace_result_card", css_styles="""{padding: 18px 20px; border-radius: 20px; border: 1px solid #e5e7eb; background: rgba(255,255,255,0.96); box-shadow: 0 12px 30px rgba(15,23,42,0.05); min-height: 520px;}"""):
+            with stylable_container(key="workspace_result_card", css_styles="""{padding: 18px 20px; border-radius: 20px; border: 1px solid #e5e7eb; background: rgba(255,255,255,0.96); box-shadow: 0 12px 30px rgba(15,23,42,0.05); min-height: 520px; overflow-x: hidden; overflow-y: visible; max-width: 100%; box-sizing: border-box;}"""):
                 if not selected_key:
-                    render_empty_state("케이스를 선택하면 AI 워크스페이스가 표시됩니다.")
+                    with stylable_container(key="workspace_result_empty_state", css_styles="""{max-width: 100%; overflow: hidden;}"""):
+                        render_empty_state("케이스를 선택하면 AI 워크스페이스가 표시됩니다.")
                 else:
                     tabs = st.tabs(["판단 요약", "근거 맵", "실행 내역", "검토 이력"])
                     with tabs[0]:

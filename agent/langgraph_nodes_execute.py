@@ -28,6 +28,7 @@ async def execute_node_impl(
     get_tools_by_name: Callable[[], dict[str, Any]],
     should_skip_tool: Callable[[dict[str, Any], list[dict[str, Any]]], tuple[bool, str | None]],
     score: Callable[[dict[str, Any], list[dict[str, Any]]], dict[str, Any]],
+    score_hybrid: Callable[[dict[str, Any], dict[str, Any], list[dict[str, Any]]], Awaitable[dict[str, Any]]] | None,
     tool_result_key: Callable[[dict[str, Any]], str],
     compute_plan_achievement: Callable[[list[dict[str, Any]], list[dict[str, Any]]], dict[str, Any]],
     stream_reasoning_events_with_llm: Callable[[str, str], Awaitable[tuple[str, list[dict[str, Any]], str]]],
@@ -294,18 +295,38 @@ async def execute_node_impl(
                     metadata={**result, "tool_description": tool_description},
                 ).to_payload()
             )
-    score_breakdown = score(state["flags"], tool_results)
+    if score_hybrid is not None:
+        score_breakdown = await score_hybrid(state, state["flags"], tool_results)
+    else:
+        score_breakdown = score(state["flags"], tool_results)
     trace = score_breakdown.get("calculation_trace", "")
+    final_decision = str(score_breakdown.get("final_decision") or "-")
+    conflict_warning = bool(score_breakdown.get("conflict_warning"))
     pending_events.append({
         "event_type": "SCORE_BREAKDOWN",
         "message": (
             f"정책점수 {score_breakdown['policy_score']}점 / 근거점수 {score_breakdown['evidence_score']}점 / "
-            f"최종 {score_breakdown['final_score']}점 [{score_breakdown.get('severity', '-')}] — {trace}"
+            f"최종 {score_breakdown['final_score']}점 [{score_breakdown.get('severity', '-')}] "
+            f"/ 판정 {final_decision} — {trace}"
         ),
         "node": "execute",
         "phase": "execute",
         "metadata": score_breakdown,
     })
+    if conflict_warning:
+        pending_events.append(
+            AgentEvent(
+                event_type="RISK_CONFLICT",
+                node="execute",
+                phase="execute",
+                message="판단 불일치 주의: 규칙 점수와 LLM Judge 점수 편차가 큽니다.",
+                metadata={
+                    "rule_score": score_breakdown.get("rule_score"),
+                    "llm_score": score_breakdown.get("llm_score"),
+                    "diagnostic_log": score_breakdown.get("diagnostic_log"),
+                },
+            ).to_payload()
+        )
     executed_tools = [tool_result_key(r) for r in tool_results if tool_result_key(r)]
     reasoning_parts = [
         f"{len(executed_tools)}개 도구를 실행해 정책점수 {score_breakdown['policy_score']}점, 근거점수 {score_breakdown['evidence_score']}점을 산출했다.",
@@ -338,6 +359,18 @@ async def execute_node_impl(
         final_score=int(score_breakdown.get("final_score") or 0),
         reasoning=execute_reasoning,
     )
+    evaluation_history = list(state.get("evaluation_history") or [])
+    evaluation_history.append(
+        {
+            "iteration": len(evaluation_history),
+            "rule_score": int(score_breakdown.get("rule_score") or score_breakdown.get("final_score") or 0),
+            "llm_score": int(score_breakdown.get("llm_score") or score_breakdown.get("final_score") or 0),
+            "final_score": int(score_breakdown.get("final_score") or 0),
+            "verification_gate": str(score_breakdown.get("verification_gate") or "pass"),
+            "fallback_used": bool(score_breakdown.get("fallback_used")),
+            "fallback_reason": score_breakdown.get("fallback_reason"),
+        }
+    )
     pending_events.append(
         AgentEvent(
             event_type="NODE_END",
@@ -354,5 +387,21 @@ async def execute_node_impl(
         "execute_output": execute_output.model_dump(),
         "pending_events": pending_events,
         "plan_achievement": plan_achievement,
+        "rule_score": int(score_breakdown.get("rule_score") or score_breakdown.get("final_score") or 0),
+        "llm_score": int(score_breakdown.get("llm_score") or score_breakdown.get("final_score") or 0),
+        "final_score": int(score_breakdown.get("final_score") or 0),
+        "verification_gate": str(score_breakdown.get("verification_gate") or "pass"),
+        "summary_reason": str(score_breakdown.get("summary_reason") or ""),
+        "diagnostic_log": str(score_breakdown.get("diagnostic_log") or ""),
+        "fidelity": int(score_breakdown.get("fidelity") or 0),
+        "rule_fidelity": int(score_breakdown.get("rule_fidelity") or 0),
+        "llm_fidelity": int(score_breakdown.get("llm_fidelity") or 0),
+        "fallback_used": bool(score_breakdown.get("fallback_used")),
+        "fallback_reason": str(score_breakdown.get("fallback_reason") or ""),
+        "retry_count": int(score_breakdown.get("retry_count") or 0),
+        "max_retries": int(score_breakdown.get("max_retries") or 2),
+        "latency_ms": {"llm_judge": float(score_breakdown.get("latency_ms") or 0.0)},
+        "version_meta": dict(score_breakdown.get("version_meta") or {}),
+        "evaluation_history": evaluation_history,
         "last_node_summary": f"execute 완료: {execute_reasoning[:60]}…" if len(execute_reasoning) > 60 else f"execute 완료: {execute_reasoning}",
     }

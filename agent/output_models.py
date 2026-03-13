@@ -249,3 +249,55 @@ class ScoreBreakdown(BaseModel):
     signals: list[ScoreSignalDetail] = Field(default_factory=list, description="점수 구성 신호")
     reasons: list[str] = Field(default_factory=list, description="호환용 이유 목록")
     calculation_trace: str = Field(default="", description="최종 점수 계산식")
+    # Hybrid judge 확장 필드
+    rule_score: float | None = Field(default=None, description="결정론 규칙 점수")
+    llm_score: float | None = Field(default=None, description="LLM Judge 점수")
+    final_decision: str | None = Field(default=None, description="최종 의사결정 코드")
+    verification_gate: str | None = Field(default=None, description="검증 게이트 코드(hold/caution/pass/regenerate)")
+    rule_fidelity: float | None = Field(default=None, description="규칙 기반 fidelity (evidence_completeness*100)")
+    llm_fidelity: float | None = Field(default=None, description="LLM 기반 grounding fidelity")
+    fidelity: float | None = Field(default=None, description="최종 fidelity=min(rule_fidelity,llm_fidelity)")
+    fallback_used: bool = Field(default=False, description="LLM Judge fallback 사용 여부")
+    fallback_reason: str | None = Field(default=None, description="fallback 원인 코드")
+    judge_skipped: bool = Field(default=False, description="LLM Judge 호출 생략 여부")
+    skip_reason: str | None = Field(default=None, description="LLM Judge 호출 생략 사유")
+    latency_ms: float | None = Field(default=None, description="LLM Judge 호출 지연(ms)")
+    summary_reason: str = Field(default="", description="사용자 노출용 요약 사유")
+    diagnostic_log: str = Field(default="", description="내부 진단 로그")
+    llm_judge_enabled: bool = Field(default=False, description="LLM Judge 사용 여부")
+    retry_count: int = Field(default=0, description="재시도 횟수")
+    max_retries: int = Field(default=2, description="최대 재시도 횟수")
+    version_meta: dict[str, str] = Field(default_factory=dict, description="버전 메타(scoring/rubric/prompt)")
+    conflict_warning: bool = Field(default=False, description="rule/llm 점수 편차 경고")
+
+
+class FallbackReason(str, Enum):
+    TIMEOUT = "TIMEOUT"
+    PARSE_ERROR = "PARSE_ERROR"
+    SCHEMA_ERROR = "SCHEMA_ERROR"
+    PROVIDER_ERROR = "PROVIDER_ERROR"
+
+
+class ScoringCriteria(BaseModel):
+    policy: str = Field(default="", description="정책 정합성 평가 기준")
+    evidence: str = Field(default="", description="증거 충실도 평가 기준")
+    fidelity: str = Field(default="", description="근거 기반 충실도 평가 기준")
+
+
+class ScoringResult(BaseModel):
+    policy_score: int = Field(ge=0, le=100, description="정책 정합성 점수")
+    evidence_score: int = Field(ge=0, le=100, description="증거 정합성 점수")
+    grounding_score: int = Field(ge=0, le=100, description="근거 기반 충실도 점수")
+    overall_score: int = Field(ge=0, le=100, description="LLM Judge 종합 점수")
+    summary_reason: str = Field(default="", description="사용자 노출용 요약 사유")
+    internal_reason: str = Field(default="", description="내부 진단용 상세 근거")
+
+
+class EvaluationHistoryEntry(BaseModel):
+    iteration: int = Field(ge=0, description="평가 반복 회차")
+    rule_score: int = Field(ge=0, le=100, description="규칙 점수")
+    llm_score: int | None = Field(default=None, ge=0, le=100, description="LLM 점수")
+    final_score: int = Field(ge=0, le=100, description="최종 점수")
+    verification_gate: str = Field(default="pass", description="게이트 상태")
+    fallback_used: bool = Field(default=False, description="fallback 사용 여부")
+    fallback_reason: str | None = Field(default=None, description="fallback 원인 코드")

@@ -57,6 +57,13 @@ def get_run_diagnostics(
             "unsupported_claim_count": 0,
             "unsupported_taxonomy_counts": {},
             "fail_closed_unsupported": False,
+            "rule_score": None,
+            "llm_score": None,
+            "final_decision": None,
+            "fallback_reason": None,
+            "judge_latency_ms": None,
+            "judge_skipped": None,
+            "skip_reason": None,
         }
     tool_results = res.get("tool_results") or []
     tool_total = len(tool_results)
@@ -96,6 +103,13 @@ def get_run_diagnostics(
         "unsupported_claim_count": unsupported_count,
         "unsupported_taxonomy_counts": unsupported_counts,
         "fail_closed_unsupported": fail_closed_unsupported,
+        "rule_score": (res.get("score_breakdown") or {}).get("rule_score"),
+        "llm_score": (res.get("score_breakdown") or {}).get("llm_score"),
+        "final_decision": (res.get("score_breakdown") or {}).get("final_decision"),
+        "fallback_reason": (res.get("score_breakdown") or {}).get("fallback_reason"),
+        "judge_latency_ms": (res.get("score_breakdown") or {}).get("latency_ms"),
+        "judge_skipped": (res.get("score_breakdown") or {}).get("judge_skipped"),
+        "skip_reason": (res.get("score_breakdown") or {}).get("skip_reason"),
     }
 
 

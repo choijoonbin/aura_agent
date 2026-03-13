@@ -104,8 +104,8 @@ def inject_css() -> None:
         [class*="st-key-workspace_chat_card"] {{ overflow: hidden !important; max-width: 100% !important; }}
         [class*="st-key-workspace_chat_card"] .mt-panel-header {{ overflow: visible !important; flex-wrap: wrap; gap: 4px 10px; align-items:flex-start; margin-bottom: 0 !important; }}
         [class*="st-key-workspace_chat_card"] .mt-panel-sub {{ margin-top: 2px !important; }}
-        /* A(헤더/설명)와 B(배지·분석시작) 사이 간격 축소 */
-        [class*="st-key-workspace_chat_cta_row"] {{ margin-top: -20px !important; }}
+        /* workspace 전용 CTA 행 간격은 페이지 내부 스타일에서 제어한다.
+           전역 음수 마진은 빈 상태 카드까지 흔들려 레이아웃 이탈을 유발할 수 있어 제거. */
         [class*="st-key-workspace_chat_card"] .mt-panel-sub.mt-panel-trailing {{
           white-space: normal !important;
           flex: 0 1 34% !important;
@@ -154,7 +154,20 @@ def inject_css() -> None:
         .mt-caption-strong {{ font-size:0.8rem; color:#475569; font-weight:700; }}
         .mt-hero-title {{ font-size: 1.25rem; font-weight: 800; color:#0f172a; letter-spacing:-0.02em; }}
         .mt-hero-sub {{ font-size: 0.9rem; color:#64748b; line-height:1.6; }}
-        .mt-empty-box {{ padding: 20px 22px; border-radius: 18px; border: 1px dashed #cbd5e1; background: #f8fafc; color:#475569; }}
+        .mt-empty-box {{
+          display: block;
+          width: auto;
+          max-width: 100%;
+          box-sizing: border-box;
+          overflow-wrap: anywhere;
+          word-break: break-word;
+          margin-top: 12px;
+          padding: 20px 22px;
+          border-radius: 18px;
+          border: 1px dashed #cbd5e1;
+          background: #f8fafc;
+          color:#475569;
+        }}
         .mt-kv-grid {{ display:grid; grid-template-columns: auto 1fr; gap: 6px 16px; align-items: baseline; font-size: 0.85rem; margin-top: 10px; margin-bottom: 12px; }}
         .mt-kv-key {{ color: var(--mt-text-soft); font-weight: 600; min-width: 72px; }}
         .mt-kv-value {{ color: var(--mt-text-strong); font-weight: 500; }}

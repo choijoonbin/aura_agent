@@ -1,9 +1,23 @@
 from __future__ import annotations
 
+import asyncio
+import json
+import logging
+import time
+from collections import deque
+from pathlib import Path
 from typing import Any
 
+from agent.output_models import FallbackReason, ScoringResult
 from agent.langgraph_domain import _find_tool_result, _tool_result_key
 from utils.config import settings
+from utils.llm_azure import completion_kwargs_for_azure
+
+logger = logging.getLogger(__name__)
+
+_RUBRIC_PATH = Path("docs/work_info/logic/scoring_rubric_v1.md")
+_JUDGE_CIRCUIT_HISTORY: deque[bool] = deque(maxlen=max(1, int(settings.llm_judge_circuit_window)))
+_JUDGE_CIRCUIT_OPEN = False
 
 _POLICY_SIGNAL_POINTS: dict[str, float] = {
     "isHoliday": 35.0,
@@ -53,6 +67,25 @@ def _score_with_hitl_adjustment(score: dict[str, Any], flags: dict[str, Any]) ->
     adjusted.setdefault("amount_weight", float((score or {}).get("amount_weight", 1.0)))
     adjusted.setdefault("signals", list((score or {}).get("signals") or []))
     adjusted.setdefault("calculation_trace", str((score or {}).get("calculation_trace") or ""))
+    adjusted.setdefault("rule_score", int((score or {}).get("rule_score", adjusted.get("final_score", 0))))
+    adjusted.setdefault("llm_score", int((score or {}).get("llm_score", adjusted.get("final_score", 0))))
+    adjusted.setdefault("verification_gate", str((score or {}).get("verification_gate") or "pass"))
+    adjusted.setdefault("final_decision", str((score or {}).get("final_decision") or "PASS"))
+    adjusted.setdefault("fidelity", int((score or {}).get("fidelity", 0)))
+    adjusted.setdefault("rule_fidelity", int((score or {}).get("rule_fidelity", adjusted.get("fidelity", 0))))
+    adjusted.setdefault("llm_fidelity", int((score or {}).get("llm_fidelity", adjusted.get("fidelity", 0))))
+    adjusted.setdefault("fallback_used", bool((score or {}).get("fallback_used", False)))
+    adjusted.setdefault("fallback_reason", (score or {}).get("fallback_reason"))
+    adjusted.setdefault("judge_skipped", bool((score or {}).get("judge_skipped", False)))
+    adjusted.setdefault("skip_reason", (score or {}).get("skip_reason"))
+    adjusted.setdefault("latency_ms", (score or {}).get("latency_ms"))
+    adjusted.setdefault("summary_reason", str((score or {}).get("summary_reason") or ""))
+    adjusted.setdefault("diagnostic_log", str((score or {}).get("diagnostic_log") or ""))
+    adjusted.setdefault("llm_judge_enabled", bool((score or {}).get("llm_judge_enabled", False)))
+    adjusted.setdefault("retry_count", int((score or {}).get("retry_count", 0)))
+    adjusted.setdefault("max_retries", int((score or {}).get("max_retries", 2)))
+    adjusted.setdefault("version_meta", dict((score or {}).get("version_meta") or {}))
+    adjusted.setdefault("conflict_warning", bool((score or {}).get("conflict_warning", False)))
     if not flags.get("hasHitlResponse"):
         adjusted["severity"] = _score_to_severity(float(adjusted.get("final_score", 0)))
         return adjusted
@@ -373,4 +406,261 @@ def _score(flags: dict[str, Any], tool_results: list[dict[str, Any]]) -> dict[st
         "severity": severity,
         "signals": [s.model_dump() for s in signals],
         "calculation_trace": calculation_trace,
+        "evidence_completeness": round(float(evidence_completeness), 4),
+        "rule_violation_summary": [str(x) for x in reasons[:6]],
     }
+
+
+def _scoring_versions() -> dict[str, str]:
+    return {
+        "scoring_version": settings.scoring_version,
+        "rubric_version": settings.scoring_rubric_version,
+        "prompt_version": settings.scoring_prompt_version,
+    }
+
+
+def _load_scoring_rubric_text() -> str:
+    try:
+        if _RUBRIC_PATH.exists():
+            return _RUBRIC_PATH.read_text(encoding="utf-8").strip()
+    except Exception:
+        pass
+    return (
+        "정책(policy), 증거(evidence), 충실도(fidelity)를 각각 0~100으로 평가한다. "
+        "점수와 함께 사용자용 요약(summary_reason)과 내부 상세(internal_reason)를 반환한다."
+    )
+
+
+def _derive_rule_gate(rule_score_breakdown: dict[str, Any], tool_results: list[dict[str, Any]]) -> str:
+    failed_tools = [
+        str(_tool_result_key(r) or "")
+        for r in (tool_results or [])
+        if not bool((r or {}).get("ok"))
+    ]
+    if any(t in {"policy_rulebook_probe", "document_evidence_probe"} for t in failed_tools):
+        return "regenerate"
+    final_score = int(rule_score_breakdown.get("final_score") or 0)
+    evidence_completeness = float(rule_score_breakdown.get("evidence_completeness") or 0.0)
+    if final_score >= 75 and evidence_completeness < 0.4:
+        return "hold"
+    if final_score >= 55:
+        return "caution"
+    return "pass"
+
+
+def _resolve_final_decision(
+    *,
+    rule_gate: str,
+    rule_score: int,
+    llm_score: int | None,
+    conflict_warning: bool = False,
+) -> str:
+    gate = str(rule_gate or "").lower()
+    if gate == "hold":
+        return "HOLD"
+    if gate == "regenerate":
+        return "REGENERATE"
+    if gate == "caution" or conflict_warning:
+        return "CAUTION"
+    if llm_score is not None and (rule_score >= 75 or llm_score >= 75):
+        return "CAUTION"
+    return "PASS"
+
+
+def _mark_circuit(fallback_used: bool) -> None:
+    global _JUDGE_CIRCUIT_OPEN
+    _JUDGE_CIRCUIT_HISTORY.append(bool(fallback_used))
+    if len(_JUDGE_CIRCUIT_HISTORY) < max(1, int(settings.llm_judge_circuit_window)):
+        return
+    rate = sum(1 for x in _JUDGE_CIRCUIT_HISTORY if x) / len(_JUDGE_CIRCUIT_HISTORY)
+    if rate >= float(settings.llm_judge_circuit_failure_threshold):
+        if not _JUDGE_CIRCUIT_OPEN:
+            logger.warning(
+                "llm judge circuit breaker opened: fallback_rate=%.2f window=%s",
+                rate,
+                len(_JUDGE_CIRCUIT_HISTORY),
+            )
+        _JUDGE_CIRCUIT_OPEN = True
+
+
+async def _call_llm_judge(
+    *,
+    body_evidence: dict[str, Any],
+    rule_score_breakdown: dict[str, Any],
+) -> tuple[ScoringResult, float]:
+    from openai import AsyncAzureOpenAI, AsyncOpenAI
+
+    base_url = (settings.openai_base_url or "").strip()
+    api_key = settings.openai_api_key
+    if not api_key:
+        raise RuntimeError("OPENAI_API_KEY missing")
+    if ".openai.azure.com" in base_url:
+        client: Any = AsyncAzureOpenAI(
+            api_key=api_key,
+            azure_endpoint=base_url,
+            api_version=settings.openai_api_version,
+        )
+    else:
+        client = AsyncOpenAI(api_key=api_key, base_url=base_url or None)
+
+    rubric = _load_scoring_rubric_text()
+    rule_violation_summary = rule_score_breakdown.get("rule_violation_summary") or []
+    evidence_completeness = float(rule_score_breakdown.get("evidence_completeness") or 0.0)
+    payload = {
+        "body_evidence": {
+            "occurredAt": body_evidence.get("occurredAt"),
+            "merchantName": body_evidence.get("merchantName"),
+            "amount": body_evidence.get("amount"),
+            "isHoliday": body_evidence.get("isHoliday"),
+            "hrStatus": body_evidence.get("hrStatus"),
+            "mccCode": body_evidence.get("mccCode"),
+            "budgetExceeded": body_evidence.get("budgetExceeded"),
+        },
+        "rule_engine_result": {
+            "policy_score": rule_score_breakdown.get("policy_score"),
+            "evidence_score": rule_score_breakdown.get("evidence_score"),
+            "final_score": rule_score_breakdown.get("final_score"),
+            "severity": rule_score_breakdown.get("severity"),
+            "evidence_completeness": evidence_completeness,
+            "rule_violation_summary": rule_violation_summary,
+        },
+        "instruction": "규칙 엔진 발견사항을 반드시 반영해 policy/evidence/grounding을 0~100으로 평가",
+    }
+    system_prompt = (
+        "당신은 재무 감사 검증 심사관이다. 아래 루브릭으로 점수화하라.\n"
+        f"{rubric}\n"
+        "출력 JSON 스키마:\n"
+        "{policy_score:int,evidence_score:int,grounding_score:int,overall_score:int,summary_reason:str,internal_reason:str}\n"
+        "요약(summary_reason)은 사용자 친화적 2~3문장, internal_reason은 구체적 근거를 포함."
+    )
+    user_prompt = json.dumps(payload, ensure_ascii=False)
+    start = time.perf_counter()
+    create_kwargs = completion_kwargs_for_azure(
+        base_url,
+        model=settings.llm_judge_model,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        response_format={"type": "json_object"},
+    )
+    timeout_sec = max(0.5, float(settings.llm_judge_timeout_ms) / 1000.0)
+    response = await asyncio.wait_for(client.chat.completions.create(**create_kwargs), timeout=timeout_sec)
+    latency_ms = (time.perf_counter() - start) * 1000.0
+    content = (response.choices[0].message.content or "").strip()
+    if not content:
+        raise ValueError("empty llm judge response")
+    try:
+        obj = json.loads(content)
+    except Exception as e:
+        raise ValueError(f"judge parse failed: {e}") from e
+    try:
+        parsed = ScoringResult.model_validate(obj)
+    except Exception as e:
+        raise ValueError(f"judge schema failed: {e}") from e
+    return parsed, latency_ms
+
+
+async def _score_hybrid(
+    state: dict[str, Any],
+    flags: dict[str, Any],
+    tool_results: list[dict[str, Any]],
+) -> dict[str, Any]:
+    out = dict(_score(flags, tool_results))
+    out["version_meta"] = _scoring_versions()
+    out["llm_judge_enabled"] = bool(settings.llm_judge_enabled)
+    out["max_retries"] = int(settings.llm_judge_max_retries)
+    out["retry_count"] = int(state.get("retry_count") or 0)
+    out["fallback_used"] = False
+    out["fallback_reason"] = None
+    out["judge_skipped"] = False
+    out["skip_reason"] = None
+    out["latency_ms"] = None
+    out["diagnostic_log"] = ""
+    out["summary_reason"] = "규칙 기반 점수로 판정했습니다."
+
+    rule_score = int(out.get("final_score") or 0)
+    rule_fidelity = int(round(float(out.get("evidence_completeness") or 0.0) * 100))
+    out["rule_score"] = rule_score
+    out["llm_score"] = rule_score
+    out["rule_fidelity"] = rule_fidelity
+    out["llm_fidelity"] = rule_fidelity
+    out["fidelity"] = rule_fidelity
+    rule_gate = _derive_rule_gate(out, tool_results)
+    out["verification_gate"] = rule_gate
+    out["final_decision"] = _resolve_final_decision(rule_gate=rule_gate, rule_score=rule_score, llm_score=None)
+    out["conflict_warning"] = False
+
+    if not bool(settings.llm_judge_enabled):
+        out["judge_skipped"] = True
+        out["skip_reason"] = "llm_judge_disabled"
+        out["diagnostic_log"] = "LLM Judge 비활성화 상태입니다."
+        return out
+    if rule_gate in {"hold", "regenerate"}:
+        out["judge_skipped"] = True
+        out["skip_reason"] = "rule_gate_blocked"
+        out["diagnostic_log"] = f"규칙 게이트({rule_gate})가 확정되어 LLM Judge 호출을 생략했습니다."
+        return out
+    if _JUDGE_CIRCUIT_OPEN:
+        out["judge_skipped"] = True
+        out["skip_reason"] = "circuit_breaker_open"
+        out["diagnostic_log"] = "LLM Judge circuit breaker가 열려 호출을 생략했습니다."
+        return out
+
+    last_error_code: str | None = None
+    last_error_message: str = ""
+    max_retries = max(0, int(settings.llm_judge_max_retries))
+    for attempt in range(max_retries + 1):
+        try:
+            judge, latency_ms = await _call_llm_judge(
+                body_evidence=state.get("body_evidence") or {},
+                rule_score_breakdown=out,
+            )
+            llm_score = int(judge.overall_score)
+            llm_fidelity = int(judge.grounding_score)
+            fidelity = min(rule_fidelity, llm_fidelity)
+            out["llm_score"] = llm_score
+            out["llm_fidelity"] = llm_fidelity
+            out["fidelity"] = fidelity
+            out["latency_ms"] = round(latency_ms, 2)
+            out["summary_reason"] = str(judge.summary_reason or "").strip() or out["summary_reason"]
+            out["diagnostic_log"] = str(judge.internal_reason or "").strip()
+            conflict = abs(rule_score - llm_score) >= int(settings.llm_judge_conflict_threshold)
+            out["conflict_warning"] = conflict
+            if conflict:
+                out["summary_reason"] = f"{out['summary_reason']} (판단 불일치 주의: 규칙 점수와 LLM 점수 편차가 큽니다.)".strip()
+            out["final_decision"] = _resolve_final_decision(
+                rule_gate=rule_gate,
+                rule_score=rule_score,
+                llm_score=llm_score,
+                conflict_warning=conflict,
+            )
+            _mark_circuit(False)
+            return out
+        except asyncio.TimeoutError as e:
+            last_error_code = FallbackReason.TIMEOUT.value
+            last_error_message = str(e)
+        except ValueError as e:
+            msg = str(e).lower()
+            if "schema" in msg:
+                last_error_code = FallbackReason.SCHEMA_ERROR.value
+            elif "parse" in msg:
+                last_error_code = FallbackReason.PARSE_ERROR.value
+            else:
+                last_error_code = FallbackReason.PARSE_ERROR.value
+            last_error_message = str(e)
+        except Exception as e:
+            last_error_code = FallbackReason.PROVIDER_ERROR.value
+            last_error_message = str(e)
+        out["retry_count"] = attempt + 1
+        if attempt < max_retries:
+            continue
+
+    out["fallback_used"] = True
+    out["fallback_reason"] = last_error_code or FallbackReason.PROVIDER_ERROR.value
+    out["diagnostic_log"] = (
+        f"LLM Judge 실패로 규칙 점수로 fallback했습니다. reason={out['fallback_reason']} detail={last_error_message[:400]}"
+    )
+    out["final_decision"] = _resolve_final_decision(rule_gate=rule_gate, rule_score=rule_score, llm_score=None)
+    _mark_circuit(True)
+    return out

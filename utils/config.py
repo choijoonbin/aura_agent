@@ -82,6 +82,18 @@ class Settings:
     score_evidence_weight: float = float(os.getenv("SCORE_EVIDENCE_WEIGHT", "0.4"))
     score_compound_multiplier_max: float = float(os.getenv("SCORE_COMPOUND_MULTIPLIER_MAX", "1.5"))
     score_amount_multiplier_max: float = float(os.getenv("SCORE_AMOUNT_MULTIPLIER_MAX", "1.3"))
+    # Hybrid scoring/judge
+    llm_judge_enabled: bool = os.getenv("LLM_JUDGE_ENABLED", "true").lower() == "true"
+    llm_judge_model: str = os.getenv("LLM_JUDGE_MODEL", "gpt-4o-mini")
+    llm_judge_timeout_ms: int = int(os.getenv("LLM_JUDGE_TIMEOUT_MS", "3000"))
+    llm_judge_slo_p95_ms: int = int(os.getenv("LLM_JUDGE_SLO_P95_MS", "3000"))
+    llm_judge_max_retries: int = int(os.getenv("LLM_JUDGE_MAX_RETRIES", "2"))
+    llm_judge_conflict_threshold: int = int(os.getenv("LLM_JUDGE_CONFLICT_THRESHOLD", "20"))
+    llm_judge_circuit_window: int = int(os.getenv("LLM_JUDGE_CIRCUIT_WINDOW", "10"))
+    llm_judge_circuit_failure_threshold: float = float(os.getenv("LLM_JUDGE_CIRCUIT_FAILURE_THRESHOLD", "0.5"))
+    scoring_version: str = os.getenv("SCORING_VERSION", "1.0.0")
+    scoring_rubric_version: str = os.getenv("SCORING_RUBRIC_VERSION", "1.2.0")
+    scoring_prompt_version: str = os.getenv("SCORING_PROMPT_VERSION", "2.0.1")
 
     # Langfuse (observability, optional)
     langfuse_enabled: bool = os.getenv("LANGFUSE_ENABLED", "false").lower() == "true"

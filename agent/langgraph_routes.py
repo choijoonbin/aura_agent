@@ -16,6 +16,13 @@ def _route_after_critic(state: dict[str, Any], *, max_critic_loop: int) -> str:
 
 def _route_after_verify(state: dict[str, Any]) -> str:
     """Phase D: 위험/규정 위배로 hitl_request가 있으면 항상 담당자 검토(hitl_pause). HITL 체크박스와 무관."""
+    verifier_output = state.get("verifier_output") or {}
+    replan_required = bool(verifier_output.get("replan_required"))
+    retry_count = int(state.get("retry_count") or 0)
+    max_retries = int(state.get("max_retries") or 2)
+    has_hitl_response = bool((state.get("flags") or {}).get("hasHitlResponse"))
+    if replan_required and retry_count < max_retries and not has_hitl_response:
+        return "planner"
     if state.get("hitl_request"):
         return "hitl_pause"
     return "reporter"

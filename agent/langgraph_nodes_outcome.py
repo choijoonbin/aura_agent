@@ -387,6 +387,18 @@ async def finalizer_node_impl(
         "reporter_output": state.get("reporter_output"),
         "retrieval_snapshot": retrieval_snapshot,
         "verification_summary": (state.get("verification") or {}).get("verification_summary"),
+        "rule_score": score.get("rule_score"),
+        "llm_score": score.get("llm_score"),
+        "final_decision": score.get("final_decision"),
+        "verification_gate": score.get("verification_gate"),
+        "fidelity": score.get("fidelity"),
+        "fallback_used": score.get("fallback_used"),
+        "fallback_reason": score.get("fallback_reason"),
+        "summary_reason": score.get("summary_reason"),
+        "diagnostic_log": score.get("diagnostic_log"),
+        "latency_ms": {"llm_judge": score.get("latency_ms")},
+        "version_meta": score.get("version_meta") or {},
+        "evaluation_history": state.get("evaluation_history") or [],
     }
     pending_events: list[dict[str, Any]] = [
         AgentEvent(event_type="NODE_START", node="finalizer", phase="finalize", message="최종 판정 결과를 확정합니다.", metadata={}).to_payload(),

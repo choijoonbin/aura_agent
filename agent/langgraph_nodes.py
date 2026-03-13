@@ -84,6 +84,7 @@ from agent.langgraph_scoring import (
     _plan_from_flags as _scoring_plan_from_flags,
     _reason_prefix as _scoring_reason_prefix,
     _score as _scoring_score,
+    _score_hybrid as _scoring_score_hybrid,
     _score_to_severity as _scoring_score_to_severity,
     _score_with_hitl_adjustment as _scoring_score_with_hitl_adjustment,
 )
@@ -195,6 +196,23 @@ class AgentState(TypedDict, total=False):
     critic_loop_count: int
     replan_context: dict[str, Any] | None
     plan_achievement: dict[str, Any]
+    # Hybrid scoring / verification fields
+    rule_score: int
+    llm_score: int
+    final_score: int
+    verification_gate: str
+    summary_reason: str
+    diagnostic_log: str
+    fidelity: int
+    rule_fidelity: int
+    llm_fidelity: int
+    fallback_used: bool
+    fallback_reason: str
+    retry_count: int
+    max_retries: int
+    latency_ms: dict[str, float]
+    version_meta: dict[str, str]
+    evaluation_history: list[dict[str, Any]]
     # workspace.md: 이전 노드 결과 1줄 요약 (generate_working_note prev_result_summary용)
     last_node_summary: str
 
@@ -357,6 +375,10 @@ def _score(flags: dict[str, Any], tool_results: list[dict[str, Any]]) -> dict[st
     return _scoring_score(flags, tool_results)
 
 
+async def _score_hybrid(state: AgentState, flags: dict[str, Any], tool_results: list[dict[str, Any]]) -> dict[str, Any]:
+    return await _scoring_score_hybrid(state, flags, tool_results)
+
+
 def _build_prescreened_result(body: dict[str, Any]) -> dict[str, Any]:
     return _domain_build_prescreened_result(body)
 
@@ -414,6 +436,7 @@ async def execute_node(state: AgentState) -> AgentState:
         get_tools_by_name=_get_tools_by_name,
         should_skip_tool=lambda step, tool_results: _should_skip_tool(step, state=state, tool_results=tool_results),
         score=_score,
+        score_hybrid=_score_hybrid,
         tool_result_key=_tool_result_key,
         compute_plan_achievement=_compute_plan_achievement,
         stream_reasoning_events_with_llm=_stream_reasoning_events_with_llm,
