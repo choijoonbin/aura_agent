@@ -10,6 +10,7 @@ from utils.llm_azure import completion_kwargs_for_azure
 
 logger = logging.getLogger(__name__)
 MAX_HITL_QUESTIONS = 2
+MAX_HITL_INPUTS = 2  # 필수 입력 항목 최대 수 (UI 과밀 방지 + 검토 집중도 향상)
 
 _CLAIM_PRIORITY: dict[str, int] = {
     "night_violation": 10,
@@ -284,7 +285,9 @@ async def _derive_hitl_from_regulation(state: dict[str, Any]) -> dict[str, Any]:
         "담당자 검토(HITL) 시 요구할 **필수 입력/증빙** 항목과 **검토 시 확인할 질문**을 추출하라.\n"
         "규칙:\n"
         "1. 규정에 '필수 입력', '필수 증빙', '② 필수' 등으로 열거된 항목을 required_inputs로 나열하라. "
-        "각 항목은 {\"field\": \"영문식별자\", \"reason\": \"규정에서 요구하는 이유 한 줄\", \"guide\": \"사용자에게 보여줄 가이드 문구\"} 형태로.\n"
+        "각 항목은 {\"field\": \"영문식별자\", \"reason\": \"규정에서 요구하는 이유 한 줄\", \"guide\": \"사용자에게 보여줄 가이드 문구\"} 형태로. "
+        "**필수 입력은 최대 2개만.** 여러 항목이 있으면 판단에 가장 핵심적인 것 2개만 중요도 높은 순으로 선별하라. "
+        "유사·중복 항목은 하나로 합쳐라.\n"
         "2. 규정에서 예외·승인·검토 시 확인하라고 한 내용을 review_questions로 짧은 질문 문장으로 나열하라. "
         "질문은 최대 2개만. 유사·중복 질문은 제외하고, 판단에 가장 중요한 핵심만 선별하라.\n"
         "3. 현재 케이스(휴일/심야/접대 등)에 실제로 해당하는 조문만 사용하라. 해당 없으면 빈 배열을 반환하라.\n"
@@ -398,7 +401,8 @@ async def _derive_hitl_from_regulation(state: dict[str, Any]) -> dict[str, Any]:
                 len(filtered_required_inputs),
             )
 
-        return {"required_inputs": filtered_required_inputs, "review_questions": review_questions}
+        # 최대 2개로 제한 — 중요도 높은 순으로 앞에 위치한다고 가정
+        return {"required_inputs": filtered_required_inputs[:MAX_HITL_INPUTS], "review_questions": review_questions}
     except Exception:
         return {}
 
