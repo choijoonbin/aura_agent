@@ -20,6 +20,7 @@ from ui.shared import stylable_container
 
 from ui.api_client import API, get, post, post_multipart
 from utils.config import settings
+from services.policy_ref_normalizer import normalize_policy_parent_title
 from ui.shared import (
     budget_exceeded_display,
     case_type_badge,
@@ -3882,7 +3883,12 @@ def render_workspace_evidence_map(latest_bundle: dict[str, Any], debug_mode: boo
 
     st.markdown("#### 채택된 규정 근거")
     for idx, ref in enumerate(policy_refs, start=1):
-        title = f"C{idx}. {ref.get('article') or '-'} / {ref.get('parent_title') or '-'}"
+        _article = ref.get("article") or "-"
+        _parent_title = ref.get("parent_title") or "-"
+        # normalize_policy_parent_title: parent_title이 article로 시작하면 중복 제거
+        # 예) "제39조 / 제39조 (주말·공휴일 제약)" → "C1. 제39조 (주말·공휴일 제약)"
+        _display_title = normalize_policy_parent_title(_article, _parent_title) or _parent_title
+        title = f"C{idx}. {_display_title}"
         with st.expander(title, expanded=(idx == 1)):
             with stylable_container(
                 key=f"process_story_evidence_ref_{latest_bundle.get('run_id') or 'none'}_{idx}",
@@ -3891,6 +3897,15 @@ def render_workspace_evidence_map(latest_bundle: dict[str, Any], debug_mode: boo
                     border-radius: 12px;
                 }""",
             ):
+                # 병합 청크 경고: 길이가 짧아 인접 조항과 합쳐진 경우 명시
+                _merged = ref.get("merged_articles") or []
+                if len(_merged) > 1:
+                    _merged_labels = " + ".join(str(a) for a in _merged)
+                    st.warning(
+                        f"⚠️ 이 근거는 **{_merged_labels}** 조항이 병합된 청크입니다. "
+                        "아래 본문에 인접 조항 내용이 포함될 수 있습니다.",
+                        icon=None,
+                    )
                 meta = []
                 if ref.get("retrieval_score") is not None:
                     meta.append(f"score={ref.get('retrieval_score')}")

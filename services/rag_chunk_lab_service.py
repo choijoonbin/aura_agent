@@ -276,7 +276,9 @@ def _merge_short_articles(
             next_article = str(next_art.get("regulation_article") or "")
             next_clauses = _normalize_clauses(list(next_art.get("clauses") or []), next_article)
             merged_title = f"{art.get('full_title') or art.get('regulation_article', '')} ~ {next_art.get('full_title') or next_art.get('regulation_article', '')}"
-            merged_body = body + "\n\n" + (next_art.get("body") or "")
+            # 조항 경계 마커를 삽입해 병합된 내용이 섞이지 않도록 시각적으로 구분
+            next_boundary = f"[{next_art.get('full_title') or next_article}]"
+            merged_body = body + f"\n\n{next_boundary}\n" + (next_art.get("body") or "")
             merged_clauses = art_clauses + next_clauses
             title_map = {
                 art_article: str(art.get("full_title") or art_article),
@@ -299,7 +301,8 @@ def _merge_short_articles(
             skip_next = True
         elif body_len < parent_min and not has_next and merged:
             prev = merged[-1]
-            prev["body"] = (prev.get("body") or "") + "\n\n" + body
+            boundary = f"[{art.get('full_title') or art_article}]"
+            prev["body"] = (prev.get("body") or "") + f"\n\n{boundary}\n" + body
             prev["full_title"] = f"{prev.get('full_title', '')} ~ {art.get('full_title') or art_article}"
             prev["article_header"] = prev["full_title"]
             prev["clauses"] = list(prev.get("clauses") or []) + art_clauses
