@@ -958,36 +958,36 @@ def _render_score_logic_dialog(kind: str, score_breakdown: dict[str, Any]) -> No
         st.markdown(
             "`policy_score = min(100, (base_policy + tool_policy_delta) × compound_multiplier × amount_multiplier)`"
         )
-        st.markdown("**base_policy 신호**")
+        st.markdown("**기본 정책 신호 (base_policy)**")
         st.table(
             [
-                {"항목": "휴일/주말 사용", "조건": "isHoliday=true", "점수": "+35"},
-                {"항목": "근태 충돌", "조건": "hrStatus in {LEAVE, OFF, VACATION}", "점수": "+20"},
-                {"항목": "심야 시간", "조건": "isNight=true", "점수": "+10"},
-                {"항목": "예산 초과", "조건": "budgetExceeded=true", "점수": "+15"},
+                {"항목": "휴일/주말 사용", "조건": "휴일 여부 = 예", "점수": "+35"},
+                {"항목": "근태 충돌", "조건": "근태 상태 = 휴가/휴무/결근", "점수": "+20"},
+                {"항목": "심야 시간", "조건": "심야 여부 = 예", "점수": "+10"},
+                {"항목": "예산 초과", "조건": "예산 초과 여부 = 예", "점수": "+15"},
             ]
         )
-        st.markdown("**tool_policy_delta 신호**")
+        st.markdown("**도구 기반 정책 보정 신호 (tool_policy_delta)**")
         st.table(
             [
-                {"항목": "holidayRisk HIGH", "점수": "+10"},
-                {"항목": "holidayRisk MEDIUM", "점수": "+5"},
-                {"항목": "merchantRisk HIGH", "점수": "+20"},
-                {"항목": "merchantRisk MEDIUM", "점수": "+10"},
-                {"항목": "merchantRisk LOW", "점수": "+3"},
+                {"항목": "휴일 위험도 높음", "점수": "+10"},
+                {"항목": "휴일 위험도 중간", "점수": "+5"},
+                {"항목": "가맹점 위험도 높음", "점수": "+20"},
+                {"항목": "가맹점 위험도 중간", "점수": "+10"},
+                {"항목": "가맹점 위험도 낮음", "점수": "+3"},
             ]
         )
-        st.markdown("**승수**")
+        st.markdown("**승수(가중치) 적용**")
         st.table(
             [
-                {"항목": "compound_multiplier", "규칙": "고위험 신호 2개=1.15, 3개=1.30, 4개+=설정 최대값"},
-                {"항목": "amount_multiplier", "규칙": "금액 구간별 가중 (10만원 이하~200만원 초과)"},
+                {"항목": "복합 위험 승수", "규칙": "고위험 신호 2개=1.15, 3개=1.30, 4개+=설정 최대값"},
+                {"항목": "금액 승수", "규칙": "금액 구간별 가중 (10만원 이하~200만원 초과)"},
             ]
         )
         st.caption(
-            f"이번 run 결과: policy_score={score_breakdown.get('policy_score', '-')}, "
-            f"compound_multiplier={score_breakdown.get('compound_multiplier', '-')}, "
-            f"amount_weight={score_breakdown.get('amount_weight', '-')}"
+            f"이번 run 결과: 정책점수={score_breakdown.get('policy_score', '-')}, "
+            f"복합 위험 승수={score_breakdown.get('compound_multiplier', '-')}, "
+            f"금액 가중치={score_breakdown.get('amount_weight', '-')}"
         )
     else:
         st.markdown("### evidence 점수 계산 로직")
@@ -2660,15 +2660,13 @@ def render_hitl_panel(latest_bundle: dict[str, Any], *, vkey: str | None = None)
             if key:
                 st.text_input(f"{label} *", key=key, placeholder=f"규정 요구 항목(필수): {label[:50]}")
         # 검토 의견 placeholder: LLM/규정에서 요구한 항목을 동적으로 안내
+        # UI에는 LLM 생성 질문(review_questions)만 노출한다.
+        # required_inputs는 서버 검증(누락 체크) 용도로 유지한다.
         must_fill: list[str] = []
         for q in (hitl_request.get("review_questions") or hitl_request.get("questions") or []):
             s = str(q or "").strip()
             if s:
                 must_fill.append(s[:120])
-        for req in required_inputs:
-            label = (req.get("guide") or req.get("reason") or req.get("field") or "").strip()
-            if label and label[:80] not in [m[:80] for m in must_fill]:
-                must_fill.append(label[:120])
         if must_fill:
             comment_placeholder = "반드시 작성할 내용:\n" + "\n".join(f"• {m}" for m in must_fill[:8]) + "\n\n왜 승인 또는 보류로 판단했는지 핵심 근거를 적습니다."
         else:
@@ -3407,6 +3405,14 @@ def render_workspace_chat_panel(selected: dict[str, Any], latest_bundle: dict[st
                 """
                 > div > div {
                     background: transparent !important;
+                }
+                """,
+                """
+                /* 스트림 텍스트 첫 글자가 라운드 경계에 걸리지 않도록 좌우 내부 여백 보정 */
+                [data-testid="stMarkdownContainer"] {
+                    padding-left: 10px !important;
+                    padding-right: 10px !important;
+                    box-sizing: border-box !important;
                 }
                 """,
             ],

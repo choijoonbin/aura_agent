@@ -107,13 +107,14 @@ flowchart LR
 | `contextual_header`         | RAG 문맥용 접두어. CLAUSE: `[제1장 > 제23조 > (식대)]` , ITEM: `[제7장 > 제23조 > (식대) > ③]` (`_build_item_contextual_header`) |
 | `semantic_group`            | 장 단위 그룹 (예: 제1장 총칙)                                                                                            |
 | `merged_with`               | 짧은 조문을 다음 조문과 병합했을 때의 대상 조문 번호                                                                                 |
+| `merged_articles`           | 병합에 포함된 원본 조문 번호 목록 (ChunkNode/ metadata_json)                                                                         |
 
 
 ### 3.3 단편 조문 병합
 
-- **PARENT_MIN = 200**: 조문 본문 길이가 200자 미만이면 **다음 조문과 병합**하여 하나의 ARTICLE로 저장.
+- **PARENT_MIN = 120**: 조문 본문 길이가 120자 미만이면 **다음 조문과 병합**하여 하나의 ARTICLE로 저장. (과거 200이었으나, 조문 헤더 파싱 보정 후 본문에 ① 등이 포함되며 짧은 조문이 많아져 120으로 조정됨.)
 - 마지막 조문만 짧을 경우 **이전 ARTICLE에 흡수**.
-- 병합된 경우 `merged_with`에 다음 조문 번호를 넣어 추적.
+- 병합된 경우 `merged_with`에 다음 조문 번호를 넣고, `merged_articles`(및 metadata_json)에 병합된 원본 조문 목록을 추적.
 
 ### 3.4 CLAUSE 생성 조건
 
@@ -148,6 +149,7 @@ flowchart LR
 - **임베딩 모델**: Azure/OpenAI `text-embedding-3-large` (3072차원, 설정으로 변경 가능).
 - **임베딩 대상**: `search_text`(본문 위주). `chunk_text`가 아닌 `search_text`를 사용해 검색 품질을 높인다.
 - **search_tsv**: PostgreSQL `to_tsvector('simple', ...)`로 BM25(ts_rank_cd) 검색에 사용.
+- **search_tokens**(선택): 컬럼이 있으면 동의어·조사 제거 확장 토큰(`_expand_tokens(search_text)`)을 저장해 BM25 확장 매칭에 활용.
 
 > 참고: `[services/chunking_pipeline.py](services/chunking_pipeline.py)` — `run_chunking_pipeline()`, `save_hierarchical_chunks()`, `embed_texts()`
 
@@ -214,7 +216,7 @@ flowchart LR
 최근 `policy_service`에 **단계형 파이프라인 + 구조화된 trace**를 추가해, “왜 이 조항이 채택됐는지”를 운영/설명회에서 그대로 보여줄 수 있게 했다.
 
 - **단계 분리**: `rewrite_query → retrieve_candidates → fuse_candidates → rerank_candidates → finalize_context`
-- **호환성 유지**: `search_policy_chunks()` 기본 반환은 기존과 동일(리스트), `debug=True`일 때만 `chunks + trace` 반환
+- **호환성 유지**: `search_policy_chunks()` 기본 반환은 기존과 동일(리스트), `debug=True`일 때만 `{"chunks", "trace"}` 반환. trace가 항상 필요하면 `search_policy_chunks_with_trace()` 사용.
 - **추적 포인트**:
   - search-level: `selection_stage`, `fallback_used`, `fallback_reason`, `reranker_used`, `reranker_type`, `weights`, `decision_summary`
   - chunk-level: `bm25_candidates`, `dense_candidates`, `fused_candidates`, `reranked_candidates`, `selected_candidates`
@@ -226,8 +228,8 @@ flowchart LR
 - “이번 건은 `fallback_used=false`라서 BM25+Dense+RRF 경로에서 정상 선택됐습니다.”
 - “선정된 조항별로 `selected_by`, `selection_stage`, `scores`가 남아 재현성과 감사추적이 가능합니다.”
 
-> 참고: `[services/policy_service.py](services/policy_service.py)` — `search_policy_chunks()`, `_search_bm25()`, `_search_dense()`, `_reciprocal_rank_fusion()`, `_enrich_with_parent_context()`  
-> 참고: `[services/retrieval_quality.py](services/retrieval_quality.py)` — `rerank_with_cross_encoder()`  
+> 참고: `[services/policy_service.py](services/policy_service.py)` — `search_policy_chunks()`, `search_policy_chunks_with_trace()`, `_rewrite_query()`, `_retrieve_candidates()`, `_fuse_candidates()`, `_rerank_candidates()`, `_finalize_context()`, `_enrich_with_parent_context()`, `normalize_policy_parent_title`(policy_ref_normalizer)  
+> 참고: `[services/retrieval_quality.py](services/retrieval_quality.py)` — `rerank_with_cross_encoder()` (기본 모델: Dongjin-kr/ko-reranker)  
 > 참고: `[agent/agent_tools.py](agent/agent_tools.py)` — policy_rulebook_probe에서 `search_policy_chunks` 호출 및 조문별 1건 채택
 
 ---
@@ -248,7 +250,8 @@ flowchart LR
 | version, effective_from, effective_to               | 문서 버전·시행일                                                     |
 | embedding_az (또는 설정 컬럼)                             | pgvector, cosine 검색용                                          |
 | search_tsv                                          | tsvector, BM25용                                               |
-| metadata_json                                       | semantic_group, merged_with, **regulation_item**(ITEM 호 마커) 등 |
+| search_tokens                                       | (선택) 동의어 확장·BM25 확장 매칭용 토큰 문자열. 컬럼 존재 시 저장.                              |
+| metadata_json                                       | semantic_group, merged_with, merged_articles, **regulation_item**(ITEM 호 마커) 등 |
 | is_active                                           | 재색인 시 기존 청크 false 처리                                          |
 
 
@@ -374,6 +377,7 @@ sequenceDiagram
 | 8   | Dense/Legacy `metadata_json` 누락 | 보완 반영  | Dense/legacy 조회 모두 `metadata_json` 포함 → ITEM 마커 추적 안정화                                           |
 | 9   | 호 패턴 확장                         | 보완 반영  | `1)`, `가)` 형식 추가 지원                                                                              |
 | 10  | 단항+호 구조 잠재 리스크                  | 운영 가이드 | 현재 규정집에는 해당 구조 없음(발생 시 청킹 미리보기로 점검 권장)                                                           |
+| 11  | PARENT_MIN 조정                          | 보완 반영  | 조문 헤더 파싱 보정 후 본문에 ① 포함 등으로 짧은 조문 증가 → 200 → 120으로 조정. (`rag_chunk_lab_service.PARENT_MIN`)          |
 
 
 ---
