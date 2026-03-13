@@ -2091,17 +2091,6 @@ def render_hitl_panel(latest_bundle: dict[str, Any], *, vkey: str | None = None)
     bundle_for_hitl = dict(latest_bundle)
     bundle_for_hitl["hitl_request"] = hitl_request
     form_keys = _prime_hitl_form_state(run_id, bundle_for_hitl)
-    # 빈 목록일 때는 카드 클릭 오버레이용(음수 마진) CSS를 주입하지 않는다.
-    # 전역/잔여 스타일 간섭을 줄여 empty-state가 카드 내부 정상 위치에 고정되도록 한다.
-    filtered = grouped.get(active_filter) or []
-    if not filtered:
-        with stylable_container(
-            key=f"workspace_case_empty_state_{active_filter}",
-            css_styles="""{margin-top: 10px; max-width: 100%; overflow: hidden;}""",
-        ):
-            render_empty_state("표시할 케이스가 없습니다.")
-        return
-
     st.markdown(
         """
         <style>
