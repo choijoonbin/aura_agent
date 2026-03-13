@@ -2980,27 +2980,31 @@ def render_workspace_case_queue(items: list[dict[str, Any]], selected_key: str |
         unsafe_allow_html=True,
     )
 
-    k1, k2, k3, k4 = st.columns(4)
-    with k1:
-        key = "case_kpi_sel_all" if active_filter == "전체" else "case_kpi_all"
-        if st.button(f"전체 케이스\n{len(items)}", key=key):
-            st.session_state["mt_case_filter"] = "전체"
-            st.rerun()
-    with k2:
-        key = "case_kpi_sel_review" if active_filter == "검토 필요" else "case_kpi_review"
-        if st.button(f"검토 필요\n{review_count}", key=key):
-            st.session_state["mt_case_filter"] = "검토 필요"
-            st.rerun()
-    with k3:
-        key = "case_kpi_sel_done" if active_filter == "완료" else "case_kpi_done"
-        if st.button(f"완료\n{completed_count}", key=key):
-            st.session_state["mt_case_filter"] = "완료"
-            st.rerun()
-    with k4:
-        key = "case_kpi_sel_hitl" if active_filter == "HITL 대기" else "case_kpi_hitl"
-        if st.button(f"HITL 대기\n{hitl_count}", key=key):
-            st.session_state["mt_case_filter"] = "HITL 대기"
-            st.rerun()
+    with stylable_container(
+        key=f"workspace_case_kpi_row_{active_filter}",
+        css_styles="""{margin: 0 0 16px 0; padding: 0;}""",
+    ):
+        k1, k2, k3, k4 = st.columns(4)
+        with k1:
+            key = "case_kpi_sel_all" if active_filter == "전체" else "case_kpi_all"
+            if st.button(f"전체 케이스\n{len(items)}", key=key):
+                st.session_state["mt_case_filter"] = "전체"
+                st.rerun()
+        with k2:
+            key = "case_kpi_sel_review" if active_filter == "검토 필요" else "case_kpi_review"
+            if st.button(f"검토 필요\n{review_count}", key=key):
+                st.session_state["mt_case_filter"] = "검토 필요"
+                st.rerun()
+        with k3:
+            key = "case_kpi_sel_done" if active_filter == "완료" else "case_kpi_done"
+            if st.button(f"완료\n{completed_count}", key=key):
+                st.session_state["mt_case_filter"] = "완료"
+                st.rerun()
+        with k4:
+            key = "case_kpi_sel_hitl" if active_filter == "HITL 대기" else "case_kpi_hitl"
+            if st.button(f"HITL 대기\n{hitl_count}", key=key):
+                st.session_state["mt_case_filter"] = "HITL 대기"
+                st.rerun()
     filtered = grouped.get(active_filter) or []
     if not filtered:
         render_empty_state("표시할 케이스가 없습니다.")
@@ -3015,7 +3019,7 @@ def render_workspace_case_queue(items: list[dict[str, Any]], selected_key: str |
       max-height: 66vh !important;
       overflow-y: auto !important;
       padding-right: 6px !important;
-      margin-top: 0 !important;
+      margin-top: 18px !important;
       min-height: 0 !important;
     }
     /* 카드 컨테이너 — 시각적 카드 외형 제공, 좌우 패딩 최소화 */
@@ -3045,7 +3049,7 @@ def render_workspace_case_queue(items: list[dict[str, Any]], selected_key: str |
     }
     /* 버튼 element-container — 배지 바로 아래까지 끌어올려 공백 최소화 */
     [class*="st-key-case_btn_"] [data-testid="element-container"]:last-child {
-      margin-top: -12px !important;
+      margin-top: 0 !important;
       position: relative !important;
       z-index: 1 !important;
     }
