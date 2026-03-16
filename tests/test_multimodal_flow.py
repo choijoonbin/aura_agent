@@ -343,6 +343,102 @@ def test_save_custom_demo_case_no_image(tmp_path):
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Sprint 2: 이미지-텍스트 교차 검증 (_check_visual_consistency)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def _make_entity(label: str, text: str, confidence: float = 0.95) -> dict:
+    return {"label": label, "text": text, "confidence": confidence, "bbox": {"ymin": 0, "xmin": 0, "ymax": 100, "xmax": 100}}
+
+
+def test_visual_consistency_all_match():
+    """금액·가맹점·날짜 모두 일치 → score=100, issues 없음."""
+    from agent.langgraph_nodes_review import _check_visual_consistency
+
+    entities = [
+        _make_entity("amount_total", "97,042"),
+        _make_entity("merchant_name", "가온 식당"),
+        _make_entity("date_occurrence", "2026-03-14"),
+    ]
+    body = {"amount": 97042, "merchantName": "가온 식당", "occurredAt": "2026-03-14T19:30:00"}
+    score, issues = _check_visual_consistency(body, entities)
+    assert score == 100
+    assert issues == []
+
+
+def test_visual_consistency_amount_mismatch_critical():
+    """금액 5% 초과 불일치 → score=0, contradictory_evidence HIGH."""
+    from agent.langgraph_nodes_review import _check_visual_consistency
+
+    entities = [_make_entity("amount_total", "120,000")]
+    body = {"amount": 97042}
+    score, issues = _check_visual_consistency(body, entities)
+    assert score == 0
+    assert len(issues) == 1
+    assert issues[0].taxonomy == "contradictory_evidence"
+    assert issues[0].severity == "HIGH"
+    assert "금액" in issues[0].claim
+
+
+def test_visual_consistency_amount_within_tolerance():
+    """금액 5% 이내 편차 → score=100, issues 없음 (반올림 허용)."""
+    from agent.langgraph_nodes_review import _check_visual_consistency
+
+    entities = [_make_entity("amount_total", "97,100")]  # 0.06% 차이
+    body = {"amount": 97042}
+    score, issues = _check_visual_consistency(body, entities)
+    assert score == 100
+    assert issues == []
+
+
+def test_visual_consistency_merchant_mismatch():
+    """가맹점명 불일치 → score=50, contradictory_evidence MEDIUM."""
+    from agent.langgraph_nodes_review import _check_visual_consistency
+
+    entities = [_make_entity("merchant_name", "완전히다른식당")]
+    body = {"amount": 50000, "merchantName": "가온 식당"}
+    score, issues = _check_visual_consistency(body, entities)
+    assert score == 50
+    assert any(i.taxonomy == "contradictory_evidence" and i.severity == "MEDIUM" for i in issues)
+
+
+def test_visual_consistency_low_confidence_skipped():
+    """confidence < 0.6 엔티티는 비교 생략 → score=100, issues 없음."""
+    from agent.langgraph_nodes_review import _check_visual_consistency
+
+    entities = [_make_entity("amount_total", "999999", confidence=0.3)]
+    body = {"amount": 1000}
+    score, issues = _check_visual_consistency(body, entities)
+    assert score == 100
+    assert issues == []
+
+
+def test_visual_consistency_empty_entities():
+    """엔티티 없음 → score=100, issues 없음 (비교 생략)."""
+    from agent.langgraph_nodes_review import _check_visual_consistency
+
+    score, issues = _check_visual_consistency({"amount": 10000}, [])
+    assert score == 100
+    assert issues == []
+
+
+def test_visual_consistency_fidelity_update():
+    """visual_consistency_score < 현재 fidelity → fidelity 하향 조정."""
+    # 금액 불일치 시 visual_consistency_score=0, fidelity=min(기존, 0)=0
+    from agent.langgraph_nodes_review import _check_visual_consistency
+
+    entities = [_make_entity("amount_total", "500,000")]
+    body = {"amount": 10000}
+    score, issues = _check_visual_consistency(body, entities)
+    assert score == 0
+
+    # min(기존fidelity=75, visual_score=0) = 0
+    current_fidelity = 75
+    updated = min(current_fidelity, score)
+    assert updated == 0
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # 6. render_image_with_bboxes: 좌표 변환 정확성 (단위 테스트)
 # ──────────────────────────────────────────────────────────────────────────────
 

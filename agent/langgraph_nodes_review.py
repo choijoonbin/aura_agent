@@ -16,6 +16,7 @@ from agent.output_models import (
 logger = logging.getLogger(__name__)
 _WORD_RE = re.compile(r"[0-9A-Za-z가-힣]{2,}")
 _ARTICLE_RE = re.compile(r"제\s*(\d+)\s*조")
+_VISUAL_MIN_CONFIDENCE = 0.6  # 이 임계값 미만 엔티티는 비교 생략
 MAX_HITL_QUESTIONS = 2
 
 _UNSUPPORTED_TAXONOMY_BLOCKING = {
@@ -63,6 +64,137 @@ _EXCLUDED_REQUIRED_INPUT_KEYWORDS = (
     "소속 정보",
     "접대 목적",
 )
+
+
+def _parse_amount(text: Any) -> float | None:
+    """금액 문자열을 float으로 파싱. 콤마·₩·원·공백 제거."""
+    if text is None:
+        return None
+    try:
+        cleaned = re.sub(r"[,₩원\s]", "", str(text))
+        return float(cleaned) if cleaned else None
+    except (ValueError, TypeError):
+        return None
+
+
+def _normalize_merchant(text: Any) -> str:
+    """가맹점명 정규화: 공백 제거 + 소문자."""
+    return re.sub(r"\s+", "", str(text or "")).lower()
+
+
+def _extract_date_part(text: Any) -> str:
+    """날짜 문자열에서 YYYY-MM-DD 부분만 추출."""
+    m = re.search(r"\d{4}-\d{2}-\d{2}", str(text or ""))
+    return m.group(0) if m else ""
+
+
+def _check_visual_consistency(
+    body_evidence: dict[str, Any],
+    visual_audit_results: list[dict[str, Any]],
+) -> tuple[int, list["UnsupportedClaimIssue"]]:
+    """
+    body_evidence 텍스트 필드와 이미지에서 추출된 엔티티를 교차 비교.
+
+    비교 항목:
+      - amount_total  vs body_evidence["amount"]     → 5% 초과 편차 시 critical mismatch
+      - merchant_name vs body_evidence["merchantName"] → 상호명이 서로 포함되지 않으면 mismatch
+      - date_occurrence vs body_evidence["occurredAt"]  → 날짜 부분 불일치 시 mismatch
+
+    신뢰도(confidence) < _VISUAL_MIN_CONFIDENCE 인 엔티티는 비교를 건너뜁니다.
+
+    Returns:
+        (visual_consistency_score: int 0~100, issues: list[UnsupportedClaimIssue])
+        score=100: 이상 없음 / 50: 부분 불일치 / 0: 금액 불일치(critical)
+    """
+    if not visual_audit_results:
+        return 100, []
+
+    # label 별 첫 번째 엔티티 선택 (confidence 기준 정렬 후)
+    by_label: dict[str, dict[str, Any]] = {}
+    for ent in visual_audit_results:
+        label = str(ent.get("label") or "")
+        if label not in by_label or float(ent.get("confidence") or 0) > float(by_label[label].get("confidence") or 0):
+            by_label[label] = ent
+
+    issues: list[UnsupportedClaimIssue] = []
+    score = 100
+    amount_mismatch = False
+
+    # ── 금액 비교 ──────────────────────────────────────────────────────────────
+    ent_amount = by_label.get("amount_total")
+    if ent_amount and float(ent_amount.get("confidence") or 0) >= _VISUAL_MIN_CONFIDENCE:
+        extracted = _parse_amount(ent_amount.get("text"))
+        body_amt = _parse_amount(body_evidence.get("amount"))
+        if extracted is not None and body_amt is not None and extracted > 0:
+            ratio = abs(extracted - body_amt) / extracted
+            if ratio > 0.05:
+                amount_mismatch = True
+                issues.append(
+                    UnsupportedClaimIssue(
+                        claim=f"금액 불일치: 이미지 추출={ent_amount.get('text')} / 입력값={body_evidence.get('amount')}",
+                        taxonomy="contradictory_evidence",
+                        reason=(
+                            f"이미지에서 추출한 금액({ent_amount.get('text')})과 "
+                            f"입력 금액({body_evidence.get('amount')})의 편차가 "
+                            f"{ratio*100:.1f}%로 허용 범위(5%)를 초과합니다."
+                        ),
+                        severity="HIGH",
+                        covered=False,
+                        citation_count=0,
+                        supporting_articles=[],
+                    )
+                )
+
+    # ── 가맹점명 비교 ──────────────────────────────────────────────────────────
+    ent_merchant = by_label.get("merchant_name")
+    if ent_merchant and float(ent_merchant.get("confidence") or 0) >= _VISUAL_MIN_CONFIDENCE:
+        extracted_m = _normalize_merchant(ent_merchant.get("text"))
+        body_m = _normalize_merchant(body_evidence.get("merchantName") or body_evidence.get("merchant_name"))
+        if extracted_m and body_m:
+            if extracted_m not in body_m and body_m not in extracted_m:
+                issues.append(
+                    UnsupportedClaimIssue(
+                        claim=f"가맹점명 불일치: 이미지 추출={ent_merchant.get('text')} / 입력값={body_evidence.get('merchantName')}",
+                        taxonomy="contradictory_evidence",
+                        reason=(
+                            f"이미지에서 추출한 가맹점명({ent_merchant.get('text')})이 "
+                            f"입력 가맹점명({body_evidence.get('merchantName')})과 일치하지 않습니다."
+                        ),
+                        severity="MEDIUM",
+                        covered=False,
+                        citation_count=0,
+                        supporting_articles=[],
+                    )
+                )
+
+    # ── 날짜 비교 ──────────────────────────────────────────────────────────────
+    ent_date = by_label.get("date_occurrence")
+    if ent_date and float(ent_date.get("confidence") or 0) >= _VISUAL_MIN_CONFIDENCE:
+        extracted_d = _extract_date_part(ent_date.get("text"))
+        body_d = _extract_date_part(body_evidence.get("occurredAt") or body_evidence.get("date_occurrence"))
+        if extracted_d and body_d and extracted_d != body_d:
+            issues.append(
+                UnsupportedClaimIssue(
+                    claim=f"거래일자 불일치: 이미지 추출={extracted_d} / 입력값={body_d}",
+                    taxonomy="contradictory_evidence",
+                    reason=(
+                        f"이미지에서 추출한 날짜({extracted_d})와 "
+                        f"입력 날짜({body_d})가 일치하지 않습니다."
+                    ),
+                    severity="MEDIUM",
+                    covered=False,
+                    citation_count=0,
+                    supporting_articles=[],
+                )
+            )
+
+    # ── 점수 산정 ──────────────────────────────────────────────────────────────
+    if amount_mismatch:
+        score = 0
+    elif issues:
+        score = 50
+
+    return score, issues
 
 
 def _is_excluded_required_input(req: dict[str, Any]) -> bool:
@@ -523,6 +655,24 @@ async def critic_node_impl(
             ).model_dump()
         )
 
+    # ── Sprint 2: 이미지-텍스트 교차 검증 ────────────────────────────────────
+    visual_audit_results: list[dict[str, Any]] = state.get("visual_audit_results") or []
+    visual_consistency_score = 100
+    if visual_audit_results:
+        visual_consistency_score, visual_issues = _check_visual_consistency(
+            state["body_evidence"], visual_audit_results
+        )
+        if visual_issues:
+            logger.info(
+                "critic_node: 이미지-텍스트 모순 감지 %d건, visual_consistency_score=%d",
+                len(visual_issues), visual_consistency_score,
+            )
+            precheck_unsupported.extend(issue.model_dump() for issue in visual_issues)
+            if not critique.get("risk_of_overclaim"):
+                critique["risk_of_overclaim"] = True
+        else:
+            logger.info("critic_node: 이미지-텍스트 일치 확인 (visual_consistency_score=100)")
+
     review_audit = _build_review_audit_payload(
         state=state,
         verification_targets=verification_targets,
@@ -592,7 +742,8 @@ async def critic_node_impl(
             metadata={"reasoning": reasoning_text, "note_source": note_source, **critique},
         ).to_payload(),
     )
-    return {
+    # ── Sprint 2: fidelity = min(기존 fidelity, visual_consistency_score) ────
+    result: dict[str, Any] = {
         "critique": critique,
         "critic_output": critic_output_dict,
         "critic_loop_count": loop_count + 1 if replan_required else loop_count,
@@ -601,6 +752,21 @@ async def critic_node_impl(
         "last_node_summary": last_node_summary,
         "pending_events": pending,
     }
+    if visual_audit_results:
+        current_fidelity = int(state.get("fidelity") or 0)
+        updated_fidelity = min(current_fidelity, visual_consistency_score)
+        if updated_fidelity != current_fidelity:
+            logger.info(
+                "critic_node: fidelity 하향 조정 %d → %d (visual_consistency_score=%d)",
+                current_fidelity, updated_fidelity, visual_consistency_score,
+            )
+        # score_breakdown 과 최상위 fidelity 동기화
+        score_bd_updated = dict(state.get("score_breakdown") or {})
+        score_bd_updated["fidelity"] = updated_fidelity
+        score_bd_updated["visual_consistency_score"] = visual_consistency_score
+        result["fidelity"] = updated_fidelity
+        result["score_breakdown"] = score_bd_updated
+    return result
 
 
 async def verify_node_impl(

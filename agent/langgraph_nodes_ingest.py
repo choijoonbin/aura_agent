@@ -337,8 +337,14 @@ async def intake_node_impl(
             metadata={"reasoning": reasoning_text, "note_source": note_source, **flags},
         ).to_payload(),
     )
+    # Sprint 2: 증빙 이미지 분석 결과가 있으면 visual_audit_results로 전달 (API 재호출 없음)
+    visual_audit_results: list[dict[str, Any]] = list(state["body_evidence"].get("extracted_entities") or [])
+    if visual_audit_results:
+        logger.info("intake_node: visual_audit_results 로드 (%d 엔티티)", len(visual_audit_results))
+
     return {
         "flags": flags,
+        "visual_audit_results": visual_audit_results,
         "last_node_summary": last_node_summary,
         "pending_events": pending,
     }

@@ -215,6 +215,8 @@ class AgentState(TypedDict, total=False):
     evaluation_history: list[dict[str, Any]]
     # workspace.md: 이전 노드 결과 1줄 요약 (generate_working_note prev_result_summary용)
     last_node_summary: str
+    # Sprint 2: 증빙 이미지 추출 엔티티 (intake에서 body_evidence.extracted_entities를 읽어 세팅)
+    visual_audit_results: list[dict[str, Any]]
 
 
 def _format_occurred_at(value: Any) -> str:
