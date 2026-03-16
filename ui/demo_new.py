@@ -266,11 +266,12 @@ def render_demo_new_page() -> None:
             placeholder="예: 휴일 야간 식대",
             key="demo_new_field_bktxt",
         )
-        sgtxt_val = st.text_input(
-            "비고 (sgtxt)",
+        mcc_code_val = st.text_input(
+            "업종코드 (mcc_code)",
             value="",
-            placeholder="예: 야간 업무 관련",
-            key="demo_new_field_sgtxt",
+            placeholder="예: 5812 (음식점), 5813 (주점), 7011 (호텔)",
+            key="demo_new_field_mcc_code",
+            help="MCC 코드: 5812=일반음식점, 5813=주점/bar, 7011=숙박, 4722=여행사, 7992=골프",
         )
 
         # 사유 (review_questions 기반)
@@ -317,7 +318,7 @@ def render_demo_new_page() -> None:
                 date_occ=date_val,
                 merchant=merchant_val,
                 bktxt=bktxt_val,
-                sgtxt=sgtxt_val,
+                mcc_code=mcc_code_val,
                 user_reason=user_reason_val,
                 image_bytes=st.session_state.get("demo_new_image_bytes"),
                 uploaded_filename=uploaded_file.name if uploaded_file else None,
@@ -339,7 +340,7 @@ def _handle_generate(
     date_occ: str,
     merchant: str,
     bktxt: str,
-    sgtxt: str,
+    mcc_code: str,
     user_reason: str,
     image_bytes: bytes | None,
     uploaded_filename: str | None,
@@ -355,7 +356,7 @@ def _handle_generate(
         "date_occurrence": date_occ.strip(),
         "merchant_name": merchant.strip(),
         "bktxt": bktxt.strip(),
-        "sgtxt": sgtxt.strip(),
+        "mcc_code": mcc_code.strip(),
         "user_reason": user_reason.strip(),
         "review_questions": review_questions,
         "review_answers": [user_reason.strip()],
