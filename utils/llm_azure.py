@@ -226,7 +226,7 @@ def analyze_visual_evidence(
     from agent.output_models import MultimodalAuditResult, VisualBox, VisualEntity
 
     effective_model = model or os.getenv("MULTIMODAL_MODEL", "gpt-4o")
-    timeout_sec = (timeout_ms or int(os.getenv("MULTIMODAL_TIMEOUT_MS", "15000"))) / 1000.0
+    timeout_sec = (timeout_ms or int(os.getenv("MULTIMODAL_TIMEOUT_MS", "45000"))) / 1000.0
 
     try:
         from utils.config import settings
