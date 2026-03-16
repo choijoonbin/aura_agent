@@ -138,9 +138,18 @@ def get_paddle_ocr(lang: str = "korean") -> Any:
     last_exc: Exception | None = None
 
     if major >= 3:
-        # ── 3.x: use_angle_cls / use_gpu / show_log 파라미터 제거됨 ──────────
-        # device='cpu' 사용; 일부 빌드에서 지원 안 할 수 있으므로 순차 시도
+        # ── 3.x: 무거운 전처리 모델 비활성화 ────────────────────────────────
+        # UVDoc(문서 왜곡 보정), 문서/텍스트 방향 감지는 CPU에서 매우 느림.
+        # 영수증 OCR에는 검출(det) + 인식(rec)만으로 충분.
+        _FAST_KWARGS = {
+            "lang": lang,
+            "device": "cpu",
+            "use_doc_orientation_classify": False,  # PP-LCNet_x1_0_doc_ori 제거
+            "use_doc_unwarping": False,              # UVDoc 제거 (가장 무거움)
+            "use_textline_orientation": False,       # PP-LCNet_x1_0_textline_ori 제거
+        }
         for kwargs in [
+            _FAST_KWARGS,
             {"lang": lang, "device": "cpu"},
             {"lang": lang},
         ]:
