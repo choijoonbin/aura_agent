@@ -274,6 +274,52 @@ def generate_preview_questions(case_type: str, case_data: dict[str, Any]) -> dic
     }
 
 
+def _validate_beta_payload(payload: dict[str, Any], image_bytes: bytes) -> None:
+    """
+    서버단 필수값 검증. UI 우회 저장 방지.
+    비정상 케이스는 증빙 이미지 필수.
+
+    Raises:
+        ValueError: 필수값 누락 또는 형식 오류 시.
+    """
+    errors: list[str] = []
+
+    # 금액 검증
+    amount_str = (payload.get("amount_total") or "").replace(",", "").strip()
+    try:
+        if not (amount_str and float(amount_str) > 0):
+            errors.append("amount_total: 0 초과 숫자 필요")
+    except (ValueError, TypeError):
+        errors.append("amount_total: 유효한 숫자 필요")
+
+    # 일자 검증
+    date_str = (payload.get("date_occurrence") or "").strip()
+    try:
+        datetime.strptime(date_str, "%Y-%m-%d")
+    except (ValueError, AttributeError):
+        errors.append("date_occurrence: YYYY-MM-DD 형식 필요")
+
+    # 가맹점명 검증
+    if not (payload.get("merchant_name") or "").strip():
+        errors.append("merchant_name: 필수 입력")
+
+    # 적요 검증
+    if not (payload.get("bktxt") or "").strip():
+        errors.append("bktxt: 필수 입력")
+
+    # 사유 검증
+    if not (payload.get("user_reason") or "").strip():
+        errors.append("user_reason: 필수 입력")
+
+    # 비정상 케이스: 증빙 이미지 필수
+    case_type = (payload.get("case_type") or "").strip()
+    if case_type and case_type != "NORMAL_BASELINE" and not image_bytes:
+        errors.append(f"image: 비정상 케이스({case_type})는 증빙 이미지 필수")
+
+    if errors:
+        raise ValueError("Beta payload 검증 실패: " + "; ".join(errors))
+
+
 def _create_beta_voucher(
     db: Session,
     payload: dict[str, Any],
@@ -426,6 +472,9 @@ def save_custom_demo_case(
         {"case_uuid": str, "image_path": str, "meta_path": str, "created_at": str}
         db 제공 시 "voucher_key" 추가 포함.
     """
+    # 서버단 필수값 검증 (UI 우회 저장 방지)
+    _validate_beta_payload(payload, image_bytes)
+
     case_uuid = str(_uuid_module.uuid4())
     save_dir = _EVIDENCE_UPLOAD_ROOT / case_uuid
     save_dir.mkdir(parents=True, exist_ok=True)
@@ -467,7 +516,10 @@ def save_custom_demo_case(
         "mcc_code": payload.get("mcc_code", ""),
         "case_type": case_type,
         "review_questions": payload.get("review_questions") or q_data["review_questions"],
+        # review_answers는 단일 통합 사유(user_reason)로 수집됨.
+        # answer_type="combined"으로 명시하여 후속 처리가 단일 통합답변으로 해석하도록 함.
         "review_answers": payload.get("review_answers", []),
+        "answer_type": "combined",
         "image_path": image_path,
         "memo": {
             "bktxt": payload.get("bktxt", ""),

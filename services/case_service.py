@@ -37,12 +37,25 @@ def _case_id_from_voucher(tenant_id: int, bukrs: str, belnr: str, gjahr: str) ->
 
 
 def _merchant_name_for_header(header: FiDocHeader) -> str:
-    """DEMO 전표는 시나리오 가맹점명, 그 외는 bktxt/xblnr."""
+    """DEMO/BETA 전표는 시나리오 가맹점명, 그 외는 bktxt/xblnr."""
     xblnr = header.xblnr or ""
     if xblnr.startswith("DEMO-"):
         scenario = xblnr.split("-")[1] if len(xblnr.split("-")) >= 2 else None
         profile = SCENARIO_PROFILES.get(scenario) if scenario else None
         return profile["merchant_name"] if profile else (header.bktxt or xblnr)
+    if xblnr.startswith("BETA-"):
+        # xblnr 형식: "BETA-{case_type[:8]}-{belnr}"
+        parts = xblnr.split("-")
+        case_type = parts[1] if len(parts) >= 2 else None
+        # case_type이 8자리로 잘렸을 수 있으므로 prefix 매칭
+        if case_type:
+            matched = next(
+                (k for k in SCENARIO_PROFILES if k.startswith(case_type) or case_type.startswith(k[:8])),
+                None,
+            )
+            if matched:
+                return SCENARIO_PROFILES[matched]["merchant_name"]
+        return header.bktxt or xblnr
     return header.bktxt or header.xblnr or ""
 
 

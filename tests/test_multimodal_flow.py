@@ -656,6 +656,7 @@ def test_save_custom_demo_case_stores_time_occurrence(tmp_path):
     svc._EVIDENCE_UPLOAD_ROOT = tmp_path / "evidence_uploads"
 
     try:
+        dummy_image = b"\x89PNG\r\n\x1a\n" + b"\x00" * 50  # 비정상 케이스: 이미지 필수
         result = svc.save_custom_demo_case(
             payload={
                 "case_type": "HOLIDAY_USAGE",
@@ -666,8 +667,8 @@ def test_save_custom_demo_case_stores_time_occurrence(tmp_path):
                 "bktxt": "휴일 야간 식대",
                 "user_reason": "업무상 불가피한 상황",
             },
-            image_bytes=b"",
-            filename="",
+            image_bytes=dummy_image,
+            filename="receipt.png",
         )
 
         meta_path = svc._EVIDENCE_UPLOAD_ROOT / result["case_uuid"] / "meta.json"
@@ -1004,3 +1005,279 @@ def test_fix_amount_same_y_line_trusted():
     # 같은 줄 올바른 값 유지
     assert amount_e.text == "68000"
     assert amount_e.bbox.ymin < 800  # ymin=805/1100*1000 ≈ 732
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Beta 경로 회귀 테스트 (DB 전표 생성 + 스크리닝 + 서버 검증)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def test_create_beta_voucher_calls_db_and_screening():
+    """_create_beta_voucher(): FiDocHeader/FiDocItem add 및 run_case_screening 호출 확인."""
+    from unittest.mock import MagicMock, patch
+
+    import services.demo_data_service as svc
+
+    mock_db = MagicMock()
+    mock_db.scalar.return_value = 0  # 기존 전표 없음
+
+    screening_result = {
+        "case_type": "HOLIDAY_USAGE",
+        "severity": "HIGH",
+        "score": 85,
+        "reason_text": "휴일 사용 의심",
+        "voucher_key": "1000-BH00000001-2026",
+        "screening_meta": None,
+    }
+
+    with patch("services.case_service.run_case_screening", return_value=screening_result):
+        voucher_key = svc._create_beta_voucher(
+            db=mock_db,
+            payload={
+                "case_type": "HOLIDAY_USAGE",
+                "amount_total": "97042",
+                "date_occurrence": "2026-03-14",
+                "time_occurrence": "19:45",
+                "merchant_name": "가온 식당",
+                "bktxt": "휴일 야간 식대",
+            },
+            case_type="HOLIDAY_USAGE",
+            case_uuid="test-uuid-holiday",
+        )
+
+    # voucher_key 형식 확인
+    assert voucher_key.startswith("1000-BH"), f"unexpected voucher_key: {voucher_key}"
+    assert "2026" in voucher_key
+
+    # FiDocHeader + FiDocItem 2회 add
+    assert mock_db.add.call_count == 2
+    # flush → commit 순서
+    mock_db.flush.assert_called_once()
+    mock_db.commit.assert_called_once()
+
+    # FiDocHeader 파라미터 확인
+    header_call_args = mock_db.add.call_args_list[0][0][0]
+    assert header_call_args.hr_status == "LEAVE"   # HOLIDAY_USAGE 프로파일
+    assert header_call_args.mcc_code == "5813"
+    assert header_call_args.budget_exceeded_flag == "N"
+    assert header_call_args.blart == "SA"
+    assert header_call_args.doc_source == "BETA"
+
+    # FiDocItem 파라미터 확인
+    item_call_args = mock_db.add.call_args_list[1][0][0]
+    assert item_call_args.wrbtr == 97042.0
+
+
+def test_create_beta_voucher_normal_baseline_uses_profile_defaults():
+    """NORMAL_BASELINE: SCENARIO_PROFILES 기본값(WORK/5816/N) 사용 확인."""
+    from unittest.mock import MagicMock, patch
+
+    import services.demo_data_service as svc
+
+    mock_db = MagicMock()
+    mock_db.scalar.return_value = 0
+
+    with patch("services.case_service.run_case_screening", return_value={
+        "case_type": "NORMAL", "severity": "LOW", "score": 10,
+        "reason_text": "정상", "voucher_key": "1000-BN00000001-2026", "screening_meta": None,
+    }):
+        voucher_key = svc._create_beta_voucher(
+            db=mock_db,
+            payload={
+                "case_type": "NORMAL_BASELINE",
+                "amount_total": "15000",
+                "date_occurrence": "2026-03-17",
+                "time_occurrence": "12:00",
+                "merchant_name": "일반 식당",
+                "bktxt": "점심 식대",
+            },
+            case_type="NORMAL_BASELINE",
+            case_uuid="test-uuid-normal",
+        )
+
+    assert voucher_key.startswith("1000-BN")
+    header = mock_db.add.call_args_list[0][0][0]
+    assert header.hr_status == "WORK"
+    assert header.mcc_code == "5816"
+    assert header.budget_exceeded_flag == "N"
+
+
+def test_create_beta_voucher_amount_fallback_on_invalid():
+    """amount_total 파싱 불가 시 시나리오 기본값 사용."""
+    from unittest.mock import MagicMock, patch
+
+    import services.demo_data_service as svc
+    from services.demo_data_service import SCENARIO_PROFILES
+
+    mock_db = MagicMock()
+    mock_db.scalar.return_value = 0
+
+    with patch("services.case_service.run_case_screening", return_value={
+        "case_type": "LIMIT_EXCEED", "severity": "HIGH", "score": 90,
+        "reason_text": "한도 초과", "voucher_key": "1000-BL00000001-2026", "screening_meta": None,
+    }):
+        svc._create_beta_voucher(
+            db=mock_db,
+            payload={
+                "case_type": "LIMIT_EXCEED",
+                "amount_total": "abc",          # 파싱 불가
+                "date_occurrence": "2026-03-17",
+                "merchant_name": "고액 식당",
+                "bktxt": "접대비",
+            },
+            case_type="LIMIT_EXCEED",
+            case_uuid="test-uuid-limit",
+        )
+
+    item = mock_db.add.call_args_list[1][0][0]
+    lo, hi = SCENARIO_PROFILES["LIMIT_EXCEED"]["amount_range"]
+    assert lo <= item.wrbtr <= hi, f"fallback amount should be in range {lo}~{hi}, got {item.wrbtr}"
+
+
+def test_validate_beta_payload_passes_valid():
+    """모든 필수값이 있으면 검증 통과."""
+    from services.demo_data_service import _validate_beta_payload
+
+    _validate_beta_payload(
+        payload={
+            "case_type": "HOLIDAY_USAGE",
+            "amount_total": "97042",
+            "date_occurrence": "2026-03-14",
+            "merchant_name": "가온 식당",
+            "bktxt": "휴일 야간 식대",
+            "user_reason": "업무상 불가피",
+        },
+        image_bytes=b"\x89PNG",
+    )  # 예외 없으면 통과
+
+
+def test_validate_beta_payload_raises_on_missing_amount():
+    """amount_total 누락 → ValueError."""
+    from services.demo_data_service import _validate_beta_payload
+
+    with pytest.raises(ValueError, match="amount_total"):
+        _validate_beta_payload(
+            payload={
+                "case_type": "HOLIDAY_USAGE",
+                "amount_total": "",
+                "date_occurrence": "2026-03-14",
+                "merchant_name": "가온 식당",
+                "bktxt": "휴일 야간 식대",
+                "user_reason": "업무 목적",
+            },
+            image_bytes=b"\x89PNG",
+        )
+
+
+def test_validate_beta_payload_raises_abnormal_no_image():
+    """비정상 케이스에서 이미지 없으면 → ValueError."""
+    from services.demo_data_service import _validate_beta_payload
+
+    with pytest.raises(ValueError, match="이미지"):
+        _validate_beta_payload(
+            payload={
+                "case_type": "HOLIDAY_USAGE",
+                "amount_total": "50000",
+                "date_occurrence": "2026-03-14",
+                "merchant_name": "가온 식당",
+                "bktxt": "휴일 야간 식대",
+                "user_reason": "업무 목적",
+            },
+            image_bytes=b"",  # 이미지 없음
+        )
+
+
+def test_validate_beta_payload_normal_baseline_allows_no_image():
+    """NORMAL_BASELINE은 이미지 없어도 저장 가능."""
+    from services.demo_data_service import _validate_beta_payload
+
+    _validate_beta_payload(
+        payload={
+            "case_type": "NORMAL_BASELINE",
+            "amount_total": "15000",
+            "date_occurrence": "2026-03-17",
+            "merchant_name": "일반 식당",
+            "bktxt": "점심 식대",
+            "user_reason": "정상 업무",
+        },
+        image_bytes=b"",  # 이미지 없어도 OK
+    )
+
+
+def test_save_custom_demo_case_rejects_invalid_payload(tmp_path):
+    """서버단 검증: 비정상 케이스에서 이미지 없으면 저장 실패."""
+    import services.demo_data_service as svc
+
+    original_root = svc._EVIDENCE_UPLOAD_ROOT
+    svc._EVIDENCE_UPLOAD_ROOT = tmp_path / "evidence_uploads"
+
+    try:
+        with pytest.raises(ValueError, match="이미지"):
+            svc.save_custom_demo_case(
+                payload={
+                    "case_type": "LIMIT_EXCEED",
+                    "amount_total": "500000",
+                    "date_occurrence": "2026-03-17",
+                    "merchant_name": "고액 식당",
+                    "bktxt": "접대비",
+                    "user_reason": "업무 목적",
+                },
+                image_bytes=b"",
+                filename="",
+            )
+    finally:
+        svc._EVIDENCE_UPLOAD_ROOT = original_root
+
+
+def test_save_custom_demo_case_meta_contains_answer_type(tmp_path):
+    """meta.json에 answer_type='combined'이 기록되어야 한다."""
+    import services.demo_data_service as svc
+
+    original_root = svc._EVIDENCE_UPLOAD_ROOT
+    svc._EVIDENCE_UPLOAD_ROOT = tmp_path / "evidence_uploads"
+
+    try:
+        result = svc.save_custom_demo_case(
+            payload={
+                "case_type": "NORMAL_BASELINE",
+                "amount_total": "15000",
+                "date_occurrence": "2026-03-17",
+                "merchant_name": "일반 식당",
+                "bktxt": "점심 식대",
+                "user_reason": "정상 업무",
+            },
+            image_bytes=b"",
+            filename="",
+        )
+        meta = json.loads((tmp_path / "evidence_uploads" / result["case_uuid"] / "meta.json").read_text())
+        assert meta.get("answer_type") == "combined"
+    finally:
+        svc._EVIDENCE_UPLOAD_ROOT = original_root
+
+
+def test_merchant_name_for_header_beta_prefix():
+    """_merchant_name_for_header(): BETA- xblnr → SCENARIO_PROFILES 가맹점명 반환."""
+    from unittest.mock import MagicMock
+
+    from services.case_service import _merchant_name_for_header
+
+    header = MagicMock()
+    header.xblnr = "BETA-HOLIDAY_-BH00000001"
+    header.bktxt = "휴일 야간 식대를 위한 시연 데이터"
+
+    name = _merchant_name_for_header(header)
+    assert name == "가온 식당", f"expected '가온 식당', got {name!r}"
+
+
+def test_merchant_name_for_header_beta_limit_exceed():
+    """BETA-LIMIT_EX- xblnr → '고액 식대' 반환."""
+    from unittest.mock import MagicMock
+
+    from services.case_service import _merchant_name_for_header
+
+    header = MagicMock()
+    header.xblnr = "BETA-LIMIT_EX-BL00000001"
+    header.bktxt = "고액 접대비를 위한 시연 데이터"
+
+    name = _merchant_name_for_header(header)
+    assert name == "고액 식대", f"expected '고액 식대', got {name!r}"
