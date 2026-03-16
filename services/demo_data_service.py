@@ -147,6 +147,15 @@ _FIXED_WEEKEND_DATE = date(2026, 3, 14)  # 2026-03-14 (토)
 _FIXED_OCCUR_TIME = time(19, 45, 0)
 _FIXED_AMOUNT_KRW = 97042
 
+# Beta 경로 belnr 접두사 (Legacy와 구별: H/L/P/U/N → BH/BL/BP/BU/BN)
+_BETA_BELNR_PREFIX: dict[str, str] = {
+    "HOLIDAY_USAGE": "BH",
+    "LIMIT_EXCEED": "BL",
+    "PRIVATE_USE_RISK": "BP",
+    "UNUSUAL_PATTERN": "BU",
+    "NORMAL_BASELINE": "BN",
+}
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Beta: 시연 데이터 생성 서비스 (기존 seed 로직과 분리된 독립 경로)
@@ -265,10 +274,143 @@ def generate_preview_questions(case_type: str, case_data: dict[str, Any]) -> dic
     }
 
 
+def _create_beta_voucher(
+    db: Session,
+    payload: dict[str, Any],
+    case_type: str,
+    case_uuid: str,
+) -> str:
+    """
+    Beta 경로 전용: FiDocHeader/FiDocItem DB 전표를 생성하고 스크리닝을 수행한다.
+
+    - 정책 필드(hr_status, mcc_code, budget_flag, blart, waers)는 SCENARIO_PROFILES 기본값 사용.
+    - 이미지 추출 필드(amount, merchant, occurredAt)는 payload 값 우선, 실패 시 시나리오 기본값 사용.
+
+    Returns:
+        voucher_key (예: "1000-BH000000001-2026")
+    """
+    from services.case_service import run_case_screening
+
+    tenant_id = settings.default_tenant_id
+    user_id = settings.default_user_id
+    profile = SCENARIO_PROFILES.get(case_type)
+    if not profile:
+        raise ValueError(f"_create_beta_voucher: unknown case_type={case_type!r}")
+
+    # 날짜 파싱 (payload 우선, 실패 시 시나리오 기본값)
+    try:
+        budat = date.fromisoformat(payload.get("date_occurrence", "").strip())
+    except (ValueError, TypeError, AttributeError):
+        budat = _next_day(profile["day_mode"])
+    gjahr_str = str(budat.year)
+
+    # 시간 파싱 (payload 우선, 실패 시 시나리오 기본값)
+    time_str = (payload.get("time_occurrence") or "").strip()
+    cputm: time | None = None
+    if time_str:
+        for fmt in ("%H:%M", "%H:%M:%S"):
+            try:
+                cputm = datetime.strptime(time_str, fmt).time()
+                break
+            except ValueError:
+                continue
+    if cputm is None:
+        cputm = time(
+            hour=random.choice(profile["hour_candidates"]),
+            minute=random.randint(0, 59),
+            second=0,
+        )
+
+    # 금액 파싱 (payload 우선, 실패 시 시나리오 기본값)
+    amount_str = (payload.get("amount_total") or "").replace(",", "").strip()
+    try:
+        amount_krw = float(amount_str)
+        if amount_krw <= 0:
+            raise ValueError("non-positive amount")
+    except (ValueError, TypeError):
+        amount_krw = float(random.randint(*profile["amount_range"]))
+
+    # belnr 생성: 접두사 + 8자리 순번 (= 10자리)
+    beta_prefix = _BETA_BELNR_PREFIX.get(case_type, "BX")
+    existing_count = db.scalar(
+        select(func.count(FiDocHeader.belnr)).where(
+            FiDocHeader.tenant_id == tenant_id,
+            FiDocHeader.bukrs == "1000",
+            FiDocHeader.belnr.like(f"{beta_prefix}%"),
+            FiDocHeader.gjahr == gjahr_str,
+        )
+    ) or 0
+    seq = existing_count + 1
+    belnr = f"{beta_prefix}{seq:08d}"
+
+    # bktxt / sgtxt
+    bktxt = (payload.get("bktxt") or "").strip()
+    if not bktxt:
+        bktxt = f"{profile['label']}{_eul_reul(profile['label'])} 위한 시연 데이터 ({belnr})"
+    sgtxt = (payload.get("sgtxt") or "").strip() or profile.get("item_text", "")
+    xblnr = f"BETA-{case_type[:8]}-{belnr}"[:30]
+
+    now = datetime.now(timezone.utc)
+    header = FiDocHeader(
+        tenant_id=tenant_id,
+        bukrs="1000",
+        belnr=belnr,
+        gjahr=gjahr_str,
+        user_id=user_id,
+        doc_source="BETA",
+        budat=budat,
+        cpudt=budat,
+        cputm=cputm,
+        blart=profile["blart"],
+        waers="KRW",
+        bktxt=bktxt,
+        xblnr=xblnr,
+        intended_risk_type=None,
+        hr_status=profile["hr_status"],
+        mcc_code=profile["mcc_code"],
+        budget_exceeded_flag=profile["budget_flag"],
+        created_at=now,
+        updated_at=now,
+        created_by=user_id,
+        updated_by=user_id,
+    )
+    item = FiDocItem(
+        tenant_id=tenant_id,
+        bukrs="1000",
+        belnr=belnr,
+        gjahr=gjahr_str,
+        buzei="001",
+        hkont="0000601000",
+        wrbtr=amount_krw,
+        waers="KRW",
+        lifnr="C1001",
+        sgtxt=sgtxt,
+    )
+    db.add(header)
+    db.add(item)
+
+    voucher_key = f"1000-{belnr}-{gjahr_str}"
+    try:
+        db.flush()
+        run_case_screening(db, voucher_key, strict_required_fields=True, commit=False)
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+
+    logger.info(
+        "save_custom_demo_case: DB voucher created (voucher_key=%s, uuid=%s)",
+        voucher_key,
+        case_uuid,
+    )
+    return voucher_key
+
+
 def save_custom_demo_case(
     payload: dict[str, Any],
     image_bytes: bytes,
     filename: str,
+    db: Session | None = None,
 ) -> dict[str, Any]:
     """
     업로드 증빙 기반 커스텀 시연 케이스를 data/evidence_uploads/{uuid}/ 에 저장한다.
@@ -278,9 +420,11 @@ def save_custom_demo_case(
         payload: 케이스 메타데이터 (case_type, amount_total, date_occurrence, merchant_name, bktxt, sgtxt, user_reason 등)
         image_bytes: 이미지 파일 내용 (없으면 b"")
         filename: 원본 파일명
+        db: SQLAlchemy Session. 제공 시 FiDocHeader/FiDocItem 전표 생성 및 스크리닝 수행.
 
     Returns:
         {"case_uuid": str, "image_path": str, "meta_path": str, "created_at": str}
+        db 제공 시 "voucher_key" 추가 포함.
     """
     case_uuid = str(_uuid_module.uuid4())
     save_dir = _EVIDENCE_UPLOAD_ROOT / case_uuid
@@ -332,16 +476,25 @@ def save_custom_demo_case(
         },
     }
 
+    # DB 전표 생성 (db 세션이 제공된 경우)
+    voucher_key: str | None = None
+    if db is not None:
+        voucher_key = _create_beta_voucher(db, payload, case_type, case_uuid)
+        meta["voucher_key"] = voucher_key
+
     meta_path = save_dir / "meta.json"
     meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
     logger.info("save_custom_demo_case: meta saved to %s (uuid=%s)", meta_path, case_uuid)
 
-    return {
+    result: dict[str, Any] = {
         "case_uuid": case_uuid,
         "image_path": image_path,
         "meta_path": str(meta_path),
         "created_at": now_iso,
     }
+    if voucher_key:
+        result["voucher_key"] = voucher_key
+    return result
 
 
 # ──────────────────────────────────────────────────────────────────────────────

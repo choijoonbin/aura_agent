@@ -407,13 +407,24 @@ def _handle_generate(
 
     with st.spinner("테스트 데이터 저장 중..."):
         try:
-            result = save_custom_demo_case(
-                payload=payload,
-                image_bytes=image_bytes or b"",
-                filename=uploaded_filename or "",
-            )
+            from db.session import SessionLocal
+
+            db = SessionLocal()
+            try:
+                result = save_custom_demo_case(
+                    payload=payload,
+                    image_bytes=image_bytes or b"",
+                    filename=uploaded_filename or "",
+                    db=db,
+                )
+            finally:
+                db.close()
             case_uuid = result.get("case_uuid", "-")
-            st.success(f"저장 완료! UUID: `{case_uuid}`")
+            voucher_key = result.get("voucher_key", "")
+            success_msg = f"저장 완료! UUID: `{case_uuid}`"
+            if voucher_key:
+                success_msg += f"  |  전표: `{voucher_key}`"
+            st.success(success_msg)
             st.json(result, expanded=False)
 
             # 저장 후 세션 초기화 (재생성 방지)
