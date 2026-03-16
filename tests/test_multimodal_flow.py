@@ -463,3 +463,124 @@ def test_clamp_bbox_value_invalid_type():
 
     assert _clamp_bbox_value("abc", "ymin") == 0
     assert _clamp_bbox_value(None, "xmin") == 0
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 7. OcrWord 픽셀→정규화 좌표 변환 및 split_key_value
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def test_ocr_word_norm_coords():
+    """픽셀 좌표 → 0~1000 정규화 변환."""
+    from utils.ocr_paddle import OcrWord
+
+    w = OcrWord(text="가온 식당", xmin=100, ymin=200, xmax=300, ymax=250,
+                img_width=1000, img_height=1000)
+    assert w.norm_xmin == 100
+    assert w.norm_ymin == 200
+    assert w.norm_xmax == 300
+    assert w.norm_ymax == 250
+
+
+def test_ocr_word_norm_coords_scaled():
+    """이미지 크기 비율에 맞게 정규화."""
+    from utils.ocr_paddle import OcrWord
+
+    w = OcrWord(text="test", xmin=500, ymin=250, xmax=1000, ymax=500,
+                img_width=2000, img_height=2000)
+    assert w.norm_xmin == 250
+    assert w.norm_ymin == 125
+    assert w.norm_xmax == 500
+    assert w.norm_ymax == 250
+
+
+def test_ocr_word_split_key_value_combined():
+    """레이블+값 한 줄 텍스트를 비율로 분리."""
+    from utils.ocr_paddle import OcrWord
+
+    # "거래처명: 가온 식당" — xmin=0, xmax=1000, img=1000×1000
+    w = OcrWord(text="거래처명: 가온 식당", xmin=0, ymin=100, xmax=1000, ymax=150,
+                img_width=1000, img_height=1000)
+    key, val = w.split_key_value("가온 식당")
+
+    # 값 시작점이 키 끝점과 일치
+    assert key.xmax == val.xmin
+    # 키/값 y범위 동일
+    assert key.ymin == val.ymin == 100
+    assert key.ymax == val.ymax == 150
+    # 전체 너비 보존
+    assert key.xmin == 0
+    assert val.xmax == 1000
+
+
+def test_ocr_word_split_not_found_returns_self():
+    """값 텍스트를 찾지 못하면 (self, self) 반환."""
+    from utils.ocr_paddle import OcrWord
+
+    w = OcrWord(text="hello", xmin=0, ymin=0, xmax=100, ymax=50,
+                img_width=1000, img_height=1000)
+    key, val = w.split_key_value("없는텍스트")
+    assert key is w
+    assert val is w
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 8. analyze_visual_evidence: PaddleOCR 경로 단위 테스트 (mock)
+# ──────────────────────────────────────────="──────────────────────────────────
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def test_analyze_visual_evidence_uses_paddle_when_available():
+    """PaddleOCR 설치 시 source='ocr_llm' 결과 반환."""
+    import base64
+    import sys
+    import types
+    from unittest.mock import MagicMock, patch
+
+    from utils.llm_azure import analyze_visual_evidence
+    from utils.ocr_paddle import OcrWord
+
+    # 실제 OcrWord 객체 사용 (norm_* 프로퍼티 포함)
+    fake_ocr_words = [
+        OcrWord(text="거래처명: 가온 식당", xmin=50, ymin=300, xmax=600, ymax=340,
+                confidence=0.99, img_width=700, img_height=1100),
+        OcrWord(text="거래일자: 2026-03-14", xmin=50, ymin=200, xmax=600, ymax=240,
+                confidence=0.98, img_width=700, img_height=1100),
+        OcrWord(text="합계금액: 97,042원", xmin=50, ymin=900, xmax=700, ymax=940,
+                confidence=0.97, img_width=700, img_height=1100),
+    ]
+
+    llm_json_response = """{
+      "merchant_name": {"key_index": 0, "value_index": 0, "text": "가온 식당"},
+      "date_occurrence": {"key_index": 1, "value_index": 1, "text": "2026-03-14"},
+      "amount_total": {"key_index": 2, "value_index": 2, "text": "97042"}
+    }"""
+
+    fake_completion = MagicMock()
+    fake_completion.choices[0].message.content = llm_json_response
+    fake_client = MagicMock()
+    fake_client.chat.completions.create.return_value = fake_completion
+
+    # openai 미설치 환경 대응: fake openai 모듈 주입
+    fake_openai = types.ModuleType("openai")
+    fake_openai.OpenAI = MagicMock(return_value=fake_client)  # type: ignore[attr-defined]
+    fake_openai.AzureOpenAI = MagicMock(return_value=fake_client)  # type: ignore[attr-defined]
+
+    dummy_b64 = base64.b64encode(b"fake-image").decode()
+
+    with patch("utils.config.settings") as mock_settings, \
+         patch("utils.ocr_paddle.run_paddle_ocr", return_value=fake_ocr_words), \
+         patch.dict(sys.modules, {"openai": fake_openai}):
+        mock_settings.openai_api_key = "fake-key"
+        mock_settings.openai_base_url = ""
+        mock_settings.openai_api_version = "2024-12-01-preview"
+        result = analyze_visual_evidence(dummy_b64)
+
+    assert result.source == "ocr_llm"
+    assert result.fallback_used is False
+    labels = {e.label for e in result.entities}
+    assert "merchant_name" in labels
+    assert "date_occurrence" in labels
+    assert "amount_total" in labels
+    merchant = next(e for e in result.entities if e.label == "merchant_name")
+    assert merchant.text == "가온 식당"

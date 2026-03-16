@@ -28,6 +28,12 @@ langfuse>=2.0.0
 # sentence-transformers>=2.2,<3.3
 # safetensors>=0.4.0
 
-# 증빙 이미지 OCR (optional). 미설치 시 증빙 추출은 스텁.
+# 증빙 이미지 OCR
 Pillow>=10.0.0
-pytesseract>=0.3.10
+
+# PaddleOCR — 2단계 OCR+LLM 파이프라인 (픽셀 단위 정확한 bbox)
+# CPU: pip install paddlepaddle paddleocr
+# GPU: pip install paddlepaddle-gpu paddleocr
+# 미설치 시 자동으로 Vision LLM 단일 단계로 fallback됨
+paddlepaddle>=2.6.0
+paddleocr>=2.7.0
