@@ -11,8 +11,14 @@ from __future__ import annotations
 
 import io
 import logging
+import os
 from dataclasses import dataclass
 from typing import Any
+
+# paddleocr/paddlex import 전에 반드시 설정해야 함.
+# 이 시점 이후에 설정하면 "Checking connectivity to the model hosters"에서
+# 무한 블로킹이 발생한다 (import 단계에서 체크가 실행됨).
+os.environ.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
 
 logger = logging.getLogger(__name__)
 
@@ -124,13 +130,7 @@ def get_paddle_ocr(lang: str = "korean") -> Any:
     if _paddle_instance is not None:
         return _paddle_instance
 
-    import os
-
     from paddleocr import PaddleOCR  # type: ignore[import]
-
-    # 모델이 이미 캐시된 경우 불필요한 네트워크 연결 체크를 건너뜀.
-    # 미설정 시 "Checking connectivity to the model hosters" 에서 무한 블로킹 발생.
-    os.environ.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
 
     major, minor = _paddle_version()
     logger.info("PaddleOCR v%d.%d 모델 로드 중 (최초 1회) ...", major, minor)
