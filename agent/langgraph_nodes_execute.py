@@ -330,6 +330,7 @@ async def execute_node_impl(
     executed_tools = [tool_result_key(r) for r in tool_results if tool_result_key(r)]
     reasoning_parts = [
         f"{len(executed_tools)}개 도구를 실행해 정책점수 {score_breakdown['policy_score']}점, 근거점수 {score_breakdown['evidence_score']}점을 산출했다.",
+        "점수 해석 기준: 정책점수는 높을수록 위반/위험 정황이 큰 신호이고, 근거점수는 높을수록 판단 근거가 충분하다는 의미다.",
         "수집된 도구 결과를 critic 단계의 반박 가능성 검토 입력으로 전달한다.",
     ]
     if skipped_tools:

@@ -273,6 +273,20 @@ async def _stream_reasoning_events_with_llm(
             client = AsyncOpenAI(**client_kwargs)
 
         context_json = json.dumps(context or {}, ensure_ascii=False, default=str)
+        execute_score_guardrail = ""
+        if node_name == "execute":
+            score = (context or {}).get("score") or {}
+            p = score.get("policy_score")
+            e = score.get("evidence_score")
+            f = score.get("final_score")
+            execute_score_guardrail = (
+                "추가 점수 해석 규칙(반드시 준수): "
+                "policy_score(정책점수)는 '위반/위험 신호 점수'로 높을수록 불리하다. "
+                "evidence_score(근거점수)는 '근거 충실도 점수'로 높을수록 유리하다. "
+                "따라서 policy_score가 높은 경우 '양호/안전'으로 표현하면 안 된다. "
+                "점수에 대한 평가는 위 규칙과 일치해야 하며 상충 문장을 만들지 마라. "
+                f"현재 점수: policy={p}, evidence={e}, final={f}."
+            )
         min_sentences = max(4, settings.reasoning_stream_max_sentences // 2)
         prompt = (
             "당신은 엔터프라이즈 감사 에이전트의 reasoning 생성기다.\n"
@@ -285,6 +299,7 @@ async def _stream_reasoning_events_with_llm(
             "불필요한 설명, 코드블록, 마크다운 금지.\n\n"
             f"[node] {node_name}\n"
             f"[context] {context_json}\n"
+            f"[score_guardrail] {execute_score_guardrail}\n"
             f"[draft_reasoning] {reasoning_text}\n"
         )
 

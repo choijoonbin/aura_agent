@@ -183,8 +183,8 @@ def inject_css() -> None:
         div[data-baseweb="popover"] li:hover {{ background: #eff6ff !important; }}
         .stChatMessage {{ background: transparent !important; }}
         .stMetric label, .stMetric div {{ color:#0f172a !important; }}
-        [data-testid="stExpanderDetails"] {{ background: #0f172a !important; color: #ffffff !important; }}
-        [data-testid="stExpanderDetails"] *, [data-testid="stExpanderDetails"] pre, [data-testid="stExpanderDetails"] code, [data-testid="stExpanderDetails"] pre span {{ color: #ffffff !important; }}
+        [data-testid="stExpanderDetails"] {{ background: #ffffff !important; color: #0f172a !important; }}
+        [data-testid="stExpanderDetails"] *, [data-testid="stExpanderDetails"] pre, [data-testid="stExpanderDetails"] code, [data-testid="stExpanderDetails"] pre span {{ color: #0f172a !important; }}
         /* Expander 내부 배지: 배경·텍스트 대비 유지 (판단 흐름 요약 등에서 배지가 보이도록) */
         [data-testid="stExpanderDetails"] .mt-badge {{ background: #fff !important; color: #334155 !important; border-color: #e2e8f0 !important; }}
         [data-testid="stExpanderDetails"] .mt-badge-blue {{ background: #eff6ff !important; color: #1d4ed8 !important; border-color: #bfdbfe !important; }}
@@ -202,13 +202,25 @@ def inject_css() -> None:
         [data-testid="stExpanderDetails"] [class*="st-key-process_story_"] code,
         [data-testid="stExpanderDetails"] [class*="st-key-process_story_"] pre *,
         [data-testid="stExpanderDetails"] [class*="st-key-process_story_"] code * {{ background: transparent !important; color: #0f172a !important; }}
+        /* 근거 맵(채택된 규정 근거/검증 주장↔규정 매핑) 펼침 영역: 밝은 카드 + 진한 텍스트 */
+        [data-testid="stExpanderDetails"] [class*="st-key-process_story_evidence_"] {{ background: rgba(255,255,255,0.98) !important; color: #0f172a !important; }}
+        [data-testid="stExpanderDetails"] [class*="st-key-process_story_evidence_"] *,
+        [data-testid="stExpanderDetails"] [class*="st-key-process_story_evidence_"] p,
+        [data-testid="stExpanderDetails"] [class*="st-key-process_story_evidence_"] label,
+        [data-testid="stExpanderDetails"] [class*="st-key-process_story_evidence_"] li,
+        [data-testid="stExpanderDetails"] [class*="st-key-process_story_evidence_"] small {{ color: #0f172a !important; }}
+        [data-testid="stExpanderDetails"] [class*="st-key-process_story_evidence_"] div {{ background: transparent !important; }}
+        [data-testid="stExpanderDetails"] [class*="st-key-process_story_evidence_"] pre,
+        [data-testid="stExpanderDetails"] [class*="st-key-process_story_evidence_"] code,
+        [data-testid="stExpanderDetails"] [class*="st-key-process_story_evidence_"] pre *,
+        [data-testid="stExpanderDetails"] [class*="st-key-process_story_evidence_"] code * {{ background: transparent !important; color: #0f172a !important; }}
         /* 펼쳤을 때 어두운 영역에서 라벨이 보이도록: 이전 타임라인 카드 보기, 판단 흐름 요약 */
         [data-testid="stExpander"]:has(.pipeline-wrapper) details[open] summary,
-        [data-testid="stExpander"]:has(.pipeline-wrapper) details[open] summary * {{ color: #e2e8f0 !important; }}
+        [data-testid="stExpander"]:has(.pipeline-wrapper) details[open] summary * {{ color: #0f172a !important; }}
         [data-testid="stExpander"]:has(.pipeline-wrapper) [aria-expanded="true"],
-        [data-testid="stExpander"]:has(.pipeline-wrapper) [aria-expanded="true"] * {{ color: #e2e8f0 !important; }}
+        [data-testid="stExpander"]:has(.pipeline-wrapper) [aria-expanded="true"] * {{ color: #0f172a !important; }}
         [data-testid="stExpander"]:has([class*="st-key-process_story_"]) details[open] summary,
-        [data-testid="stExpander"]:has([class*="st-key-process_story_"]) details[open] summary * {{ color: #e2e8f0 !important; }}
+        [data-testid="stExpander"]:has([class*="st-key-process_story_"]) details[open] summary * {{ color: #0f172a !important; }}
         /* 실시간 스트림/타임라인: 토글 라벨·스위치가 배경과 대비되어 보이도록 (키 기반 선택자로 Streamlit DOM에 확실히 적용) */
         [class*="st-key-tl_nested_"] label {{ color: #0f172a !important; font-weight: 600 !important; }}
         [class*="st-key-tl_nested_"] [role="switch"] {{ background: #e2e8f0 !important; border: 1px solid #94a3b8 !important; }}
@@ -234,12 +246,12 @@ def inject_css() -> None:
         .st-key-timeline_shell p, .st-key-timeline_shell div, .st-key-timeline_shell span, .st-key-timeline_shell .thinking-content, .st-key-timeline_shell .thinking-content p {{ overflow-wrap: break-word !important; word-break: break-word !important; max-width: 100% !important; min-width: 0 !important; box-sizing: border-box !important; }}
         .st-key-timeline_shell .thinking-row .thinking-content {{ flex: 1 1 0; min-width: 0 !important; }}
         [data-testid="stExpander"]:has([class*="st-key-process_story_"]) [aria-expanded="true"],
-        [data-testid="stExpander"]:has([class*="st-key-process_story_"]) [aria-expanded="true"] * {{ color: #e2e8f0 !important; }}
-        [data-testid="stExpanderDetails"] pre, [data-testid="stExpanderDetails"] code {{ background: #0f172a !important; }}
-        [data-testid="stExpanderDetails"] div[data-testid="stJson"] {{ color: #ffffff !important; background: #0f172a !important; }}
-        [data-testid="stExpanderDetails"] .token {{ color: #ffffff !important; }}
-        [data-testid="stExpanderDetails"] pre, [data-testid="stExpanderDetails"] pre * {{ background: #0f172a !important; color: #ffffff !important; }}
-        [data-testid="stExpanderDetails"] div {{ background: #0f172a !important; }}
+        [data-testid="stExpander"]:has([class*="st-key-process_story_"]) [aria-expanded="true"] * {{ color: #0f172a !important; }}
+        [data-testid="stExpanderDetails"] pre, [data-testid="stExpanderDetails"] code {{ background: #f8fafc !important; color: #0f172a !important; }}
+        [data-testid="stExpanderDetails"] div[data-testid="stJson"] {{ color: #0f172a !important; background: #f8fafc !important; }}
+        [data-testid="stExpanderDetails"] .token {{ color: #0f172a !important; }}
+        [data-testid="stExpanderDetails"] pre, [data-testid="stExpanderDetails"] pre * {{ background: #f8fafc !important; color: #0f172a !important; }}
+        [data-testid="stExpanderDetails"] div {{ background: transparent !important; }}
         div[data-baseweb="tab-panel"] [data-testid="stJson"], div[data-baseweb="tab-panel"] [data-testid="stJson"] * {{ background: #0f172a !important; color: #ffffff !important; }}
         div[data-baseweb="tab-panel"] [data-testid="stCode"], div[data-baseweb="tab-panel"] .stCode {{ background: #0f172a !important; color: #ffffff !important; }}
         div[data-baseweb="tab-panel"] [data-testid="stCode"] pre, div[data-baseweb="tab-panel"] [data-testid="stCode"] code, div[data-baseweb="tab-panel"] [data-testid="stCode"] pre * {{ background: #0f172a !important; color: #ffffff !important; }}

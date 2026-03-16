@@ -3877,6 +3877,34 @@ def render_workspace_evidence_map(latest_bundle: dict[str, Any], debug_mode: boo
                     break
 
     render_panel_header("근거 맵", "최종 판단에 사용된 규정 근거와 citation 연결 상태를 검토합니다.")
+    # 근거 맵 expander 펼침 영역: 전역 Expander 다크 스타일과 충돌하지 않도록
+    # evidence 전용 컨테이너 텍스트를 검정 계열로 고정한다.
+    st.markdown(
+        """
+        <style>
+        [class*="st-key-process_story_evidence_"] {
+          background: rgba(255,255,255,0.98) !important;
+          color: #0f172a !important;
+        }
+        [class*="st-key-process_story_evidence_"] *,
+        [class*="st-key-process_story_evidence_"] p,
+        [class*="st-key-process_story_evidence_"] span,
+        [class*="st-key-process_story_evidence_"] div,
+        [class*="st-key-process_story_evidence_"] label,
+        [class*="st-key-process_story_evidence_"] li,
+        [class*="st-key-process_story_evidence_"] small {
+          color: #0f172a !important;
+        }
+        [class*="st-key-process_story_evidence_"] pre,
+        [class*="st-key-process_story_evidence_"] code,
+        [class*="st-key-process_story_evidence_"] pre * {
+          color: #0f172a !important;
+          background: transparent !important;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
     if not policy_refs:
         render_empty_state("연결된 규정 근거가 없습니다.")
         return
@@ -3915,7 +3943,7 @@ def render_workspace_evidence_map(latest_bundle: dict[str, Any], debug_mode: boo
                     meta.append(str(ref.get("adoption_reason")))
                 if meta:
                     st.caption(" · ".join(meta))
-                st.write(ref.get("chunk_text") or "")
+                st.write(ref.get("display_text") or ref.get("chunk_text") or "")
                 if debug_mode:
                     st.json(ref)
 

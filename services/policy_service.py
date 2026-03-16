@@ -963,6 +963,55 @@ def _resolve_source_strategy(selection_stage: str) -> str:
     return f"policy_search:{selection_stage}"
 
 
+def _build_display_context_and_text(
+    item: dict[str, Any],
+    *,
+    article: Any,
+    clause: Any,
+    regulation_item: Any,
+    scoped_chunk_text: Any,
+) -> tuple[dict[str, Any], str]:
+    """UI 표시에 사용할 일관된 문맥/본문 포맷 생성.
+
+    - ITEM/CLAUSE는 원문 chunk_text에 contextual_header가 이미 포함될 수 있음.
+    - ARTICLE/CLAUSE처럼 헤더가 없는 경우 semantic_group 기반 문맥을 앞에 붙여 표준화.
+    """
+    meta = _parse_metadata_json(item.get("metadata_json"))
+    semantic_group = str(meta.get("semantic_group") or "").strip()
+    node_type = str(item.get("node_type") or "").strip().upper() or "UNKNOWN"
+    article_txt = str(article or "").strip()
+    clause_txt = str(clause or "").strip()
+    item_txt = str(regulation_item or "").strip()
+    base_text = str(scoped_chunk_text or "").strip()
+    has_inline_context = base_text.startswith("[")
+
+    context_parts: list[str] = []
+    if semantic_group:
+        context_parts.append(semantic_group)
+    if article_txt:
+        context_parts.append(article_txt)
+    if clause_txt:
+        context_parts.append(clause_txt)
+    if item_txt:
+        context_parts.append(item_txt)
+    context_label = " > ".join(context_parts).strip()
+
+    display_text = base_text
+    if base_text and context_label and not has_inline_context:
+        display_text = f"[{context_label}] {base_text}"
+
+    display_context = {
+        "semantic_group": semantic_group or None,
+        "article": article_txt or None,
+        "clause": clause_txt or None,
+        "item": item_txt or None,
+        "node_type": node_type,
+        "context_label": context_label or None,
+        "has_inline_context": has_inline_context,
+    }
+    return display_context, display_text
+
+
 def _extract_article_no(article: Any) -> str | None:
     text = str(article or "").strip()
     if not text:
@@ -1291,17 +1340,27 @@ def _finalize_context(
         domain_match_hints = _build_domain_match_hints(item, body_evidence)
         chunk_id = item.get("chunk_id")
         article = item.get("regulation_article")
+        clause = item.get("regulation_clause")
         scoped_chunk_text = _trim_chunk_text_to_article_scope(item.get("chunk_text"), article)
+        display_context, display_text = _build_display_context_and_text(
+            item,
+            article=article,
+            clause=clause,
+            regulation_item=regulation_item,
+            scoped_chunk_text=scoped_chunk_text,
+        )
         normalized_parent_title = normalize_policy_parent_title(article, item.get("parent_title"))
         results.append({
             "chunk_id": chunk_id,
             "doc_id": item.get("doc_id"),
             "article": article,
-            "clause": item.get("regulation_clause"),
+            "clause": clause,
             "item": regulation_item,
             "node_type": item.get("node_type"),
             "parent_title": normalized_parent_title,
             "chunk_text": scoped_chunk_text,
+            "display_text": display_text,
+            "display_context": display_context,
             "version": item.get("version"),
             "effective_from": str(item.get("effective_from")) if item.get("effective_from") else None,
             "effective_to": str(item.get("effective_to")) if item.get("effective_to") else None,
