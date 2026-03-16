@@ -139,20 +139,20 @@ def get_paddle_ocr(lang: str = "korean") -> Any:
 
     if major >= 3:
         # ── 3.x: CPU 최적화 — 무거운 모델 모두 비활성화 ──────────────────────
-        # PP-OCRv5_server_det: GPU용 대형 모델, CPU에서 추론 hang 원인
-        # UVDoc, 방향감지 모델: 영수증 OCR에 불필요
-        # → mobile_det + mobile_rec 조합으로 CPU에서 빠른 동작
+        # 주의: text_detection_model_name 또는 text_recognition_model_name 지정 시
+        #       lang/ocr_version이 무시됨 → 두 모델 모두 명시적으로 지정 필수.
+        # mobile_det: server_det(CPU hang 원인) 대체 / korean_mobile_rec: 한국어 인식
         _FAST_KWARGS = {
-            "lang": lang,
             "device": "cpu",
             "use_doc_orientation_classify": False,         # PP-LCNet_x1_0_doc_ori 제거
             "use_doc_unwarping": False,                    # UVDoc 제거 (가장 무거움)
             "use_textline_orientation": False,             # PP-LCNet_x1_0_textline_ori 제거
-            "text_detection_model_name": "PP-OCRv5_mobile_det",   # server→mobile 교체
+            "text_detection_model_name": "PP-OCRv5_mobile_det",       # server→mobile
+            "text_recognition_model_name": "korean_PP-OCRv5_mobile_rec",  # 한국어 인식
         }
         for kwargs in [
             _FAST_KWARGS,
-            # text_detection_model_name 미지원 빌드 fallback (전처리만 비활성화)
+            # text_*_model_name 미지원 빌드 fallback — lang 으로 한국어 인식 유지
             {
                 "lang": lang,
                 "device": "cpu",
