@@ -732,3 +732,146 @@ def test_analyze_visual_evidence_extracts_time_occurrence():
     assert "time_occurrence" in labels
     time_entity = next(e for e in result.entities if e.label == "time_occurrence")
     assert time_entity.text == "19:45"
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 결제일시 3분할 fix + amount nearby fix
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def test_apply_combined_datetime_fix_splits_bboxes():
+    """결제일시 같은 줄 → 라벨/날짜/시간 3분할 bbox."""
+    import sys
+    import types
+    from unittest.mock import MagicMock, patch
+
+    from utils.llm_azure import analyze_visual_evidence
+    from utils.ocr_paddle import OcrWord
+
+    # "결제일시 : 2026-03-14 23:42 (토요일)" — xmin=0, xmax=700 (img_width=700)
+    fake_ocr_words = [
+        OcrWord(text="가맹점명 : 가온식당 강남점",
+                xmin=50, ymin=100, xmax=600, ymax=140,
+                confidence=0.99, img_width=700, img_height=1100),
+        OcrWord(text="결제일시 : 2026-03-14 23:42 (토요일)",
+                xmin=0, ymin=200, xmax=700, ymax=240,
+                confidence=0.98, img_width=700, img_height=1100),
+        OcrWord(text="합계금액",
+                xmin=50, ymin=800, xmax=300, ymax=840,
+                confidence=0.97, img_width=700, img_height=1100),
+        OcrWord(text="68,000원",
+                xmin=400, ymin=800, xmax=680, ymax=840,
+                confidence=0.97, img_width=700, img_height=1100),
+    ]
+
+    llm_json_response = """{
+      "merchant_name": {"key_index": 0, "value_index": 0, "text": "가온식당 강남점"},
+      "date_occurrence": {"key_index": 1, "value_index": 1, "text": "2026-03-14"},
+      "time_occurrence": {"key_index": 1, "value_index": 1, "text": "23:42"},
+      "amount_total": {"key_index": 2, "value_index": 3, "text": "68000"}
+    }"""
+
+    fake_completion = MagicMock()
+    fake_completion.choices[0].message.content = llm_json_response
+    fake_client = MagicMock()
+    fake_client.chat.completions.create.return_value = fake_completion
+
+    fake_openai = types.ModuleType("openai")
+    fake_openai.OpenAI = MagicMock(return_value=fake_client)  # type: ignore
+    fake_openai.AzureOpenAI = MagicMock(return_value=fake_client)  # type: ignore
+
+    import base64
+    dummy_b64 = base64.b64encode(b"fake-image").decode()
+
+    with patch("utils.config.settings") as mock_settings, \
+         patch("utils.ocr_paddle.run_paddle_ocr", return_value=fake_ocr_words), \
+         patch.dict(sys.modules, {"openai": fake_openai}):
+        mock_settings.openai_api_key = "fake-key"
+        mock_settings.openai_base_url = ""
+        mock_settings.openai_api_version = "2024-12-01-preview"
+        result = analyze_visual_evidence(dummy_b64)
+
+    date_e = next(e for e in result.entities if e.label == "date_occurrence")
+    time_e = next(e for e in result.entities if e.label == "time_occurrence")
+
+    # 1) 두 엔티티의 bbox_key(라벨 구간)가 동일해야 함
+    assert date_e.bbox_key is not None
+    assert time_e.bbox_key is not None
+    assert date_e.bbox_key.xmin == time_e.bbox_key.xmin
+    assert date_e.bbox_key.xmax == time_e.bbox_key.xmax, "라벨 bbox가 동일해야 함"
+
+    # 2) 날짜 bbox는 시간 bbox보다 왼쪽이어야 함
+    assert date_e.bbox.xmin < time_e.bbox.xmin, "날짜가 시간보다 왼쪽이어야 함"
+    assert date_e.bbox.xmax <= time_e.bbox.xmin + 10, "날짜 bbox가 시간 bbox와 겹치지 않아야 함"
+
+    # 3) 라벨 bbox는 날짜 bbox보다 왼쪽이어야 함
+    assert date_e.bbox_key.xmax <= date_e.bbox.xmin + 10, "라벨이 날짜보다 왼쪽이어야 함"
+
+
+def test_fix_amount_nearby_corrects_distant_value():
+    """합계금액 value_index가 key_index와 멀면 가까운 금액 블록으로 교체."""
+    import sys
+    import types
+    from unittest.mock import MagicMock, patch
+
+    from utils.llm_azure import analyze_visual_evidence
+    from utils.ocr_paddle import OcrWord
+
+    # 합계금액(idx=2) 옆 68000원(idx=3) — LLM이 footer의 idx=8을 잘못 선택
+    fake_ocr_words = [
+        OcrWord(text="가맹점명 : 가온식당", xmin=50, ymin=100, xmax=600, ymax=140,
+                confidence=0.99, img_width=700, img_height=1100),
+        OcrWord(text="결제일시 : 2026-03-14 23:42",
+                xmin=0, ymin=200, xmax=700, ymax=240,
+                confidence=0.98, img_width=700, img_height=1100),
+        OcrWord(text="합계금액", xmin=50, ymin=800, xmax=300, ymax=850,
+                confidence=0.97, img_width=700, img_height=1100),
+        OcrWord(text="68,000원", xmin=400, ymin=800, xmax=680, ymax=850,
+                confidence=0.97, img_width=700, img_height=1100),
+        OcrWord(text="공급가액", xmin=50, ymin=860, xmax=300, ymax=900,
+                confidence=0.96, img_width=700, img_height=1100),
+        OcrWord(text="61,818원", xmin=400, ymin=860, xmax=680, ymax=900,
+                confidence=0.96, img_width=700, img_height=1100),
+        OcrWord(text="부가가치세", xmin=50, ymin=910, xmax=300, ymax=950,
+                confidence=0.95, img_width=700, img_height=1100),
+        OcrWord(text="6,182원", xmin=400, ymin=910, xmax=680, ymax=950,
+                confidence=0.95, img_width=700, img_height=1100),
+        OcrWord(text="합계:", xmin=50, ymin=1000, xmax=200, ymax=1040,
+                confidence=0.94, img_width=700, img_height=1100),
+        OcrWord(text="68,000원", xmin=400, ymin=1000, xmax=680, ymax=1040,
+                confidence=0.94, img_width=700, img_height=1100),
+    ]
+
+    # LLM이 잘못 footer(idx=9) 선택
+    llm_json_response = """{
+      "merchant_name": {"key_index": 0, "value_index": 0, "text": "가온식당"},
+      "date_occurrence": {"key_index": 1, "value_index": 1, "text": "2026-03-14"},
+      "time_occurrence": {"key_index": 1, "value_index": 1, "text": "23:42"},
+      "amount_total": {"key_index": 2, "value_index": 9, "text": "68000"}
+    }"""
+
+    fake_completion = MagicMock()
+    fake_completion.choices[0].message.content = llm_json_response
+    fake_client = MagicMock()
+    fake_client.chat.completions.create.return_value = fake_completion
+
+    fake_openai = types.ModuleType("openai")
+    fake_openai.OpenAI = MagicMock(return_value=fake_client)  # type: ignore
+    fake_openai.AzureOpenAI = MagicMock(return_value=fake_client)  # type: ignore
+
+    import base64
+    dummy_b64 = base64.b64encode(b"fake-image").decode()
+
+    with patch("utils.config.settings") as mock_settings, \
+         patch("utils.ocr_paddle.run_paddle_ocr", return_value=fake_ocr_words), \
+         patch.dict(sys.modules, {"openai": fake_openai}):
+        mock_settings.openai_api_key = "fake-key"
+        mock_settings.openai_base_url = ""
+        mock_settings.openai_api_version = "2024-12-01-preview"
+        result = analyze_visual_evidence(dummy_b64)
+
+    amount_e = next(e for e in result.entities if e.label == "amount_total")
+    # idx=3 의 "68,000원" → "68000" 으로 교체되어야 함
+    assert amount_e.text == "68000"
+    # 올바른 y좌표(idx=3, ymin=800)에 있어야 함 — footer(ymin=1000)가 아님
+    assert amount_e.bbox.ymin < 850  # 0~1000 정규화 기준 800/1100*1000 ≈ 727
