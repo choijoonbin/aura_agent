@@ -99,10 +99,22 @@ def _px_to_norm(px: int, dim: int) -> int:
     return max(0, min(1000, int(px / dim * 1000)))
 
 
+def _paddle_version() -> tuple[int, int]:
+    """paddleocr 패키지의 (major, minor) 버전을 반환한다. 파싱 실패 시 (2, 0)."""
+    try:
+        import paddleocr  # type: ignore[import]
+        ver = getattr(paddleocr, "__version__", "2.0.0")
+        parts = str(ver).split(".")
+        return int(parts[0]), int(parts[1]) if len(parts) > 1 else 0
+    except Exception:
+        return 2, 0
+
+
 def get_paddle_ocr(lang: str = "korean") -> "Any":
     """PaddleOCR 싱글톤 인스턴스를 반환한다.
 
     최초 호출 시 모델 파일을 다운로드한다 (~100 MB, 1회만).
+    PaddleOCR 2.x / 3.x 모두 지원.
 
     Raises:
         ImportError: paddleocr 패키지가 설치되지 않은 경우.
@@ -111,19 +123,81 @@ def get_paddle_ocr(lang: str = "korean") -> "Any":
     if _paddle_instance is None:
         from paddleocr import PaddleOCR  # type: ignore[import]
 
-        logger.info("PaddleOCR 모델 로드 중 (최초 1회, 약 100 MB 다운로드 가능) ...")
-        _paddle_instance = PaddleOCR(
-            use_angle_cls=True,
-            lang=lang,
-            use_gpu=False,   # CPU 기본; GPU 환경에서는 True로 변경 가능
-            show_log=False,
-        )
+        major, _ = _paddle_version()
+        logger.info("PaddleOCR %s 모델 로드 중 (최초 1회, 약 100 MB 다운로드 가능) ...", major)
+
+        if major >= 3:
+            # 3.x: use_angle_cls 파라미터 제거됨, lang 방식도 변경
+            # 한국어+영어 복합 인식: lang='korean' 또는 'ch' (중·영 포함) 사용
+            _paddle_instance = PaddleOCR(
+                lang=lang,
+                use_gpu=False,
+                show_log=False,
+            )
+        else:
+            # 2.x 기존 방식
+            _paddle_instance = PaddleOCR(
+                use_angle_cls=True,
+                lang=lang,
+                use_gpu=False,
+                show_log=False,
+            )
         logger.info("PaddleOCR 모델 로드 완료.")
     return _paddle_instance
 
 
+def _parse_line(line: "Any") -> "tuple[list, str, float] | None":
+    """PaddleOCR 2.x / 3.x 결과 한 줄을 (box_points, text, confidence)로 파싱한다.
+
+    2.x 형식: [[x1,y1], [x2,y2], [x3,y3], [x4,y4]], ('text', 0.99)
+    3.x 형식: {'transcription': 'text', 'points': [...], 'score': 0.99}
+              또는 {'rec_text': 'text', 'det_poly': [...], 'rec_score': 0.99}
+    """
+    try:
+        # ── dict 형식 (3.x) ─────────────────────────────────────────────────
+        if isinstance(line, dict):
+            text = (
+                line.get("transcription")
+                or line.get("rec_text")
+                or line.get("text")
+                or ""
+            )
+            conf = float(
+                line.get("score")
+                or line.get("rec_score")
+                or line.get("confidence")
+                or 1.0
+            )
+            box = (
+                line.get("points")
+                or line.get("det_poly")
+                or line.get("bbox")
+                or []
+            )
+            # bbox가 [xmin, ymin, xmax, ymax] 형식인 경우 4-point로 변환
+            if box and not isinstance(box[0], (list, tuple)):
+                xmin, ymin, xmax, ymax = float(box[0]), float(box[1]), float(box[2]), float(box[3])
+                box = [[xmin, ymin], [xmax, ymin], [xmax, ymax], [xmin, ymax]]
+            return box, str(text), conf
+
+        # ── list/tuple 형식 (2.x 호환) ──────────────────────────────────────
+        if isinstance(line, (list, tuple)) and len(line) == 2:
+            box_points, text_info = line
+            if isinstance(text_info, (list, tuple)) and len(text_info) == 2:
+                text, conf = text_info
+            else:
+                text, conf = str(text_info), 1.0
+            return box_points, str(text), float(conf)
+
+    except Exception as exc:
+        logger.debug("OCR 라인 파싱 실패: %s | 입력: %r", exc, line)
+    return None
+
+
 def run_paddle_ocr(image_bytes: bytes, lang: str = "korean") -> list[OcrWord]:
     """이미지 bytes에서 PaddleOCR로 전체 텍스트와 픽셀 bbox를 추출한다.
+
+    PaddleOCR 2.x / 3.x 결과 포맷을 모두 처리한다.
 
     Args:
         image_bytes: JPEG/PNG 등 이미지 raw bytes.
@@ -145,18 +219,29 @@ def run_paddle_ocr(image_bytes: bytes, lang: str = "korean") -> list[OcrWord]:
 
     try:
         results = ocr.ocr(image_bytes, cls=True)
+    except TypeError:
+        # 3.x 일부 버전: cls 파라미터 미지원
+        try:
+            results = ocr.ocr(image_bytes)
+        except Exception as exc:
+            raise RuntimeError(f"PaddleOCR 실행 실패: {exc}") from exc
     except Exception as exc:
         raise RuntimeError(f"PaddleOCR 실행 실패: {exc}") from exc
 
     words: list[OcrWord] = []
     for page in results or []:
-        for line in page or []:
-            box_points, (text, conf) = line
-            xs = [float(p[0]) for p in box_points]
-            ys = [float(p[1]) for p in box_points]
-            stripped = (text or "").strip()
+        if page is None:
+            continue
+        for line in page:
+            parsed = _parse_line(line)
+            if parsed is None:
+                continue
+            box_points, text, conf = parsed
+            stripped = text.strip()
             if not stripped:
                 continue
+            xs = [float(p[0]) for p in box_points]
+            ys = [float(p[1]) for p in box_points]
             words.append(
                 OcrWord(
                     text=stripped,
@@ -164,7 +249,7 @@ def run_paddle_ocr(image_bytes: bytes, lang: str = "korean") -> list[OcrWord]:
                     ymin=max(0, int(min(ys))),
                     xmax=min(w, int(max(xs))),
                     ymax=min(h, int(max(ys))),
-                    confidence=float(conf),
+                    confidence=conf,
                     img_width=w,
                     img_height=h,
                 )
