@@ -248,7 +248,18 @@ def _parse_result_obj(result_obj: Any, w: int, h: int) -> list[OcrWord]:
     rec_polys = getattr(result_obj, "rec_polys", None)
     rec_scores = getattr(result_obj, "rec_scores", None)
 
-    if rec_texts is None or rec_polys is None:
+    # ── 디버그: 속성이 없거나 비어있을 때 객체 구조 덤프 ─────────────────────
+    if rec_texts is None or rec_polys is None or len(rec_texts) == 0:
+        attrs = [a for a in dir(result_obj) if not a.startswith("__")]
+        logger.warning(
+            "OCRResult 파싱 실패 또는 빈 결과 | type=%s | attrs=%s",
+            type(result_obj).__name__,
+            attrs,
+        )
+        # json 속성이 있으면 내용도 덤프
+        json_val = getattr(result_obj, "json", None)
+        if json_val is not None:
+            logger.warning("OCRResult.json = %s", json_val)
         return words
 
     scores_iter = rec_scores if rec_scores is not None else [1.0] * len(rec_texts)
@@ -295,7 +306,7 @@ def run_paddle_ocr(image_bytes: bytes, lang: str = "korean") -> list[OcrWord]:
 
     img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
     w, h = img.size
-    img_array = np.array(img)
+    img_array = np.array(img)[:, :, ::-1]  # RGB→BGR (PaddleOCR/OpenCV 기대 포맷)
 
     ocr = get_paddle_ocr(lang=lang)  # RuntimeError 발생 시 그대로 전파
 
@@ -310,9 +321,11 @@ def run_paddle_ocr(image_bytes: bytes, lang: str = "korean") -> list[OcrWord]:
             raise RuntimeError(f"PaddleOCR predict() 실행 실패: {exc}") from exc
 
         logger.debug("PaddleOCR 3.x predict() 결과: %d건", len(results))
-        for res in results or []:
+        for i, res in enumerate(results or []):
             if res is None:
                 continue
+            logger.debug("result[%d] type=%s rec_texts=%s", i, type(res).__name__,
+                         getattr(res, "rec_texts", "N/A"))
             words.extend(_parse_result_obj(res, w, h))
 
         words.sort(key=lambda ww: ww.ymin)
