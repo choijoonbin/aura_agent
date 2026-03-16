@@ -177,15 +177,32 @@ def _apply_combined_datetime_fix(
         else:
             return  # 시간 정보 없음
 
-    d_text = str(d_match.get("text") or "").strip()
+    d_text_raw = str(d_match.get("text") or "").strip()
     t_text = str(t_match.get("text") or "").strip()
     full = val_block.text
 
-    if not d_text or not t_text:
+    if not d_text_raw or not t_text:
         return
 
+    # ── LLM이 날짜에 시간을 포함해 반환했을 때 날짜 부분만 추출 ────────────
+    # 예: "2026-03-14 23:42" → "2026-03-14"
+    _date_norm_m = _re.search(r"\d{4}-\d{2}-\d{2}", d_text_raw)
+    d_text = _date_norm_m.group(0) if _date_norm_m else d_text_raw
+
+    # ── 시간 텍스트를 OCR 블록에서 위치 탐색 (ASCII/유니코드 콜론 모두 허용) ──
+    # PaddleOCR가 full-width 콜론(：U+FF1A)을 쓸 경우 literal find 실패 방지
     d_pos = full.find(d_text)
     t_pos = full.find(t_text)
+    if t_pos < 0:
+        # 유니코드 변형 콜론 또는 소폭 OCR 차이 → 패턴으로 재탐색
+        _t_fallback = _re.search(r"\d{1,2}[:\uff1a]\d{2}", full)
+        if _t_fallback:
+            t_pos = _t_fallback.start()
+            # ASCII HH:MM으로 정규화
+            t_text = _re.sub(r"[\uff1a]", ":", _t_fallback.group(0))
+            matched["time_occurrence"] = dict(t_match, text=t_text)
+            logger.info("_apply_combined_datetime_fix: 시간 패턴 fallback 탐색 → '%s'", t_text)
+
     if d_pos < 0 or t_pos < 0 or d_pos >= t_pos:
         return
 
@@ -231,12 +248,18 @@ def _apply_combined_datetime_fix(
     time_box = _make_box(val_block, x_t, val_block.xmax)
 
     # ── 엔티티 인플레이스 교체 ────────────────────────────────────────────────
+    # d_text_raw: LLM 원본 (날짜+시간 혼재 가능), d_text: YYYY-MM-DD 정규화값
+    # 엔티티 text 매칭은 raw 값으로, 저장은 정규화값으로 수행
     time_updated = False
     for i, e in enumerate(entities):
-        if e.label == "date_occurrence" and e.text == d_text:
+        if e.label == "date_occurrence" and (
+            e.text == d_text or e.text == d_text_raw
+        ):
             try:
                 entities[i] = VisualEntity(
-                    id=e.id, label="date_occurrence", text=e.text,
+                    id=e.id, label="date_occurrence",
+                    # LLM이 시간 포함 반환 시 YYYY-MM-DD로 정규화
+                    text=d_text,
                     bbox=date_box,
                     bbox_key=shared_key_box if shared_key_box else e.bbox_key,
                     confidence=e.confidence,
@@ -246,7 +269,7 @@ def _apply_combined_datetime_fix(
         elif e.label == "time_occurrence" and e.text == t_text:
             try:
                 entities[i] = VisualEntity(
-                    id=e.id, label="time_occurrence", text=e.text,
+                    id=e.id, label="time_occurrence", text=t_text,
                     bbox=time_box,
                     bbox_key=shared_key_box if shared_key_box else e.bbox_key,
                     confidence=e.confidence,
@@ -280,6 +303,10 @@ def _fix_amount_nearby(
 
     LLM이 '61,818원(공급가액)' 또는 footer '합 계' 금액을 잘못 선택하는 경우를 보정.
     Y좌표 비교를 기준으로 라벨(key)과 같은 수평선의 금액을 우선 선택한다.
+
+    PaddleOCR는 ymin 기준으로 정렬하므로, 같은 라인이더라도 큰 bold 숫자("68,000원")의
+    ymin이 레이블("합계금액") ymin보다 작아 key_idx 앞에 위치할 수 있다.
+    이를 처리하기 위해 앞·뒤 양방향 탐색을 수행한다.
     """
     import re
 
@@ -306,14 +333,17 @@ def _fix_amount_nearby(
     if abs(val_y_center - key_y_center) <= y_tol:
         return
 
-    # 같은 줄에 더 가까운 숫자 블록을 탐색
+    # 같은 줄에 더 가까운 숫자 블록을 탐색 (앞·뒤 양방향)
+    # 이유: PaddleOCR ymin-sort 시 큰 bold 숫자가 레이블보다 ymin이 작으면 key_idx 앞에 위치
     _digit_re = re.compile(r"\d[\d,]+")
     _skip_kw = ("공급가액", "부가가치세", "VAT", "소계")
 
-    for offset in range(1, 6):
+    # 전방(+1..+5) → 후방(-1..-3) 순서로 탐색 (forward first, then backward)
+    search_offsets = list(range(1, 6)) + list(range(-1, -4, -1))
+    for offset in search_offsets:
         candidate_idx = key_idx + offset
         if not (0 <= candidate_idx < len(ocr_words)):
-            break
+            continue
         candidate = ocr_words[candidate_idx]
         c_y_center = (candidate.ymin + candidate.ymax) / 2
 

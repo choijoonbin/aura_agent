@@ -1255,6 +1255,202 @@ def test_save_custom_demo_case_meta_contains_answer_type(tmp_path):
         svc._EVIDENCE_UPLOAD_ROOT = original_root
 
 
+def test_fix_amount_backward_search_when_bold_value_before_label():
+    """
+    PaddleOCR ymin-sort 시 bold "68,000원"(우측)의 ymin이 "합계금액"(좌측)보다
+    작아 key_idx 앞에 위치하는 실제 영수증 패턴을 재현.
+    LLM이 key_idx+1("61,818원")을 잘못 선택하더라도 backward 탐색으로 교정해야 함.
+    """
+    import sys
+    import types
+    from unittest.mock import MagicMock, patch
+
+    from utils.llm_azure import analyze_visual_evidence
+    from utils.ocr_paddle import OcrWord
+
+    # "68,000원"(bold large, ymin=793) → "합계금액"(framed label, ymin=803)
+    # → "61,818원"(다음 줄, ymin=880) — 행 간격 충분히 큼
+    # ymin-sort 결과: 68,000원(idx=2), 합계금액(idx=3), 61,818원(idx=4)
+    fake_ocr_words = [
+        OcrWord(text="가맹점명 : 가온식당 강남점",
+                xmin=50, ymin=100, xmax=600, ymax=140,
+                confidence=0.99, img_width=700, img_height=1100),
+        OcrWord(text="결제일시 : 2026-03-14 23:42",
+                xmin=0, ymin=200, xmax=700, ymax=240,
+                confidence=0.98, img_width=700, img_height=1100),
+        OcrWord(text="68,000원",              # bold — ymin 작음(key_idx-1 위치)
+                xmin=420, ymin=793, xmax=680, ymax=855,
+                confidence=0.97, img_width=700, img_height=1100),
+        OcrWord(text="합계금액",              # frame 때문에 ymin 살짝 큼
+                xmin=50, ymin=803, xmax=300, ymax=843,
+                confidence=0.97, img_width=700, img_height=1100),
+        OcrWord(text="61,818원",              # 다음 줄 — 공급가액 (충분히 분리)
+                xmin=420, ymin=880, xmax=680, ymax=920,
+                confidence=0.96, img_width=700, img_height=1100),
+        OcrWord(text="공급가액",
+                xmin=50, ymin=880, xmax=300, ymax=920,
+                confidence=0.96, img_width=700, img_height=1100),
+    ]
+
+    # LLM이 합계금액(idx=3)의 key=3, val=4("61,818원") 를 잘못 선택
+    llm_json_response = """{
+      "merchant_name": {"key_index": 0, "value_index": 0, "text": "가온식당 강남점"},
+      "date_occurrence": {"key_index": 1, "value_index": 1, "text": "2026-03-14"},
+      "time_occurrence": {"key_index": 1, "value_index": 1, "text": "23:42"},
+      "amount_total": {"key_index": 3, "value_index": 4, "text": "61818"}
+    }"""
+
+    fake_completion = MagicMock()
+    fake_completion.choices[0].message.content = llm_json_response
+    fake_client = MagicMock()
+    fake_client.chat.completions.create.return_value = fake_completion
+
+    fake_openai = types.ModuleType("openai")
+    fake_openai.OpenAI = MagicMock(return_value=fake_client)
+    fake_openai.AzureOpenAI = MagicMock(return_value=fake_client)
+
+    import base64
+    dummy_b64 = base64.b64encode(b"fake-image").decode()
+
+    with patch("utils.config.settings") as mock_settings, \
+         patch("utils.ocr_paddle.run_paddle_ocr", return_value=fake_ocr_words), \
+         patch.dict(sys.modules, {"openai": fake_openai}):
+        mock_settings.openai_api_key = "fake-key"
+        mock_settings.openai_base_url = ""
+        mock_settings.openai_api_version = "2024-12-01-preview"
+        result = analyze_visual_evidence(dummy_b64)
+
+    amount_e = next(e for e in result.entities if e.label == "amount_total")
+    # backward 탐색으로 key_idx-1 = idx2("68,000원")로 교정되어야 함
+    assert amount_e.text == "68000", (
+        f"backward 탐색 실패: 기대 '68000', 실제 '{amount_e.text}'"
+    )
+    # ymin ≈ 795/1100*1000 ≈ 723 — 다음 줄(845/1100≈769)보다 위에 있어야 함
+    assert amount_e.bbox.ymin < 770, (
+        f"bbox ymin({amount_e.bbox.ymin}) 이 너무 크면 공급가액 줄임"
+    )
+
+
+def test_apply_combined_datetime_fix_normalizes_date_text_with_time():
+    """
+    LLM이 date_occurrence.text에 시간까지 포함해 반환 ("2026-03-14 23:42")하더라도
+    최종 엔티티 text는 YYYY-MM-DD 로만 정규화되어야 한다.
+    """
+    import sys
+    import types
+    from unittest.mock import MagicMock, patch
+
+    from utils.llm_azure import analyze_visual_evidence
+    from utils.ocr_paddle import OcrWord
+
+    fake_ocr_words = [
+        OcrWord(text="결제일시 : 2026-03-14 23:42 (토요일)",
+                xmin=0, ymin=200, xmax=700, ymax=240,
+                confidence=0.98, img_width=700, img_height=1100),
+        OcrWord(text="합계금액",
+                xmin=50, ymin=800, xmax=300, ymax=840,
+                confidence=0.97, img_width=700, img_height=1100),
+        OcrWord(text="68,000원",
+                xmin=400, ymin=800, xmax=680, ymax=840,
+                confidence=0.97, img_width=700, img_height=1100),
+    ]
+
+    # LLM이 날짜 text에 시간까지 포함해 반환하는 오류 케이스
+    llm_json_response = """{
+      "merchant_name": null,
+      "date_occurrence": {"key_index": 0, "value_index": 0, "text": "2026-03-14 23:42"},
+      "time_occurrence": {"key_index": 0, "value_index": 0, "text": "23:42"},
+      "amount_total": {"key_index": 1, "value_index": 2, "text": "68000"}
+    }"""
+
+    fake_completion = MagicMock()
+    fake_completion.choices[0].message.content = llm_json_response
+    fake_client = MagicMock()
+    fake_client.chat.completions.create.return_value = fake_completion
+
+    fake_openai = types.ModuleType("openai")
+    fake_openai.OpenAI = MagicMock(return_value=fake_client)
+    fake_openai.AzureOpenAI = MagicMock(return_value=fake_client)
+
+    import base64
+    dummy_b64 = base64.b64encode(b"fake-image").decode()
+
+    with patch("utils.config.settings") as mock_settings, \
+         patch("utils.ocr_paddle.run_paddle_ocr", return_value=fake_ocr_words), \
+         patch.dict(sys.modules, {"openai": fake_openai}):
+        mock_settings.openai_api_key = "fake-key"
+        mock_settings.openai_base_url = ""
+        mock_settings.openai_api_version = "2024-12-01-preview"
+        result = analyze_visual_evidence(dummy_b64)
+
+    date_e = next((e for e in result.entities if e.label == "date_occurrence"), None)
+    assert date_e is not None, "date_occurrence 엔티티가 없음"
+    # 날짜 text가 YYYY-MM-DD 로만 정규화되어야 함
+    assert date_e.text == "2026-03-14", (
+        f"날짜 text 정규화 실패: 기대 '2026-03-14', 실제 '{date_e.text}'"
+    )
+
+
+def test_apply_combined_datetime_fix_unicode_colon_fallback():
+    """
+    PaddleOCR가 시간의 콜론을 유니코드 전각 '：'(U+FF1A)으로 인식하더라도
+    time_occurrence가 ASCII '23:42' 로 추출되어야 한다.
+    """
+    import sys
+    import types
+    from unittest.mock import MagicMock, patch
+
+    from utils.llm_azure import analyze_visual_evidence
+    from utils.ocr_paddle import OcrWord
+
+    # PaddleOCR가 "23：42" (full-width colon) 으로 OCR 한 케이스
+    fake_ocr_words = [
+        OcrWord(text="결제일시 : 2026-03-14 23\uff1a42 (토요일)",  # ：= U+FF1A
+                xmin=0, ymin=200, xmax=700, ymax=240,
+                confidence=0.98, img_width=700, img_height=1100),
+        OcrWord(text="합계금액",
+                xmin=50, ymin=800, xmax=300, ymax=840,
+                confidence=0.97, img_width=700, img_height=1100),
+        OcrWord(text="68,000원",
+                xmin=400, ymin=800, xmax=680, ymax=840,
+                confidence=0.97, img_width=700, img_height=1100),
+    ]
+
+    # LLM은 정상 ASCII 반환, OCR 블록엔 full-width 콜론 존재
+    llm_json_response = """{
+      "merchant_name": null,
+      "date_occurrence": {"key_index": 0, "value_index": 0, "text": "2026-03-14"},
+      "time_occurrence": {"key_index": 0, "value_index": 0, "text": "23:42"},
+      "amount_total": {"key_index": 1, "value_index": 2, "text": "68000"}
+    }"""
+
+    fake_completion = MagicMock()
+    fake_completion.choices[0].message.content = llm_json_response
+    fake_client = MagicMock()
+    fake_client.chat.completions.create.return_value = fake_completion
+
+    fake_openai = types.ModuleType("openai")
+    fake_openai.OpenAI = MagicMock(return_value=fake_client)
+    fake_openai.AzureOpenAI = MagicMock(return_value=fake_client)
+
+    import base64
+    dummy_b64 = base64.b64encode(b"fake-image").decode()
+
+    with patch("utils.config.settings") as mock_settings, \
+         patch("utils.ocr_paddle.run_paddle_ocr", return_value=fake_ocr_words), \
+         patch.dict(sys.modules, {"openai": fake_openai}):
+        mock_settings.openai_api_key = "fake-key"
+        mock_settings.openai_base_url = ""
+        mock_settings.openai_api_version = "2024-12-01-preview"
+        result = analyze_visual_evidence(dummy_b64)
+
+    labels = {e.label for e in result.entities}
+    assert "time_occurrence" in labels, "time_occurrence가 생성되어야 함"
+    time_e = next(e for e in result.entities if e.label == "time_occurrence")
+    # ASCII 정규화된 HH:MM 이어야 함
+    assert time_e.text == "23:42", f"기대 '23:42', 실제 '{time_e.text}'"
+
+
 def test_merchant_name_for_header_beta_prefix():
     """_merchant_name_for_header(): BETA- xblnr → SCENARIO_PROFILES 가맹점명 반환."""
     from unittest.mock import MagicMock
