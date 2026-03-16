@@ -239,27 +239,36 @@ def _parse_line(line: Any) -> "tuple[list, str, float] | None":
 
 
 def _parse_result_obj(result_obj: Any, w: int, h: int) -> list[OcrWord]:
-    """paddleocr 3.x OCRResult 객체(속성 기반) 파싱.
+    """paddleocr 3.x OCRResult 파싱.
 
-    rec_texts / rec_scores / rec_polys 속성을 가진 객체를 처리한다.
+    PaddleOCR 3.4 실제 포맷: OCRResult는 dict-like 객체.
+    데이터는 result_obj.json['res'] 안에 있다.
     """
     words: list[OcrWord] = []
+
+    # ── 1순위: 직접 속성 (일부 빌드에서 rec_texts 가 최상위 attr) ───────────
     rec_texts = getattr(result_obj, "rec_texts", None)
     rec_polys = getattr(result_obj, "rec_polys", None)
     rec_scores = getattr(result_obj, "rec_scores", None)
 
-    # ── 디버그: 속성이 없거나 비어있을 때 객체 구조 덤프 ─────────────────────
-    if rec_texts is None or rec_polys is None or len(rec_texts) == 0:
-        attrs = [a for a in dir(result_obj) if not a.startswith("__")]
-        logger.warning(
-            "OCRResult 파싱 실패 또는 빈 결과 | type=%s | attrs=%s",
-            type(result_obj).__name__,
-            attrs,
-        )
-        # json 속성이 있으면 내용도 덤프
+    # ── 2순위: result_obj.json['res'] 구조 (PaddleOCR 3.4 확인된 포맷) ─────
+    if not rec_texts or not rec_polys:
         json_val = getattr(result_obj, "json", None)
-        if json_val is not None:
-            logger.warning("OCRResult.json = %s", json_val)
+        if isinstance(json_val, dict):
+            res_inner = json_val.get("res", {}) or {}
+            rec_texts = res_inner.get("rec_texts")
+            rec_polys = res_inner.get("rec_polys")
+            rec_scores = res_inner.get("rec_scores")
+
+    # ── 3순위: dict-like 직접 접근 ──────────────────────────────────────────
+    if not rec_texts or not rec_polys:
+        if hasattr(result_obj, "get"):
+            res_inner = result_obj.get("res", {}) or {}
+            rec_texts = res_inner.get("rec_texts")
+            rec_polys = res_inner.get("rec_polys")
+            rec_scores = res_inner.get("rec_scores")
+
+    if not rec_texts or not rec_polys:
         return words
 
     scores_iter = rec_scores if rec_scores is not None else [1.0] * len(rec_texts)
