@@ -1354,3 +1354,113 @@ _TOOL_EXECUTION_MERMAID = """graph TD
     policy --> score
     legacy --> score
 """
+
+
+# ----- Multimodal bbox 렌더링 -----
+
+def render_image_with_bboxes(
+    image_data: "bytes | Any",
+    boxes: "list[list[int]]",
+    labels: "list[str] | None" = None,
+) -> None:
+    """
+    이미지 위에 bbox 사각형과 라벨을 Pillow로 그린 뒤 st.image로 출력.
+
+    Args:
+        image_data: bytes 또는 PIL Image 객체.
+        boxes: [[ymin, xmin, ymax, xmax], ...] 형식, 0~1000 정규화 좌표.
+        labels: bbox에 표시할 텍스트 레이블 목록 (boxes와 동일 인덱스).
+    """
+    import io as _io
+    import logging as _logging
+
+    _log = _logging.getLogger(__name__)
+
+    try:
+        from PIL import Image as _Image, ImageDraw as _ImageDraw, ImageFont as _ImageFont
+    except ImportError:
+        st.warning("Pillow 라이브러리가 없어 bbox 렌더링을 건너뜁니다.")
+        if isinstance(image_data, bytes):
+            st.image(image_data)
+        return
+
+    # 이미지 로드
+    try:
+        if isinstance(image_data, bytes):
+            img = _Image.open(_io.BytesIO(image_data)).convert("RGB")
+        else:
+            img = image_data.convert("RGB") if hasattr(image_data, "convert") else image_data
+    except Exception as e:
+        st.warning(f"이미지 로드 실패: {e}")
+        return
+
+    w, h = img.size
+    draw_img = img.copy()
+    draw = _ImageDraw.Draw(draw_img)
+
+    _COLORS = ["#ef4444", "#3b82f6", "#10b981", "#f59e0b", "#8b5cf6"]
+    _LABEL_BG_ALPHA = 200  # RGBA alpha for label background
+
+    for idx, box in enumerate(boxes):
+        if len(box) < 4:
+            _log.warning("render_image_with_bboxes: invalid box %r, skipping", box)
+            continue
+
+        # 정규화 좌표 → 픽셀 좌표 변환 + clamp
+        ymin_n = max(0, min(1000, int(box[0])))
+        xmin_n = max(0, min(1000, int(box[1])))
+        ymax_n = max(0, min(1000, int(box[2])))
+        xmax_n = max(0, min(1000, int(box[3])))
+
+        # 역전 보정
+        if ymin_n > ymax_n:
+            ymin_n, ymax_n = ymax_n, ymin_n
+            _log.warning("render_image_with_bboxes: box[%d] y-coords inverted, auto-corrected", idx)
+        if xmin_n > xmax_n:
+            xmin_n, xmax_n = xmax_n, xmin_n
+            _log.warning("render_image_with_bboxes: box[%d] x-coords inverted, auto-corrected", idx)
+
+        px0 = int(xmin_n / 1000 * w)
+        py0 = int(ymin_n / 1000 * h)
+        px1 = int(xmax_n / 1000 * w)
+        py1 = int(ymax_n / 1000 * h)
+
+        color = _COLORS[idx % len(_COLORS)]
+
+        # bbox 사각형 (테두리 두께 3px)
+        for t in range(3):
+            draw.rectangle([px0 - t, py0 - t, px1 + t, py1 + t], outline=color)
+
+        # 라벨 텍스트 배경 + 텍스트
+        label_text = (labels[idx] if labels and idx < len(labels) else f"entity_{idx+1}")
+        try:
+            font = _ImageFont.load_default()
+        except Exception:
+            font = None
+
+        text_bbox = draw.textbbox((px0, py0), label_text, font=font) if font else (px0, py0, px0 + len(label_text) * 7, py0 + 14)
+        text_w = text_bbox[2] - text_bbox[0]
+        text_h = text_bbox[3] - text_bbox[1]
+        padding = 3
+        bg_x0 = px0
+        bg_y0 = max(0, py0 - text_h - padding * 2)
+        bg_x1 = px0 + text_w + padding * 2
+        bg_y1 = py0
+
+        # 불투명 배경 (overlay 방식)
+        overlay = _Image.new("RGBA", draw_img.size, (0, 0, 0, 0))
+        ov_draw = _ImageDraw.Draw(overlay)
+        r, g, b = int(color[1:3], 16), int(color[3:5], 16), int(color[5:7], 16)
+        ov_draw.rectangle([bg_x0, bg_y0, bg_x1, bg_y1], fill=(r, g, b, _LABEL_BG_ALPHA))
+        draw_img = _Image.alpha_composite(draw_img.convert("RGBA"), overlay).convert("RGB")
+        draw = _ImageDraw.Draw(draw_img)
+
+        draw.text((bg_x0 + padding, bg_y0 + padding), label_text, fill="#ffffff", font=font)
+
+    # 비정상 좌표 경고 (모든 box가 0이면 분석 실패 가능성)
+    if boxes and all(b == [0, 0, 0, 0] for b in boxes):
+        st.warning("bbox 좌표가 모두 (0,0,0,0)입니다. 이미지 분석 결과를 확인하세요.")
+
+    buf = _io.BytesIO()
+    draw_img.save(buf, format="PNG")
+    st.image(buf.getvalue(), use_container_width=True)

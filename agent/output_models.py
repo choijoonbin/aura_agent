@@ -5,9 +5,9 @@ Phase B: planner / critic / verifier / reporter용 structured output 스키마.
 from __future__ import annotations
 
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 # ----- Planner -----
@@ -301,3 +301,55 @@ class EvaluationHistoryEntry(BaseModel):
     verification_gate: str = Field(default="pass", description="게이트 상태")
     fallback_used: bool = Field(default=False, description="fallback 사용 여부")
     fallback_reason: str | None = Field(default=None, description="fallback 원인 코드")
+
+
+# ----- Multimodal Evidence Analysis -----
+
+
+class VisualBox(BaseModel):
+    """이미지 좌표 박스. [ymin, xmin, ymax, xmax], 0~1000 정규화 정수."""
+
+    ymin: int = Field(ge=0, le=1000, description="상단 y 좌표 (0~1000)")
+    xmin: int = Field(ge=0, le=1000, description="좌측 x 좌표 (0~1000)")
+    ymax: int = Field(ge=0, le=1000, description="하단 y 좌표 (0~1000)")
+    xmax: int = Field(ge=0, le=1000, description="우측 x 좌표 (0~1000)")
+
+    @model_validator(mode="after")
+    def check_coordinate_order(self) -> "VisualBox":
+        if self.ymin > self.ymax:
+            raise ValueError(f"ymin({self.ymin}) must be <= ymax({self.ymax})")
+        if self.xmin > self.xmax:
+            raise ValueError(f"xmin({self.xmin}) must be <= xmax({self.xmax})")
+        return self
+
+
+class VisualEntity(BaseModel):
+    """이미지에서 추출된 개별 엔티티 (금액/일자/가맹점)."""
+
+    id: str = Field(description="엔티티 식별자 (예: item_1)")
+    label: Literal["amount_total", "date_occurrence", "merchant_name"] = Field(
+        description="엔티티 유형: amount_total | date_occurrence | merchant_name"
+    )
+    text: str = Field(description="추출된 텍스트 (정규화 후)")
+    bbox: VisualBox = Field(description="이미지 내 좌표 (ymin,xmin,ymax,xmax), 0~1000 정규화")
+    confidence: float = Field(ge=0.0, le=1.0, description="추출 신뢰도 (0.0~1.0)")
+
+
+class MultimodalAuditResult(BaseModel):
+    """멀티모달 이미지 분석 결과. analyze_visual_evidence() 반환값."""
+
+    image_analysis: dict[str, Any] = Field(
+        default_factory=dict,
+        description="이미지 품질 분석: {condition: clear|blurry|damaged|partial_cut, has_stamp: bool}",
+    )
+    entities: list[VisualEntity] = Field(
+        default_factory=list,
+        description="추출된 엔티티 목록 (amount_total / date_occurrence / merchant_name)",
+    )
+    suggested_summary: str = Field(default="", description="에이전트 제안 1줄 적요")
+    audit_comment: str = Field(default="", description="시각적으로 감지된 특이사항")
+    source: Literal["vision_llm", "ocr_llm"] = Field(
+        default="vision_llm",
+        description="분석 소스: vision_llm | ocr_llm",
+    )
+    fallback_used: bool = Field(default=False, description="fallback 사용 여부")

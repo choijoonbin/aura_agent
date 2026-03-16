@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import hashlib
+import json
+import logging
 import random
+import uuid as _uuid_module
 from datetime import date, datetime, time, timezone
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy import and_, delete, func, select, text
@@ -11,6 +15,11 @@ from sqlalchemy.orm import Session
 from db.models import AgentCase, FiDocHeader, FiDocItem
 from services.stream_runtime import runtime
 from utils.config import settings
+
+logger = logging.getLogger(__name__)
+
+# Beta 전용 저장 경로 (POC 로컬 파일시스템)
+_EVIDENCE_UPLOAD_ROOT = Path("data/evidence_uploads")
 
 
 # 시연 데이터 규칙:
@@ -104,6 +113,192 @@ _FIXED_WEEKEND_DATE = date(2026, 3, 14)  # 2026-03-14 (토)
 _FIXED_OCCUR_TIME = time(19, 45, 0)
 _FIXED_AMOUNT_KRW = 97042
 
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Beta: 시연 데이터 생성 서비스 (기존 seed 로직과 분리된 독립 경로)
+# ──────────────────────────────────────────────────────────────────────────────
+
+# 케이스 유형별 표준 검토 질문 (에이전트 규정 기반과 동일 구조)
+_REVIEW_QUESTIONS_BY_CASE_TYPE: dict[str, dict[str, Any]] = {
+    "HOLIDAY_USAGE": {
+        "required_inputs": [
+            {"field": "approval_doc", "reason": "휴일 사용 사전 승인 규정(제4조)", "guide": "휴일 사전 승인 문서를 첨부하세요"},
+            {"field": "business_purpose", "reason": "업무 목적 입증 필요(제6조)", "guide": "업무 목적을 구체적으로 기술하세요"},
+        ],
+        "review_questions": [
+            "휴일 사용에 대한 사전 승인을 받았습니까?",
+            "해당 지출이 업무 목적임을 증명할 수 있습니까?",
+        ],
+    },
+    "LIMIT_EXCEED": {
+        "required_inputs": [
+            {"field": "approval_over_limit", "reason": "한도 초과 결재 승인 필요(제9조)", "guide": "한도 초과 승인 결재 문서를 첨부하세요"},
+            {"field": "counterpart_info", "reason": "접대 상대방 정보 필수(제10조)", "guide": "접대 상대방 및 목적을 기재하세요"},
+        ],
+        "review_questions": [
+            "한도 초과에 대한 결재 승인이 있습니까?",
+            "접대 상대방 및 목적을 명시할 수 있습니까?",
+        ],
+    },
+    "PRIVATE_USE_RISK": {
+        "required_inputs": [
+            {"field": "work_relation_proof", "reason": "업무 관련성 증명 필요(제7조)", "guide": "업무 관련 근거 자료를 제출하세요"},
+            {"field": "non_private_declaration", "reason": "사적 사용 아님 확인 필요(제8조)", "guide": "사적 사용이 아님을 확인하는 서술을 작성하세요"},
+        ],
+        "review_questions": [
+            "해당 지출이 업무와 직접 관련된 것임을 증명할 수 있습니까?",
+            "사적 사용이 아닌 업무 목적 사용 근거가 있습니까?",
+        ],
+    },
+    "UNUSUAL_PATTERN": {
+        "required_inputs": [
+            {"field": "reason_for_unusual_time", "reason": "심야/비정상 시간대 불가피한 사유 필요(제5조)", "guide": "심야 사용이 불가피했던 업무 사유를 기술하세요"},
+            {"field": "industry_purpose", "reason": "해당 업종 이용 업무 목적 확인(제6조)", "guide": "해당 업종 이용이 업무 목적임을 설명하세요"},
+        ],
+        "review_questions": [
+            "심야/비정상 시간대 사용에 대한 업무상 불가피한 사유가 있습니까?",
+            "해당 업종 이용이 업무 목적임을 설명할 수 있습니까?",
+        ],
+    },
+    "NORMAL_BASELINE": {
+        "required_inputs": [],
+        "review_questions": [],
+    },
+}
+
+
+def validate_demo_required_fields(
+    amount: str,
+    date_occ: str,
+    merchant: str,
+    bktxt: str,
+    user_reason: str,
+) -> tuple[bool, list[str]]:
+    """
+    시연 데이터 생성 필수 5개 항목 유효성 검사. (UI 레이어에서 재사용 가능한 순수 함수)
+
+    Returns:
+        (all_valid: bool, errors: list[str])
+    """
+    errors: list[str] = []
+
+    try:
+        if not (amount.replace(",", "").strip() and float(amount.replace(",", "")) > 0):
+            errors.append("금액: 0 초과 숫자를 입력하세요")
+    except (ValueError, AttributeError):
+        errors.append("금액: 0 초과 숫자를 입력하세요")
+
+    try:
+        datetime.strptime(date_occ.strip(), "%Y-%m-%d")
+    except (ValueError, AttributeError):
+        errors.append("일자: YYYY-MM-DD 형식으로 입력하세요")
+
+    if not merchant.strip():
+        errors.append("가맹점명을 입력하세요")
+    if not bktxt.strip():
+        errors.append("적요를 입력하세요")
+    if not user_reason.strip():
+        errors.append("사유를 입력하세요")
+
+    return len(errors) == 0, errors
+
+
+def generate_preview_questions(case_type: str, case_data: dict[str, Any]) -> dict[str, Any]:
+    """
+    케이스 유형에 맞는 규정 기반 검토 질문과 필수 입력 목록을 반환한다.
+    agent/langgraph_verification_logic.py의 규정 기반 질문 구조와 동일한 형태.
+
+    Returns:
+        {
+            "required_inputs": [{"field": ..., "reason": ..., "guide": ...}, ...],
+            "review_questions": ["질문1", "질문2", ...],
+        }
+    """
+    base = _REVIEW_QUESTIONS_BY_CASE_TYPE.get(
+        case_type,
+        {"required_inputs": [], "review_questions": []},
+    )
+    return {
+        "required_inputs": list(base["required_inputs"]),
+        "review_questions": list(base["review_questions"]),
+    }
+
+
+def save_custom_demo_case(
+    payload: dict[str, Any],
+    image_bytes: bytes,
+    filename: str,
+) -> dict[str, Any]:
+    """
+    업로드 증빙 기반 커스텀 시연 케이스를 data/evidence_uploads/{uuid}/ 에 저장한다.
+    기존 seed_demo_scenarios()와 완전히 분리된 Beta 전용 저장 경로.
+
+    Args:
+        payload: 케이스 메타데이터 (case_type, amount_total, date_occurrence, merchant_name, bktxt, sgtxt, user_reason 등)
+        image_bytes: 이미지 파일 내용 (없으면 b"")
+        filename: 원본 파일명
+
+    Returns:
+        {"case_uuid": str, "image_path": str, "meta_path": str, "created_at": str}
+    """
+    case_uuid = str(_uuid_module.uuid4())
+    save_dir = _EVIDENCE_UPLOAD_ROOT / case_uuid
+    save_dir.mkdir(parents=True, exist_ok=True)
+
+    # 이미지 저장
+    image_path = ""
+    if image_bytes:
+        ext = Path(filename).suffix.lower() if filename else ".jpg"
+        if ext not in {".jpg", ".jpeg", ".png", ".webp"}:
+            ext = ".jpg"
+        img_filename = f"evidence{ext}"
+        img_path = save_dir / img_filename
+        img_path.write_bytes(image_bytes)
+        image_path = str(img_path)
+        logger.info("save_custom_demo_case: image saved to %s", image_path)
+
+    # 메타데이터 JSON 저장
+    now_iso = datetime.now(timezone.utc).isoformat()
+    case_type = payload.get("case_type", "UNKNOWN")
+    q_data = generate_preview_questions(case_type, payload)
+
+    meta: dict[str, Any] = {
+        "case_uuid": case_uuid,
+        "created_at": now_iso,
+        "model": payload.get("model_source", "vision_llm"),
+        "fallback_used": payload.get("fallback_used", False),
+        "extracted_entities": payload.get("extracted_entities", []),
+        "edited_entities": {
+            "amount_total": payload.get("amount_total", ""),
+            "date_occurrence": payload.get("date_occurrence", ""),
+            "merchant_name": payload.get("merchant_name", ""),
+        },
+        "case_type": case_type,
+        "review_questions": payload.get("review_questions") or q_data["review_questions"],
+        "review_answers": payload.get("review_answers", []),
+        "image_path": image_path,
+        "memo": {
+            "bktxt": payload.get("bktxt", ""),
+            "sgtxt": payload.get("sgtxt", ""),
+            "user_reason": payload.get("user_reason", ""),
+        },
+    }
+
+    meta_path = save_dir / "meta.json"
+    meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+    logger.info("save_custom_demo_case: meta saved to %s (uuid=%s)", meta_path, case_uuid)
+
+    return {
+        "case_uuid": case_uuid,
+        "image_path": image_path,
+        "meta_path": str(meta_path),
+        "created_at": now_iso,
+    }
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Legacy: 기존 시나리오 seed 로직 (재사용 가능하도록 분리 유지)
+# ──────────────────────────────────────────────────────────────────────────────
 
 def list_demo_scenarios() -> list[dict[str, Any]]:
     out = []
