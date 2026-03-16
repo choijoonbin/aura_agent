@@ -73,6 +73,10 @@ def _entities_to_boxes_and_labels(entities: list) -> tuple[list[list[int]], list
         bbox = e.bbox if hasattr(e, "bbox") else None
         if bbox is None:
             continue
+        # 신뢰도 낮은 entity는 렌더링 제외 (잘못된 위치 bbox 방지)
+        conf = e.confidence if hasattr(e, "confidence") else e.get("confidence", 1.0)
+        if float(conf) < 0.5:
+            continue
         ymin = bbox.ymin if hasattr(bbox, "ymin") else bbox.get("ymin", 0)
         xmin = bbox.xmin if hasattr(bbox, "xmin") else bbox.get("xmin", 0)
         ymax = bbox.ymax if hasattr(bbox, "ymax") else bbox.get("ymax", 0)
