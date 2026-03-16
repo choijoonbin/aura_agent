@@ -761,3 +761,159 @@ async def _retry_fill_hitl_review_when_empty(
         return {"review_reasons": reasons[:5], "review_questions": questions[:MAX_HITL_QUESTIONS]}
     except Exception:
         return {"review_reasons": [], "review_questions": []}
+
+
+_QA_MATCH_FALLBACK: list[dict[str, Any]] = []
+
+_BASIS_FIELD_LABELS: dict[str, str] = {
+    "bktxt": "적요",
+    "user_reason": "사용 사유",
+    "sgtxt": "비고",
+}
+
+
+async def _match_questions_to_prior_answers(
+    questions: list[str],
+    body_evidence: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """
+    HITL 질문 목록과 전표 제출자의 기존 답변(bktxt/user_reason/sgtxt)을
+    LLM으로 의미 매칭하여 각 질문의 커버리지를 판단한다.
+
+    Returns:
+        list of {
+            "question": str,          # 원본 질문
+            "covered": bool,          # 기존 답변으로 충분히 답변됨 여부
+            "matched_answer": str,    # 매칭된 답변 발췌 (없으면 "")
+            "basis_field": str,       # 출처 필드명 ("bktxt"/"user_reason"/"sgtxt" 또는 "")
+        }
+
+    LLM 호출 실패 시 모든 질문을 covered=False로 fallback 반환.
+    """
+    if not questions:
+        return []
+
+    memo = (body_evidence.get("memo") or {})
+    prior: dict[str, str] = {
+        "bktxt": str(memo.get("bktxt") or "").strip(),
+        "user_reason": str(memo.get("user_reason") or "").strip(),
+        "sgtxt": str(memo.get("sgtxt") or "").strip(),
+    }
+    # 기존 답변이 전혀 없으면 매칭 불가 — 모두 미확인으로 즉시 반환
+    if not any(prior.values()):
+        return [
+            {"question": q, "covered": False, "matched_answer": "", "basis_field": ""}
+            for q in questions
+        ]
+
+    prior_lines = "\n".join(
+        f"- {_BASIS_FIELD_LABELS[k]}({k}): {v}"
+        for k, v in prior.items()
+        if v
+    )
+    q_lines = "\n".join(f"{i+1}. {q}" for i, q in enumerate(questions))
+
+    system_prompt = (
+        "당신은 경비 감사 에이전트입니다. "
+        "전표 제출자가 사전에 작성한 내용과 담당자 검토 질문을 비교하여, "
+        "각 질문이 기존 작성 내용으로 충분히 답변되었는지 판단합니다.\n\n"
+        "판단 기준:\n"
+        "- covered=true: 기존 작성 내용 중 해당 질문에 실질적으로 답하는 내용이 있을 때\n"
+        "- covered=false: 기존 내용에서 해당 질문과 관련된 언급이 없거나 불충분할 때\n\n"
+        "반드시 아래 JSON 배열만 반환하세요 (다른 텍스트 없이):\n"
+        '[\n'
+        '  {\n'
+        '    "index": 0,\n'
+        '    "covered": true,\n'
+        '    "matched_answer": "매칭된 원문 발췌 (없으면 빈 문자열)",\n'
+        '    "basis_field": "bktxt 또는 user_reason 또는 sgtxt (없으면 빈 문자열)"\n'
+        '  }\n'
+        ']'
+    )
+    user_prompt = (
+        f"## 전표 제출자 작성 내용\n{prior_lines}\n\n"
+        f"## 담당자 검토 질문 목록\n{q_lines}\n\n"
+        "각 질문(0-based index)에 대해 JSON 배열을 반환하세요."
+    )
+
+    fallback = [
+        {"question": q, "covered": False, "matched_answer": "", "basis_field": ""}
+        for q in questions
+    ]
+
+    try:
+        from openai import AsyncAzureOpenAI, AsyncOpenAI
+
+        base_url = (getattr(settings, "openai_base_url", None) or "").strip()
+        api_key = getattr(settings, "openai_api_key", None) or ""
+        api_version = getattr(settings, "openai_api_version", "2024-12-01-preview")
+        timeout_sec = 10.0
+
+        is_azure = ".openai.azure.com" in base_url
+        if is_azure:
+            azure_ep = base_url.rstrip("/")
+            if azure_ep.endswith("/openai/v1"):
+                azure_ep = azure_ep[: -len("/openai/v1")]
+            client: Any = AsyncAzureOpenAI(
+                api_key=api_key,
+                azure_endpoint=azure_ep,
+                api_version=api_version,
+                timeout=timeout_sec,
+            )
+        else:
+            client = AsyncOpenAI(
+                api_key=api_key,
+                base_url=base_url or None,
+                timeout=timeout_sec,
+            )
+
+        model = getattr(settings, "reasoning_llm_model", "gpt-4o-mini")
+        tok_kw = completion_kwargs_for_azure(
+            base_url,
+            temperature=0.0,
+            max_tokens=512,
+        )
+        response = await client.chat.completions.create(
+            model=model,
+            response_format={"type": "json_object"},
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            **tok_kw,
+        )
+        raw = (response.choices[0].message.content or "").strip()
+        # LLM이 배열을 json_object 래퍼 안에 반환할 수 있으므로 처리
+        parsed_root = json.loads(raw)
+        if isinstance(parsed_root, list):
+            items = parsed_root
+        elif isinstance(parsed_root, dict):
+            # {"matches": [...]} 또는 {"results": [...]} 등 래퍼 처리
+            items = next(
+                (v for v in parsed_root.values() if isinstance(v, list)),
+                [],
+            )
+        else:
+            items = []
+
+        results: list[dict[str, Any]] = []
+        for i, q in enumerate(questions):
+            item = next((it for it in items if isinstance(it, dict) and it.get("index") == i), None)
+            if item is None:
+                results.append({"question": q, "covered": False, "matched_answer": "", "basis_field": ""})
+            else:
+                results.append({
+                    "question": q,
+                    "covered": bool(item.get("covered", False)),
+                    "matched_answer": str(item.get("matched_answer") or "").strip(),
+                    "basis_field": str(item.get("basis_field") or "").strip(),
+                })
+        logger.info(
+            "_match_questions_to_prior_answers: %d/%d covered",
+            sum(1 for r in results if r["covered"]),
+            len(results),
+        )
+        return results
+    except Exception as exc:
+        logger.warning("_match_questions_to_prior_answers: fallback (error: %s)", exc)
+        return fallback

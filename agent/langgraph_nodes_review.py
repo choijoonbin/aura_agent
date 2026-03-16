@@ -1110,6 +1110,29 @@ async def verify_node_impl(
         hitl_request["review_questions"] = final_questions[:MAX_HITL_QUESTIONS]
         hitl_request["questions"] = final_questions[:MAX_HITL_QUESTIONS]
 
+        # ── Sprint 3: 전표 제출자 사전 답변 Q&A 매칭 ──────────────────────────
+        memo = (state.get("body_evidence") or {}).get("memo") or {}
+        hitl_request["uploader_answers"] = {
+            "bktxt": str(memo.get("bktxt") or "").strip(),
+            "user_reason": str(memo.get("user_reason") or "").strip(),
+            "sgtxt": str(memo.get("sgtxt") or "").strip(),
+        }
+        try:
+            from agent.langgraph_verification_logic import _match_questions_to_prior_answers
+            qa_matches = await _match_questions_to_prior_answers(
+                questions=final_questions[:MAX_HITL_QUESTIONS],
+                body_evidence=state.get("body_evidence") or {},
+            )
+            hitl_request["qa_matches"] = qa_matches
+            logger.info(
+                "verify_node: qa_matches %d/%d covered",
+                sum(1 for m in qa_matches if m.get("covered")),
+                len(qa_matches),
+            )
+        except Exception as _qa_err:
+            logger.warning("verify_node: qa_matching skipped (%s)", _qa_err)
+            hitl_request["qa_matches"] = []
+
     events: list[dict[str, Any]] = [
         AgentEvent(event_type="NODE_START", node="verify", phase="verify", message="근거 정합성과 추가 검토 필요 여부를 확인합니다.", metadata={}).to_payload(),
     ]

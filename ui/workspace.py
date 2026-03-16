@@ -2667,6 +2667,73 @@ def render_hitl_panel(latest_bundle: dict[str, Any], *, vkey: str | None = None)
             + '</div>',
             unsafe_allow_html=True,
         )
+        # ── Sprint 3: 전표 제출자 사전 답변 Q&A 매칭 결과 표시 ────────────────
+        qa_matches: list[dict] = (hitl_request or {}).get("qa_matches") or []
+        uploader_answers: dict = (hitl_request or {}).get("uploader_answers") or {}
+        _field_label = {"bktxt": "적요", "user_reason": "사용 사유", "sgtxt": "비고"}
+
+        if qa_matches:
+            any_prior = any(uploader_answers.values())
+            covered_count = sum(1 for m in qa_matches if m.get("covered"))
+            total_count = len(qa_matches)
+            st.markdown("#### 전표 제출자 작성 내용")
+            if any_prior:
+                # 작성된 원문 요약을 접을 수 있는 형태로 표시
+                raw_lines = [
+                    f"**{_field_label.get(k, k)}**: {v}"
+                    for k, v in uploader_answers.items()
+                    if v
+                ]
+                if raw_lines:
+                    with st.expander("제출자 원문 보기", expanded=False):
+                        for line in raw_lines:
+                            st.markdown(line)
+            # 질문별 커버리지 테이블
+            st.caption(
+                f"총 {total_count}개 질문 중 {covered_count}개 답변 확인됨 "
+                f"{'— 미확인 항목은 아래 검토 의견에 직접 작성해 주세요.' if covered_count < total_count else '— 모든 질문에 답변이 확인되었습니다.'}"
+            )
+            for m in qa_matches:
+                question = str(m.get("question") or "").strip()
+                covered = bool(m.get("covered"))
+                matched = str(m.get("matched_answer") or "").strip()
+                basis = str(m.get("basis_field") or "").strip()
+                field_name = _field_label.get(basis, "")
+
+                if covered and matched:
+                    col_icon, col_body = st.columns([0.04, 0.96])
+                    with col_icon:
+                        st.markdown("✅")
+                    with col_body:
+                        st.markdown(f"**{question}**")
+                        src = f" _(출처: {field_name})_" if field_name else ""
+                        st.markdown(
+                            f'<div style="background:#f0fdf4;border-left:3px solid #22c55e;'
+                            f'padding:6px 10px;border-radius:4px;color:#166534;font-size:0.88em">'
+                            f'{matched}{src}</div>',
+                            unsafe_allow_html=True,
+                        )
+                else:
+                    col_icon, col_body = st.columns([0.04, 0.96])
+                    with col_icon:
+                        st.markdown("⚠️")
+                    with col_body:
+                        st.markdown(f"**{question}**")
+                        st.markdown(
+                            '<div style="background:#fffbeb;border-left:3px solid #f59e0b;'
+                            'padding:6px 10px;border-radius:4px;color:#92400e;font-size:0.88em">'
+                            '제출자 답변 없음 — 아래 검토 의견에 직접 작성 필요</div>',
+                            unsafe_allow_html=True,
+                        )
+            st.markdown("---")
+        elif uploader_answers and any(uploader_answers.values()):
+            # qa_matches가 없지만 원문은 있는 경우 (LLM 매칭 실패 fallback)
+            st.markdown("#### 전표 제출자 작성 내용")
+            for k, v in uploader_answers.items():
+                if v:
+                    st.markdown(f"**{_field_label.get(k, k)}**: {v}")
+            st.markdown("---")
+
         required_inputs = (hitl_request.get("required_inputs") or [])
         _req_fields = {(req.get("field") or "").strip() for req in required_inputs}
         info_cols = st.columns(3)
