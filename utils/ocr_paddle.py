@@ -138,18 +138,28 @@ def get_paddle_ocr(lang: str = "korean") -> Any:
     last_exc: Exception | None = None
 
     if major >= 3:
-        # ── 3.x: 무거운 전처리 모델 비활성화 ────────────────────────────────
-        # UVDoc(문서 왜곡 보정), 문서/텍스트 방향 감지는 CPU에서 매우 느림.
-        # 영수증 OCR에는 검출(det) + 인식(rec)만으로 충분.
+        # ── 3.x: CPU 최적화 — 무거운 모델 모두 비활성화 ──────────────────────
+        # PP-OCRv5_server_det: GPU용 대형 모델, CPU에서 추론 hang 원인
+        # UVDoc, 방향감지 모델: 영수증 OCR에 불필요
+        # → mobile_det + mobile_rec 조합으로 CPU에서 빠른 동작
         _FAST_KWARGS = {
             "lang": lang,
             "device": "cpu",
-            "use_doc_orientation_classify": False,  # PP-LCNet_x1_0_doc_ori 제거
-            "use_doc_unwarping": False,              # UVDoc 제거 (가장 무거움)
-            "use_textline_orientation": False,       # PP-LCNet_x1_0_textline_ori 제거
+            "use_doc_orientation_classify": False,         # PP-LCNet_x1_0_doc_ori 제거
+            "use_doc_unwarping": False,                    # UVDoc 제거 (가장 무거움)
+            "use_textline_orientation": False,             # PP-LCNet_x1_0_textline_ori 제거
+            "text_detection_model_name": "PP-OCRv5_mobile_det",   # server→mobile 교체
         }
         for kwargs in [
             _FAST_KWARGS,
+            # text_detection_model_name 미지원 빌드 fallback (전처리만 비활성화)
+            {
+                "lang": lang,
+                "device": "cpu",
+                "use_doc_orientation_classify": False,
+                "use_doc_unwarping": False,
+                "use_textline_orientation": False,
+            },
             {"lang": lang, "device": "cpu"},
             {"lang": lang},
         ]:
@@ -289,29 +299,47 @@ def run_paddle_ocr(image_bytes: bytes, lang: str = "korean") -> list[OcrWord]:
 
     ocr = get_paddle_ocr(lang=lang)  # RuntimeError 발생 시 그대로 전파
 
-    # ── OCR 실행 (cls 파라미터 지원 여부 자동 감지) ──────────────────────────
-    results: Any = None
+    major, _ = _paddle_version()
+    words: list[OcrWord] = []
+
+    if major >= 3:
+        # ── 3.x: predict() 가 공식 API — ocr()는 내부 동작이 다를 수 있음 ──
+        try:
+            results = list(ocr.predict(img_array))
+        except Exception as exc:
+            raise RuntimeError(f"PaddleOCR predict() 실행 실패: {exc}") from exc
+
+        logger.debug("PaddleOCR 3.x predict() 결과: %d건", len(results))
+        for res in results or []:
+            if res is None:
+                continue
+            words.extend(_parse_result_obj(res, w, h))
+
+        words.sort(key=lambda ww: ww.ymin)
+        logger.info("PaddleOCR 완료: %d개 텍스트 블록 추출", len(words))
+        return words
+
+    # ── 2.x: ocr() 메서드 사용 ────────────────────────────────────────────────
+    results_2x: Any = None
     for call_kwargs in [{"cls": True}, {}]:
         try:
-            results = ocr.ocr(img_array, **call_kwargs)
+            results_2x = ocr.ocr(img_array, **call_kwargs)
             break
         except TypeError:
             continue
         except Exception as exc:
             raise RuntimeError(f"PaddleOCR ocr() 실행 실패: {exc}") from exc
 
-    if results is None:
+    if results_2x is None:
         raise RuntimeError("PaddleOCR ocr() 호출 방법을 찾지 못했습니다.")
 
-    logger.debug("PaddleOCR raw results type: %s, len: %s", type(results), len(results) if results else 0)
+    logger.debug("PaddleOCR 2.x raw results len: %s", len(results_2x) if results_2x else 0)
 
-    words: list[OcrWord] = []
-
-    for page in results or []:
+    for page in results_2x or []:
         if page is None:
             continue
 
-        # ── Case A: 속성 기반 객체 (paddleocr 3.x 일부 빌드) ─────────────────
+        # 속성 기반 객체인 경우
         if hasattr(page, "rec_texts"):
             words.extend(_parse_result_obj(page, w, h))
             continue
