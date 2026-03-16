@@ -1624,3 +1624,132 @@ def test_datetime_split_korean_aware_bbox_position():
     # bbox_key(라벨) 구간은 날짜 시작보다 왼쪽이어야 함
     assert date_e.bbox_key is not None
     assert date_e.bbox_key.xmax <= date_e.bbox.xmin + 20
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# _keyword_spatial_override 근본 교정 테스트
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def test_keyword_spatial_override_amount_when_llm_returns_null():
+    """
+    LLM이 amount_total = null 반환해도 _keyword_spatial_override가
+    키워드 탐색으로 합계금액 옆 숫자 블록을 엔티티에 추가해야 함. (Image 1 시나리오)
+    """
+    import sys
+    import types
+    from unittest.mock import MagicMock, patch
+
+    from utils.llm_azure import analyze_visual_evidence
+    from utils.ocr_paddle import OcrWord
+
+    fake_ocr_words = [
+        OcrWord(text="가맹점명 : 가온 식당",
+                xmin=50, ymin=100, xmax=600, ymax=140,
+                confidence=0.99, img_width=700, img_height=1100),
+        OcrWord(text="결제일시 : 2026-03-14 23:42",
+                xmin=0, ymin=200, xmax=700, ymax=240,
+                confidence=0.98, img_width=700, img_height=1100),
+        OcrWord(text="합계금액",
+                xmin=50, ymin=800, xmax=300, ymax=840,
+                confidence=0.97, img_width=700, img_height=1100),
+        OcrWord(text="95,000원",
+                xmin=420, ymin=800, xmax=680, ymax=840,
+                confidence=0.97, img_width=700, img_height=1100),
+    ]
+
+    # LLM이 amount_total을 null로 반환 (인덱스 선택 실패)
+    llm_json_response = """{
+      "merchant_name": null,
+      "date_occurrence": {"key_index": 1, "value_index": 1, "text": "2026-03-14"},
+      "time_occurrence": {"key_index": 1, "value_index": 1, "text": "23:42"},
+      "amount_total": null
+    }"""
+
+    fake_completion = MagicMock()
+    fake_completion.choices[0].message.content = llm_json_response
+    fake_client = MagicMock()
+    fake_client.chat.completions.create.return_value = fake_completion
+
+    fake_openai = types.ModuleType("openai")
+    fake_openai.OpenAI = MagicMock(return_value=fake_client)
+    fake_openai.AzureOpenAI = MagicMock(return_value=fake_client)
+
+    import base64
+    dummy_b64 = base64.b64encode(b"fake-image").decode()
+
+    with patch("utils.config.settings") as mock_settings, \
+         patch("utils.ocr_paddle.run_paddle_ocr", return_value=fake_ocr_words), \
+         patch.dict(sys.modules, {"openai": fake_openai}):
+        mock_settings.openai_api_key = "fake-key"
+        mock_settings.openai_base_url = ""
+        mock_settings.openai_api_version = "2024-12-01-preview"
+        result = analyze_visual_evidence(dummy_b64)
+
+    amount_e = next((e for e in result.entities if e.label == "amount_total"), None)
+    assert amount_e is not None, "_keyword_spatial_override가 amount_total 엔티티를 추가하지 않음"
+    assert amount_e.text == "95000", (
+        f"키워드+공간 탐색으로 95000 기대, 실제: '{amount_e.text}'"
+    )
+
+
+def test_keyword_spatial_override_merchant_when_llm_returns_null():
+    """
+    LLM이 merchant_name = null 반환해도 _keyword_spatial_override가
+    가맹점명 블록 내 ': ' 구분자로 값 추출해야 함. (Image 1 시나리오)
+    """
+    import sys
+    import types
+    from unittest.mock import MagicMock, patch
+
+    from utils.llm_azure import analyze_visual_evidence
+    from utils.ocr_paddle import OcrWord
+
+    fake_ocr_words = [
+        OcrWord(text="가맹점명 : 가온 식당 강남점",
+                xmin=50, ymin=100, xmax=650, ymax=140,
+                confidence=0.99, img_width=700, img_height=1100),
+        OcrWord(text="합계금액",
+                xmin=50, ymin=800, xmax=300, ymax=840,
+                confidence=0.97, img_width=700, img_height=1100),
+        OcrWord(text="95,000원",
+                xmin=420, ymin=800, xmax=680, ymax=840,
+                confidence=0.97, img_width=700, img_height=1100),
+    ]
+
+    # LLM이 merchant_name, amount_total 모두 null 반환
+    llm_json_response = """{
+      "merchant_name": null,
+      "date_occurrence": null,
+      "time_occurrence": null,
+      "amount_total": null
+    }"""
+
+    fake_completion = MagicMock()
+    fake_completion.choices[0].message.content = llm_json_response
+    fake_client = MagicMock()
+    fake_client.chat.completions.create.return_value = fake_completion
+
+    fake_openai = types.ModuleType("openai")
+    fake_openai.OpenAI = MagicMock(return_value=fake_client)
+    fake_openai.AzureOpenAI = MagicMock(return_value=fake_client)
+
+    import base64
+    dummy_b64 = base64.b64encode(b"fake-image").decode()
+
+    with patch("utils.config.settings") as mock_settings, \
+         patch("utils.ocr_paddle.run_paddle_ocr", return_value=fake_ocr_words), \
+         patch.dict(sys.modules, {"openai": fake_openai}):
+        mock_settings.openai_api_key = "fake-key"
+        mock_settings.openai_base_url = ""
+        mock_settings.openai_api_version = "2024-12-01-preview"
+        result = analyze_visual_evidence(dummy_b64)
+
+    merchant_e = next((e for e in result.entities if e.label == "merchant_name"), None)
+    assert merchant_e is not None, "_keyword_spatial_override가 merchant_name 엔티티를 추가하지 않음"
+    assert merchant_e.text == "가온 식당 강남점", (
+        f"': ' 분리로 '가온 식당 강남점' 기대, 실제: '{merchant_e.text}'"
+    )
+    amount_e = next((e for e in result.entities if e.label == "amount_total"), None)
+    assert amount_e is not None, "_keyword_spatial_override가 amount_total 엔티티를 추가하지 않음"
+    assert amount_e.text == "95000"

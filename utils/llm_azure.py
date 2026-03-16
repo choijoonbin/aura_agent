@@ -12,6 +12,11 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+# ── 키워드+공간 기반 추출 상수 ────────────────────────────────────────────────
+_AMOUNT_LABEL_KW = frozenset(("합계금액", "결제금액", "총금액", "합 계", "청구금액", "실결제금액"))
+_AMOUNT_SKIP_KW = frozenset(("공급가액", "부가가치세", "VAT", "소계"))
+_MERCHANT_LABEL_KW = frozenset(("가맹점명", "거래처명", "상호명", "업체명"))
+
 _MULTIMODAL_SYSTEM_PROMPT = """당신은 대한민국 기업 경비 증빙(영수증/전표)에서 핵심 객체를 찾아 위치(bbox)와 데이터를 추출하는 전문 감사 에이전트입니다.
 아래 규칙을 엄격히 준수하여 시연 데이터 생성 및 감사 분석에 필요한 정보를 반환하세요.
 
@@ -336,8 +341,9 @@ def _fix_amount_nearby(
 
     key_y_center = (key_word.ymin + key_word.ymax) / 2
     val_y_center = (val_word.ymin + val_word.ymax) / 2
-    # 라벨 높이의 1.2배를 "같은 줄" 허용 범위로 설정
-    y_tol = max(key_word.ymax - key_word.ymin, 10) * 1.2
+    # 라벨 높이의 0.6배를 "같은 줄" 허용 범위로 설정
+    # (1.2× → 0.6×: 인접 행이 y_tol 안에 들어와 조기 리턴되는 버그 수정)
+    y_tol = max(key_word.ymax - key_word.ymin, 10) * 0.6
 
     # 이미 같은 줄이면 아무것도 하지 않음
     if abs(val_y_center - key_y_center) <= y_tol:
@@ -390,6 +396,162 @@ def _fix_amount_nearby(
                     logger.warning("amount nearby fix 실패: %s", exc)
                 return
         return
+
+
+def _keyword_spatial_override(
+    entities: "list[Any]",
+    ocr_words: "list[Any]",
+) -> None:
+    """키워드+공간 탐색으로 LLM 인덱스 선택 오류를 근본적으로 교정.
+
+    합계금액: 라벨 키워드 블록 → 동일 Y-라인 우측 숫자 블록 (4자리 이상).
+    가맹점명: 라벨 블록 내 ': ' 이후 추출 또는 우측 동일 Y 블록.
+
+    LLM 결과가 없거나 잘못 선택된 경우를 모두 처리.
+    Y-허용치 = 라벨 높이의 0.5× (인접 행 오인 방지).
+    """
+    import re
+
+    from agent.output_models import VisualBox, VisualEntity
+
+    def _yc(w: "Any") -> float:
+        return (w.ymin + w.ymax) / 2
+
+    def _ytol(w: "Any") -> float:
+        return max(w.ymax - w.ymin, 10) * 0.5
+
+    # ── 합계금액 공간 탐색 ────────────────────────────────────────────────────
+    for label_block in ocr_words:
+        if not any(kw in label_block.text for kw in _AMOUNT_LABEL_KW):
+            continue
+
+        key_yc = _yc(label_block)
+        y_tol = _ytol(label_block)
+
+        candidates = []
+        for w in ocr_words:
+            if abs(_yc(w) - key_yc) > y_tol:
+                continue
+            if any(kw in w.text for kw in _AMOUNT_SKIP_KW):
+                continue
+            digits = re.sub(r"[^\d]", "", w.text)
+            if len(digits) >= 4:
+                candidates.append(w)
+
+        if not candidates:
+            break
+
+        best = max(candidates, key=lambda w: w.xmin)
+        best_digits = re.sub(r"[^\d]", "", best.text)
+        best_box = VisualBox(
+            ymin=best.norm_ymin, xmin=best.norm_xmin,
+            ymax=best.norm_ymax, xmax=best.norm_xmax,
+        )
+        key_box = VisualBox(
+            ymin=label_block.norm_ymin, xmin=label_block.norm_xmin,
+            ymax=label_block.norm_ymax, xmax=label_block.norm_xmax,
+        )
+
+        updated = False
+        for i, e in enumerate(entities):
+            if e.label == "amount_total":
+                try:
+                    entities[i] = VisualEntity(
+                        id=e.id, label="amount_total", text=best_digits,
+                        bbox=best_box, bbox_key=e.bbox_key or key_box,
+                        confidence=float(best.confidence),
+                    )
+                    updated = True
+                    logger.info(
+                        "_keyword_spatial_override[amount]: 교체 → text=%s", best_digits
+                    )
+                except Exception as exc:
+                    logger.warning("amount override 실패: %s", exc)
+                break
+
+        if not updated:
+            try:
+                entities.append(VisualEntity(
+                    id=f"item_{len(entities) + 1}", label="amount_total",
+                    text=best_digits, bbox=best_box, bbox_key=key_box,
+                    confidence=float(best.confidence),
+                ))
+                logger.info(
+                    "_keyword_spatial_override[amount]: 새로 추가 → text=%s", best_digits
+                )
+            except Exception as exc:
+                logger.warning("amount 새 추가 실패: %s", exc)
+        break  # 첫 번째 합계금액 라벨만 사용
+
+    # ── 가맹점명 공간 탐색 ────────────────────────────────────────────────────
+    for label_block in ocr_words:
+        if not any(kw in label_block.text for kw in _MERCHANT_LABEL_KW):
+            continue
+
+        merchant_text: str | None = None
+        merchant_block = label_block
+
+        # 1) 동일 블록 내 ': ' 또는 '：' 이후 값
+        for sep in (": ", "：", ":"):
+            idx = label_block.text.find(sep)
+            if idx >= 0:
+                merchant_text = label_block.text[idx + len(sep):].strip()
+                break
+
+        # 2) 값이 없으면 우측 동일 Y 블록
+        if not merchant_text:
+            key_yc = _yc(label_block)
+            y_tol = _ytol(label_block)
+            right_blocks = [
+                w for w in ocr_words
+                if abs(_yc(w) - key_yc) <= y_tol and w.xmin > label_block.xmax
+            ]
+            if right_blocks:
+                merchant_block = min(right_blocks, key=lambda w: w.xmin)
+                merchant_text = merchant_block.text.strip()
+
+        if not merchant_text:
+            break
+
+        best_box = VisualBox(
+            ymin=merchant_block.norm_ymin, xmin=merchant_block.norm_xmin,
+            ymax=merchant_block.norm_ymax, xmax=merchant_block.norm_xmax,
+        )
+        key_box = VisualBox(
+            ymin=label_block.norm_ymin, xmin=label_block.norm_xmin,
+            ymax=label_block.norm_ymax, xmax=label_block.norm_xmax,
+        )
+
+        updated = False
+        for i, e in enumerate(entities):
+            if e.label == "merchant_name":
+                try:
+                    entities[i] = VisualEntity(
+                        id=e.id, label="merchant_name", text=merchant_text,
+                        bbox=best_box, bbox_key=e.bbox_key or key_box,
+                        confidence=float(merchant_block.confidence),
+                    )
+                    updated = True
+                    logger.info(
+                        "_keyword_spatial_override[merchant]: 교체 → text=%s", merchant_text
+                    )
+                except Exception as exc:
+                    logger.warning("merchant override 실패: %s", exc)
+                break
+
+        if not updated:
+            try:
+                entities.append(VisualEntity(
+                    id=f"item_{len(entities) + 1}", label="merchant_name",
+                    text=merchant_text, bbox=best_box, bbox_key=key_box,
+                    confidence=float(merchant_block.confidence),
+                ))
+                logger.info(
+                    "_keyword_spatial_override[merchant]: 새로 추가 → text=%s", merchant_text
+                )
+            except Exception as exc:
+                logger.warning("merchant 새 추가 실패: %s", exc)
+        break  # 첫 번째 가맹점명 라벨만 사용
 
 
 def _analyze_with_paddle_ocr(
@@ -527,6 +689,10 @@ def _analyze_with_paddle_ocr(
 
     # ── 후처리 2: 합계금액 value_index가 key_index와 너무 멀면 가까운 값으로 교체 ──
     _fix_amount_nearby(entities, matched, ocr_words)
+
+    # ── 후처리 3: 키워드+공간 탐색으로 LLM 선택 오류 근본 교정 ─────────────
+    # LLM 비결정적 인덱스 선택과 무관하게 올바른 블록을 직접 탐색해 덮어씀.
+    _keyword_spatial_override(entities, ocr_words)
 
     return MultimodalAuditResult(
         image_analysis={"condition": image_condition, "has_stamp": has_stamp},
