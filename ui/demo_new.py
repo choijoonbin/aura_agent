@@ -38,6 +38,12 @@ def _check_required_fields(
     return validate_demo_required_fields(amount, date_occ, merchant, bktxt, user_reason)
 
 
+def _is_generate_disabled(all_valid: bool, is_abnormal: bool, has_file: bool) -> bool:
+    """버튼 비활성화 조건: 5개 필드 미완료 OR 비정상 케이스+파일 미첨부."""
+    from services.demo_data_service import is_generate_disabled
+    return is_generate_disabled(all_valid, is_abnormal, has_file)
+
+
 def _run_visual_analysis(image_bytes: bytes) -> "Any":
     """이미지 바이트를 analyze_visual_evidence로 전달해 분석 결과 반환."""
     from utils.llm_azure import analyze_visual_evidence
@@ -122,14 +128,23 @@ def render_demo_new_page() -> None:
                 with st.spinner("Vision LLM으로 분석 중..."):
                     result = _run_visual_analysis(image_bytes)
                     st.session_state["demo_new_analysis_result"] = result
-                    # 추출 결과를 편집 필드 초기값으로 자동 채우기
+                    # 추출 결과를 편집 필드에 직접 반영 (widget key + auto fallback 동시 갱신)
                     entities = result.entities if hasattr(result, "entities") else []
-                    st.session_state["demo_new_auto_amount"] = _extract_entity_value(entities, "amount_total")
-                    st.session_state["demo_new_auto_date"] = _extract_entity_value(entities, "date_occurrence")
-                    st.session_state["demo_new_auto_merchant"] = _extract_entity_value(entities, "merchant_name")
-                    st.session_state["demo_new_auto_summary"] = (
-                        result.suggested_summary if hasattr(result, "suggested_summary") else ""
-                    )
+                    extracted = {
+                        "amount_total": _extract_entity_value(entities, "amount_total"),
+                        "date_occurrence": _extract_entity_value(entities, "date_occurrence"),
+                        "merchant_name": _extract_entity_value(entities, "merchant_name"),
+                        "summary": result.suggested_summary if hasattr(result, "suggested_summary") else "",
+                    }
+                    st.session_state["demo_new_auto_amount"] = extracted["amount_total"]
+                    st.session_state["demo_new_auto_date"] = extracted["date_occurrence"]
+                    st.session_state["demo_new_auto_merchant"] = extracted["merchant_name"]
+                    st.session_state["demo_new_auto_summary"] = extracted["summary"]
+                    # Streamlit 위젯 key에도 직접 기록해야 재렌더 시 value= 파라미터 무시 문제를 해결
+                    st.session_state["demo_new_field_amount"] = extracted["amount_total"]
+                    st.session_state["demo_new_field_date"] = extracted["date_occurrence"]
+                    st.session_state["demo_new_field_merchant"] = extracted["merchant_name"]
+                    st.session_state["demo_new_field_bktxt"] = extracted["summary"]
                 st.rerun()
 
             analysis_result = st.session_state.get("demo_new_analysis_result")
@@ -155,7 +170,7 @@ def render_demo_new_page() -> None:
 
         else:
             st.info("이미지를 업로드하면 자동 분석이 가능합니다.")
-            # 이전 분석 결과 초기화
+            # 이전 분석 결과 및 자동 채우기 위젯 키 초기화
             for key in (
                 "demo_new_analysis_result",
                 "demo_new_image_bytes",
@@ -163,6 +178,10 @@ def render_demo_new_page() -> None:
                 "demo_new_auto_date",
                 "demo_new_auto_merchant",
                 "demo_new_auto_summary",
+                "demo_new_field_amount",
+                "demo_new_field_date",
+                "demo_new_field_merchant",
+                "demo_new_field_bktxt",
             ):
                 st.session_state.pop(key, None)
             image_bytes = None
@@ -243,15 +262,15 @@ def render_demo_new_page() -> None:
             amount_val, date_val, merchant_val, bktxt_val, user_reason_val
         )
 
-        # 비정상 케이스 + 이미지 없음 → 추가 차단
-        if is_abnormal and uploaded_file is None:
-            st.info("비정상 케이스는 증빙 이미지를 첨부하거나 위 필드를 직접 입력하세요.")
-
         if validation_errors:
             for err in validation_errors:
                 st.caption(f"⚠ {err}")
 
-        generate_disabled = not all_valid
+        # 비정상 케이스 + 파일 미첨부 → 버튼 항상 disabled (스펙 정책)
+        if is_abnormal and uploaded_file is None:
+            st.info("비정상 케이스는 증빙 이미지 첨부가 필수입니다.")
+
+        generate_disabled = _is_generate_disabled(all_valid, is_abnormal, uploaded_file is not None)
 
         if st.button(
             "테스트 데이터 생성",
@@ -275,27 +294,9 @@ def render_demo_new_page() -> None:
 
 
 def _get_review_questions_for_case_type(case_type: str) -> list[str]:
-    """케이스 유형별 표준 검토 질문 반환 (에이전트 규정 기반 질문과 동일 구조)."""
-    _questions: dict[str, list[str]] = {
-        "HOLIDAY_USAGE": [
-            "휴일 사용에 대한 사전 승인을 받았습니까?",
-            "해당 지출이 업무 목적임을 증명할 수 있습니까?",
-        ],
-        "LIMIT_EXCEED": [
-            "한도 초과에 대한 결재 승인이 있습니까?",
-            "접대 상대방 및 목적을 명시할 수 있습니까?",
-        ],
-        "PRIVATE_USE_RISK": [
-            "해당 지출이 업무와 직접 관련된 것임을 증명할 수 있습니까?",
-            "사적 사용이 아닌 업무 목적 사용 근거가 있습니까?",
-        ],
-        "UNUSUAL_PATTERN": [
-            "심야/비정상 시간대 사용에 대한 업무상 불가피한 사유가 있습니까?",
-            "해당 업종 이용이 업무 목적임을 설명할 수 있습니까?",
-        ],
-        "NORMAL_BASELINE": [],
-    }
-    return _questions.get(case_type, [])
+    """케이스 유형별 표준 검토 질문 반환. 서비스 레이어에 단일 정의 위임."""
+    from services.demo_data_service import generate_preview_questions
+    return generate_preview_questions(case_type, {})["review_questions"]
 
 
 def _handle_generate(

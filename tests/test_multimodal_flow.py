@@ -187,6 +187,29 @@ def test_check_required_fields_all_five_required():
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# 3b. 비정상 케이스 + 파일 미첨부 → generate_disabled=True (UI 정책 로직 검증)
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def test_is_generate_disabled_abnormal_no_file():
+    """비정상 케이스 + 파일 미첨부 시 generate_disabled=True (스펙 정책)."""
+    from services.demo_data_service import is_generate_disabled as _is_generate_disabled
+
+    # 비정상 + 파일 없음 → 5개 필드 모두 OK여도 disabled
+    assert _is_generate_disabled(all_valid=True, is_abnormal=True, has_file=False) is True
+
+    # 비정상 + 파일 있음 + 필드 OK → enabled
+    assert _is_generate_disabled(all_valid=True, is_abnormal=True, has_file=True) is False
+
+    # 정상 비교군 + 파일 없음 + 필드 OK → enabled (회귀 유지)
+    assert _is_generate_disabled(all_valid=True, is_abnormal=False, has_file=False) is False
+
+    # 정상/비정상 무관, 필드 미완 → disabled
+    assert _is_generate_disabled(all_valid=False, is_abnormal=False, has_file=True) is True
+    assert _is_generate_disabled(all_valid=False, is_abnormal=True, has_file=True) is True
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # 4. analyze_visual_evidence fallback (API 키 없을 때)
 # ──────────────────────────────────────────────────────────────────────────────
 

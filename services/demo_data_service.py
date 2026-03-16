@@ -167,6 +167,13 @@ _REVIEW_QUESTIONS_BY_CASE_TYPE: dict[str, dict[str, Any]] = {
 }
 
 
+def is_generate_disabled(all_valid: bool, is_abnormal: bool, has_file: bool) -> bool:
+    """버튼 비활성화 조건: 5개 필드 미완료 OR 비정상 케이스+파일 미첨부."""
+    if is_abnormal and not has_file:
+        return True
+    return not all_valid
+
+
 def validate_demo_required_fields(
     amount: str,
     date_occ: str,
