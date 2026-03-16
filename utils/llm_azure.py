@@ -206,11 +206,21 @@ def _apply_combined_datetime_fix(
     if d_pos < 0 or t_pos < 0 or d_pos >= t_pos:
         return
 
-    # ── 비율 기반 x좌표 분할 ────────────────────────────────────────────────
-    total = max(len(full), 1)
+    # ── 한글/CJK 표시 폭을 반영한 비율 기반 x좌표 분할 ───────────────────────
+    # 한글/CJK 한 글자는 ASCII 두 글자 너비 → 단순 문자 수 대신 display 폭 사용
+    def _disp_width(text: str) -> int:
+        """텍스트의 화면 표시 폭 계산 (한글/CJK=2, 그 외=1)."""
+        return sum(
+            2 if "\uac00" <= ch <= "\ud7a3" or "\u4e00" <= ch <= "\u9fff" else 1
+            for ch in text
+        )
+
+    disp_total = max(_disp_width(full), 1)
+    disp_d = _disp_width(full[:d_pos])
+    disp_t = _disp_width(full[:t_pos])
     vw = val_block.xmax - val_block.xmin
-    x_d = val_block.xmin + int(vw * d_pos / total)
-    x_t = val_block.xmin + int(vw * t_pos / total)
+    x_d = val_block.xmin + int(vw * disp_d / disp_total)
+    x_t = val_block.xmin + int(vw * disp_t / disp_total)
 
     def _make_box(src: "OcrWord", xmin: int, xmax: int) -> VisualBox:
         w = OcrWord(
@@ -355,7 +365,9 @@ def _fix_amount_nearby(
             continue
 
         new_text = re.sub(r"[^\d]", "", candidate.text)
-        if not new_text:
+        # 너무 짧은 숫자(예: "68" / "000"원으로 분리된 bold 숫자) 제외
+        # 영수증 금액은 최소 4자리(1,000원) 이상이어야 함
+        if not new_text or len(new_text) < 4:
             continue
 
         new_box = VisualBox(

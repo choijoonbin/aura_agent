@@ -1477,3 +1477,150 @@ def test_merchant_name_for_header_beta_limit_exceed():
 
     name = _merchant_name_for_header(header)
     assert name == "고액 식대", f"expected '고액 식대', got {name!r}"
+
+
+def test_fix_amount_rejects_short_number_from_split_bold_text():
+    """
+    PaddleOCR가 '68,000원'을 '68' + '000원' 두 블록으로 분리할 때
+    2자리 '68'이 금액으로 선택되지 않아야 한다 (최소 4자리 필터).
+    """
+    import sys
+    import types
+    from unittest.mock import MagicMock, patch
+
+    from utils.llm_azure import analyze_visual_evidence
+    from utils.ocr_paddle import OcrWord
+
+    # OCR가 bold "68,000원"을 "68"(idx=2)과 "000원"(idx=3)으로 분리한 케이스
+    # "합계금액"(idx=4)은 살짝 큰 ymin → LLM은 key=4, val=5(61818)를 선택
+    fake_ocr_words = [
+        OcrWord(text="가맹점명 : 가온식당 강남점",
+                xmin=50, ymin=100, xmax=600, ymax=140,
+                confidence=0.99, img_width=700, img_height=1100),
+        OcrWord(text="결제일시 : 2026-03-14 23:42",
+                xmin=0, ymin=200, xmax=700, ymax=240,
+                confidence=0.98, img_width=700, img_height=1100),
+        OcrWord(text="68",                       # bold 분리 좌측 절반 (ymin 작음)
+                xmin=420, ymin=793, xmax=490, ymax=855,
+                confidence=0.95, img_width=700, img_height=1100),
+        OcrWord(text="000원",                    # bold 분리 우측 절반
+                xmin=490, ymin=793, xmax=680, ymax=855,
+                confidence=0.95, img_width=700, img_height=1100),
+        OcrWord(text="합계금액",
+                xmin=50, ymin=803, xmax=300, ymax=843,
+                confidence=0.97, img_width=700, img_height=1100),
+        OcrWord(text="61,818원",                 # 다음 줄 — 충분히 분리
+                xmin=420, ymin=880, xmax=680, ymax=920,
+                confidence=0.96, img_width=700, img_height=1100),
+        OcrWord(text="공급가액",
+                xmin=50, ymin=880, xmax=300, ymax=920,
+                confidence=0.96, img_width=700, img_height=1100),
+    ]
+
+    # LLM이 key=4(합계금액), val=5(61,818원) 잘못 선택
+    llm_json_response = """{
+      "merchant_name": {"key_index": 0, "value_index": 0, "text": "가온식당 강남점"},
+      "date_occurrence": {"key_index": 1, "value_index": 1, "text": "2026-03-14"},
+      "time_occurrence": {"key_index": 1, "value_index": 1, "text": "23:42"},
+      "amount_total": {"key_index": 4, "value_index": 5, "text": "61818"}
+    }"""
+
+    fake_completion = MagicMock()
+    fake_completion.choices[0].message.content = llm_json_response
+    fake_client = MagicMock()
+    fake_client.chat.completions.create.return_value = fake_completion
+
+    fake_openai = types.ModuleType("openai")
+    fake_openai.OpenAI = MagicMock(return_value=fake_client)
+    fake_openai.AzureOpenAI = MagicMock(return_value=fake_client)
+
+    import base64
+    dummy_b64 = base64.b64encode(b"fake-image").decode()
+
+    with patch("utils.config.settings") as mock_settings, \
+         patch("utils.ocr_paddle.run_paddle_ocr", return_value=fake_ocr_words), \
+         patch.dict(sys.modules, {"openai": fake_openai}):
+        mock_settings.openai_api_key = "fake-key"
+        mock_settings.openai_base_url = ""
+        mock_settings.openai_api_version = "2024-12-01-preview"
+        result = analyze_visual_evidence(dummy_b64)
+
+    amount_e = next(e for e in result.entities if e.label == "amount_total")
+    # "68"(2자리), "000원"→"000"(3자리) 모두 최소 4자리 미달로 필터되어야 함
+    # backward 탐색 중 4자리 이상 블록이 없으면 LLM 원래 선택(61818) 유지
+    # 단: "68" + "000원" 합산은 코드 레벨에서 하지 않음 → 61818이 최선 fallback
+    assert amount_e.text not in ("68", "000"), (
+        f"2~3자리 단편 숫자가 금액으로 선택되었음: '{amount_e.text}'"
+    )
+
+
+def test_datetime_split_korean_aware_bbox_position():
+    """
+    한글 문자('결제일시 :')가 포함된 OCR 블록에서 한글/ASCII 폭 차이를 반영한
+    display-width 분할로 날짜 bbox가 ASCII 문자 위치보다 더 오른쪽에 위치해야 함.
+    ('결제일시 :' = 한글 4자×2 + ' : ' = 11 display units → x_d 위치가 더 큼)
+    """
+    import sys
+    import types
+    from unittest.mock import MagicMock, patch
+
+    from utils.llm_azure import analyze_visual_evidence
+    from utils.ocr_paddle import OcrWord
+
+    # 하나의 OCR 블록에 '결제일시 : 2026-03-14 23:42 (토요일)' 전체 포함
+    # xmin=0, xmax=700 → vw=700
+    fake_ocr_words = [
+        OcrWord(text="결제일시 : 2026-03-14 23:42 (토요일)",
+                xmin=0, ymin=200, xmax=700, ymax=240,
+                confidence=0.98, img_width=700, img_height=1100),
+        OcrWord(text="합계금액",
+                xmin=50, ymin=800, xmax=300, ymax=840,
+                confidence=0.97, img_width=700, img_height=1100),
+        OcrWord(text="68,000원",
+                xmin=400, ymin=800, xmax=680, ymax=840,
+                confidence=0.97, img_width=700, img_height=1100),
+    ]
+
+    # key_idx == val_idx (Case A)
+    llm_json_response = """{
+      "merchant_name": null,
+      "date_occurrence": {"key_index": 0, "value_index": 0, "text": "2026-03-14"},
+      "time_occurrence": {"key_index": 0, "value_index": 0, "text": "23:42"},
+      "amount_total": {"key_index": 1, "value_index": 2, "text": "68000"}
+    }"""
+
+    fake_completion = MagicMock()
+    fake_completion.choices[0].message.content = llm_json_response
+    fake_client = MagicMock()
+    fake_client.chat.completions.create.return_value = fake_completion
+
+    fake_openai = types.ModuleType("openai")
+    fake_openai.OpenAI = MagicMock(return_value=fake_client)
+    fake_openai.AzureOpenAI = MagicMock(return_value=fake_client)
+
+    import base64
+    dummy_b64 = base64.b64encode(b"fake-image").decode()
+
+    with patch("utils.config.settings") as mock_settings, \
+         patch("utils.ocr_paddle.run_paddle_ocr", return_value=fake_ocr_words), \
+         patch.dict(sys.modules, {"openai": fake_openai}):
+        mock_settings.openai_api_key = "fake-key"
+        mock_settings.openai_base_url = ""
+        mock_settings.openai_api_version = "2024-12-01-preview"
+        result = analyze_visual_evidence(dummy_b64)
+
+    date_e = next(e for e in result.entities if e.label == "date_occurrence")
+    time_e = next(e for e in result.entities if e.label == "time_occurrence")
+
+    # 한글 인식 분할: "결제일시 : "(11 disp) / 전체(33 disp) ≈ 33%
+    # → date box xmin ≈ 700 * 11/33 * 1000/700 ≈ 333 (normalized)
+    # 단순 문자 분할이면 7/29 ≈ 241 — 실제보다 왼쪽으로 치우침
+    # 한글 인식 분할이면 더 오른쪽 (> 280)이어야 함
+    assert date_e.bbox.xmin > 280, (
+        f"한글 인식 분할 미적용: date bbox xmin({date_e.bbox.xmin}) 이 너무 왼쪽"
+    )
+    # 날짜 bbox는 시간 bbox보다 왼쪽이어야 함
+    assert date_e.bbox.xmin < time_e.bbox.xmin
+    # bbox_key(라벨) 구간은 날짜 시작보다 왼쪽이어야 함
+    assert date_e.bbox_key is not None
+    assert date_e.bbox_key.xmax <= date_e.bbox.xmin + 20
