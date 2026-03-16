@@ -135,31 +135,51 @@ def _apply_combined_datetime_fix(
     matched: "dict[str, Any]",
     ocr_words: "list[Any]",
 ) -> None:
-    """결제일시처럼 날짜+시간이 같은 OCR 블록에 있을 때 bbox를 3분할해 덮어쓴다.
+    """결제일시처럼 날짜+시간이 같은 OCR 값 블록에 있을 때 bbox를 분리해 덮어쓴다.
 
-    date_occurrence와 time_occurrence가 동일 value_index를 가리키면:
-      [라벨 bbox | 날짜 bbox | 시간 bbox] 3구역으로 비율 분할.
+    두 케이스를 모두 처리:
+    - Case A: key_idx == val_idx (라벨+날짜+시간이 한 블록)
+      → [라벨 | 날짜 | 시간] 3구역 분할
+    - Case B: key_idx != val_idx (라벨/값이 별도 블록, 값 블록에 날짜+시간 혼재)
+      → 라벨 박스 = key 블록 전체, 값 블록만 [날짜 | 시간] 2구역 분할
 
-    첫째 방식:
-    - 라벨: 두 엔티티가 동일한 bbox_key (라벨 구간만)
-    - 날짜 값: 날짜 텍스트 구간 bbox
-    - 시간 값: 시간 텍스트 구간 bbox
+    LLM이 time_occurrence를 null로 반환했을 때:
+      → 날짜 값 블록에서 HH:MM 패턴을 자동 탐색해 time 엔티티를 생성
     """
+    import re as _re
+
     from agent.output_models import VisualBox, VisualEntity
     from utils.ocr_paddle import OcrWord
 
-    d_match = matched.get("date_occurrence") or {}
-    t_match = matched.get("time_occurrence") or {}
+    d_match = dict(matched.get("date_occurrence") or {})
+    t_match = dict(matched.get("time_occurrence") or {})
     d_vidx = d_match.get("value_index")
+    d_kidx = d_match.get("key_index")
+
+    if d_vidx is None or not (0 <= d_vidx < len(ocr_words)):
+        return
+
     t_vidx = t_match.get("value_index")
+    val_block = ocr_words[d_vidx]
 
-    if d_vidx is None or d_vidx != t_vidx:
-        return  # 다른 OCR 블록이면 후처리 불필요
+    # ── LLM이 time_occurrence를 반환하지 않았으면 값 블록에서 자동 감지 ──────
+    if t_vidx is None or t_vidx != d_vidx:
+        m = _re.search(r"\b(\d{1,2}:\d{2})(?::\d{2})?\b", val_block.text)
+        if m:
+            t_match = {
+                "key_index": d_kidx,
+                "value_index": d_vidx,
+                "text": m.group(1),
+            }
+            t_vidx = d_vidx
+            matched["time_occurrence"] = t_match
+            logger.info("_apply_combined_datetime_fix: auto-detected time '%s'", m.group(1))
+        else:
+            return  # 시간 정보 없음
 
-    shared = ocr_words[d_vidx]
     d_text = str(d_match.get("text") or "").strip()
     t_text = str(t_match.get("text") or "").strip()
-    full = shared.text
+    full = val_block.text
 
     if not d_text or not t_text:
         return
@@ -167,41 +187,58 @@ def _apply_combined_datetime_fix(
     d_pos = full.find(d_text)
     t_pos = full.find(t_text)
     if d_pos < 0 or t_pos < 0 or d_pos >= t_pos:
-        return  # 텍스트 순서가 예상과 다르면 안전하게 스킵
+        return
 
-    # 비율 기반 x좌표 3분할
+    # ── 비율 기반 x좌표 분할 ────────────────────────────────────────────────
     total = max(len(full), 1)
-    width = shared.xmax - shared.xmin
-    x_d = shared.xmin + int(width * d_pos / total)
-    x_t = shared.xmin + int(width * t_pos / total)
+    vw = val_block.xmax - val_block.xmin
+    x_d = val_block.xmin + int(vw * d_pos / total)
+    x_t = val_block.xmin + int(vw * t_pos / total)
 
-    def _make_box(xmin: int, xmax: int) -> VisualBox:
+    def _make_box(src: "OcrWord", xmin: int, xmax: int) -> VisualBox:
         w = OcrWord(
             text="",
-            xmin=max(xmin, shared.xmin),
-            ymin=shared.ymin,
-            xmax=min(xmax, shared.xmax),
-            ymax=shared.ymax,
-            confidence=shared.confidence,
-            img_width=shared.img_width,
-            img_height=shared.img_height,
+            xmin=max(xmin, src.xmin),
+            ymin=src.ymin,
+            xmax=min(xmax, src.xmax),
+            ymax=src.ymax,
+            confidence=src.confidence,
+            img_width=src.img_width,
+            img_height=src.img_height,
         )
         return VisualBox(
             ymin=w.norm_ymin, xmin=w.norm_xmin,
             ymax=w.norm_ymax, xmax=w.norm_xmax,
         )
 
-    shared_key_box = _make_box(shared.xmin, x_d)   # 라벨 구간
-    date_box = _make_box(x_d, x_t)                  # 날짜 구간
-    time_box = _make_box(x_t, shared.xmax)           # 시간 구간
+    # ── 라벨 박스 결정 ────────────────────────────────────────────────────────
+    if d_kidx is not None and d_kidx != d_vidx and 0 <= d_kidx < len(ocr_words):
+        # Case B: 별도 key 블록 → 그 블록 전체를 라벨 박스로 사용
+        key_block = ocr_words[d_kidx]
+        shared_key_box = VisualBox(
+            ymin=key_block.norm_ymin, xmin=key_block.norm_xmin,
+            ymax=key_block.norm_ymax, xmax=key_block.norm_xmax,
+        )
+    elif d_pos > 0:
+        # Case A: 한 블록 안에 라벨+날짜+시간 → 날짜 앞 구간이 라벨
+        shared_key_box = _make_box(val_block, val_block.xmin, x_d)
+    else:
+        # d_pos==0: 값 블록에 라벨 텍스트가 없으므로 기존 bbox_key 유지
+        existing = next((e for e in entities if e.label == "date_occurrence"), None)
+        shared_key_box = existing.bbox_key if existing and existing.bbox_key else None
 
-    # 엔티티 인플레이스 교체 (id / text / confidence 유지, bbox만 수정)
+    date_box = _make_box(val_block, x_d, x_t)
+    time_box = _make_box(val_block, x_t, val_block.xmax)
+
+    # ── 엔티티 인플레이스 교체 ────────────────────────────────────────────────
+    time_updated = False
     for i, e in enumerate(entities):
         if e.label == "date_occurrence" and e.text == d_text:
             try:
                 entities[i] = VisualEntity(
                     id=e.id, label="date_occurrence", text=e.text,
-                    bbox=date_box, bbox_key=shared_key_box,
+                    bbox=date_box,
+                    bbox_key=shared_key_box if shared_key_box else e.bbox_key,
                     confidence=e.confidence,
                 )
             except Exception as exc:
@@ -210,11 +247,28 @@ def _apply_combined_datetime_fix(
             try:
                 entities[i] = VisualEntity(
                     id=e.id, label="time_occurrence", text=e.text,
-                    bbox=time_box, bbox_key=shared_key_box,
+                    bbox=time_box,
+                    bbox_key=shared_key_box if shared_key_box else e.bbox_key,
                     confidence=e.confidence,
                 )
+                time_updated = True
             except Exception as exc:
                 logger.warning("combined datetime time fix 실패: %s", exc)
+
+    # ── time 엔티티가 아직 없으면 새로 생성 (auto-detect 케이스) ──────────────
+    if not time_updated and t_text and time_box:
+        try:
+            entities.append(VisualEntity(
+                id=f"item_{len(entities) + 1}",
+                label="time_occurrence",
+                text=t_text,
+                bbox=time_box,
+                bbox_key=shared_key_box,
+                confidence=float(val_block.confidence),
+            ))
+            logger.info("_apply_combined_datetime_fix: created time entity '%s'", t_text)
+        except Exception as exc:
+            logger.warning("time 엔티티 자동 생성 실패: %s", exc)
 
 
 def _fix_amount_nearby(
@@ -222,10 +276,10 @@ def _fix_amount_nearby(
     matched: "dict[str, Any]",
     ocr_words: "list[Any]",
 ) -> None:
-    """합계금액 value_index가 key_index와 5 이상 떨어졌으면 더 가까운 금액으로 교체.
+    """합계금액 value가 라벨과 다른 줄에 있으면 같은 줄의 인접 금액으로 교체.
 
-    LLM이 영수증 하단 footer의 '합 계' 금액을 잘못 선택하는 경우를 보정한다.
-    key_index 기준 ±4 이내에서 숫자를 포함한 OCR 블록을 우선 선택한다.
+    LLM이 '61,818원(공급가액)' 또는 footer '합 계' 금액을 잘못 선택하는 경우를 보정.
+    Y좌표 비교를 기준으로 라벨(key)과 같은 수평선의 금액을 우선 선택한다.
     """
     import re
 
@@ -237,43 +291,63 @@ def _fix_amount_nearby(
 
     if key_idx is None or val_idx is None:
         return
-    if abs(val_idx - key_idx) <= 4:
-        return  # 이미 가까우면 그대로
+    if not (0 <= key_idx < len(ocr_words)) or not (0 <= val_idx < len(ocr_words)):
+        return
 
-    # key_idx 이후 인접 5개 블록에서 숫자가 포함된 첫 번째 블록 선택
+    key_word = ocr_words[key_idx]
+    val_word = ocr_words[val_idx]
+
+    key_y_center = (key_word.ymin + key_word.ymax) / 2
+    val_y_center = (val_word.ymin + val_word.ymax) / 2
+    # 라벨 높이의 1.2배를 "같은 줄" 허용 범위로 설정
+    y_tol = max(key_word.ymax - key_word.ymin, 10) * 1.2
+
+    # 이미 같은 줄이면 아무것도 하지 않음
+    if abs(val_y_center - key_y_center) <= y_tol:
+        return
+
+    # 같은 줄에 더 가까운 숫자 블록을 탐색
     _digit_re = re.compile(r"\d[\d,]+")
-    for offset in range(1, 5):
+    _skip_kw = ("공급가액", "부가가치세", "VAT", "소계")
+
+    for offset in range(1, 6):
         candidate_idx = key_idx + offset
         if not (0 <= candidate_idx < len(ocr_words)):
             break
         candidate = ocr_words[candidate_idx]
-        if _digit_re.search(candidate.text):
-            # 공급가액/VAT 행은 제외
-            if any(kw in candidate.text for kw in ("공급가액", "부가가치세", "VAT", "소계")):
-                continue
-            new_text = re.sub(r"[^\d]", "", candidate.text)
-            if not new_text:
-                continue
-            new_box = VisualBox(
-                ymin=candidate.norm_ymin, xmin=candidate.norm_xmin,
-                ymax=candidate.norm_ymax, xmax=candidate.norm_xmax,
-            )
-            for i, e in enumerate(entities):
-                if e.label == "amount_total":
-                    try:
-                        entities[i] = VisualEntity(
-                            id=e.id, label="amount_total", text=new_text,
-                            bbox=new_box, bbox_key=e.bbox_key,
-                            confidence=float(candidate.confidence),
-                        )
-                        logger.info(
-                            "_fix_amount_nearby: val_idx %d→%d text=%s",
-                            val_idx, candidate_idx, new_text,
-                        )
-                    except Exception as exc:
-                        logger.warning("amount nearby fix 실패: %s", exc)
-                    return
-            return
+        c_y_center = (candidate.ymin + candidate.ymax) / 2
+
+        if abs(c_y_center - key_y_center) > y_tol:
+            continue  # 다른 줄
+        if any(kw in candidate.text for kw in _skip_kw):
+            continue
+        if not _digit_re.search(candidate.text):
+            continue
+
+        new_text = re.sub(r"[^\d]", "", candidate.text)
+        if not new_text:
+            continue
+
+        new_box = VisualBox(
+            ymin=candidate.norm_ymin, xmin=candidate.norm_xmin,
+            ymax=candidate.norm_ymax, xmax=candidate.norm_xmax,
+        )
+        for i, e in enumerate(entities):
+            if e.label == "amount_total":
+                try:
+                    entities[i] = VisualEntity(
+                        id=e.id, label="amount_total", text=new_text,
+                        bbox=new_box, bbox_key=e.bbox_key,
+                        confidence=float(candidate.confidence),
+                    )
+                    logger.info(
+                        "_fix_amount_nearby: 잘못된 값(val_idx=%d) → 교체(idx=%d, text=%s)",
+                        val_idx, candidate_idx, new_text,
+                    )
+                except Exception as exc:
+                    logger.warning("amount nearby fix 실패: %s", exc)
+                return
+        return
 
 
 def _analyze_with_paddle_ocr(
