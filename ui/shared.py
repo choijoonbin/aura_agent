@@ -1362,6 +1362,7 @@ def render_image_with_bboxes(
     image_data: "bytes | Any",
     boxes: "list[list[int]]",
     labels: "list[str] | None" = None,
+    color_groups: "list[int] | None" = None,
 ) -> None:
     """
     이미지 위에 bbox 사각형과 라벨을 Pillow로 그린 뒤 st.image로 출력.
@@ -1370,6 +1371,10 @@ def render_image_with_bboxes(
         image_data: bytes 또는 PIL Image 객체.
         boxes: [[ymin, xmin, ymax, xmax], ...] 형식, 0~1000 정규화 좌표.
         labels: bbox에 표시할 텍스트 레이블 목록 (boxes와 동일 인덱스).
+            빈 문자열("")이면 해당 박스의 라벨 태그를 렌더링하지 않음.
+        color_groups: 각 박스가 속하는 색상 그룹 인덱스 목록.
+            같은 그룹 인덱스는 같은 색으로 그려져 항목명·값 박스를 매칭 표시.
+            None이면 박스 순서(idx)로 색상을 결정.
     """
     import io as _io
     import logging as _logging
@@ -1425,14 +1430,17 @@ def render_image_with_bboxes(
         px1 = int(xmax_n / 1000 * w)
         py1 = int(ymax_n / 1000 * h)
 
-        color = _COLORS[idx % len(_COLORS)]
+        group = color_groups[idx] if (color_groups and idx < len(color_groups)) else idx
+        color = _COLORS[group % len(_COLORS)]
 
         # bbox 사각형 (테두리 두께 3px)
         for t in range(3):
             draw.rectangle([px0 - t, py0 - t, px1 + t, py1 + t], outline=color)
 
-        # 라벨 텍스트 배경 + 텍스트
+        # 라벨 텍스트 배경 + 텍스트 (빈 문자열이면 렌더링 생략)
         label_text = (labels[idx] if labels and idx < len(labels) else f"entity_{idx+1}")
+        if not label_text:
+            continue
         try:
             font = _ImageFont.load_default()
         except Exception:

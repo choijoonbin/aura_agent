@@ -5,7 +5,7 @@ Phase B: planner / critic / verifier / reporter용 structured output 스키마.
 from __future__ import annotations
 
 from enum import Enum
-from typing import Any, Literal
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -331,7 +331,11 @@ class VisualEntity(BaseModel):
         description="엔티티 유형: amount_total | date_occurrence | merchant_name"
     )
     text: str = Field(description="추출된 텍스트 (정규화 후)")
-    bbox: VisualBox = Field(description="이미지 내 좌표 (ymin,xmin,ymax,xmax), 0~1000 정규화")
+    bbox: VisualBox = Field(description="값 텍스트 위치 (ymin,xmin,ymax,xmax), 0~1000 정규화")
+    bbox_key: Optional[VisualBox] = Field(
+        default=None,
+        description="항목명(레이블) 텍스트 위치 — 예: '가맹점명:' 텍스트 영역",
+    )
     confidence: float = Field(ge=0.0, le=1.0, description="추출 신뢰도 (0.0~1.0)")
 
 

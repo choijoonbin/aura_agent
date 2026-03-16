@@ -60,8 +60,16 @@ def _extract_entity_value(entities: list, label: str) -> str:
     return ""
 
 
-def _entities_to_boxes_and_labels(entities: list) -> tuple[list[list[int]], list[str]]:
-    """VisualEntity 목록 → boxes([[ymin,xmin,ymax,xmax],...]), labels 변환."""
+def _entities_to_boxes_and_labels(
+    entities: list,
+) -> tuple[list[list[int]], list[str], list[int]]:
+    """VisualEntity 목록 → boxes, labels, color_groups 변환.
+
+    엔티티당 최대 2개 박스를 생성합니다:
+    - bbox_key: 항목명 위치 → 색상 그룹과 동일 색, 라벨 "[항목명]"
+    - bbox (값): 실제 값 위치 → 같은 색상 그룹, 라벨 "항목명: 값"
+    같은 그룹 인덱스를 공유하므로 render_image_with_bboxes에서 동일 색으로 렌더링됩니다.
+    """
     _label_map = {
         "amount_total": "금액",
         "date_occurrence": "일자",
@@ -69,23 +77,44 @@ def _entities_to_boxes_and_labels(entities: list) -> tuple[list[list[int]], list
     }
     boxes: list[list[int]] = []
     labels: list[str] = []
-    for e in entities:
-        bbox = e.bbox if hasattr(e, "bbox") else None
-        if bbox is None:
-            continue
-        # 신뢰도 낮은 entity는 렌더링 제외 (잘못된 위치 bbox 방지)
+    color_groups: list[int] = []
+
+    for group_idx, e in enumerate(entities):
+        # 신뢰도 낮은 entity 제외
         conf = e.confidence if hasattr(e, "confidence") else e.get("confidence", 1.0)
         if float(conf) < 0.5:
             continue
-        ymin = bbox.ymin if hasattr(bbox, "ymin") else bbox.get("ymin", 0)
-        xmin = bbox.xmin if hasattr(bbox, "xmin") else bbox.get("xmin", 0)
-        ymax = bbox.ymax if hasattr(bbox, "ymax") else bbox.get("ymax", 0)
-        xmax = bbox.xmax if hasattr(bbox, "xmax") else bbox.get("xmax", 0)
-        boxes.append([ymin, xmin, ymax, xmax])
+
         raw_label = e.label if hasattr(e, "label") else e.get("label", "")
         ent_text = e.text if hasattr(e, "text") else e.get("text", "")
-        labels.append(f"{_label_map.get(raw_label, raw_label)}: {ent_text}")
-    return boxes, labels
+        short_name = _label_map.get(raw_label, raw_label)
+
+        def _box_coords(b: object) -> list[int] | None:
+            if b is None:
+                return None
+            ymin = b.ymin if hasattr(b, "ymin") else b.get("ymin", 0)  # type: ignore[union-attr]
+            xmin = b.xmin if hasattr(b, "xmin") else b.get("xmin", 0)  # type: ignore[union-attr]
+            ymax = b.ymax if hasattr(b, "ymax") else b.get("ymax", 0)  # type: ignore[union-attr]
+            xmax = b.xmax if hasattr(b, "xmax") else b.get("xmax", 0)  # type: ignore[union-attr]
+            return [ymin, xmin, ymax, xmax]
+
+        # 항목명(키) 박스 — 라벨 태그 있음
+        bbox_key = e.bbox_key if hasattr(e, "bbox_key") else e.get("bbox_key")
+        key_coords = _box_coords(bbox_key)
+        if key_coords is not None:
+            boxes.append(key_coords)
+            labels.append(f"[{short_name}]")
+            color_groups.append(group_idx)
+
+        # 값 박스 — 라벨 태그에 값 텍스트 표시
+        bbox_val = e.bbox if hasattr(e, "bbox") else e.get("bbox")
+        val_coords = _box_coords(bbox_val)
+        if val_coords is not None:
+            boxes.append(val_coords)
+            labels.append(f"{short_name}: {ent_text}")
+            color_groups.append(group_idx)
+
+    return boxes, labels, color_groups
 
 
 def render_demo_new_page() -> None:
@@ -158,11 +187,11 @@ def render_demo_new_page() -> None:
                 from ui.shared import render_image_with_bboxes
 
                 entities = analysis_result.entities if hasattr(analysis_result, "entities") else []
-                boxes, bbox_labels = _entities_to_boxes_and_labels(entities)
+                boxes, bbox_labels, color_groups = _entities_to_boxes_and_labels(entities)
 
                 if boxes:
-                    st.caption("추출 위치 하이라이트")
-                    render_image_with_bboxes(image_bytes, boxes, bbox_labels)
+                    st.caption("추출 위치 하이라이트 (항목명·값 동일 색 매칭)")
+                    render_image_with_bboxes(image_bytes, boxes, bbox_labels, color_groups=color_groups)
                 else:
                     st.image(image_bytes, use_container_width=True)
                     if getattr(analysis_result, "fallback_used", False):
