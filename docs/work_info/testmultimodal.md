@@ -124,12 +124,25 @@ C. `ui/demo_new.py`
   - `amount_total`, `date_occurrence`, `merchant_name`
   - `적요(bktxt)`, `비고(sgtxt)`, `suggested_summary` 및 `review_questions` 기반 `사유` 입력
 - 하단: `테스트 데이터 생성` 버튼
+- 필수 입력 상태 제어(명시)
+  - 아래 5개 필드는 `필수`로 간주하고, 모두 값이 있을 때만 생성 버튼 활성화:
+    - `amount_total`(금액)
+    - `date_occurrence`(일자)
+    - `merchant_name`(가맹점)
+    - `bktxt`(적요)
+    - `user_reason`(사유)
+  - 구현 규칙: `all_required_filled = all([...])` 상태값을 계산하고, `st.button(\"테스트 데이터 생성\", disabled=not all_required_filled)`로 제어
+  - 값 검증 최소 기준:
+    - 금액: 숫자형 변환 가능 + 0 초과
+    - 일자: `YYYY-MM-DD` 파싱 가능
+    - 가맹점/적요/사유: trim 후 빈 문자열 금지
 
 UI 정책
 - 비정상 케이스 선택 시: "증빙 첨부 필수" 경고
 - 비정상 케이스 + 파일 미첨부: 생성 버튼 disabled
 - 정상비교군(NORMAL_BASELINE): 기존처럼 증빙 없이 완료 가능(회귀 유지)
 - 비정상 케이스: 업로드 결과가 없으면 `amount/merchant/date` 입력 필수, `적요/비고` 중 최소 1개 필수
+- 공통: 필수 5개 항목(`금액/일자/가맹점/적요/사유`) 미완료 시 생성 버튼은 항상 disabled
 
 ----------------------------------------------------------------
 4단계: 에이전트 분석 노드 멀티모달 통합
@@ -166,6 +179,10 @@ UI 정책
 
 5. 저장 무결성
 - `data/evidence_uploads/{uuid}`에 이미지+json이 함께 저장되는지
+
+6. 필수 입력 제어 검증
+- `금액/일자/가맹점/적요/사유` 중 1개라도 비어 있으면 생성 버튼이 disabled인지
+- 5개 항목이 모두 유효하면 생성 버튼이 활성화되는지
 
 완료 기준(Definition of Done)
 - UI에서 업로드 즉시 bbox+자동 추출 표시
