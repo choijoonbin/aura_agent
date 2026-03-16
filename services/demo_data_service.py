@@ -4,12 +4,13 @@ import hashlib
 import json
 import logging
 import random
+import shutil
 import uuid as _uuid_module
 from datetime import date, datetime, time, timezone
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import and_, delete, func, select, text
+from sqlalchemy import and_, delete, func, or_, select, text
 from sqlalchemy.orm import Session
 
 from db.models import AgentCase, FiDocHeader, FiDocItem
@@ -283,6 +284,12 @@ def _validate_beta_payload(payload: dict[str, Any], image_bytes: bytes) -> None:
         ValueError: 필수값 누락 또는 형식 오류 시.
     """
     errors: list[str] = []
+    case_type = (payload.get("case_type") or "").strip()
+
+    # NORMAL_BASELINE은 Legacy seed와 동일하게 백엔드 기본값으로 생성 가능해야 하므로
+    # 필수 입력(금액/일자/가맹점/적요/사유) 강제를 적용하지 않는다.
+    if case_type == "NORMAL_BASELINE":
+        return
 
     # 금액 검증
     amount_str = (payload.get("amount_total") or "").replace(",", "").strip()
@@ -312,7 +319,6 @@ def _validate_beta_payload(payload: dict[str, Any], image_bytes: bytes) -> None:
         errors.append("user_reason: 필수 입력")
 
     # 비정상 케이스: 증빙 이미지 필수
-    case_type = (payload.get("case_type") or "").strip()
     if case_type and case_type != "NORMAL_BASELINE" and not image_bytes:
         errors.append(f"image: 비정상 케이스({case_type})는 증빙 이미지 필수")
 
@@ -800,7 +806,10 @@ def list_seeded_demo_cases(db: Session) -> list[dict[str, Any]]:
         )
         .where(
             FiDocHeader.tenant_id == tenant_id,
-            FiDocHeader.xblnr.like("DEMO-%"),
+            or_(
+                FiDocHeader.xblnr.like("DEMO-%"),
+                FiDocHeader.xblnr.like("BETA-%"),
+            ),
         )
         .order_by(FiDocHeader.created_at.desc(), FiDocHeader.belnr.desc())
     )
@@ -833,16 +842,67 @@ def list_seeded_demo_cases(db: Session) -> list[dict[str, Any]]:
     return out
 
 
+def _purge_beta_evidence_uploads(voucher_keys: set[str] | None = None) -> int:
+    """
+    Beta 시연데이터 저장 폴더(data/evidence_uploads/{uuid})를 정리한다.
+
+    삭제 기준:
+    - meta.json의 voucher_key가 전달된 voucher_keys에 포함된 경우
+    - 또는 Beta 저장 메타 포맷(case_uuid/edited_entities/memo/review_questions)을 만족하는 경우
+      (과거 Beta 데이터처럼 DB 전표가 없는 잔여 파일도 전체삭제 시 정리하기 위함)
+    """
+    root = _EVIDENCE_UPLOAD_ROOT
+    if not root.exists():
+        return 0
+
+    voucher_keys = voucher_keys or set()
+    deleted_dirs = 0
+    for child in root.iterdir():
+        if not child.is_dir():
+            continue
+        meta_path = child / "meta.json"
+        if not meta_path.exists():
+            continue
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            logger.warning("clear_demo_data: failed to read meta.json (%s): %s", meta_path, exc)
+            continue
+        if not isinstance(meta, dict):
+            continue
+
+        has_beta_meta_shape = (
+            str(meta.get("case_uuid") or "") == child.name
+            and isinstance(meta.get("edited_entities"), dict)
+            and isinstance(meta.get("memo"), dict)
+            and isinstance(meta.get("review_questions"), list)
+        )
+        voucher_key = str(meta.get("voucher_key") or "")
+        should_delete = (voucher_key in voucher_keys) or has_beta_meta_shape
+        if not should_delete:
+            continue
+        try:
+            shutil.rmtree(child)
+            deleted_dirs += 1
+        except Exception as exc:
+            logger.warning("clear_demo_data: failed to remove evidence folder (%s): %s", child, exc)
+    return deleted_dirs
+
+
 def clear_demo_data(db: Session) -> dict[str, Any]:
     tenant_id = settings.default_tenant_id
     headers = db.scalars(
         select(FiDocHeader).where(
             FiDocHeader.tenant_id == tenant_id,
-            FiDocHeader.xblnr.like("DEMO-%"),
+            or_(
+                FiDocHeader.xblnr.like("DEMO-%"),
+                FiDocHeader.xblnr.like("BETA-%"),
+            ),
         )
     ).all()
 
     if not headers:
+        evidence_upload_deleted = _purge_beta_evidence_uploads(set())
         return {
             "deleted": 0,
             "fi_doc_header_deleted": 0,
@@ -855,6 +915,7 @@ def clear_demo_data(db: Session) -> dict[str, Any]:
             "case_action_proposal_deleted": 0,
             "case_action_execution_deleted": 0,
             "run_count": 0,
+            "evidence_upload_deleted": evidence_upload_deleted,
         }
 
     voucher_keys: list[str] = []
@@ -1056,8 +1117,10 @@ def clear_demo_data(db: Session) -> dict[str, Any]:
     db.commit()
     # DB 삭제와 함께 메모리 런타임 상태도 정리해 동일 case_id 재사용 시 과거 run 잔상이 보이지 않게 한다.
     runtime.purge_cases(case_ids_str)
+    evidence_upload_deleted = _purge_beta_evidence_uploads(set(voucher_keys))
     return {
         "deleted": deleted["fi_doc_header_deleted"],
         "run_count": len(run_ids),
+        "evidence_upload_deleted": evidence_upload_deleted,
         **deleted,
     }

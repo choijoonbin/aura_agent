@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import base64
+import json
 import logging
 from typing import Any
 
@@ -306,9 +307,13 @@ def render_demo_new_page() -> None:
         st.divider()
 
         # 필수 입력 유효성 + 버튼 활성화 판단
-        all_valid, validation_errors = _check_required_fields(
-            amount_val, date_val, merchant_val, bktxt_val, user_reason_val
-        )
+        # NORMAL_BASELINE은 즉시 생성 가능하도록 필수값 검증을 우회한다.
+        if selected_case_type == "NORMAL_BASELINE":
+            all_valid, validation_errors = True, []
+        else:
+            all_valid, validation_errors = _check_required_fields(
+                amount_val, date_val, merchant_val, bktxt_val, user_reason_val
+            )
 
         if validation_errors:
             for err in validation_errors:
@@ -425,7 +430,17 @@ def _handle_generate(
             if voucher_key:
                 success_msg += f"  |  전표: `{voucher_key}`"
             st.success(success_msg)
-            st.json(result, expanded=False)
+            pretty_result = json.dumps(result, ensure_ascii=False, indent=2)
+            st.markdown(
+                (
+                    '<div style="background:#f8fafc;color:#0f172a;border:1px solid #cbd5e1;'
+                    'border-radius:8px;padding:12px 14px;margin-top:8px;">'
+                    '<div style="font-weight:700;margin-bottom:6px;">저장 결과</div>'
+                    f'<pre style="margin:0;white-space:pre-wrap;color:#0f172a;">{pretty_result}</pre>'
+                    "</div>"
+                ),
+                unsafe_allow_html=True,
+            )
 
             # 저장 후 세션 초기화 (재생성 방지)
             for key in (

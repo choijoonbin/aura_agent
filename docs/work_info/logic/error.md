@@ -1,398 +1,344 @@
-당신은 “기술 설명용 PPT 제작 전문가”입니다.
-목표는 비개발 사용자도 이해할 수 있게, 우리 프로젝트의 “규정집 청킹 → 임베딩 → 하이브리드 검색 → 최종 규정 채택” 흐름을 하나의 전표 사례로 설명하는 것입니다.
-
-[출력 형식]
-- PPTX 제작용 상세 기획안 + 슬라이드별 본문 텍스트 + 시각화 지시문 + 발표자 멘트(스피커 노트)
-- 한국어
-- 16:9 비율
-- 총 10~12장
-- 각 슬라이드마다:
-  1) 제목
-  2) 핵심 메시지 1줄
-  3) 본문(불릿)
-  4) 들어갈 이미지/도식 설명
-  5) 스피커 노트(30~50초 분량)
-- 마지막에 “5분 발표용 요약 멘트” 별도 제공
-
-[청중]
-- 비개발 PM/현업/운영 담당자
-- RAG, 벡터, rerank 개념을 모를 수 있음
-
-[반드시 반영할 시스템 설명]
-우리 시스템의 핵심 흐름:
-1) 규정집 원문을 계층형으로 청킹
-   - ARTICLE(조문), CLAUSE(항), ITEM(호)
-2) 청크를 DB에 저장하고 임베딩 생성
-3) 검색 시 하이브리드 방식 적용
-   - BM25(키워드)
-   - Dense(임베딩 유사도)
-   - RRF 융합
-   - Cross-Encoder rerank (필요 시 fallback)
-4) 최종 채택 규정(조문) 선정 후 판단요약 생성
-
-[예시 규정(반드시 등장)]
-- 제14조 공통 증빙 의무, 제23조 식대, 제39조 주말·공휴일 제약 (필요 시 제12조 사전승인/사후승인 보조)
-- **슬라이드에 넣을 조문 본문 원문**은 본 문서 **[제작용] 10. 예제에 사용될 규정 본문 (조문별)** 섹션을 그대로 사용할 것. (제14·23·39·12조 전문 수록됨)
-
-[예시 전표 데이터(반드시 사용)]
-- **실제 전표 형태**와 **단계별 검색·필터 산출물 전부**는 본 문서 **[제작용] 실제 전표 데이터 + 단계별 산출물 전부** 섹션에 JSON·표로 정리되어 있음. 슬라이드 본문·도식·표는 반드시 해당 값을 참조해 채울 것.
-- 요약: 전표키 1000-H000000001-2026, 발생일시 2026-03-14 19:45:00 (토), 가맹점 가온 식당, 금액 97,042원, hrStatus LEAVE, isHoliday true, mccCode 5813, budgetExceeded false, 케이스 유형 HOLIDAY_USAGE.
-
-[핵심 설명 시나리오]
-이 전표 예시를 입력했을 때:
-- 어떤 신호가 추출되는지
-- 규정집이 어떻게 조·항·호(ARTICLE·CLAUSE·ITEM) 단위로 잘리는지
-- 어떤 검색 질의가 만들어지는지
-- BM25와 Dense가 각각 어떤 후보를 올리는지
-- RRF + rerank를 통해 최종 후보가 어떻게 압축되는지
-- 최종 채택 규정이 왜 그 조항들인지
-를 한 흐름으로 설명해줘.
-
-[시각화 요구사항]
-슬라이드에 아래 도식을 반드시 포함:
-1) 규정집 계층 청킹 트리 (장→조→항→호)
-2) 샘플 청크 테이블 (chunk_id, node_type, article/clause/item, search_text)
-3) 하이브리드 검색 파이프라인 플로우차트
-4) BM25 vs Dense 결과 병합(RRF) 개념도
-5) rerank 후 최종 Top-K 축소 과정(퍼널·funnel)
-6) 전표 1건 end-to-end 추적 다이어그램(입력→신호→검색→채택→결론)
-
-[이미지 제작 지시]
-- 실제 이미지를 생성할 수 없으면, 슬라이드별 “이미지 생성 프롬프트”를 함께 제공
-- 스타일: 깔끔한 엔터프라이즈, 가독성 높은 폰트, 흰 배경+남색 포인트
-- 과도한 장식 금지, 데이터 흐름이 한눈에 보여야 함
-
-[정확성/표현 원칙]
-- 기술 사실과 예시를 구분해서 표기:
-  - “시스템 사실”
-  - “데모 예시”
-- 과장 금지 (“100% 정확” 같은 표현 금지)
-- 용어는 처음 등장 시 쉬운 설명 병기
-  예: “RRF(두 검색 결과의 순위를 합치는 방식)”
-- 최종 슬라이드에 “한계와 향후 개선 포인트” 3개 포함
-  (예: 평가셋 고도화, rerank 튜닝, 설명가능성 시각화 개선)
-
-[원하는 최종 산출]
-A. 슬라이드 10~12장 완성본 텍스트
-B. 슬라이드별 삽입 이미지 지시문
-C. 발표자 5분 스크립트 (처음~끝까지 읽으면 5분)
-D. 부록: 용어집(청킹, 임베딩, BM25, Dense, RRF, rerank)
-
-출력은 바로 PPT 제작 가능한 수준으로, 슬라이드 번호별로 정리해서 제시해줘.
+모든 정보를 취합했습니다. 종합 감사 보고서를 작성합니다.
 
 ---
 
-## [검토 요약] 이 프롬프트만으로 문서 생성 AI가 완벽히 만들 수 있을까?
+## 감사 보고서: 시연데이터 생성 (Beta) — 비정상 케이스 데이터 완비성 점검
 
-**잘 되어 있는 부분**
-- 역할·출력 형식·청중·시각화 요구사항이 명확해 PPT 구조는 잘 나올 가능성이 높음.
-- 예시 전표·예시 규정이 구체적이라 “한 건 추적” 스토리라인을 잡기 좋음.
-- 정확성 원칙(시스템 사실 vs 데모 예시, 과장 금지)이 있어 허구가 덜 나옴.
-
-**부족해서 오해·생략될 수 있는 부분**
-1. **1차 필터가 “케이스별”이라는 구체 내용**  
-   - 문서 생성 AI는 “케이스별 필터”만 보면 어떤 장(章)을 쓰는지 추측할 수 있음.  
-   - **HOLIDAY_USAGE**일 때 실제로는 **제7장, 제8장, 제3장** semantic_group만 검색하고, 결과 부족 시 전체로 넓히는 fallback이 있다는 점을 명시해야 “이 전표일 때 왜 제39조(주말·공휴일)가 후보에 들어가는지”를 정확히 설명 가능함.
-2. **검색 쿼리가 어떻게 만들어지는지**  
-   - BM25: 전표에서 **키워드**(케이스 힌트 + 가맹점명, 금액, MCC, 휴일/주말, 증빙 등)를 뽑아 `tsquery`로 검색한다는 점.  
-   - Dense: **자연어 문장** 하나로 만든다(예: “주말 또는 공휴일 경비 사용 건으로, 가온 식당에서 97,042원을 지출하였다. 해당 일자 근태 상태는 휴가·결근(LEAVE)이다. … 적용되는 휴일 경비 사용 제한 규정과 식대 규정을 찾아야 한다.”).  
-   - 이 둘을 명시해야 “어떤 검색 질의가 만들어지는지” 슬라이드가 구체적으로 채워짐.
-3. **시행일 필터**  
-   - 전표의 **발생일(occurredAt)** 으로 **effective_date**를 정해, 그 시점에 시행 중인 조문만 검색한다는 한 줄이 있으면 “날짜로 왜 일부 조문이 빠지는지”를 설명 가능함.
-4. **최종 채택 규정이 “어떤 것들인지” 예시**  
-   - “최종 필터된 규정이 이렇다”고 끝내지 말고, **이 전표 예시에 대한 기대 결과**를 명시하는 편이 좋음.  
-   - 예: “이 전표 예시의 최종 채택 규정 예시(데모): **제14조** 공통 증빙, **제23조** 식대, **제39조** 주말·공휴일 제약. (동일 조문은 1건만 채택, 서로 다른 조문만 최대 4~5건 선정.)”
-5. **Fallback 의미**  
-   - “Cross-Encoder rerank (필요 시 fallback)”만 있으면, fallback이 “rerank를 건너뛰는 것”인지 “BM25·Dense 둘 다 실패 시 LIKE 검색”인지 혼동될 수 있음.  
-   - rerank는 **미설치/실패 시 RRF 순위 유지**, **검색 실패 fallback**은 BM25·Dense 모두 결과 없을 때 **LIKE 기반 lexical 검색**으로 구분해 두면 정확함.
-
-**결론**  
-- **이대로 전달해도** 슬라이드 개수·구성·톤·시각화 종류는 잘 나올 가능성이 큼.  
-- 다만 **전표 데이터 예시를 통해 규정 검색까지 “완벽하게” 이해하고 만들게 하려면**, 아래 **[시스템 사실 참조]** 블록을 프롬프트에 **그대로 추가**해서 전달하는 것을 권장함.  
-- 참조 블록에는 “이건 우리 시스템의 실제 동작/수치”라고 명시해 두면, 문서 생성 AI가 지어내지 않고 이걸 기준으로 슬라이드 문장과 도식 설명을 채우기 좋음.
+**테스트 실행 결과:** 6 passed / 44 total — 감사 대상 6개 테스트 모두 통과 (단, 아래에서 확인하듯 이는 "충분히 좁은 커버리지"이기 때문임)
 
 ---
 
-## [시스템 사실 참조] — PPT 내용 채울 때 반드시 이 사실 기준으로 작성
-
-(문서 생성 AI에게 전달 시: “아래는 우리 시스템의 실제 동작이다. 슬라이드 본문·도식·스피커 노트는 이 사실에 맞춰 작성하고, 예시와 구분해 ‘시스템 사실’로 표기하라.”라고 안내한 뒤 아래를 붙여넣으면 됨.)
-
-### 1) 규정집 청킹 (실제 전략)
-- **전략명**: hierarchical_parent_child. 장(章) 구분 후 조(條) → 항(①②③, CLAUSE) → 호(1./가., ITEM) 3단계.
-- **저장**: ARTICLE(parent_id=NULL), CLAUSE(parent_id=ARTICLE), ITEM(parent_id=CLAUSE). 검색/임베딩은 **search_text**(본문 위주) 기준. BM25용 **search_tsv**, Dense용 **embedding** 컬럼 사용.
-- **단편 조문**: 본문 120자 미만 조문은 다음 조문과 병합해 하나의 ARTICLE로 저장.
-
-### 2) 검색 전 1차 필터
-- **semantic_group(장) 필터**: 케이스 유형에 따라 검색 대상 장을 좁힘.  
-  - **HOLIDAY_USAGE** → 제7장, 제8장, 제3장.  
-  - (기타: LIMIT_EXCEED → 제8장·제3장, PRIVATE_USE_RISK → 제7·8·4장, UNUSUAL_PATTERN → 제8·10·12장.)  
-  - 해당 장에서 후보가 부족하면 **전체 장**으로 재검색(fallback).
-- **effective_date 필터**: 전표 **occurredAt** 날짜로 시행일이 겹치는 조문만 검색. (effective_from ≤ occurredAt ≤ effective_to.)
-
-### 3) 검색 쿼리 생성 (이 전표 예시 기준)
-- **BM25**: 케이스 힌트(휴일, 주말, 식대, 심야 등) + 증빙·공통·제14조 + 가맹점명(가온 식당), 금액·MCC(5813) 등으로 **키워드 목록** 생성 → PostgreSQL `to_tsquery`(simple, prefix 가능)로 **search_tsv** 검색.
-- **Dense**: **자연어 한 문장** 생성. 예시 문장: “주말 또는 공휴일 경비 사용 건으로, 가온 식당에서 97,042원을 지출하였다. 해당 일자 근태 상태는 휴가·결근(LEAVE)이다. 이 지출에 적용되는 휴일 경비 사용 제한 규정과 식대 규정을 찾아야 한다.” (+ 공통 증빙 포함 문구). 이 문장을 임베딩해 **embedding** 컬럼과 코사인 유사도 검색.
-
-### 4) 하이브리드 병합·재정렬
-- BM25 후보와 Dense 후보를 **RRF(Reciprocal Rank Fusion, k=60)** 로 융합. (필요 시 케이스별 BM25/Dense 가중치 조정.)
-- **Cross-Encoder Rerank**: query–chunk 쌍 재점수화(예: ko-reranker). **미설치 또는 실패 시** RRF 순위 그대로 사용.
-- **Fallback**: BM25·Dense **둘 다** 결과가 없을 때만 **LIKE 기반 lexical 검색**으로 대체.
-
-### 5) 최종 채택 규정 (이 전표 예시의 기대 결과)
-- **조문(regulation_article) 단위 중복 제거**: 같은 조문에서 여러 청크(ARTICLE/CLAUSE/ITEM)가 올라와도 **한 조문당 1건만** 채택.
-- **서로 다른 조문만** 상위부터 최대 **4~5건** 선정.
-- **이 전표 예시(데모)의 최종 채택 규정 예시**: **제14조** 공통 증빙 의무, **제23조** 식대, **제39조** 주말·공휴일 제약. (필요 시 제12조 사전/사후 승인 보조 언급 가능.)
-
-### 6) 용어 한 줄 정의 (부록용)
-- **청킹**: 규정 원문을 검색·임베딩 단위(조/항/호)로 나누는 것.  
-- **임베딩**: 문장을 고정 차원 벡터로 바꿔 의미 유사도 검색에 쓰는 것.  
-- **BM25**: 키워드(용어) 매칭 기반 검색.  
-- **Dense**: 임베딩 유사도(의미 유사도) 기반 검색.  
-- **RRF**: 두 검색 결과의 순위를 합쳐 하나의 순위로 만드는 방식.  
-- **Rerank**: 최종 후보에 대해 query–문장 쌍을 다시 점수 매겨 순서를 바꾸는 단계.
+## A. Findings (심각도 순)
 
 ---
 
-## [제작용] 실제 전표 데이터 + 단계별 산출물 전부
+### [Severity: Critical] Beta 경로는 FiDocHeader/FiDocItem/AgentCase를 생성하지 않으며 스크리닝 파이프라인에 진입하지 않음
 
-문서 생성 AI가 슬라이드에 넣을 **실제 전표 1건**과, **검색·필터가 단계별로 어떻게 바뀌는지 모든 항목**을 아래에 넣었다. PPT 본문·도식·표는 이 값을 그대로 참조해 채우면 된다.
+**문제 요약:** `save_custom_demo_case()`는 로컬 JSON 파일만 저장하고, DB 전표 생성·스크리닝 호출이 전혀 없어 Beta로 생성된 비정상 케이스는 에이전트 분석 대상이 될 수 없음
 
-### 1. 실제 전표 데이터 (body_evidence — API/에이전트 입력과 동일한 형태)
+**근거 코드:**
+- `services/demo_data_service.py:268–344` — 파일 I/O만 존재, DB 코드 0줄
+- `services/case_service.py:108–198` — `run_case_screening()`이 FiDocHeader 조회를 전제 (`select(FiDocHeader)...` line 125)
+- `services/demo_data_service.py:541–556` — Legacy `seed_demo_scenarios()`만 `run_case_screening()` 호출
 
-```json
-{
-  "voucherKey": "1000-H000000001-2026",
-  "occurredAt": "2026-03-14T19:45:00",
-  "merchantName": "가온 식당",
-  "amount": 97042,
-  "hrStatus": "LEAVE",
-  "hrStatusRaw": "휴가",
-  "isHoliday": true,
-  "mccCode": "5813",
-  "mccName": "일반 음식점",
-  "budgetExceeded": false,
-  "case_type": "HOLIDAY_USAGE",
-  "intended_risk_type": "HOLIDAY_USAGE",
-  "document": {
-    "items": [
-      { "sgtxt": "경비식대", "hkont": "600101" },
-      { "sgtxt": "팀 회식", "hkont": "600102" }
-    ]
-  }
+**실제 영향:** Beta로 생성한 HOLIDAY_USAGE 케이스는 AgentCase 테이블에 없으므로 "분석 케이스 목록"에 노출되지 않음. 업로드·보정·저장 후 증빙 파일만 디스크에 존재하고 심사 불가.
+
+**재현 방법:**
+```python
+# services/demo_data_service.py:268–344 전체를 보면 DB session 파라미터 자체 없음
+result = save_custom_demo_case(payload={...}, image_bytes=b"", filename="")
+# → data/evidence_uploads/{uuid}/meta.json 만 생성
+# → FiDocHeader, FiDocItem, AgentCase 모두 0건
+```
+
+**권장 수정:** `save_custom_demo_case()`에 `db: Session` 파라미터 추가 후 FiDocHeader/FiDocItem 생성 + `run_case_screening()` 호출 블록 삽입. 또는 문서(testmultimodal.md)에 "Beta 경로는 의도적으로 DB 비연결"임을 명시하고, 별도 "Beta→분석 진입" 엔드포인트 설계.
+
+---
+
+### [Severity: Critical] 스크리닝 7개 필수 필드 중 4개가 Beta 저장 JSON에 누락
+
+**문제 요약:** `case_service.py`의 `_SCREENING_REQUIRED_FIELDS`(7개)와 Beta `meta.json` 저장 필드를 대조하면 `hrStatus`, `hrStatusRaw`, `budgetExceeded`, `isHoliday`가 항상 누락
+
+**근거 코드:**
+```
+# services/case_service.py:85–93
+_SCREENING_REQUIRED_FIELDS = (
+    "occurredAt",      ← Beta: datetime_occurrence로 부분 저장 ⚠
+    "isHoliday",       ← Beta: 저장 없음 ✗
+    "hrStatus",        ← Beta: 저장 없음 ✗
+    "hrStatusRaw",     ← Beta: 저장 없음 ✗
+    "mccCode",         ← Beta: 저장됨 ✓
+    "budgetExceeded",  ← Beta: 저장 없음 ✗
+    "amount",          ← Beta: amount_total로 저장 ✓
+)
+```
+
+**SCENARIO_PROFILES의 정의된 케이스별 기본값이 Beta에서 완전 무시됨:**
+
+| Case Type | hr_status | budget_flag | mcc_code |
+|-----------|-----------|-------------|----------|
+| HOLIDAY_USAGE | LEAVE | N | 5813 |
+| LIMIT_EXCEED | WORK | **Y** | 5812 |
+| PRIVATE_USE_RISK | LEAVE | N | 7992 |
+| UNUSUAL_PATTERN | WORK | N | 5813 |
+
+`services/demo_data_service.py:65–143` 에 위 값이 정의되어 있지만 `save_custom_demo_case()`에서 `SCENARIO_PROFILES`를 단 한 번도 참조하지 않음.
+
+**실제 영향:**
+- LIMIT_EXCEED 케이스 저장 시 `budgetExceeded` 없음 → 스크리닝 투입 시 "한도 초과" 신호 부재
+- HOLIDAY_USAGE 저장 시 `isHoliday=false`(혹은 없음)로 저장 가능 → 정책 위반 감지 불가
+
+**재현 방법:**
+```python
+result = save_custom_demo_case(
+    payload={"case_type": "LIMIT_EXCEED", "amount_total": "500000",
+             "date_occurrence": "2026-03-17", "merchant_name": "고액식당", ...},
+    image_bytes=b"", filename=""
+)
+meta = json.loads(Path(result["meta_path"]).read_text())
+assert "hrStatus" in meta["edited_entities"]      # ← FAILS
+assert "budgetExceeded" in meta["edited_entities"] # ← FAILS
+```
+
+**권장 수정:**
+```python
+# save_custom_demo_case() 내부에서 case_type에 맞는 profile defaults 병합
+profile = SCENARIO_PROFILES.get(case_type, {})
+"edited_entities": {
+    ...existing fields...,
+    "hrStatus": payload.get("hr_status") or profile.get("hr_status", "WORK"),
+    "budgetExceeded": payload.get("budget_exceeded") or (profile.get("budget_flag","N") == "Y"),
+    "isHoliday": _is_weekend_date(date_occurrence) or profile.get("day_mode") == "weekend",
+    "blart": profile.get("blart", "SA"),
+    "waers": "KRW",
 }
 ```
 
-**필드 설명 (슬라이드용)**  
-| 필드 | 값 예시 | 의미 |
-|------|---------|------|
-| voucherKey | 1000-H000000001-2026 | 전표 고유키 |
-| occurredAt | 2026-03-14T19:45:00 | 발생 일시 (토요일 19:45) |
-| merchantName | 가온 식당 | 가맹점명 |
-| amount | 97042 | 금액(원) |
-| hrStatus | LEAVE | 근태(휴가·결근) |
-| isHoliday | true | 주말/공휴일 여부 |
-| mccCode | 5813 | 가맹점 업종 코드 |
-| case_type | HOLIDAY_USAGE | 케이스 유형(휴일 사용 의심) |
-| document.items | sgtxt, hkont | 전표 라인(경비식대, 팀 회식 등) — BM25 키워드에 포함됨 |
+---
+
+### [Severity: High] 서버단 검증이 전무 — UI 우회 시 필수값 누락 데이터 저장 가능
+
+**문제 요약:** `save_custom_demo_case()`는 인자를 받아 그대로 저장하며 어떠한 비즈니스 룰 검증도 없음. 모든 검증(`validate_demo_required_fields`)은 UI 레이어에서만 수행됨
+
+**근거 코드:**
+```python
+# services/demo_data_service.py:268 — 함수 시그니처에 validation 없음
+def save_custom_demo_case(payload: dict[str, Any], image_bytes: bytes, filename: str):
+    # line 268~344: 파일 쓰기만 있고 payload 검증 코드 전혀 없음
+    case_type = payload.get("case_type", "UNKNOWN")   # UNKNOWN도 허용
+    meta = {...}
+    meta_path.write_text(json.dumps(meta, ...))  # 그대로 저장
+```
+
+**UI 검증 위치:** `services/demo_data_service.py:211–244` (validate_demo_required_fields), `demo_new.py:294–307` (버튼 disabled 제어) — 모두 UI 호출 전용
+
+**실제 영향:** HTTP API 직접 호출(또는 Python 직접 호출) 시:
+```python
+# 비정상 케이스 + 빈 amount + 이미지 없어도 저장됨
+save_custom_demo_case(
+    payload={"case_type": "HOLIDAY_USAGE", "amount_total": "", "date_occurrence": ""},
+    image_bytes=b"", filename=""
+)  # → 오류 없이 meta.json 생성됨
+```
+
+**권장 수정:** `save_custom_demo_case()` 함수 진입 시점에 `validate_demo_required_fields()` 재호출 또는 서버전용 필드검증 로직 삽입. 비정상 케이스이면서 `image_bytes=b""`인 경우 `ValueError` 발생.
 
 ---
 
-### 2. 단계 1 — 신호·1차 필터 산출 (이 전표 기준)
+### [Severity: High] `review_answers`가 항상 단일 원소 리스트 — 질문 수와 구조적 불일치
 
-시스템이 전표에서 먼저 뽑는 값과 검색 범위를 좁히는 필터다.
+**문제 요약:** 모든 비정상 케이스의 `review_questions`는 2개인데 `review_answers`는 항상 `[user_reason]` (1개). 저장 후 질문↔답변 인덱스 매핑 불가.
 
-| 항목 | 필드/키 | 값 (이 전표 예시) |
-|------|---------|-------------------|
-| 시행일 | effective_date | 2026-03-14 (occurredAt에서 날짜만) |
-| 검색 대상 장 | group_filter | ["제7장", "제8장", "제3장"] (HOLIDAY_USAGE 고정 매핑) |
-| 장 필터 완화 여부 | bm25_group_relaxed, dense_group_relaxed | 후보 부족 시에만 true, 우선 false |
+**근거 코드:**
+```python
+# ui/demo_new.py:378–379
+"review_questions": review_questions,        # 2개 질문 (HOLIDAY_USAGE 등)
+"review_answers": [user_reason.strip()],     # 항상 1개
+```
 
----
+```python
+# services/demo_data_service.py:156–165 (HOLIDAY_USAGE 질문 정의)
+"review_questions": [
+    "휴일 사용에 대한 사전 승인을 받았습니까?",
+    "해당 지출이 업무 목적임을 증명할 수 있습니까?",
+]
+```
 
-### 3. 단계 2 — 쿼리 생성 (검색 질의)
+**케이스별 불일치:**
 
-**2-1. structured_query (BM25·키워드 생성용)**
+| case_type | questions 수 | answers 수 | 상태 |
+|-----------|-------------|-----------|------|
+| HOLIDAY_USAGE | 2 | 1 | ❌ |
+| LIMIT_EXCEED | 2 | 1 | ❌ |
+| PRIVATE_USE_RISK | 2 | 1 | ❌ |
+| UNUSUAL_PATTERN | 2 | 1 | ❌ |
+| NORMAL_BASELINE | 0 | 1 | ❌ (답이 더 많음) |
 
-| 필드 | 값 (이 전표 예시) |
-|------|-------------------|
-| risk_type | HOLIDAY_USAGE |
-| keywords | ["휴일", "주말", "공휴일", "식대", "심야", "증빙", "공통", "제14조", "필수 증빙", "가온", "식당", "경비식대", "팀 회식", "600101", "600102", "5813", "일반", "음식점", …] (중복 제거·동의어 확장 반영) |
-| mcc_code | 5813 |
-| mcc_name | 일반 음식점 |
-| hr_status | LEAVE |
-| occurred_at | 2026-03-14T19:45:00 |
-| is_holiday | true |
-| document_line_hints | ["경비식대", "600101", "팀 회식", "600102"] |
-| merchant_name | 가온 식당 |
+**실제 영향:** 저장된 meta.json을 에이전트가 읽을 때 "Q1에 대한 답이 뭔가?" 역참조 불가. HITL 리뷰 노드에서 질문별 충족도 평가 불가.
 
-**BM25 실제 쿼리 (tsquery)**  
-- keywords 상위 약 20~30개를 `토큰:*` 형태로 바꾼 뒤 ` | `(OR)로 연결.  
-- 예시 문자열: `휴일:* | 주말:* | 공휴일:* | 식대:* | 심야:* | 증빙:* | 공통:* | 가온:* | 식당:* | 경비식대:* | 팀:* | 회식:* | 5813:* | …`
-
-**2-2. dense_query (Dense 검색용 자연어 한 문장)**
-
-- **필드명**: dense_query (또는 rewritten_query)
-- **값 (이 전표 예시)**  
-  「주말 또는 공휴일 경비 사용 건으로, 가온 식당에서 97,042원을 지출하였다. 해당 일자 근태 상태는 휴가·결근(LEAVE)이다. 이 지출에 적용되는 휴일 경비 사용 제한 규정과 식대 규정을 찾아야 한다. 모든 경비 지출에 공통 적용되는 증빙 의무(제14조 공통 증빙) 규정을 포함해야 한다.」
+**권장 수정:** UI에 질문별 개별 text_area 렌더링 또는 단일 텍스트를 N개 질문에 대한 통합 답변임을 명시하는 필드(`answer_type: "combined"`) 추가. 아니면 `review_answers`를 `[user_reason] * len(review_questions)`로 복제하는 임시 처리.
 
 ---
 
-### 4. 단계 3 — BM25 검색 결과 (후보 목록 예시)
+### [Severity: Medium] `occurredAt` 필드가 `datetime_occurrence` 키로 저장 — 스크리닝 API 필드명과 불일치
 
-각 후보 청크에 들어가는 **항목(필드)** 과, 이 전표로 검색했을 때 나올 수 있는 **예시 행** 형태다. (실제 chunk_id·점수는 DB 기준이므로 데모용 예시값.)
+**문제 요약:** `_build_screening_body()`는 `occurredAt`을 키로 사용하는데, Beta meta.json은 `datetime_occurrence`로 저장함. 향후 Beta→스크리닝 연결 시 필드명 매핑 누락으로 묵시적 None 처리
 
-**후보 1건당 공통 필드**  
-chunk_id, doc_id, regulation_article, regulation_clause, parent_title, chunk_text, search_text, node_type, parent_id, bm25_score, metadata_json(regulation_item 등)
+**근거 코드:**
+```python
+# services/demo_data_service.py:279–283
+"edited_entities": {
+    "date_occurrence": payload.get("date_occurrence", ""),
+    "datetime_occurrence": _combine_date_time(...),  # ← 이 키
+    ...
+}
+# services/case_service.py:73 — 스크리닝 body 키
+{"occurredAt": occurred_at, ...}  # ← 다른 키
+```
 
-**데모 예시 (상위 5건 가정)**  
-| rank | chunk_id (예) | article | clause | node_type | parent_title (요약) | bm25_score (예) |
-|------|----------------|---------|--------|-----------|----------------------|-----------------|
-| 1 | c-39-1 | 제39조 | ① | CLAUSE | 제39조 (주말·공휴일 제약) | 0.08 |
-| 2 | c-23-2 | 제23조 | ② | CLAUSE | 제23조 (식대) | 0.06 |
-| 3 | c-14-1 | 제14조 | (없음) | ARTICLE | 제14조 (공통 증빙 의무) | 0.05 |
-| 4 | c-39-2 | 제39조 | ② | CLAUSE | 제39조 (주말·공휴일 제약) | 0.04 |
-| 5 | c-23-3 | 제23조 | ③ | CLAUSE | 제23조 (식대) | 0.03 |
-
----
-
-### 5. 단계 4 — Dense 검색 결과 (후보 목록 예시)
-
-**후보 1건당 공통 필드**  
-chunk_id, doc_id, regulation_article, regulation_clause, parent_title, chunk_text, search_text, node_type, parent_id, dense_score (1 - cosine_distance)
-
-**데모 예시 (상위 5건 가정)**  
-| rank | chunk_id (예) | article | clause | node_type | parent_title (요약) | dense_score (예) |
-|------|----------------|---------|--------|-----------|----------------------|------------------|
-| 1 | c-23-2 | 제23조 | ② | CLAUSE | 제23조 (식대) | 0.82 |
-| 2 | c-39-1 | 제39조 | ① | CLAUSE | 제39조 (주말·공휴일 제약) | 0.79 |
-| 3 | c-14-1 | 제14조 | (없음) | ARTICLE | 제14조 (공통 증빙 의무) | 0.75 |
-| 4 | c-12-1 | 제12조 | ① | CLAUSE | 제12조 (사전승인·사후승인) | 0.71 |
-| 5 | c-39-2 | 제39조 | ② | CLAUSE | 제39조 (주말·공휴일 제약) | 0.68 |
+**권장 수정:** meta.json 저장 시 `"occurredAt"` 키를 병행 저장하거나, Beta→스크리닝 변환 레이어에서 명시적 매핑.
 
 ---
 
-### 6. 단계 5 — RRF 융합 (fused_candidates)
+### [Severity: Medium] `mcc_code` 중복 저장 (top-level + edited_entities 두 곳)
 
-BM25 순위와 Dense 순위를 RRF(k=60)로 합친 뒤, **rrf_score** 순으로 정렬한 목록.
+**근거 코드:**
+```python
+# services/demo_data_service.py:284, 322–323
+meta = {
+    ...
+    "mcc_code": payload.get("mcc_code", ""),      # line 284: top-level
+    "edited_entities": {
+        "mcc_code": payload.get("mcc_code", ""),  # line 322: 중복
+    }
+}
+```
 
-**1건당 필드**  
-rank, chunk_id, doc_id, article, clause, item, node_type, parent_title, scores.bm25, scores.dense, scores.rrf, stage="fused", selected_by="fused_rrf"
-
-**데모 예시 (상위 5건)**  
-| rank | chunk_id (예) | article | clause | node_type | rrf_score (예) |
-|------|----------------|---------|--------|-----------|----------------|
-| 1 | c-39-1 | 제39조 | ① | CLAUSE | 0.0328 |
-| 2 | c-23-2 | 제23조 | ② | CLAUSE | 0.0312 |
-| 3 | c-14-1 | 제14조 | (없음) | ARTICLE | 0.0295 |
-| 4 | c-39-2 | 제39조 | ② | CLAUSE | 0.0164 |
-| 5 | c-23-3 | 제23조 | ③ | CLAUSE | 0.0156 |
-
----
-
-### 7. 단계 6 — Rerank (reranked_candidates)
-
-Cross-Encoder(또는 미설치 시 RRF 순위 유지)로 query–chunk 쌍 재점수 후 **cross_encoder_score** 순으로 정렬한 목록.
-
-**1건당 필드**  
-rank, chunk_id, doc_id, article, clause, item, node_type, parent_title, scores.bm25, scores.dense, scores.rrf, scores.cross_encoder, stage="reranked", selected_by="reranked_cross_encoder", why_selected
-
-**데모 예시 (상위 5건)**  
-| rank | chunk_id (예) | article | clause | node_type | cross_encoder (예) | why_selected (예) |
-|------|----------------|---------|--------|-----------|--------------------|-------------------|
-| 1 | c-39-1 | 제39조 | ① | CLAUSE | 0.92 | cross-encoder 재정렬 상위 (0.9200) |
-| 2 | c-14-1 | 제14조 | (없음) | ARTICLE | 0.88 | cross-encoder 재정렬 상위 (0.8800) |
-| 3 | c-23-2 | 제23조 | ② | CLAUSE | 0.85 | cross-encoder 재정렬 상위 (0.8500) |
-| 4 | c-39-2 | 제39조 | ② | CLAUSE | 0.81 | … |
-| 5 | c-23-3 | 제23조 | ③ | CLAUSE | 0.78 | … |
+**실제 영향:** 두 값이 서로 다르게 업데이트될 경우(예: 향후 수정 로직 추가 시) 어느 것이 정본인지 불명확. 현재는 동일 source라 동기화 오류는 없음.
 
 ---
 
-### 8. 단계 7 — 최종 채택 (조문 단위 중복 제거 후 selected_refs)
+## B. Spec Gap (문서 요구사항 vs 실제 구현 비교)
 
-동일 **regulation_article** 은 1건만 채택하고, 서로 다른 조문만 상위부터 최대 4~5건 선정한 결과.
-
-**채택 1건당 필드**  
-article, parent_title, chunk_id(대표), chunk_ids, adoption_reason, score_detail(bm25, dense, rrf, cross_encoder)
-
-**이 전표 예시의 최종 채택 규정 (데모)**  
-| 순서 | article | parent_title | 채택 이유 요약 |
-|------|---------|--------------|----------------|
-| 1 | 제14조 | 제14조 (공통 증빙 의무) | 모든 경비 지출 공통 증빙 의무 |
-| 2 | 제23조 | 제23조 (식대) | 식대 한도·승인 기준 |
-| 3 | 제39조 | 제39조 (주말·공휴일 제약) | 휴일·주말 사용 제한 |
-
-(필요 시 제12조 사전/사후 승인을 4번째로 보조 언급 가능.)
-
----
-
-### 9. 제작 시 참고 사항
-
-- **실제 전표 데이터**는 위 JSON을 그대로 슬라이드 “입력 예시” 또는 부록에 넣으면 된다.
-- **단계별 변화**는 2→3→4→5→6→7 순서로, “입력 전표 → 신호/필터 → BM25/Dense 쿼리 → BM25 후보 → Dense 후보 → RRF 융합 → Rerank → 최종 채택 규정” 한 흐름으로 도식화하면 된다.
-- 표·도식에 넣을 때 **필드 이름**은 위 표의 필드명을 그대로 쓰고, **값**은 “데모 예시”라고 표기하면 된다.
+| 항목 | testmultimodal.md 요구 | 실제 구현 | 상태 |
+|------|----------------------|---------|------|
+| 비정상 케이스 전표 필드 매핑 | `hrStatus`, `mccCode`, `budgetExceeded`, `isHoliday` — "기존 시나리오 기본값 재사용" (line 88) | `SCENARIO_PROFILES` 전혀 참조 안 함 | ❌ 미구현 |
+| `occurredAt` 보정 | "시간은 정책 규칙에 맞춰 보정" (line 37) | `_combine_date_time()`으로 단순 합산만, 정책 보정 없음 | ❌ 미구현 |
+| `isHoliday` 계산 | 스크리닝 필수 필드 (case_service.py:87) | Beta 경로에서 계산·저장 없음 | ❌ 미구현 |
+| `blart`, `waers` | "기존 시나리오 기본값 재사용" (testmultimodal.md:88) | Beta 경로에서 저장 없음 | ❌ 미구현 |
+| 서버단 비정상 케이스 필수값 보정 | "서버에서 최종 보정" (testmultimodal.md:89) | `save_custom_demo_case()`에 보정 로직 없음 | ❌ 미구현 |
+| `review_questions` UI/파이프라인 일치 | "규정 기반 질문이 UI/검증 파이프라인에서 동일하게 노출" (testmultimodal.md:190) | 질문 정의는 일치, 답변 매핑 불일치 | ⚠ 부분 |
+| `sgtxt` 저장 | "적요/비고(`sgtxt`, `bktxt`) 전달 필수" (testmultimodal.md:38) | `memo.sgtxt`로 저장됨, but UI에 sgtxt 입력 필드 없음 | ⚠ 부분 |
+| VisualEntity `time_occurrence` | 스펙 외 (추가 구현됨) | 구현됨 | ✅ 추가됨 |
+| 저장 JSON 최소 스키마 | 10개 최소 필드 (testmultimodal.md:92–96) | 모두 저장됨 | ✅ 충족 |
+| 비정상 케이스+파일 없으면 버튼 disabled | testmultimodal.md:142 | 구현됨 | ✅ 충족 |
 
 ---
 
-### 10. 예제에 사용될 규정 본문 (조문별)
+## C. Test Gap
 
-PPT에서 “검색된 규정 원문”, “청킹된 조문 예시”, “최종 채택 조항 본문” 등을 보여줄 때 아래 본문을 그대로 사용하면 된다. 출처: 사내 경비 지출 관리 규정(규정집 원문).
+### 현재 테스트가 보장하는 것
+- `save_custom_demo_case()`: UUID 폴더 + 이미지 + meta.json 파일 생성 여부 (file system)
+- `validate_demo_required_fields()`: 5개 필드 형식 검증 (금액>0, 날짜 형식, 빈값)
+- `is_generate_disabled()`: 비정상케이스+파일없음 → disabled
+- `generate_preview_questions()`: 케이스별 질문 목록 반환
+- bbox 좌표 유효성(0~1000, ymin≤ymax)
+- `analyze_visual_evidence()` fallback (API키 없음, 예외)
+- `_combine_date_time()`: 날짜+시간 조합 변환
+- `time_occurrence` 엔티티 생성, 3분할 bbox fix
 
----
+### 보장되지 않는 것 + 추가 테스트 케이스 목록
 
-**제14조 (공통 증빙 의무)**
-
-① 모든 경비 지출은 법적·내부 기준에 따른 증빙을 구비하여야 한다.
-② 공통 필수 증빙 정보는 다음과 같다.
-1. 거래일자 및 시간
-2. 거래처명(사업자명), 사업자등록번호 또는 식별정보
-3. 품목/서비스 내역
-4. 공급가액/세액/합계금액 또는 총결제금액
-5. 결제수단(법인카드/계좌이체/현금 등)
-6. 업무 목적 및 관련 프로젝트/코스트센터(해당 시)
-③ 증빙 원본 보관 방식(전자/실물), 보관 기간, 접근권한은 별도 기준에 따른다.
-
----
-
-**제23조 (식대)**
-
-① 업무상 식대는 인당 기준한도 및 참석자 기준을 충족하여야 하며, 사적 목적 식대를 금지한다.
-② 필수 입력/증빙:
-1. 업무 목적
-2. 참석자 수(내부/외부 구분)
-3. 일시 및 장소
-4. 카드전표 또는 적격 증빙
-③ 다음은 경고 또는 검토 대상으로 분류한다.
-1. 23:00~06:00 심야 식대
-2. 주말/공휴일 식대(예외 승인 없는 경우)
-3. 동일 참석자 기준 동일일 다회 식대
-4. 인당 한도 초과 식대
-④ 예외는 장애대응, 야간근무, 대외행사 운영 등 업무 사유가 명확한 경우에 한한다.
+| 번호 | 테스트 케이스 | 우선순위 |
+|------|------------|---------|
+| T1 | `save_custom_demo_case(HOLIDAY_USAGE)` → `meta.json`에 `hrStatus="LEAVE"` 존재 확인 | Critical |
+| T2 | `save_custom_demo_case(LIMIT_EXCEED)` → `meta.json`에 `budgetExceeded=True` 존재 확인 | Critical |
+| T3 | `save_custom_demo_case(HOLIDAY_USAGE, date="2026-03-14")` → `isHoliday=True` 계산·저장 확인 | Critical |
+| T4 | `save_custom_demo_case()` 직접 호출 시 amount="" → ValueError 발생 (서버단 검증) | High |
+| T5 | `review_answers` 길이 == `review_questions` 길이 또는 단일답변임을 명시하는 구조 확인 | High |
+| T6 | `meta.json`의 `occurredAt` or `datetime_occurrence` → `case_service._build_screening_body()` 투입 시 오류 없음 | High |
+| T7 | `save_custom_demo_case()` mcc_code 중복값 두 위치가 동일한지 확인 | Medium |
+| T8 | Beta 저장 후 `run_case_screening()` 호출 가능 여부 (DB 레코드 없어서 실패해야 하는지 설계 명확화) | High |
+| T9 | 비정상 케이스에서 `blart="SA"`, `waers="KRW"` 저장 확인 | Medium |
+| T10 | NORMAL_BASELINE: review_questions=[], review_answers 처리 일관성 확인 | Low |
 
 ---
 
-**제39조 (주말·공휴일 제약)**
+## D. Patch Plan (코드 수정 전 제안)
 
-① 주말·공휴일 지출은 계정별 기준에 따라 제한 또는 검토 대상으로 운영한다.
-② 반복적인 주말·공휴일 지출은 위험도 상향 대상이다.
+### 변경할 함수 목록
+
+| 함수 | 파일 | 변경 방향 |
+|------|------|---------|
+| `save_custom_demo_case()` | `services/demo_data_service.py` | ① `SCENARIO_PROFILES` 기본값 병합 ② 서버단 필수값 검증 ③ `isHoliday` 자동 계산 ④ `occurredAt` 키 병행 저장 |
+| `validate_demo_required_fields()` | `services/demo_data_service.py` | `save_custom_demo_case()` 내에서 재호출 (서버 게이트 역할) |
+| `_handle_generate()` | `ui/demo_new.py` | `review_answers` 매핑 구조 개선 (질문당 1답변 또는 `answer_type` 명시) |
+
+### 데이터 계약 변경안 (meta.json 필수 필드 확장)
+
+```json
+{
+  "edited_entities": {
+    "amount_total": "97042",
+    "merchant_name": "가온 식당",
+    "date_occurrence": "2026-03-14",
+    "time_occurrence": "19:45",
+    "datetime_occurrence": "2026-03-14T19:45",
+    "occurredAt": "2026-03-14T19:45:00",    ← 신규 (스크리닝 필드명 일치)
+    "mcc_code": "5813",
+    "hrStatus": "LEAVE",                    ← 신규 (SCENARIO_PROFILES 기본값)
+    "hrStatusRaw": "LEAVE",                 ← 신규
+    "budgetExceeded": false,                ← 신규
+    "isHoliday": true,                      ← 신규 (날짜 기반 자동 계산)
+    "blart": "SA",                          ← 신규
+    "waers": "KRW"                          ← 신규
+  },
+  "review_questions": ["질문1", "질문2"],
+  "review_answers": ["통합 답변"],          ← answer_type: "combined" 추가 권장
+  "answer_type": "combined"                 ← 신규
+}
+```
+
+### 하위 호환성 영향
+
+- **기존 meta.json 파일**: 신규 필드 없어도 `meta.get("hrStatus")` 패턴은 `None` 반환으로 안전. 읽기 하위 호환 유지.
+- **`validate_demo_required_fields()` 재호출**: 기존 UI 경로에서는 이미 통과한 데이터이므로 이중 검증이지만 오류 없음.
+- **`review_answers` 구조 변경**: 저장된 기존 케이스 재처리 시 `answer_type` 없으면 `"combined"`로 간주하는 fallback 필요.
+- **`case_service.run_case_screening()` 연결**: DB 세션 주입 필요 → `save_custom_demo_case(db: Session, ...)` 시그니처 변경 → 기존 호출부(`ui/demo_new.py`, 테스트) 파라미터 업데이트 필요.
+
+
+
+
+첫째, 이미지 참고하고 아래 수정사항 진행
+
+왜 고쳐지지 않을까요 합계금액 라벨과 동일 라인의 금액을 못 찾는 이유가 궁금합니다.
+
+그리고 결제일시는 여전히 문제입니다. 신중하게 검토해서 진행하세요. 계속 오류가 반복되니 힘드네요
+
+claude 는 멀티 모달 vllm 은 실력이 없는건가요?
+
+
+
+둘째, 시연데이터제어(베타) 메뉴는 기존 시연데이터제어(legacy)  로직을 동일하게 가져오데 vllm 으로 읽어들이는 값만 
+
+기존거에서 대체하는것으로 시작했습니다.
+
+그런데 정상비교군 케이스 선택을 해도 로컬 파일시스템에 저장을 하고,  Legacy는 FiDocHeader/FiDocItem에 전표를 넣고 스크리닝까지 수행하는데 그 로직도 다 빠진듯 합니다. 
+
+정상 비교군 외 케이스도 이미지에서 읽어들이는 값들을 사용하는것 외에는 기존 프로세스를 동일하게 수행해야되는데 얼마나 바뀌고 적용이 안된건지 모르겠네요 . 위 내용 확인해서 이해가 안되면 작업 하지 말고 이해되면 진행하세요
 
 ---
 
-**제12조 (사전승인 및 사후승인)** — 보조 예시용
+## 추가 정리: 현재 파일 기준으로 실제 진행해야 할 작업(확정본)
 
-① 경비 지출은 원칙적으로 사전승인을 받아야 한다.
-② 다음 각 호의 경우에 한하여 사후승인을 예외적으로 허용할 수 있다.
-1. 긴급 장애 대응
-2. 비상 상황 또는 재난 대응
-3. 시스템 장애로 인한 입력 지연
-4. 해외출장 현지 증빙 확보 지연
-③ 사후승인은 지출일로부터 3영업일 이내 신청하여야 하며, 지연 사유와 대체 증빙을 제출하여야 한다.
+아래 항목이 완료되어야 "Beta는 Legacy와 동일 프로세스 + 이미지 추출값 대체" 요구를 충족한다.
 
----
+### 1) 저장 경로 정렬 (필수)
+- `save_custom_demo_case()`가 파일 저장만 하지 말고 `FiDocHeader/FiDocItem`도 생성해야 함.
+- 생성 직후 `run_case_screening(..., strict_required_fields=True)`을 호출해 Legacy와 동일하게 스크리닝까지 완료해야 함.
+- 즉, Beta 결과가 분석 목록/케이스 흐름에 즉시 나타나야 함.
 
-**청킹 시 참고 (슬라이드 “청크 예시”용)**
+### 2) 비정상 케이스 필수 필드 보강 (필수)
+- 이미지+수정값 우선 반영: `amount`, `merchantName`, `occurredAt`, `bktxt`, `sgtxt`.
+- 시나리오 기본값 병합: `hrStatus`, `hrStatusRaw`, `mccCode`, `budgetExceeded`, `blart`, `waers`.
+- 서버 최종 보정: `isHoliday` 및 시간대/예산 신호 정합성 보정.
 
-- **제14조**: ①②③ 있으므로 CLAUSE 3개. ②항 내 1.~6. 호 있으므로 해당 CLAUSE 하위에 ITEM 노드 생성. (단항 조문은 CLAUSE 없이 ARTICLE 1청크만 생성.)
-- **제23조**: ARTICLE 1개 + CLAUSE ④항(①②③④) 4개 + 각 항 내 호(1. 2. 3. 4.) → ITEM 다수. 검색 시 “주말/공휴일 식대(예외 승인 없는 경우)”가 들어간 ③항 2. 호가 휴일 전표와 잘 매칭됨.
-- **제39조**: ARTICLE 1개 + CLAUSE ①② 2개(호 없음). ① “주말·공휴일 지출은 … 제한 또는 검토 대상”, ② “반복적인 주말·공휴일 지출은 위험도 상향”이 search_text로 저장·검색됨.
+### 3) 서버단 검증 추가 (필수)
+- 현재 UI 검증만으로는 우회 저장 가능하므로, 저장 함수 내부에서 필수값 검증을 다시 수행해야 함.
+- 비정상 케이스 + 증빙 없음, 금액/일자/가맹점/적요/사유 누락 시 저장 실패 처리 필요.
 
+### 4) 질문/답변 구조 정합성 수정 (필수)
+- `review_questions`(다건)과 `review_answers`(현재 1건) 불일치 해결 필요.
+- 해결안:
+- 질문별 답변 입력으로 변경하거나,
+- 단일 통합답변이면 `answer_type: "combined"`를 명시하고 후속 처리에서 이를 기준으로 해석.
 
+### 5) 정상 비교군 동작 보장 (필수)
+- 정상 비교군은 Legacy와 동일 정책으로 DB 전표 생성/스크리닝 완료되어야 함.
+- "파일 시스템만 저장"으로 끝나면 요구사항 미충족으로 판단.
+
+### 6) 구현 완료 판정 기준 (체크포인트)
+- Beta에서 케이스 생성 후 DB에 `FiDocHeader/FiDocItem/AgentCase`가 실제 생성되는지.
+- 비정상 케이스별 `hrStatus/budgetExceeded/isHoliday/mccCode`가 기대값으로 채워지는지.
+- 생성 직후 분석 목록에서 케이스 조회 및 후속 분석 실행이 가능한지.
+- 관련 회귀 테스트가 추가되어 CI에서 재검증되는지.
