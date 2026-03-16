@@ -22,6 +22,40 @@ logger = logging.getLogger(__name__)
 _EVIDENCE_UPLOAD_ROOT = Path("data/evidence_uploads")
 
 
+def _combine_date_time(date_str: str, time_str: str) -> str:
+    """날짜(YYYY-MM-DD)와 시간(HH:MM)을 합쳐 ISO 8601 datetime 문자열 반환.
+
+    - date_str이 없으면 빈 문자열 반환.
+    - time_str이 없으면 날짜만 반환 (YYYY-MM-DD).
+    - 유효하지 않은 형식은 무시하고 파싱 가능한 범위만 조합.
+    예: ("2026-03-14", "19:45") → "2026-03-14T19:45"
+    예: ("2026-03-14", "")     → "2026-03-14"
+    """
+    date_clean = date_str.strip()
+    time_clean = time_str.strip()
+    if not date_clean:
+        return ""
+    try:
+        datetime.strptime(date_clean, "%Y-%m-%d")
+    except ValueError:
+        return date_clean
+    if not time_clean:
+        return date_clean
+    # HH:MM 또는 HH:MM:SS 허용
+    try:
+        t = datetime.strptime(time_clean, "%H:%M")
+        return f"{date_clean}T{t.strftime('%H:%M')}"
+    except ValueError:
+        pass
+    try:
+        t = datetime.strptime(time_clean, "%H:%M:%S")
+        return f"{date_clean}T{t.strftime('%H:%M')}"
+    except ValueError:
+        pass
+    # 파싱 실패 시 날짜만 반환
+    return date_clean
+
+
 # 시연 데이터 규칙:
 # - AuraAgent 표준 case_type 5종(HOLIDAY_USAGE/LIMIT_EXCEED/PRIVATE_USE_RISK/UNUSUAL_PATTERN/NORMAL_BASELINE)만 사용.
 # - 스크리닝 핵심 입력 필드(occurredAt, isHoliday, hrStatus, hrStatusRaw, mccCode, budgetExceeded, amount)를
@@ -278,6 +312,11 @@ def save_custom_demo_case(
         "edited_entities": {
             "amount_total": payload.get("amount_total", ""),
             "date_occurrence": payload.get("date_occurrence", ""),
+            "time_occurrence": payload.get("time_occurrence", ""),
+            "datetime_occurrence": _combine_date_time(
+                payload.get("date_occurrence", ""),
+                payload.get("time_occurrence", ""),
+            ),
             "merchant_name": payload.get("merchant_name", ""),
             "mcc_code": payload.get("mcc_code", ""),
         },

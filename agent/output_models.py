@@ -327,8 +327,8 @@ class VisualEntity(BaseModel):
     """이미지에서 추출된 개별 엔티티 (금액/일자/가맹점)."""
 
     id: str = Field(description="엔티티 식별자 (예: item_1)")
-    label: Literal["amount_total", "date_occurrence", "merchant_name"] = Field(
-        description="엔티티 유형: amount_total | date_occurrence | merchant_name"
+    label: Literal["amount_total", "date_occurrence", "time_occurrence", "merchant_name"] = Field(
+        description="엔티티 유형: amount_total | date_occurrence | time_occurrence | merchant_name"
     )
     text: str = Field(description="추출된 텍스트 (정규화 후)")
     bbox: VisualBox = Field(description="값 텍스트 위치 (ymin,xmin,ymax,xmax), 0~1000 정규화")

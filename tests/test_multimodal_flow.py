@@ -584,3 +584,151 @@ def test_analyze_visual_evidence_uses_paddle_when_available():
     assert "amount_total" in labels
     merchant = next(e for e in result.entities if e.label == "merchant_name")
     assert merchant.text == "가온 식당"
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# time_occurrence: OCR 추출 + 날짜+시간 조합 로직
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def test_visual_entity_allows_time_occurrence_label():
+    """VisualEntity가 time_occurrence 레이블을 허용해야 한다."""
+    from agent.output_models import VisualBox, VisualEntity
+
+    box = VisualBox(ymin=100, xmin=50, ymax=130, xmax=400)
+    entity = VisualEntity(
+        id="item_time",
+        label="time_occurrence",
+        text="19:45",
+        bbox=box,
+        confidence=0.95,
+    )
+    assert entity.label == "time_occurrence"
+    assert entity.text == "19:45"
+
+
+def test_combine_date_time_with_time():
+    """날짜+시간 모두 있을 때 ISO 8601 형식으로 조합."""
+    from services.demo_data_service import _combine_date_time
+
+    result = _combine_date_time("2026-03-14", "19:45")
+    assert result == "2026-03-14T19:45"
+
+
+def test_combine_date_time_without_time():
+    """시간이 없으면 날짜만 반환."""
+    from services.demo_data_service import _combine_date_time
+
+    assert _combine_date_time("2026-03-14", "") == "2026-03-14"
+    assert _combine_date_time("2026-03-14", "   ") == "2026-03-14"
+
+
+def test_combine_date_time_without_date():
+    """날짜가 없으면 빈 문자열 반환."""
+    from services.demo_data_service import _combine_date_time
+
+    assert _combine_date_time("", "19:45") == ""
+    assert _combine_date_time("   ", "19:45") == ""
+
+
+def test_combine_date_time_with_seconds():
+    """HH:MM:SS 형식도 HH:MM으로 잘라서 조합."""
+    from services.demo_data_service import _combine_date_time
+
+    result = _combine_date_time("2026-03-14", "19:45:00")
+    assert result == "2026-03-14T19:45"
+
+
+def test_combine_date_time_invalid_time():
+    """시간 형식이 잘못된 경우 날짜만 반환."""
+    from services.demo_data_service import _combine_date_time
+
+    result = _combine_date_time("2026-03-14", "7:45 PM")
+    assert result == "2026-03-14"
+
+
+def test_save_custom_demo_case_stores_time_occurrence(tmp_path):
+    """time_occurrence와 datetime_occurrence가 meta.json에 저장되어야 한다."""
+    import json
+    import services.demo_data_service as svc
+
+    original_root = svc._EVIDENCE_UPLOAD_ROOT
+    svc._EVIDENCE_UPLOAD_ROOT = tmp_path / "evidence_uploads"
+
+    try:
+        result = svc.save_custom_demo_case(
+            payload={
+                "case_type": "HOLIDAY_USAGE",
+                "amount_total": "97042",
+                "date_occurrence": "2026-03-14",
+                "time_occurrence": "19:45",
+                "merchant_name": "가온 식당",
+                "bktxt": "휴일 야간 식대",
+                "user_reason": "업무상 불가피한 상황",
+            },
+            image_bytes=b"",
+            filename="",
+        )
+
+        meta_path = svc._EVIDENCE_UPLOAD_ROOT / result["case_uuid"] / "meta.json"
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+
+        assert meta["edited_entities"]["time_occurrence"] == "19:45"
+        assert meta["edited_entities"]["datetime_occurrence"] == "2026-03-14T19:45"
+
+    finally:
+        svc._EVIDENCE_UPLOAD_ROOT = original_root
+
+
+def test_analyze_visual_evidence_extracts_time_occurrence():
+    """OCR+LLM 파이프라인에서 time_occurrence 엔티티가 추출되어야 한다."""
+    import base64
+    import sys
+    import types
+    from unittest.mock import MagicMock, patch
+
+    from utils.llm_azure import analyze_visual_evidence
+    from utils.ocr_paddle import OcrWord
+
+    fake_ocr_words = [
+        OcrWord(text="거래처명: 가온 식당", xmin=50, ymin=300, xmax=600, ymax=340,
+                confidence=0.99, img_width=700, img_height=1100),
+        OcrWord(text="거래일자: 2026-03-14", xmin=50, ymin=200, xmax=600, ymax=240,
+                confidence=0.98, img_width=700, img_height=1100),
+        OcrWord(text="거래시간: 19:45 PM", xmin=50, ymin=250, xmax=600, ymax=290,
+                confidence=0.97, img_width=700, img_height=1100),
+        OcrWord(text="합계금액: 97,042원", xmin=50, ymin=900, xmax=700, ymax=940,
+                confidence=0.97, img_width=700, img_height=1100),
+    ]
+
+    llm_json_response = """{
+      "merchant_name": {"key_index": 0, "value_index": 0, "text": "가온 식당"},
+      "date_occurrence": {"key_index": 1, "value_index": 1, "text": "2026-03-14"},
+      "time_occurrence": {"key_index": 2, "value_index": 2, "text": "19:45"},
+      "amount_total": {"key_index": 3, "value_index": 3, "text": "97042"}
+    }"""
+
+    fake_completion = MagicMock()
+    fake_completion.choices[0].message.content = llm_json_response
+    fake_client = MagicMock()
+    fake_client.chat.completions.create.return_value = fake_completion
+
+    fake_openai = types.ModuleType("openai")
+    fake_openai.OpenAI = MagicMock(return_value=fake_client)  # type: ignore[attr-defined]
+    fake_openai.AzureOpenAI = MagicMock(return_value=fake_client)  # type: ignore[attr-defined]
+
+    dummy_b64 = base64.b64encode(b"fake-image").decode()
+
+    with patch("utils.config.settings") as mock_settings, \
+         patch("utils.ocr_paddle.run_paddle_ocr", return_value=fake_ocr_words), \
+         patch.dict(sys.modules, {"openai": fake_openai}):
+        mock_settings.openai_api_key = "fake-key"
+        mock_settings.openai_base_url = ""
+        mock_settings.openai_api_version = "2024-12-01-preview"
+        result = analyze_visual_evidence(dummy_b64)
+
+    assert result.source == "ocr_llm"
+    labels = {e.label for e in result.entities}
+    assert "time_occurrence" in labels
+    time_entity = next(e for e in result.entities if e.label == "time_occurrence")
+    assert time_entity.text == "19:45"

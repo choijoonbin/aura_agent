@@ -73,6 +73,7 @@ def _entities_to_boxes_and_labels(
     _label_map = {
         "amount_total": "금액",
         "date_occurrence": "일자",
+        "time_occurrence": "시간",
         "merchant_name": "가맹점",
     }
     boxes: list[list[int]] = []
@@ -166,16 +167,19 @@ def render_demo_new_page() -> None:
                     extracted = {
                         "amount_total": _extract_entity_value(entities, "amount_total"),
                         "date_occurrence": _extract_entity_value(entities, "date_occurrence"),
+                        "time_occurrence": _extract_entity_value(entities, "time_occurrence"),
                         "merchant_name": _extract_entity_value(entities, "merchant_name"),
                         "summary": result.suggested_summary if hasattr(result, "suggested_summary") else "",
                     }
                     st.session_state["demo_new_auto_amount"] = extracted["amount_total"]
                     st.session_state["demo_new_auto_date"] = extracted["date_occurrence"]
+                    st.session_state["demo_new_auto_time"] = extracted["time_occurrence"]
                     st.session_state["demo_new_auto_merchant"] = extracted["merchant_name"]
                     st.session_state["demo_new_auto_summary"] = extracted["summary"]
                     # Streamlit 위젯 key에도 직접 기록해야 재렌더 시 value= 파라미터 무시 문제를 해결
                     st.session_state["demo_new_field_amount"] = extracted["amount_total"]
                     st.session_state["demo_new_field_date"] = extracted["date_occurrence"]
+                    st.session_state["demo_new_field_time"] = extracted["time_occurrence"]
                     st.session_state["demo_new_field_merchant"] = extracted["merchant_name"]
                     st.session_state["demo_new_field_bktxt"] = extracted["summary"]
                 st.rerun()
@@ -209,10 +213,12 @@ def render_demo_new_page() -> None:
                 "demo_new_image_bytes",
                 "demo_new_auto_amount",
                 "demo_new_auto_date",
+                "demo_new_auto_time",
                 "demo_new_auto_merchant",
                 "demo_new_auto_summary",
                 "demo_new_field_amount",
                 "demo_new_field_date",
+                "demo_new_field_time",
                 "demo_new_field_merchant",
                 "demo_new_field_bktxt",
             ):
@@ -238,6 +244,7 @@ def render_demo_new_page() -> None:
         # 자동 추출된 값을 초기값으로 (분석 후 처음 한 번만 채움)
         auto_amount = st.session_state.get("demo_new_auto_amount", "")
         auto_date = st.session_state.get("demo_new_auto_date", "")
+        auto_time = st.session_state.get("demo_new_auto_time", "")
         auto_merchant = st.session_state.get("demo_new_auto_merchant", "")
         auto_summary = st.session_state.get("demo_new_auto_summary", "")
 
@@ -253,6 +260,13 @@ def render_demo_new_page() -> None:
             value=auto_date,
             placeholder="예: 2026-03-14",
             key="demo_new_field_date",
+        )
+        time_val = st.text_input(
+            "시간 (time_occurrence)",
+            value=auto_time,
+            placeholder="예: 19:45",
+            key="demo_new_field_time",
+            help="영수증의 거래시간. 이미지 분석 시 자동 추출. HH:MM 형식 (24시간제)",
         )
         merchant_val = st.text_input(
             "가맹점 (merchant_name) *",
@@ -316,6 +330,7 @@ def render_demo_new_page() -> None:
                 case_type=selected_case_type,
                 amount=amount_val,
                 date_occ=date_val,
+                time_occ=time_val,
                 merchant=merchant_val,
                 bktxt=bktxt_val,
                 mcc_code=mcc_code_val,
@@ -338,6 +353,7 @@ def _handle_generate(
     case_type: str,
     amount: str,
     date_occ: str,
+    time_occ: str,
     merchant: str,
     bktxt: str,
     mcc_code: str,
@@ -354,6 +370,7 @@ def _handle_generate(
         "case_type": case_type,
         "amount_total": amount.replace(",", "").strip(),
         "date_occurrence": date_occ.strip(),
+        "time_occurrence": time_occ.strip(),
         "merchant_name": merchant.strip(),
         "bktxt": bktxt.strip(),
         "mcc_code": mcc_code.strip(),
