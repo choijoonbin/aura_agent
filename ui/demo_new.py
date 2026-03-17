@@ -13,6 +13,7 @@ from typing import Any
 
 import streamlit as st
 
+from ui.api_client import delete
 from ui.shared import inject_css, render_page_header
 
 logger = logging.getLogger(__name__)
@@ -125,14 +126,32 @@ def render_demo_new_page() -> None:
         "증빙 이미지 업로드 → 자동 추출 → 보정 → 테스트 케이스 저장",
     )
 
-    # ── 케이스 타입 선택 ──────────────────────────────────
+    # ── 케이스 타입 선택 + 전체 삭제(legacy 동일 동작) ─────
     case_type_labels = [label for _, label in _CASE_TYPE_OPTIONS]
     case_type_keys = [key for key, _ in _CASE_TYPE_OPTIONS]
-    selected_label = st.selectbox(
-        "케이스 유형",
-        options=case_type_labels,
-        key="demo_new_case_type_label",
-    )
+    case_type_col, delete_col = st.columns([0.74, 0.26])
+    with case_type_col:
+        selected_label = st.selectbox(
+            "케이스 유형",
+            options=case_type_labels,
+            key="demo_new_case_type_label",
+        )
+    with delete_col:
+        # selectbox 레이블 높이에 맞춰 버튼을 같은 라인 우측 끝에 배치
+        st.markdown('<div style="height:1.75rem"></div>', unsafe_allow_html=True)
+        if st.button("시연 데이터 전체 삭제", key="demo_new_delete_all", use_container_width=True):
+            out = delete("/api/v1/demo/seed")
+            st.warning(
+                "삭제 완료: "
+                f"전표 {out.get('fi_doc_header_deleted', out.get('deleted', 0))}건 / "
+                f"품목 {out.get('fi_doc_item_deleted', 0)}건 / "
+                f"케이스 {out.get('agent_case_deleted', 0)}건 / "
+                f"분석run {out.get('case_analysis_run_deleted', 0)}건 / "
+                f"결과 {out.get('case_analysis_result_deleted', 0)}건 / "
+                f"활동로그 {out.get('agent_activity_log_deleted', 0)}건"
+            )
+            st.rerun()
+
     selected_case_type = case_type_keys[case_type_labels.index(selected_label)]
     is_abnormal = selected_case_type in _ABNORMAL_CASE_TYPES
 
@@ -249,57 +268,61 @@ def render_demo_new_page() -> None:
         auto_merchant = st.session_state.get("demo_new_auto_merchant", "")
         auto_summary = st.session_state.get("demo_new_auto_summary", "")
 
-        # 필수 5개 필드
-        amount_val = st.text_input(
-            "금액 (amount_total) *",
-            value=auto_amount,
-            placeholder="예: 97042",
-            key="demo_new_field_amount",
-        )
-        date_val = st.text_input(
-            "일자 (date_occurrence) *",
-            value=auto_date,
-            placeholder="예: 2026-03-14",
-            key="demo_new_field_date",
-        )
-        time_val = st.text_input(
-            "시간 (time_occurrence)",
-            value=auto_time,
-            placeholder="예: 19:45",
-            key="demo_new_field_time",
-            help="영수증의 거래시간. 이미지 분석 시 자동 추출. HH:MM 형식 (24시간제)",
-        )
-        merchant_val = st.text_input(
-            "가맹점 (merchant_name) *",
-            value=auto_merchant,
-            placeholder="예: 가온 식당",
-            key="demo_new_field_merchant",
-        )
-        bktxt_val = st.text_input(
-            "적요 (bktxt) *",
-            value=auto_summary if auto_summary else "",
-            placeholder="예: 휴일 야간 식대",
-            key="demo_new_field_bktxt",
-        )
-        mcc_code_val = st.text_input(
-            "업종코드 (mcc_code)",
-            value="",
-            placeholder="예: 5812 (음식점), 5813 (주점), 7011 (호텔)",
-            key="demo_new_field_mcc_code",
-            help="MCC 코드: 5812=일반음식점, 5813=주점/bar, 7011=숙박, 4722=여행사, 7992=골프",
-        )
+        # 입력 레이아웃: 3, 3, 1
+        # 1행: 금액 / 가맹점 / 업종코드
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            amount_val = st.text_input(
+                "금액 (amount_total) *",
+                value=auto_amount,
+                placeholder="예: 97042",
+                key="demo_new_field_amount",
+            )
+        with c2:
+            merchant_val = st.text_input(
+                "가맹점 (merchant_name) *",
+                value=auto_merchant,
+                placeholder="예: 가온 식당",
+                key="demo_new_field_merchant",
+            )
+        with c3:
+            mcc_code_val = st.text_input(
+                "업종코드 (mcc_code)",
+                value="",
+                placeholder="예: 5812 (음식점), 5813 (주점), 7011 (호텔)",
+                key="demo_new_field_mcc_code",
+                help="MCC 코드: 5812=일반음식점, 5813=주점/bar, 7011=숙박, 4722=여행사, 7992=골프",
+            )
 
-        # 사유 (review_questions 기반)
-        review_questions = _get_review_questions_for_case_type(selected_case_type)
-        if review_questions:
-            st.caption("검토 질문 (규정 기반):")
-            for q in review_questions:
-                st.caption(f"• {q}")
+        # 2행: 일자 / 시간 / 적요
+        c4, c5, c6 = st.columns(3)
+        with c4:
+            date_val = st.text_input(
+                "일자 (date_occurrence) *",
+                value=auto_date,
+                placeholder="예: 2026-03-14",
+                key="demo_new_field_date",
+            )
+        with c5:
+            time_val = st.text_input(
+                "시간 (time_occurrence)",
+                value=auto_time,
+                placeholder="예: 19:45",
+                key="demo_new_field_time",
+                help="영수증의 거래시간. 이미지 분석 시 자동 추출. HH:MM 형식 (24시간제)",
+            )
+        with c6:
+            bktxt_val = st.text_input(
+                "적요 (bktxt) *",
+                value=auto_summary if auto_summary else "",
+                placeholder="예: 휴일 야간 식대",
+                key="demo_new_field_bktxt",
+            )
 
         user_reason_val = st.text_area(
             "사유 (user_reason) *",
             value="",
-            placeholder="위 검토 질문에 대한 사유를 입력하세요",
+            placeholder="사용 사유 또는 메모를 입력하세요",
             key="demo_new_field_reason",
             height=90,
         )
@@ -343,14 +366,7 @@ def render_demo_new_page() -> None:
                 image_bytes=st.session_state.get("demo_new_image_bytes"),
                 uploaded_filename=uploaded_file.name if uploaded_file else None,
                 analysis_result=st.session_state.get("demo_new_analysis_result"),
-                review_questions=review_questions,
             )
-
-
-def _get_review_questions_for_case_type(case_type: str) -> list[str]:
-    """케이스 유형별 표준 검토 질문 반환. 서비스 레이어에 단일 정의 위임."""
-    from services.demo_data_service import generate_preview_questions
-    return generate_preview_questions(case_type, {})["review_questions"]
 
 
 def _handle_generate(
@@ -366,7 +382,6 @@ def _handle_generate(
     image_bytes: bytes | None,
     uploaded_filename: str | None,
     analysis_result: "Any",
-    review_questions: list[str],
 ) -> None:
     """테스트 데이터 생성 버튼 클릭 처리."""
     from services.demo_data_service import save_custom_demo_case
@@ -380,8 +395,6 @@ def _handle_generate(
         "bktxt": bktxt.strip(),
         "mcc_code": mcc_code.strip(),
         "user_reason": user_reason.strip(),
-        "review_questions": review_questions,
-        "review_answers": [user_reason.strip()],
     }
 
     # 분석 결과 직렬화

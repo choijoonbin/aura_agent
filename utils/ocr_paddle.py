@@ -337,7 +337,9 @@ def run_paddle_ocr(image_bytes: bytes, lang: str = "korean") -> list[OcrWord]:
                          getattr(res, "rec_texts", "N/A"))
             words.extend(_parse_result_obj(res, w, h))
 
-        words.sort(key=lambda ww: ww.ymin)
+        # 같은 줄 텍스트의 좌→우 순서를 안정화하기 위해 (y-bucket, xmin) 기준 정렬.
+        # 단일 ymin 정렬은 큰 폰트/기울기에서 행 내 순서가 흔들려 key/value 인덱스 오류를 유발할 수 있다.
+        words.sort(key=lambda ww: (ww.ymin // 8, ww.xmin))
         logger.info("PaddleOCR 완료: %d개 텍스트 블록 추출", len(words))
         return words
 
@@ -386,7 +388,7 @@ def run_paddle_ocr(image_bytes: bytes, lang: str = "korean") -> list[OcrWord]:
                 continue
             _append_word(words, parsed, w, h)
 
-    words.sort(key=lambda ww: ww.ymin)
+    words.sort(key=lambda ww: (ww.ymin // 8, ww.xmin))
     logger.info("PaddleOCR 완료: %d개 텍스트 블록 추출", len(words))
     return words
 

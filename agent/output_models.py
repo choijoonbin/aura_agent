@@ -285,8 +285,8 @@ class ScoringCriteria(BaseModel):
 
 
 class ScoringResult(BaseModel):
-    policy_score: int = Field(ge=0, le=100, description="정책 정합성 점수")
-    evidence_score: int = Field(ge=0, le=100, description="증거 정합성 점수")
+    policy_score: int = Field(ge=0, le=100, description="정책 위반/위험 신호 점수 (높을수록 위험)")
+    evidence_score: int = Field(ge=0, le=100, description="증거 충실도 점수 (높을수록 근거 충분)")
     grounding_score: int = Field(ge=0, le=100, description="근거 기반 충실도 점수")
     overall_score: int = Field(ge=0, le=100, description="LLM Judge 종합 점수")
     summary_reason: str = Field(default="", description="사용자 노출용 요약 사유")

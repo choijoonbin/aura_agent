@@ -14,6 +14,8 @@ logger = logging.getLogger(__name__)
 
 _REASONING_JSON_MARKER = '"reasoning"'
 _REASONING_FALLBACK_MESSAGE = "이 단계의 추론은 LLM으로 생성되지 않았습니다. (API 비활성 또는 일시 오류)"
+_POSITIVE_POLICY_WORDS = ("우수", "양호", "안전", "좋", "긍정", "문제없")
+_NEGATIVE_POLICY_WORDS = ("위험", "위반", "불리", "주의", "우려", "문제", "경고")
 
 
 @dataclass
@@ -47,6 +49,102 @@ def _get_attr(output: Any, key: str) -> Any:
     if isinstance(output, dict):
         return output.get(key)
     return None
+
+
+def _to_int_score(value: Any) -> int | None:
+    try:
+        if value is None:
+            return None
+        return int(float(value))
+    except Exception:
+        return None
+
+
+def _extract_score_snapshot(context: dict[str, Any] | None) -> dict[str, int | None]:
+    payload = context or {}
+    candidates: list[dict[str, Any]] = []
+    if isinstance(payload.get("score"), dict):
+        candidates.append(payload.get("score") or {})
+    if isinstance(payload.get("confidence_risk_signals"), dict):
+        candidates.append(payload.get("confidence_risk_signals") or {})
+    if isinstance(payload.get("score_breakdown"), dict):
+        candidates.append(payload.get("score_breakdown") or {})
+    for candidate in candidates:
+        policy = _to_int_score(candidate.get("policy_score"))
+        evidence = _to_int_score(candidate.get("evidence_score"))
+        final = _to_int_score(candidate.get("final_score"))
+        if policy is not None or evidence is not None or final is not None:
+            return {"policy_score": policy, "evidence_score": evidence, "final_score": final}
+    return {"policy_score": None, "evidence_score": None, "final_score": None}
+
+
+def _build_score_guardrail_text(score_snapshot: dict[str, int | None]) -> str:
+    p = score_snapshot.get("policy_score")
+    e = score_snapshot.get("evidence_score")
+    f = score_snapshot.get("final_score")
+    if p is None and e is None and f is None:
+        return ""
+    return (
+        "추가 점수 해석 규칙(반드시 준수): "
+        "policy_score(정책점수)는 '위반/위험 신호 점수'로 높을수록 불리하다. "
+        "evidence_score(근거점수)는 '근거 충실도 점수'로 높을수록 유리하다. "
+        "따라서 policy_score가 높은 경우 '양호/안전/우수'로 표현하면 안 된다. "
+        "점수 평가는 위 규칙과 일치해야 하며 상충 문장을 만들지 마라. "
+        f"현재 점수: policy={p}, evidence={e}, final={f}."
+    )
+
+
+def _split_sentences(text: str) -> list[str]:
+    raw = re.sub(r"\s+", " ", str(text or "")).strip()
+    if not raw:
+        return []
+    parts = re.split(r"(?<=[.!?])\s+|(?<=다\.)\s+", raw)
+    return [p.strip() for p in parts if p and p.strip()]
+
+
+def _strip_policy_conflict_sentences(text: str, policy_score: int | None) -> str:
+    if policy_score is None:
+        return str(text or "").strip()
+    kept: list[str] = []
+    for sentence in _split_sentences(text):
+        if "정책점수" not in sentence and "policy_score" not in sentence:
+            kept.append(sentence)
+            continue
+        lower = sentence.lower()
+        has_positive = any(word in sentence for word in _POSITIVE_POLICY_WORDS)
+        has_negative = any(word in sentence for word in _NEGATIVE_POLICY_WORDS)
+        if policy_score >= 70 and has_positive and not has_negative:
+            continue
+        if policy_score <= 30 and has_negative and not has_positive:
+            continue
+        if "high" in lower and "good" in lower and policy_score >= 70:
+            continue
+        kept.append(sentence)
+    return " ".join(kept).strip()
+
+
+def _sanitize_reasoning_score_semantics(text: str, score_snapshot: dict[str, int | None]) -> str:
+    policy = score_snapshot.get("policy_score")
+    evidence = score_snapshot.get("evidence_score")
+    cleaned = _strip_policy_conflict_sentences(text, policy)
+    if not cleaned:
+        cleaned = str(text or "").strip()
+    has_policy_semantics = bool(re.search(r"(정책점수|policy_score).{0,40}(위험|위반|불리|주의)", cleaned))
+    has_evidence_semantics = bool(re.search(r"(근거점수|evidence_score).{0,40}(근거|증거|충실|유리|부족|확보)", cleaned))
+    if (policy is not None or evidence is not None) and not (has_policy_semantics and has_evidence_semantics):
+        policy_text = (
+            f"정책점수 {policy}점은 위반/위험 신호 강도로 높을수록 불리하고"
+            if policy is not None
+            else "정책점수는 위반/위험 신호 강도로 높을수록 불리하고"
+        )
+        evidence_text = (
+            f"근거점수 {evidence}점은 근거 충실도로 높을수록 유리합니다."
+            if evidence is not None
+            else "근거점수는 근거 충실도로 높을수록 유리합니다."
+        )
+        semantics = f"{policy_text}, {evidence_text}"
+        return f"{semantics} {cleaned}".strip()
+    return cleaned
 
 
 def check_reasoning_consistency(node_name: str, output: Any) -> ConsistencyCheckResult:
@@ -273,20 +371,8 @@ async def _stream_reasoning_events_with_llm(
             client = AsyncOpenAI(**client_kwargs)
 
         context_json = json.dumps(context or {}, ensure_ascii=False, default=str)
-        execute_score_guardrail = ""
-        if node_name == "execute":
-            score = (context or {}).get("score") or {}
-            p = score.get("policy_score")
-            e = score.get("evidence_score")
-            f = score.get("final_score")
-            execute_score_guardrail = (
-                "추가 점수 해석 규칙(반드시 준수): "
-                "policy_score(정책점수)는 '위반/위험 신호 점수'로 높을수록 불리하다. "
-                "evidence_score(근거점수)는 '근거 충실도 점수'로 높을수록 유리하다. "
-                "따라서 policy_score가 높은 경우 '양호/안전'으로 표현하면 안 된다. "
-                "점수에 대한 평가는 위 규칙과 일치해야 하며 상충 문장을 만들지 마라. "
-                f"현재 점수: policy={p}, evidence={e}, final={f}."
-            )
+        score_snapshot = _extract_score_snapshot(context)
+        score_guardrail = _build_score_guardrail_text(score_snapshot)
         min_sentences = max(4, settings.reasoning_stream_max_sentences // 2)
         prompt = (
             "당신은 엔터프라이즈 감사 에이전트의 reasoning 생성기다.\n"
@@ -299,7 +385,7 @@ async def _stream_reasoning_events_with_llm(
             "불필요한 설명, 코드블록, 마크다운 금지.\n\n"
             f"[node] {node_name}\n"
             f"[context] {context_json}\n"
-            f"[score_guardrail] {execute_score_guardrail}\n"
+            f"[score_guardrail] {score_guardrail}\n"
             f"[draft_reasoning] {reasoning_text}\n"
         )
 
@@ -410,7 +496,9 @@ async def _stream_reasoning_events_with_llm(
             )
             return _REASONING_FALLBACK_MESSAGE, fallback_message_only, "fallback"
 
-        final_reasoning = _compact_reasoning_for_stream(parsed_reasoning or for_chunk_reasoning.strip())
+        final_reasoning = _compact_reasoning_for_stream(
+            _sanitize_reasoning_score_semantics(parsed_reasoning or for_chunk_reasoning.strip(), score_snapshot)
+        )
         events.append(
             AgentEvent(
                 event_type="THINKING_DONE",

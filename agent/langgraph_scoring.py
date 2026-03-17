@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 from collections import deque
 from pathlib import Path
@@ -18,6 +19,8 @@ logger = logging.getLogger(__name__)
 _RUBRIC_PATH = Path("docs/work_info/logic/scoring_rubric_v1.md")
 _JUDGE_CIRCUIT_HISTORY: deque[bool] = deque(maxlen=max(1, int(settings.llm_judge_circuit_window)))
 _JUDGE_CIRCUIT_OPEN = False
+_POSITIVE_POLICY_WORDS = ("우수", "양호", "안전", "좋", "긍정", "문제없")
+_NEGATIVE_POLICY_WORDS = ("위험", "위반", "불리", "주의", "우려", "문제", "경고")
 
 _POLICY_SIGNAL_POINTS: dict[str, float] = {
     "isHoliday": 35.0,
@@ -101,7 +104,7 @@ def _score_with_hitl_adjustment(score: dict[str, Any], flags: dict[str, Any]) ->
     if approved is not False:
         pw = float(adjusted.get("policy_weight", settings.score_policy_weight))
         ew = float(adjusted.get("evidence_weight", settings.score_evidence_weight))
-        adjusted["final_score"] = min(100, int(adjusted["policy_score"] * pw + adjusted["evidence_score"] * ew))
+        adjusted["final_score"] = min(100, int(round(adjusted["policy_score"] * pw + adjusted["evidence_score"] * ew)))
     adjusted["severity"] = _score_to_severity(float(adjusted.get("final_score", 0)))
     adjusted["calculation_trace"] = (
         f"policy({float(adjusted.get('policy_score', 0)):.1f}) × {float(adjusted.get('policy_weight', settings.score_policy_weight)):.1f} + "
@@ -132,6 +135,83 @@ def _derive_flags(body_evidence: dict[str, Any]) -> dict[str, Any]:
         "hasHitlResponse": bool(hitl_response),
         "hitlApproved": hitl_response.get("approved"),
     }
+
+
+def _to_int_score(value: Any) -> int | None:
+    try:
+        if value is None:
+            return None
+        return int(float(value))
+    except Exception:
+        return None
+
+
+def _split_sentences(text: str) -> list[str]:
+    raw = re.sub(r"\s+", " ", str(text or "")).strip()
+    if not raw:
+        return []
+    parts = re.split(r"(?<=[.!?])\s+|(?<=다\.)\s+", raw)
+    return [p.strip() for p in parts if p and p.strip()]
+
+
+def _strip_policy_semantic_conflict_sentences(text: str, policy_score: int | None) -> str:
+    if policy_score is None:
+        return str(text or "").strip()
+    kept: list[str] = []
+    for sentence in _split_sentences(text):
+        if "정책점수" not in sentence and "policy_score" not in sentence:
+            kept.append(sentence)
+            continue
+        lower = sentence.lower()
+        has_positive = any(word in sentence for word in _POSITIVE_POLICY_WORDS)
+        has_negative = any(word in sentence for word in _NEGATIVE_POLICY_WORDS)
+        if policy_score >= 70 and has_positive and not has_negative:
+            continue
+        if policy_score <= 30 and has_negative and not has_positive:
+            continue
+        if "high" in lower and "good" in lower and policy_score >= 70:
+            continue
+        kept.append(sentence)
+    return " ".join(kept).strip()
+
+
+def _contains_semantics_sentence(text: str) -> bool:
+    if not text:
+        return False
+    has_policy = bool(re.search(r"(정책점수|policy_score).{0,40}(위험|위반|불리|주의)", text))
+    has_evidence = bool(re.search(r"(근거점수|evidence_score).{0,40}(근거|증거|충실|유리|부족|확보)", text))
+    return has_policy and has_evidence
+
+
+def _make_score_semantics_sentence(policy_score: int | None, evidence_score: int | None, final_score: int | None) -> str:
+    if policy_score is None and evidence_score is None:
+        return ""
+    policy_txt = (
+        f"정책점수 {policy_score}점은 위반/위험 신호 강도를 뜻해 점수가 높을수록 불리합니다."
+        if policy_score is not None
+        else "정책점수는 위반/위험 신호 강도를 뜻해 점수가 높을수록 불리합니다."
+    )
+    evidence_txt = (
+        f" 근거점수 {evidence_score}점은 근거 충실도를 뜻해 점수가 높을수록 유리합니다."
+        if evidence_score is not None
+        else " 근거점수는 근거 충실도를 뜻해 점수가 높을수록 유리합니다."
+    )
+    final_txt = f" 현재 최종점수는 {final_score}점입니다." if final_score is not None else ""
+    return f"{policy_txt}{evidence_txt}{final_txt}".strip()
+
+
+def _sanitize_summary_reason(summary_reason: str, policy_score: Any, evidence_score: Any, final_score: Any) -> str:
+    policy = _to_int_score(policy_score)
+    evidence = _to_int_score(evidence_score)
+    final = _to_int_score(final_score)
+    cleaned = _strip_policy_semantic_conflict_sentences(summary_reason, policy)
+    semantics = _make_score_semantics_sentence(policy, evidence, final)
+    if not cleaned:
+        return semantics or "규칙 기반 점수로 판정했습니다."
+    # 점수 해석 문장이 없는 경우 명시적으로 추가해 역해석을 방지한다.
+    if semantics and not _contains_semantics_sentence(cleaned):
+        return f"{semantics} {cleaned}".strip()
+    return cleaned
 
 
 def _plan_from_flags(flags: dict[str, Any]) -> list[dict[str, Any]]:
@@ -529,6 +609,10 @@ async def _call_llm_judge(
     system_prompt = (
         "당신은 재무 감사 검증 심사관이다. 아래 루브릭으로 점수화하라.\n"
         f"{rubric}\n"
+        "점수 해석 규칙(반드시 준수): "
+        "policy_score는 위반/위험 신호 점수이므로 높을수록 불리하다. "
+        "evidence_score는 근거 충실도 점수이므로 높을수록 유리하다. "
+        "policy_score가 높은데도 '우수/양호/안전'으로 표현하면 안 된다.\n"
         "출력 JSON 스키마:\n"
         "{policy_score:int,evidence_score:int,grounding_score:int,overall_score:int,summary_reason:str,internal_reason:str}\n"
         "요약(summary_reason)은 사용자 친화적 2~3문장, internal_reason은 구체적 근거를 포함."
@@ -623,7 +707,12 @@ async def _score_hybrid(
             out["llm_fidelity"] = llm_fidelity
             out["fidelity"] = fidelity
             out["latency_ms"] = round(latency_ms, 2)
-            out["summary_reason"] = str(judge.summary_reason or "").strip() or out["summary_reason"]
+            out["summary_reason"] = _sanitize_summary_reason(
+                str(judge.summary_reason or "").strip() or out["summary_reason"],
+                out.get("policy_score"),
+                out.get("evidence_score"),
+                out.get("final_score"),
+            )
             out["diagnostic_log"] = str(judge.internal_reason or "").strip()
             conflict = abs(rule_score - llm_score) >= int(settings.llm_judge_conflict_threshold)
             out["conflict_warning"] = conflict
