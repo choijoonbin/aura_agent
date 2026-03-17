@@ -20,6 +20,7 @@ from typing import Any
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
+from services.policy_case_alignment import case_alignment_score
 from utils.config import settings
 from utils.llm_azure import completion_kwargs_for_azure
 
@@ -187,6 +188,19 @@ def rerank_with_llm_fallback(
         for idx, item in enumerate(top_groups):
             if idx not in seen:
                 reranked.append(dict(item))
+
+        if body_evidence:
+            reranked = sorted(
+                reranked,
+                key=lambda item: (
+                    case_alignment_score(item, body_evidence),
+                    float(item.get("llm_rerank_score") or 0.0),
+                ),
+                reverse=True,
+            )
+            for item in reranked:
+                item["case_alignment_score"] = case_alignment_score(item, body_evidence)
+
         reranked.extend(groups[len(top_groups):])
         return reranked
     except Exception:

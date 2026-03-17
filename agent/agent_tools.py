@@ -15,6 +15,12 @@ from sqlalchemy.orm import Session
 
 from agent.aura_bridge import run_legacy_aura_analysis
 from agent.tool_schemas import ToolContextInput
+from services.policy_case_alignment import (
+    case_alignment_score,
+    has_entertainment_context,
+    is_clear_case_mismatch,
+    is_common_evidence_article as _is_common_evidence_article_aligned,
+)
 from services.policy_ref_normalizer import normalize_policy_parent_title
 from services.policy_service import search_policy_chunks
 from utils.config import get_mcc_sets, settings
@@ -134,12 +140,15 @@ async def document_evidence_probe(context: dict[str, Any]) -> dict[str, Any]:
 
 def _adoption_reason_for_ref(ref: dict[str, Any], body_evidence: dict[str, Any]) -> str:
     """규칙 + retrieval context 기반 채택 이유 한 줄 (발표용)."""
-    case_type = str(body_evidence.get("case_type") or body_evidence.get("intended_risk_type") or "")
+    case_type = str(body_evidence.get("case_type") or body_evidence.get("intended_risk_type") or "").upper()
     article = ref.get("article") or ""
     parent_title = normalize_policy_parent_title(article, ref.get("parent_title"))[:40]
-    direct_match_case_types = {"HOLIDAY_USAGE", "LIMIT_EXCEED", "PRIVATE_USE_RISK", "UNUSUAL_PATTERN"}
-    if case_type in direct_match_case_types and article:
-        return f"{case_type} 조건과 직접 일치하는 조항({article})이어서 채택"
+    if case_type in {"HOLIDAY_USAGE", "LIMIT_EXCEED", "PRIVATE_USE_RISK", "UNUSUAL_PATTERN"} and article:
+        alignment = case_alignment_score(ref, body_evidence)
+        if alignment >= 10:
+            return f"{case_type} 핵심 조건과 직접 일치하는 조항({article})이어서 채택"
+        if alignment <= -20:
+            return f"{case_type} 직접 조항은 아니지만 보조 참고용 조항({article})으로 채택"
     if case_type == "NORMAL_BASELINE" and article:
         return f"정상 비교군 검증에 필요한 기본 조항({article})이어서 채택"
     if parent_title:
@@ -152,10 +161,8 @@ def _article_key(ref: dict[str, Any]) -> str:
 
 
 def _is_common_evidence_article(ref: dict[str, Any]) -> bool:
-    article = _article_key(ref)
-    parent_title = "".join(str(ref.get("parent_title") or "").split())
     # 제14조(공통 증빙 의무) 식별
-    return "제14조" in article or "제14조" in parent_title
+    return _is_common_evidence_article_aligned(ref)
 
 
 def _ref_log_label(ref: dict[str, Any]) -> str:
@@ -189,6 +196,12 @@ async def policy_rulebook_probe(context: dict[str, Any]) -> dict[str, Any]:
                 enriched_body["_enriched_merchantRisk"] = m_risk
                 enriched_body["_extra_keywords"] = ["고위험", "업종", "강화승인"]
 
+    case_type = str(enriched_body.get("case_type") or enriched_body.get("intended_risk_type") or "").upper()
+    if case_type == "HOLIDAY_USAGE" and not enriched_body.get("_regulation_article_hint"):
+        # 휴일 식대 케이스(비 접대비 맥락)는 제23조 중심으로 검색 힌트를 부여해 제24조 오탐을 줄인다.
+        if not has_entertainment_context(enriched_body):
+            enriched_body["_regulation_article_hint"] = "제23조"
+
     engine = create_engine(settings.database_url, future=True)
     with Session(engine) as db:
         candidates = search_policy_chunks(db, enriched_body, limit=20)
@@ -213,6 +226,16 @@ async def policy_rulebook_probe(context: dict[str, Any]) -> dict[str, Any]:
             ref["adoption_reason"] = _adoption_reason_for_ref(ref, enriched_body)
             ranked_unique_refs.append(ref)
 
+        aligned_unique_refs: list[dict[str, Any]] = []
+        mismatch_dropped = 0
+        for ref in ranked_unique_refs:
+            if is_clear_case_mismatch(ref, enriched_body):
+                mismatch_dropped += 1
+                continue
+            aligned_unique_refs.append(ref)
+        if aligned_unique_refs:
+            ranked_unique_refs = aligned_unique_refs
+
         need_common_evidence_first = case_type not in {"", "NORMAL_BASELINE"}
         common_evidence_ref = next((ref for ref in ranked_unique_refs if _is_common_evidence_article(ref)), None)
         max_ref_count = 4 if (need_common_evidence_first and common_evidence_ref is not None) else 3
@@ -225,6 +248,12 @@ async def policy_rulebook_probe(context: dict[str, Any]) -> dict[str, Any]:
             _ref_log_label(common_evidence_ref) if common_evidence_ref is not None else "-",
             max_ref_count,
         )
+        if mismatch_dropped:
+            logger.info(
+                "[POLICY_REF_TRACE] case_alignment_mismatch_dropped case_type=%s dropped=%s",
+                case_type or "-",
+                mismatch_dropped,
+            )
         if need_common_evidence_first and common_evidence_ref is None:
             logger.warning(
                 "[POLICY_REF_TRACE] common evidence article(제14조) not found in ranked_unique_refs for case_type=%s; common_in_candidates=%s",

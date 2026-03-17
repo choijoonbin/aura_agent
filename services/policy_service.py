@@ -9,6 +9,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from services.chunking_pipeline import _embedding_column_exists
+from services.policy_case_alignment import has_entertainment_context
 from services.policy_ref_normalizer import normalize_policy_parent_title
 from utils.config import settings
 from utils.llm_azure import completion_kwargs_for_azure
@@ -52,8 +53,18 @@ def _dedupe_keep_order(values: list[str]) -> list[str]:
 
 
 def build_policy_keywords(body_evidence: dict[str, Any]) -> list[str]:
-    case_type = str(body_evidence.get("case_type") or body_evidence.get("intended_risk_type") or "")
+    case_type = str(body_evidence.get("case_type") or body_evidence.get("intended_risk_type") or "").upper()
     keywords = list(KEYWORD_HINTS.get(case_type, []))
+    if case_type == "HOLIDAY_USAGE":
+        if has_entertainment_context(body_evidence):
+            keywords.extend(["접대비", "업무추진비", "제24조"])
+        else:
+            keywords.extend(["제23조", "주말/공휴일 식대", "심야 식대"])
+
+    article_hint = str(body_evidence.get("_regulation_article_hint") or "").strip()
+    if article_hint:
+        keywords.append(article_hint)
+
     # 규정 제14조: 모든 경비 지출은 증빙 구비 의무. case_type 무관하게 공통 증빙 관련 조항 검색에 포함.
     for kw in ["증빙", "공통", "제14조", "필수 증빙"]:
         if kw not in keywords:
@@ -271,7 +282,7 @@ def _get_semantic_group_filter(body_evidence: dict[str, Any]) -> list[str] | Non
     케이스 유형에 따라 검색할 장(章) semantic_group 패턴 목록 반환.
     None이면 전체 검색.
     """
-    case_type = str(body_evidence.get("case_type") or "")
+    case_type = str(body_evidence.get("case_type") or body_evidence.get("intended_risk_type") or "").upper()
     _CASE_GROUP_HINTS: dict[str, list[str]] = {
         "HOLIDAY_USAGE": ["제7장", "제8장", "제3장"],
         "LIMIT_EXCEED": ["제8장", "제3장"],

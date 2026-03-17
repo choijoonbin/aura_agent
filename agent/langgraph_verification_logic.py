@@ -5,6 +5,7 @@ import logging
 from typing import Any
 
 from agent.langgraph_domain import _find_tool_result
+from services.policy_case_alignment import has_entertainment_context
 from utils.config import settings
 from utils.llm_azure import completion_kwargs_for_azure
 
@@ -57,6 +58,15 @@ _EXCLUDED_REQUIRED_INPUT_KEYWORDS = (
     "외부 참석자 소속",
     "소속 정보",
     "접대 목적",
+)
+
+_ENTERTAINMENT_ONLY_HITL_KEYWORDS = (
+    "접대비",
+    "업무추진비",
+    "참석자 명단",
+    "외부 참석자 소속",
+    "접대 목적",
+    "외부 이해관계자",
 )
 
 
@@ -135,6 +145,38 @@ def _is_excluded_required_input(req: dict[str, str]) -> bool:
         (kw.lower() in lowered) or ("".join(kw.lower().split()) in lowered_compact)
         for kw in _EXCLUDED_REQUIRED_INPUT_KEYWORDS
     )
+
+
+def _is_holiday_non_entertainment_case(body: dict[str, Any]) -> bool:
+    case_type = str(body.get("case_type") or body.get("intended_risk_type") or "").upper()
+    return case_type == "HOLIDAY_USAGE" and not has_entertainment_context(body)
+
+
+def _is_entertainment_only_text(text: str) -> bool:
+    lowered = str(text or "").lower()
+    return any(token.lower() in lowered for token in _ENTERTAINMENT_ONLY_HITL_KEYWORDS)
+
+
+def _filter_hitl_content_by_case(
+    *,
+    body: dict[str, Any],
+    required_inputs: list[dict[str, str]],
+    review_questions: list[str],
+) -> tuple[list[dict[str, str]], list[str]]:
+    if not _is_holiday_non_entertainment_case(body):
+        return required_inputs, review_questions
+
+    filtered_required_inputs: list[dict[str, str]] = []
+    for req in required_inputs:
+        combined = " ".join(
+            [str(req.get("field", "")), str(req.get("reason", "")), str(req.get("guide", ""))]
+        )
+        if _is_entertainment_only_text(combined):
+            continue
+        filtered_required_inputs.append(req)
+
+    filtered_questions = [q for q in review_questions if not _is_entertainment_only_text(q)]
+    return filtered_required_inputs, filtered_questions
 
 
 def _build_verification_targets(state: dict[str, Any]) -> list[str]:
@@ -340,6 +382,11 @@ async def _derive_hitl_from_regulation(state: dict[str, Any]) -> dict[str, Any]:
             for x in required_inputs if isinstance(x, dict)
         ]
         review_questions = [str(q).strip() for q in review_questions if str(q).strip()][:MAX_HITL_QUESTIONS]
+        required_inputs, review_questions = _filter_hitl_content_by_case(
+            body=body,
+            required_inputs=required_inputs,
+            review_questions=review_questions,
+        )
         if not required_inputs:
             return {"required_inputs": [], "review_questions": review_questions}
 
@@ -400,6 +447,12 @@ async def _derive_hitl_from_regulation(state: dict[str, Any]) -> dict[str, Any]:
                 len(required_inputs),
                 len(filtered_required_inputs),
             )
+
+        filtered_required_inputs, review_questions = _filter_hitl_content_by_case(
+            body=body,
+            required_inputs=filtered_required_inputs,
+            review_questions=review_questions,
+        )
 
         # 최대 2개로 제한 — 중요도 높은 순으로 앞에 위치한다고 가정
         return {"required_inputs": filtered_required_inputs[:MAX_HITL_INPUTS], "review_questions": review_questions}
