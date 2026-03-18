@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 _HOLIDAY_CORE_ARTICLES = {"제23조", "제38조", "제39조"}
+_LIMIT_EXCEED_CORE_ARTICLES = {"제40조", "제19조", "제11조"}
 
 _HOLIDAY_TERMS = (
     "휴일",
@@ -23,6 +24,27 @@ _ENTERTAINMENT_TERMS = (
     "외부 이해관계자",
     "외부미팅",
     "참석자 명단",
+)
+
+_LIMIT_EXCEED_TERMS = (
+    "예산",
+    "한도",
+    "초과",
+    "누적",
+    "금액",
+    "승인권한",
+    "상위 승인",
+    "차단",
+)
+
+_APPROVAL_EXCEPTION_TERMS = (
+    "사후승인",
+    "긴급 장애",
+    "비상 상황",
+    "재난 대응",
+    "입력 지연",
+    "지연 사유",
+    "대체 증빙",
 )
 
 
@@ -87,20 +109,47 @@ def has_entertainment_context(body_evidence: dict[str, Any] | None) -> bool:
 
 def is_clear_case_mismatch(ref: dict[str, Any], body_evidence: dict[str, Any] | None) -> bool:
     case_type = _normalize_case_type(body_evidence)
-    if case_type != "HOLIDAY_USAGE":
-        return False
     if is_common_evidence_article(ref):
-        return False
-    if has_entertainment_context(body_evidence):
         return False
 
     merged = _ref_merged_text(ref)
-    has_holiday = _contains_any(merged, _HOLIDAY_TERMS)
-    has_entertainment = _contains_any(merged, _ENTERTAINMENT_TERMS)
     article = _to_article_token(ref.get("article") or ref.get("regulation_article"))
-    if article in _HOLIDAY_CORE_ARTICLES:
-        return False
-    return bool(has_entertainment and not has_holiday)
+
+    if case_type == "HOLIDAY_USAGE":
+        if has_entertainment_context(body_evidence):
+            return False
+        has_holiday = _contains_any(merged, _HOLIDAY_TERMS)
+        has_entertainment = _contains_any(merged, _ENTERTAINMENT_TERMS)
+        if article in _HOLIDAY_CORE_ARTICLES:
+            return False
+        return bool(has_entertainment and not has_holiday)
+
+    if case_type == "LIMIT_EXCEED":
+        body = body_evidence or {}
+        is_holiday = bool(body.get("isHoliday"))
+        occurred_at = str(body.get("occurredAt") or "")
+        hour: int | None = None
+        try:
+            if len(occurred_at) >= 13:
+                hour = int(occurred_at[11:13])
+        except Exception:
+            hour = None
+        is_night = hour is not None and (hour >= 22 or hour < 6)
+
+        has_limit = _contains_any(merged, _LIMIT_EXCEED_TERMS)
+        has_holiday = _contains_any(merged, _HOLIDAY_TERMS) or article == "제39조"
+        has_approval_exception = _contains_any(merged, _APPROVAL_EXCEPTION_TERMS) or article == "제12조"
+
+        if article in _LIMIT_EXCEED_CORE_ARTICLES:
+            return False
+        # 평일·주간의 한도초과 케이스에서는 휴일/사후승인 예외 조항을 오채택으로 본다.
+        if (not is_holiday and not is_night) and (has_holiday or has_approval_exception) and not has_limit:
+            return True
+        # 한도초과 문맥이 없는 조항인데 휴일·사후승인 예외 문맥만 강하면 오채택으로 본다.
+        if (has_holiday or has_approval_exception) and not has_limit:
+            return True
+
+    return False
 
 
 def case_alignment_score(ref: dict[str, Any], body_evidence: dict[str, Any] | None) -> int:
@@ -122,6 +171,12 @@ def case_alignment_score(ref: dict[str, Any], body_evidence: dict[str, Any] | No
             score += 10
         if is_clear_case_mismatch(ref, body_evidence):
             score -= 40
+    elif case_type == "LIMIT_EXCEED":
+        if article in _LIMIT_EXCEED_CORE_ARTICLES:
+            score += 18
+        if _contains_any(merged, _LIMIT_EXCEED_TERMS):
+            score += 10
+        if is_clear_case_mismatch(ref, body_evidence):
+            score -= 40
 
     return score
-

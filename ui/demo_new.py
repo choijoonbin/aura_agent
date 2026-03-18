@@ -374,6 +374,14 @@ def render_demo_new_page() -> None:
 
         generate_disabled = _is_generate_disabled(all_valid, is_abnormal, uploaded_file is not None)
 
+        create_count = st.slider(
+            "생성건수",
+            min_value=1,
+            max_value=20,
+            value=1,
+            key="demo_new_create_count",
+        )
+
         if st.button(
             "테스트 데이터 생성",
             key="demo_new_generate_btn",
@@ -388,6 +396,7 @@ def render_demo_new_page() -> None:
                 merchant=merchant_val,
                 bktxt=bktxt_val,
                 mcc_code=mcc_code_val,
+                create_count=int(create_count),
                 image_bytes=st.session_state.get("demo_new_image_bytes"),
                 uploaded_filename=uploaded_file.name if uploaded_file else None,
                 analysis_result=st.session_state.get("demo_new_analysis_result"),
@@ -403,6 +412,7 @@ def _handle_generate(
     merchant: str,
     bktxt: str,
     mcc_code: str,
+    create_count: int,
     image_bytes: bytes | None,
     uploaded_filename: str | None,
     analysis_result: "Any",
@@ -446,27 +456,44 @@ def _handle_generate(
             payload["model_source"] = "vision_llm"
             payload["fallback_used"] = True
 
-    with st.spinner("테스트 데이터 저장 중..."):
+    target_count = max(1, min(int(create_count or 1), 20))
+
+    with st.spinner(f"테스트 데이터 저장 중... ({target_count}건)"):
         try:
             from db.session import SessionLocal
 
             db = SessionLocal()
             try:
-                result = save_custom_demo_case(
-                    payload=payload,
-                    image_bytes=image_bytes or b"",
-                    filename=uploaded_filename or "",
-                    db=db,
-                )
+                results: list[dict[str, Any]] = []
+                for _ in range(target_count):
+                    one = save_custom_demo_case(
+                        payload=dict(payload),
+                        image_bytes=image_bytes or b"",
+                        filename=uploaded_filename or "",
+                        db=db,
+                    )
+                    results.append(one)
             finally:
                 db.close()
-            case_uuid = result.get("case_uuid", "-")
-            voucher_key = result.get("voucher_key", "")
-            success_msg = f"저장 완료! UUID: `{case_uuid}`"
-            if voucher_key:
-                success_msg += f"  |  전표: `{voucher_key}`"
+            first_result = results[0] if results else {}
+            case_uuid = first_result.get("case_uuid", "-")
+            voucher_keys = [str(r.get("voucher_key") or "").strip() for r in results]
+            voucher_keys = [v for v in voucher_keys if v]
+
+            success_msg = f"저장 완료! 총 `{len(results)}`건 생성"
+            if voucher_keys:
+                if len(voucher_keys) == 1:
+                    success_msg += f"  |  전표: `{voucher_keys[0]}`"
+                else:
+                    success_msg += f"  |  전표: `{voucher_keys[0]}` ~ `{voucher_keys[-1]}`"
+            else:
+                success_msg += f"  |  첫 UUID: `{case_uuid}`"
             st.success(success_msg)
-            pretty_result = json.dumps(result, ensure_ascii=False, indent=2)
+            pretty_payload = {
+                "count": len(results),
+                "items": results,
+            }
+            pretty_result = json.dumps(pretty_payload, ensure_ascii=False, indent=2)
             st.markdown(
                 (
                     '<div style="background:#f8fafc;color:#0f172a;border:1px solid #cbd5e1;'

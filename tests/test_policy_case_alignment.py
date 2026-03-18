@@ -17,6 +17,16 @@ def _holiday_body_non_entertainment() -> dict[str, object]:
     }
 
 
+def _limit_exceed_weekday_body() -> dict[str, object]:
+    return {
+        "case_type": "LIMIT_EXCEED",
+        "isHoliday": False,
+        "occurredAt": "2026-03-18T14:30:00",
+        "budgetExceeded": True,
+        "merchantName": "가온 식당",
+    }
+
+
 def test_holiday_non_entertainment_marks_article24_mismatch():
     body = _holiday_body_non_entertainment()
     ref = {
@@ -76,3 +86,43 @@ def test_filter_hitl_content_by_case_removes_entertainment_only_prompts():
     assert len(filtered_questions) == 1
     assert "접대비" not in filtered_questions[0]
 
+
+def test_limit_exceed_weekday_marks_article39_mismatch():
+    body = _limit_exceed_weekday_body()
+    ref = {
+        "article": "제39조",
+        "parent_title": "제39조 (주말·공휴일 제약)",
+        "chunk_text": "주말·공휴일 지출은 제한 또는 검토 대상으로 운영한다.",
+    }
+    assert is_clear_case_mismatch(ref, body) is True
+
+
+def test_limit_exceed_weekday_marks_article12_mismatch():
+    body = _limit_exceed_weekday_body()
+    ref = {
+        "article": "제12조",
+        "parent_title": "제12조 (사전승인 및 사후승인)",
+        "chunk_text": "긴급 장애 대응, 입력 지연 시 사후승인 및 지연 사유/대체 증빙 제출",
+    }
+    assert is_clear_case_mismatch(ref, body) is True
+
+
+def test_limit_exceed_alignment_score_prefers_article40_over_39_and_12():
+    body = _limit_exceed_weekday_body()
+    ref40 = {
+        "article": "제40조",
+        "parent_title": "제40조 (금액 및 누적한도 제약)",
+        "chunk_text": "예산 한도 초과 시 상위 승인 또는 차단한다.",
+    }
+    ref39 = {
+        "article": "제39조",
+        "parent_title": "제39조 (주말·공휴일 제약)",
+        "chunk_text": "주말·공휴일 지출은 검토 대상으로 운영한다.",
+    }
+    ref12 = {
+        "article": "제12조",
+        "parent_title": "제12조 (사전승인 및 사후승인)",
+        "chunk_text": "긴급 장애 대응 또는 입력 지연 시 사후승인을 허용한다.",
+    }
+    assert case_alignment_score(ref40, body) > case_alignment_score(ref39, body)
+    assert case_alignment_score(ref40, body) > case_alignment_score(ref12, body)

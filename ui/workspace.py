@@ -1828,8 +1828,29 @@ def _hitl_state_key(kind: str, run_id: str | None) -> str:
     return f"mt_hitl_{kind}_{run_id or 'unknown'}"
 
 
+def _latest_history_hitl_submission(latest_bundle: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    history = latest_bundle.get("history") or []
+    run_id = str(latest_bundle.get("run_id") or "")
+    # 우선 현재 run과 동일한 이력에서 찾고, 없으면 전체 이력 최신값 사용
+    if run_id:
+        for item in reversed(history):
+            if str(item.get("run_id") or "") != run_id:
+                continue
+            resp = item.get("hitl_response")
+            req = item.get("hitl_request")
+            if isinstance(resp, dict) and resp:
+                return (req if isinstance(req, dict) else {}, resp)
+    for item in reversed(history):
+        resp = item.get("hitl_response")
+        req = item.get("hitl_request")
+        if isinstance(resp, dict) and resp:
+            return (req if isinstance(req, dict) else {}, resp)
+    return ({}, {})
+
+
 def _prime_hitl_form_state(run_id: str, latest_bundle: dict[str, Any]) -> dict[str, str]:
-    draft = latest_bundle.get("hitl_draft") or latest_bundle.get("hitl_response") or {}
+    _prev_req, prev_resp = _latest_history_hitl_submission(latest_bundle)
+    draft = latest_bundle.get("hitl_draft") or latest_bundle.get("hitl_response") or prev_resp or {}
     extra_facts = draft.get("extra_facts") or {}
     required_inputs = (latest_bundle.get("hitl_request") or {}).get("required_inputs") or []
     defaults = {
@@ -1934,6 +1955,25 @@ def _build_hitl_summary_sections(latest_bundle: dict[str, Any]) -> dict[str, lis
     stop_reasons = [_plain_stop_reason(s, verification_summary) for s in raw_stop] if raw_stop else ["자동 확정 중단 사유 데이터가 비어 있습니다."]
 
     questions = [str(x) for x in (hitl_request.get("review_questions") or hitl_request.get("questions") or []) if str(x).strip()]
+    if not questions:
+        # review_questions가 비어도, HITL payload의 required_inputs guide/reason을
+        # 사용자 질문으로 표시해 최초 팝업에서 작성 포인트가 보이도록 한다.
+        req_questions: list[str] = []
+        for req in (hitl_request.get("required_inputs") or []):
+            if not isinstance(req, dict):
+                continue
+            q = str(req.get("guide") or req.get("reason") or "").strip()
+            if q:
+                req_questions.append(q)
+        # 중복 제거 + 상위 2개만 표시(기존 HITL 질문 개수 정책 유지)
+        seen_q: set[str] = set()
+        dedup_req: list[str] = []
+        for q in req_questions:
+            if q in seen_q:
+                continue
+            seen_q.add(q)
+            dedup_req.append(q)
+        questions = dedup_req[:2]
     if not questions:
         questions = ["검토 질문이 누락되었습니다. (run 데이터를 확인해 주세요)"]
 
@@ -2667,6 +2707,41 @@ def render_hitl_panel(latest_bundle: dict[str, Any], *, vkey: str | None = None)
             + '</div>',
             unsafe_allow_html=True,
         )
+
+        prev_req, prev_resp = _latest_history_hitl_submission(bundle_for_hitl)
+        if prev_resp:
+            prev_questions = [
+                str(x).strip()
+                for x in (prev_req.get("review_questions") or prev_req.get("questions") or [])
+                if str(x).strip()
+            ]
+            prev_extra = prev_resp.get("extra_facts") if isinstance(prev_resp.get("extra_facts"), dict) else {}
+            with st.expander("이전 제출 질문/답변 보기", expanded=False):
+                if prev_questions:
+                    st.markdown("**이전 질문**")
+                    for idx, q in enumerate(prev_questions, start=1):
+                        st.caption(f"{idx}. {q}")
+                st.markdown("**이전 답변**")
+                st.caption(f"- 판단: {'승인 가능' if prev_resp.get('approved') is True else '보류/추가 검토'}")
+                if prev_resp.get("business_purpose"):
+                    st.caption(f"- 업무 목적: {prev_resp.get('business_purpose')}")
+                attendees = prev_resp.get("attendees") or []
+                if attendees:
+                    st.caption(f"- 참석자: {', '.join(str(x) for x in attendees)}")
+                for k, v in prev_extra.items():
+                    if str(v or "").strip():
+                        st.caption(f"- {k}: {v}")
+                if prev_resp.get("comment"):
+                    st.markdown("**검토 의견(이전 제출)**")
+                    st.text_area(
+                        "이전 검토 의견",
+                        value=str(prev_resp.get("comment") or ""),
+                        height=96,
+                        disabled=True,
+                        key=f"hitl_prev_comment_{run_id}",
+                        label_visibility="collapsed",
+                    )
+
         required_inputs = (hitl_request.get("required_inputs") or [])
         _req_fields = {(req.get("field") or "").strip() for req in required_inputs}
         info_cols = st.columns(3)
