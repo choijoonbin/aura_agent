@@ -212,7 +212,7 @@ _REVIEW_QUESTIONS_BY_CASE_TYPE: dict[str, dict[str, Any]] = {
 
 
 def is_generate_disabled(all_valid: bool, is_abnormal: bool, has_file: bool) -> bool:
-    """버튼 비활성화 조건: 5개 필드 미완료 OR 비정상 케이스+파일 미첨부."""
+    """버튼 비활성화 조건: 필수 필드 미완료 OR 비정상 케이스+파일 미첨부."""
     if is_abnormal and not has_file:
         return True
     return not all_valid
@@ -222,11 +222,12 @@ def validate_demo_required_fields(
     amount: str,
     date_occ: str,
     merchant: str,
-    bktxt: str,
-    user_reason: str,
+    bktxt: str = "",
+    user_reason: str = "",
 ) -> tuple[bool, list[str]]:
     """
-    시연 데이터 생성 필수 5개 항목 유효성 검사. (UI 레이어에서 재사용 가능한 순수 함수)
+    시연 데이터 생성 필수 핵심 항목(금액/일자/가맹점) 유효성 검사.
+    bktxt/user_reason은 선택 입력으로 허용한다.
 
     Returns:
         (all_valid: bool, errors: list[str])
@@ -246,10 +247,6 @@ def validate_demo_required_fields(
 
     if not merchant.strip():
         errors.append("가맹점명을 입력하세요")
-    if not bktxt.strip():
-        errors.append("적요를 입력하세요")
-    if not user_reason.strip():
-        errors.append("사유를 입력하세요")
 
     return len(errors) == 0, errors
 
@@ -287,7 +284,7 @@ def _validate_beta_payload(payload: dict[str, Any], image_bytes: bytes) -> None:
     case_type = (payload.get("case_type") or "").strip()
 
     # NORMAL_BASELINE은 Legacy seed와 동일하게 백엔드 기본값으로 생성 가능해야 하므로
-    # 필수 입력(금액/일자/가맹점/적요/사유) 강제를 적용하지 않는다.
+    # 필수 입력(금액/일자/가맹점) 강제를 적용하지 않는다.
     if case_type == "NORMAL_BASELINE":
         return
 
@@ -309,14 +306,6 @@ def _validate_beta_payload(payload: dict[str, Any], image_bytes: bytes) -> None:
     # 가맹점명 검증
     if not (payload.get("merchant_name") or "").strip():
         errors.append("merchant_name: 필수 입력")
-
-    # 적요 검증
-    if not (payload.get("bktxt") or "").strip():
-        errors.append("bktxt: 필수 입력")
-
-    # 사유 검증
-    if not (payload.get("user_reason") or "").strip():
-        errors.append("user_reason: 필수 입력")
 
     # 비정상 케이스: 증빙 이미지 필수
     if case_type and case_type != "NORMAL_BASELINE" and not image_bytes:

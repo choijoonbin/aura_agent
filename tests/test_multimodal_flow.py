@@ -7,7 +7,7 @@
   3. 비정상 케이스 필수 입력 차단 로직
   4. analyze_visual_evidence fallback (API 키 없을 때 fallback_used=True)
   5. save_custom_demo_case 저장 무결성 (uuid 폴더 + json + 이미지)
-  6. 필수 5개 항목 유효성 검사 함수 (_check_required_fields)
+  6. 필수 핵심 3개 항목 유효성 검사 함수 (_check_required_fields)
 """
 from __future__ import annotations
 
@@ -151,11 +151,11 @@ def test_check_required_fields_zero_amount():
     assert any("금액" in e for e in errors)
 
 
-def test_check_required_fields_all_five_required():
-    """5개 항목 중 하나라도 누락 시 False 반환."""
+def test_check_required_fields_core_three_required():
+    """핵심 3개(금액/일자/가맹점) 중 하나라도 누락 시 False 반환."""
     from services.demo_data_service import validate_demo_required_fields
 
-    # 사유 누락
+    # 사유 누락: 선택 항목이므로 통과
     ok, errors = validate_demo_required_fields(
         amount="10000",
         date_occ="2026-03-14",
@@ -163,9 +163,10 @@ def test_check_required_fields_all_five_required():
         bktxt="식대",
         user_reason="",
     )
-    assert ok is False
+    assert ok is True
+    assert errors == []
 
-    # 적요 누락
+    # 적요 누락: 선택 항목이므로 통과
     ok, errors = validate_demo_required_fields(
         amount="10000",
         date_occ="2026-03-14",
@@ -173,7 +174,8 @@ def test_check_required_fields_all_five_required():
         bktxt="",
         user_reason="사유",
     )
-    assert ok is False
+    assert ok is True
+    assert errors == []
 
     # 가맹점 누락
     ok, errors = validate_demo_required_fields(
@@ -195,7 +197,7 @@ def test_is_generate_disabled_abnormal_no_file():
     """비정상 케이스 + 파일 미첨부 시 generate_disabled=True (스펙 정책)."""
     from services.demo_data_service import is_generate_disabled as _is_generate_disabled
 
-    # 비정상 + 파일 없음 → 5개 필드 모두 OK여도 disabled
+    # 비정상 + 파일 없음 → 핵심 필드 모두 OK여도 disabled
     assert _is_generate_disabled(all_valid=True, is_abnormal=True, has_file=False) is True
 
     # 비정상 + 파일 있음 + 필드 OK → enabled
@@ -1242,6 +1244,77 @@ def test_datetime_label_keybox_repaired_when_llm_key_index_wrong():
     assert date_e.bbox_key is not None and time_e.bbox_key is not None
     # 잘못된 line("--------")이 아닌 결제일시 라벨 영역(왼쪽 값 블록 일부)이어야 함
     assert date_e.bbox_key.xmin > 20
+    assert date_e.bbox_key.xmax > date_e.bbox_key.xmin
+
+
+def test_datetime_label_only_returns_placeholder_and_marks_blurry():
+    """거래일자 라벨만 읽히고 값이 불명확하면 date placeholder를 만들고 image_condition=blurry여야 한다."""
+    import base64
+    import sys
+    import types
+    from unittest.mock import MagicMock, patch
+
+    from utils.llm_azure import analyze_visual_evidence
+    from utils.ocr_paddle import OcrWord
+
+    fake_ocr_words = [
+        OcrWord(
+            text="가맹점명 : 가온 식당",
+            xmin=40, ymin=120, xmax=560, ymax=160,
+            confidence=0.97, img_width=700, img_height=1100,
+        ),
+        OcrWord(
+            text="거래일자 :",
+            xmin=40, ymin=200, xmax=220, ymax=240,
+            confidence=0.93, img_width=700, img_height=1100,
+        ),
+        OcrWord(
+            text="########",
+            xmin=230, ymin=200, xmax=580, ymax=240,
+            confidence=0.41, img_width=700, img_height=1100,
+        ),
+        OcrWord(
+            text="총금액",
+            xmin=40, ymin=800, xmax=220, ymax=840,
+            confidence=0.96, img_width=700, img_height=1100,
+        ),
+        OcrWord(
+            text="68,000원",
+            xmin=430, ymin=800, xmax=680, ymax=840,
+            confidence=0.96, img_width=700, img_height=1100,
+        ),
+    ]
+
+    llm_json_response = """{
+      "merchant_name": {"key_index": 0, "value_index": 0, "text": "가온 식당"},
+      "date_occurrence": null,
+      "time_occurrence": null,
+      "amount_total": {"key_index": 3, "value_index": 4, "text": "68000"}
+    }"""
+
+    fake_completion = MagicMock()
+    fake_completion.choices[0].message.content = llm_json_response
+    fake_client = MagicMock()
+    fake_client.chat.completions.create.return_value = fake_completion
+
+    fake_openai = types.ModuleType("openai")
+    fake_openai.OpenAI = MagicMock(return_value=fake_client)  # type: ignore[attr-defined]
+    fake_openai.AzureOpenAI = MagicMock(return_value=fake_client)  # type: ignore[attr-defined]
+
+    dummy_b64 = base64.b64encode(b"fake-image").decode()
+    with patch("utils.config.settings") as mock_settings, \
+         patch("utils.ocr_paddle.run_paddle_ocr", return_value=fake_ocr_words), \
+         patch.dict(sys.modules, {"openai": fake_openai}):
+        mock_settings.openai_api_key = "fake-key"
+        mock_settings.openai_base_url = ""
+        mock_settings.openai_api_version = "2024-12-01-preview"
+        result = analyze_visual_evidence(dummy_b64)
+
+    assert (result.image_analysis or {}).get("condition") == "blurry"
+    date_e = next((e for e in result.entities if e.label == "date_occurrence"), None)
+    assert date_e is not None, "거래일자 라벨 placeholder 엔티티가 생성되어야 함"
+    assert date_e.text == ""
+    assert date_e.bbox_key is not None
     assert date_e.bbox_key.xmax > date_e.bbox_key.xmin
 
 

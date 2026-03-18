@@ -27,21 +27,26 @@ _CASE_TYPE_OPTIONS: list[tuple[str, str]] = [
 ]
 _ABNORMAL_CASE_TYPES = {"HOLIDAY_USAGE", "LIMIT_EXCEED", "PRIVATE_USE_RISK", "UNUSUAL_PATTERN"}
 
+_IMAGE_CONDITION_LABELS: dict[str, str] = {
+    "clear": "선명",
+    "blurry": "흐림",
+    "damaged": "훼손",
+    "partial_cut": "일부 잘림",
+}
+
 
 def _check_required_fields(
     amount: str,
     date_occ: str,
     merchant: str,
-    bktxt: str,
-    user_reason: str,
 ) -> tuple[bool, list[str]]:
-    """5개 필수 항목 유효성 검사. 순수 서비스 함수 위임."""
+    """핵심 필수 항목(금액/일자/가맹점) 유효성 검사. 순수 서비스 함수 위임."""
     from services.demo_data_service import validate_demo_required_fields
-    return validate_demo_required_fields(amount, date_occ, merchant, bktxt, user_reason)
+    return validate_demo_required_fields(amount, date_occ, merchant)
 
 
 def _is_generate_disabled(all_valid: bool, is_abnormal: bool, has_file: bool) -> bool:
-    """버튼 비활성화 조건: 5개 필드 미완료 OR 비정상 케이스+파일 미첨부."""
+    """버튼 비활성화 조건: 필수 필드 미완료 OR 비정상 케이스+파일 미첨부."""
     from services.demo_data_service import is_generate_disabled
     return is_generate_disabled(all_valid, is_abnormal, has_file)
 
@@ -51,6 +56,14 @@ def _run_visual_analysis(image_bytes: bytes) -> "Any":
     from utils.llm_azure import analyze_visual_evidence
     b64 = base64.b64encode(image_bytes).decode("utf-8")
     return analyze_visual_evidence(b64)
+
+
+def _image_condition_display(condition: str) -> str:
+    token = str(condition or "").strip().lower()
+    if not token:
+        return "-"
+    ko = _IMAGE_CONDITION_LABELS.get(token)
+    return f"{ko}({token})" if ko else token
 
 
 def _extract_entity_value(entities: list, label: str) -> str:
@@ -154,9 +167,10 @@ def render_demo_new_page() -> None:
 
     selected_case_type = case_type_keys[case_type_labels.index(selected_label)]
     is_abnormal = selected_case_type in _ABNORMAL_CASE_TYPES
+    is_normal_baseline = selected_case_type == "NORMAL_BASELINE"
 
     if is_abnormal:
-        st.warning("비정상 케이스는 증빙 이미지 첨부를 권장합니다. 미첨부 시 금액/일자/가맹점/적요 직접 입력이 필요합니다.")
+        st.warning("비정상 케이스는 증빙 이미지 첨부를 권장합니다. 미첨부 시 금액/일자/가맹점을 직접 입력해야 합니다.")
 
     st.divider()
 
@@ -165,16 +179,36 @@ def render_demo_new_page() -> None:
 
     with col_left:
         st.subheader("증빙 이미지")
+
+        if is_normal_baseline:
+            for key in (
+                "demo_new_uploader",
+                "demo_new_analysis_result",
+                "demo_new_image_bytes",
+                "demo_new_auto_amount",
+                "demo_new_auto_date",
+                "demo_new_auto_time",
+                "demo_new_auto_merchant",
+                "demo_new_auto_summary",
+            ):
+                st.session_state.pop(key, None)
+
         uploaded_file = st.file_uploader(
             "영수증/전표 이미지 업로드 (JPG/PNG/WEBP)",
             type=["jpg", "jpeg", "png", "webp"],
             key="demo_new_uploader",
+            disabled=is_normal_baseline,
         )
 
         analysis_result = st.session_state.get("demo_new_analysis_result")
         image_bytes: bytes | None = None
 
-        if uploaded_file is not None:
+        if is_normal_baseline:
+            st.info("정상 비교군은 증빙 이미지 업로드를 사용하지 않습니다.")
+            uploaded_file = None
+            analysis_result = None
+            image_bytes = None
+        elif uploaded_file is not None:
             image_bytes = uploaded_file.read()
             st.session_state["demo_new_image_bytes"] = image_bytes
 
@@ -252,7 +286,7 @@ def render_demo_new_page() -> None:
             has_stamp = (analysis_result.image_analysis or {}).get("has_stamp", False)
             fallback = getattr(analysis_result, "fallback_used", False)
             st.caption(
-                f"이미지 상태: **{cond}** | 직인: {'있음' if has_stamp else '없음'}"
+                f"이미지 상태: **{_image_condition_display(str(cond))}** | 직인: {'있음' if has_stamp else '없음'}"
                 + (" | ⚠️ fallback" if fallback else "")
             )
             if analysis_result.audit_comment:
@@ -313,19 +347,11 @@ def render_demo_new_page() -> None:
             )
         with c6:
             bktxt_val = st.text_input(
-                "적요 (bktxt) *",
+                "적요 (bktxt)",
                 value=auto_summary if auto_summary else "",
                 placeholder="예: 휴일 야간 식대",
                 key="demo_new_field_bktxt",
             )
-
-        user_reason_val = st.text_area(
-            "사유 (user_reason) *",
-            value="",
-            placeholder="사용 사유 또는 메모를 입력하세요",
-            key="demo_new_field_reason",
-            height=90,
-        )
 
         st.divider()
 
@@ -335,7 +361,7 @@ def render_demo_new_page() -> None:
             all_valid, validation_errors = True, []
         else:
             all_valid, validation_errors = _check_required_fields(
-                amount_val, date_val, merchant_val, bktxt_val, user_reason_val
+                amount_val, date_val, merchant_val
             )
 
         if validation_errors:
@@ -362,7 +388,6 @@ def render_demo_new_page() -> None:
                 merchant=merchant_val,
                 bktxt=bktxt_val,
                 mcc_code=mcc_code_val,
-                user_reason=user_reason_val,
                 image_bytes=st.session_state.get("demo_new_image_bytes"),
                 uploaded_filename=uploaded_file.name if uploaded_file else None,
                 analysis_result=st.session_state.get("demo_new_analysis_result"),
@@ -378,7 +403,6 @@ def _handle_generate(
     merchant: str,
     bktxt: str,
     mcc_code: str,
-    user_reason: str,
     image_bytes: bytes | None,
     uploaded_filename: str | None,
     analysis_result: "Any",
@@ -394,7 +418,6 @@ def _handle_generate(
         "merchant_name": merchant.strip(),
         "bktxt": bktxt.strip(),
         "mcc_code": mcc_code.strip(),
-        "user_reason": user_reason.strip(),
     }
 
     # 분석 결과 직렬화
@@ -463,6 +486,7 @@ def _handle_generate(
                 "demo_new_auto_date",
                 "demo_new_auto_merchant",
                 "demo_new_auto_summary",
+                "demo_new_field_reason",
             ):
                 st.session_state.pop(key, None)
 

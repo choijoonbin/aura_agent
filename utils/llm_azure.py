@@ -661,26 +661,59 @@ def _recover_datetime_from_ocr(
     date_re = re.compile(r"(\d{4})[./-](\d{1,2})[./-](\d{1,2})")
     time_re = re.compile(r"(\d{1,2})[:\uff1a](\d{2})(?::\d{2})?\s*(AM|PM)?", re.IGNORECASE)
 
-    candidates = [
-        w for w in ocr_words
-        if any(kw in w.text for kw in _DATETIME_LABEL_KW) and (date_re.search(w.text) or time_re.search(w.text))
-    ]
-    if not candidates:
+    label_candidates = [w for w in ocr_words if any(kw in w.text for kw in _DATETIME_LABEL_KW)]
+    if not label_candidates:
         return
 
-    def _score(word: Any) -> tuple[int, int]:
-        # 날짜+시간 동시 포함 라인을 우선
+    def _score(word: Any) -> tuple[int, float, int]:
+        # 날짜+시간 동시 포함 + 대표 라벨 우선
+        label_bonus = 2 if any(kw in word.text for kw in ("결제일시", "거래일시", "거래일자", "거래시간", "결제시간")) else 1
         return (
-            int(bool(date_re.search(word.text))) + int(bool(time_re.search(word.text))),
+            label_bonus + (int(bool(date_re.search(word.text))) + int(bool(time_re.search(word.text)))) * 3,
+            float(getattr(word, "confidence", 0.0)),
             -word.ymin,
         )
 
-    block = max(candidates, key=_score)
-    full = block.text
+    label_block = max(label_candidates, key=_score)
+    full = label_block.text
     d_match = date_re.search(full)
     t_match = time_re.search(full)
-    if not d_match and not t_match:
-        return
+    d_source = label_block if d_match else None
+    t_source = label_block if t_match else None
+
+    def _yc(word: Any) -> float:
+        return (word.ymin + word.ymax) / 2
+
+    def _nearby_words(anchor: Any) -> list[Any]:
+        h = max(anchor.ymax - anchor.ymin, 1)
+        out: list[tuple[int, float, int, float, Any]] = []
+        for w in ocr_words:
+            if w is anchor:
+                continue
+            # 같은 라인 또는 인접 라인만 후보화
+            if abs(_yc(w) - _yc(anchor)) > h * 2.2:
+                continue
+            right_pref = 0 if w.xmin >= anchor.xmin - 10 else 1
+            x_gap = abs(w.xmin - anchor.xmax)
+            out.append((right_pref, abs(_yc(w) - _yc(anchor)), x_gap, -float(getattr(w, "confidence", 0.0)), w))
+        out.sort(key=lambda x: (x[0], x[1], x[2], x[3]))
+        return [item[4] for item in out]
+
+    nearby = _nearby_words(label_block)
+    if d_match is None:
+        for w in nearby:
+            m = date_re.search(w.text)
+            if m:
+                d_match = m
+                d_source = w
+                break
+    if t_match is None:
+        for w in nearby:
+            m = time_re.search(w.text)
+            if m:
+                t_match = m
+                t_source = w
+                break
 
     d_text = ""
     t_text = ""
@@ -720,26 +753,46 @@ def _recover_datetime_from_ocr(
         )
         return VisualBox(ymin=w.norm_ymin, xmin=w.norm_xmin, ymax=w.norm_ymax, xmax=w.norm_xmax)
 
-    # 기본값: 분리 실패 시 동일 bbox 재사용
-    full_box = VisualBox(
-        ymin=block.norm_ymin, xmin=block.norm_xmin,
-        ymax=block.norm_ymax, xmax=block.norm_xmax,
+    key_box = VisualBox(
+        ymin=label_block.norm_ymin,
+        xmin=label_block.norm_xmin,
+        ymax=label_block.norm_ymax,
+        xmax=label_block.norm_xmax,
     )
-    date_box = full_box
-    time_box = full_box
-    key_box = None
 
-    # 날짜/시간 둘 다 있고 위치 분리가 가능하면 분할 bbox 사용
-    if d_pos >= 0 and t_pos >= 0 and d_pos < t_pos:
-        disp_total = max(_disp_width(full), 1)
-        vw = block.xmax - block.xmin
-        x_d = block.xmin + int(vw * _disp_width(full[:d_pos]) / disp_total)
-        x_t = block.xmin + int(vw * _disp_width(full[:t_pos]) / disp_total)
+    # 날짜/시간 값 박스 기본: 각 source 블록 전체
+    if d_source is not None:
+        date_box = VisualBox(
+            ymin=d_source.norm_ymin,
+            xmin=d_source.norm_xmin,
+            ymax=d_source.norm_ymax,
+            xmax=d_source.norm_xmax,
+        )
+    else:
+        date_box = key_box
 
-        if d_pos > 0:
-            key_box = _make_box(block, block.xmin, x_d)
-        date_box = _make_box(block, x_d, x_t)
-        time_box = _make_box(block, x_t, block.xmax)
+    if t_source is not None:
+        time_box = VisualBox(
+            ymin=t_source.norm_ymin,
+            xmin=t_source.norm_xmin,
+            ymax=t_source.norm_ymax,
+            xmax=t_source.norm_xmax,
+        )
+    else:
+        time_box = key_box
+
+    # 날짜/시간이 같은 블록이면 위치 분할로 정밀 보정
+    if d_source is not None and t_source is not None and d_source is t_source and d_pos >= 0 and t_pos >= 0 and d_pos < t_pos:
+        src = d_source
+        disp_total = max(_disp_width(src.text), 1)
+        vw = src.xmax - src.xmin
+        x_d = src.xmin + int(vw * _disp_width(src.text[:d_pos]) / disp_total)
+        x_t = src.xmin + int(vw * _disp_width(src.text[:t_pos]) / disp_total)
+        date_box = _make_box(src, x_d, x_t)
+        time_box = _make_box(src, x_t, src.xmax)
+        # 라벨+값이 한 줄이면 라벨 키 박스는 날짜 시작 전 구간으로 축소
+        if src is label_block and d_pos > 0:
+            key_box = _make_box(src, src.xmin, x_d)
 
     def _add_missing(label: str, text: str, box: VisualBox) -> None:
         if not text:
@@ -754,11 +807,28 @@ def _recover_datetime_from_ocr(
                     text=text,
                     bbox=box,
                     bbox_key=key_box,
-                    confidence=float(block.confidence),
+                    confidence=float(getattr((d_source or t_source or label_block), "confidence", 0.8)),
                 )
             )
         except Exception as exc:
             logger.warning("_recover_datetime_from_ocr: %s 생성 실패: %s", label, exc)
+
+    # 값까지는 못 읽어도 라벨은 명확한 경우, date 라벨 하이라이트를 남겨 사용자 보정을 유도
+    if not d_text and not t_text and not has_date:
+        try:
+            entities.append(
+                VisualEntity(
+                    id=f"item_{len(entities) + 1}",
+                    label="date_occurrence",
+                    text="",
+                    bbox=key_box,
+                    bbox_key=key_box,
+                    confidence=min(float(getattr(label_block, "confidence", 0.7)), 0.7),
+                )
+            )
+        except Exception as exc:
+            logger.warning("_recover_datetime_from_ocr: date label placeholder 생성 실패: %s", exc)
+        return
 
     if not has_date:
         _add_missing("date_occurrence", d_text, date_box)
@@ -785,6 +855,52 @@ def _recover_datetime_from_ocr(
                 )
             except Exception as exc:
                 logger.warning("_recover_datetime_from_ocr: bbox_key 보강 실패(%s): %s", e.label, exc)
+
+
+def _assess_ocr_image_condition(
+    ocr_words: "list[Any]",
+    entities: "list[Any]",
+) -> tuple[str, dict[str, Any]]:
+    """OCR 결과와 추출 완성도를 함께 반영해 이미지 상태를 판정한다."""
+    if not ocr_words:
+        return "damaged", {"avg_confidence": 0.0, "low_conf_ratio": 1.0, "missing_fields": []}
+
+    confs: list[float] = []
+    for w in ocr_words:
+        try:
+            confs.append(max(0.0, min(1.0, float(getattr(w, "confidence", 0.0)))))
+        except Exception:
+            confs.append(0.0)
+    avg_conf = sum(confs) / max(len(confs), 1)
+    low_conf_ratio = sum(1 for c in confs if c < 0.55) / max(len(confs), 1)
+
+    extracted = {
+        str(getattr(e, "label", "")).strip(): str(getattr(e, "text", "")).strip()
+        for e in entities
+    }
+    has_merchant_label = any(any(kw in str(w.text) for kw in _MERCHANT_LABEL_KW) for w in ocr_words)
+    has_datetime_label = any(any(kw in str(w.text) for kw in _DATETIME_LABEL_KW) for w in ocr_words)
+    has_amount_label = any(any(kw in str(w.text) for kw in _AMOUNT_LABEL_KW) for w in ocr_words)
+
+    merchant_found = bool(extracted.get("merchant_name"))
+    datetime_found = bool(extracted.get("date_occurrence") or extracted.get("time_occurrence"))
+    amount_found = bool(extracted.get("amount_total"))
+
+    missing_fields: list[str] = []
+    if has_merchant_label and not merchant_found:
+        missing_fields.append("merchant_name")
+    if has_datetime_label and not datetime_found:
+        missing_fields.append("date_time")
+    if has_amount_label and not amount_found:
+        missing_fields.append("amount_total")
+
+    if len(ocr_words) < 3:
+        return "partial_cut", {"avg_confidence": round(avg_conf, 3), "low_conf_ratio": round(low_conf_ratio, 3), "missing_fields": missing_fields}
+    if avg_conf < 0.45:
+        return "damaged", {"avg_confidence": round(avg_conf, 3), "low_conf_ratio": round(low_conf_ratio, 3), "missing_fields": missing_fields}
+    if avg_conf < 0.62 or low_conf_ratio >= 0.4 or missing_fields:
+        return "blurry", {"avg_confidence": round(avg_conf, 3), "low_conf_ratio": round(low_conf_ratio, 3), "missing_fields": missing_fields}
+    return "clear", {"avg_confidence": round(avg_conf, 3), "low_conf_ratio": round(low_conf_ratio, 3), "missing_fields": missing_fields}
 
 
 def _analyze_with_paddle_ocr(
@@ -820,8 +936,6 @@ def _analyze_with_paddle_ocr(
             audit_comment="OCR 결과 없음: 이미지 품질 문제 가능",
         )
 
-    # 이미지 품질 간이 판단
-    image_condition = "clear" if len(ocr_words) >= 3 else "partial_cut"
     # 직인 키워드 탐지
     stamp_keywords = {"인감", "도장", "직인", "날인", "STAMP"}
     has_stamp = any(kw in w.text for w in ocr_words for kw in stamp_keywords)
@@ -930,11 +1044,17 @@ def _analyze_with_paddle_ocr(
     # ── 후처리 4: 거래일시/결제일시 OCR 라인 기반 date/time 복구 ────────────
     _recover_datetime_from_ocr(entities, ocr_words)
 
+    image_condition, cond_meta = _assess_ocr_image_condition(ocr_words, entities)
+    miss = cond_meta.get("missing_fields") or []
+    miss_txt = f", missing={','.join(str(x) for x in miss)}" if miss else ""
     return MultimodalAuditResult(
         image_analysis={"condition": image_condition, "has_stamp": has_stamp},
         entities=entities,
         suggested_summary="",
-        audit_comment=f"PaddleOCR {len(ocr_words)}개 블록 추출 → LLM 매핑",
+        audit_comment=(
+            f"PaddleOCR {len(ocr_words)}개 블록 추출 → LLM 매핑 "
+            f"(avg_conf={cond_meta.get('avg_confidence')}, low_conf_ratio={cond_meta.get('low_conf_ratio')}{miss_txt})"
+        ),
         source="ocr_llm",
         fallback_used=False,
     )
