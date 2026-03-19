@@ -337,14 +337,14 @@ async def _stream_reasoning_events_with_llm(
 
     if not settings.enable_reasoning_live_llm:
         logger.warning(
-            "reasoning_llm_skipped node=%s reason=enable_reasoning_live_llm_false draft_len=%s",
+            "[llm:reasoning] 생략 | node=%s reason=enable_reasoning_live_llm_false draft_len=%s",
             node_name,
             len(reasoning_text or ""),
         )
         return _REASONING_FALLBACK_MESSAGE, fallback_message_only, "fallback"
     if not (settings.openai_api_key or "").strip():
         logger.warning(
-            "reasoning_llm_skipped node=%s reason=openai_api_key_missing draft_len=%s",
+            "[llm:reasoning] 생략 | node=%s reason=openai_api_key_missing draft_len=%s",
             node_name,
             len(reasoning_text or ""),
         )
@@ -408,7 +408,7 @@ async def _stream_reasoning_events_with_llm(
                 **tok_kw,
             )
             logger.info(
-                "reasoning_llm_request node=%s model=%s stream=False (Azure, no response_format)",
+                "[llm:reasoning] 요청 | node=%s model=%s (Azure)",
                 node_name,
                 settings.reasoning_llm_model,
             )
@@ -430,10 +430,9 @@ async def _stream_reasoning_events_with_llm(
                 **tok_kw,
             )
             logger.info(
-                "reasoning_llm_request node=%s model=%s response_format=%s stream=False",
+                "[llm:reasoning] 요청 | node=%s model=%s",
                 node_name,
                 settings.reasoning_llm_model,
-                response_format_req,
             )
         full_response = ""
         events: list[dict[str, Any]] = []
@@ -507,7 +506,7 @@ async def _stream_reasoning_events_with_llm(
                 metadata={"reasoning": final_reasoning},
             ).to_payload()
         )
-        logger.info("reasoning_llm_ok node=%s response_len=%s", node_name, len(final_reasoning))
+        logger.info("[llm:reasoning] 완료 | node=%s response_len=%s", node_name, len(final_reasoning))
         return final_reasoning, events, "llm"
     except Exception as e:
         err_detail = str(e)
@@ -520,7 +519,7 @@ async def _stream_reasoning_events_with_llm(
         except Exception:
             pass
         logger.warning(
-            "reasoning_llm_failed node=%s response_format=json_object stream=True error_type=%s detail=%s",
+            "[llm:reasoning] 실패 | node=%s error_type=%s detail=%s",
             node_name,
             type(e).__name__,
             err_detail,

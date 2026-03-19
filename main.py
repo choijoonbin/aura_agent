@@ -59,11 +59,24 @@ from services.schemas import (
 from services.stream_runtime import runtime
 from utils.config import ensure_source_paths, settings
 
-# 터미널에서 [RESUME_TRACE]/[HITL_CLOSE]/[analysis] 등 INFO 로그 확인용 (uvicorn 실행 터미널에 출력)
+# ── 터미널 로그 설정 ─────────────────────────────────────────────────────────
+# Agent 추론 단계(Planning/ToolCall/Critic/Verify/HITL/Score/RAG)를 한눈에 파악할 수 있도록 포맷 설정
+_LOG_FMT = "%(asctime)s %(levelname)-5s %(message)s"
+_LOG_DATEFMT = "%H:%M:%S"
 try:
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s", datefmt="%H:%M:%S", force=True)
+    logging.basicConfig(level=logging.INFO, format=_LOG_FMT, datefmt=_LOG_DATEFMT, force=True)
 except TypeError:
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s", datefmt="%H:%M:%S")
+    logging.basicConfig(level=logging.INFO, format=_LOG_FMT, datefmt=_LOG_DATEFMT)
+
+# 불필요한 라이브러리 로그 억제 (httpx, openai, sqlalchemy 등이 터미널을 오염하지 않도록)
+for _noisy_logger in (
+    "httpx", "httpcore", "openai", "openai._base_client",
+    "sqlalchemy.engine", "sqlalchemy.pool", "sqlalchemy.dialects",
+    "uvicorn.access", "asyncio",
+    "langchain", "langchain_core", "langchain_community",
+    "langgraph",
+):
+    logging.getLogger(_noisy_logger).setLevel(logging.WARNING)
 
 logger = logging.getLogger(__name__)
 

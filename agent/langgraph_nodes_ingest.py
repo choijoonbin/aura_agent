@@ -83,7 +83,9 @@ async def start_router_node_impl(
     body = state.get("body_evidence") or {}
     pre_classified = body.get("case_type") or body.get("intended_risk_type")
     if not is_valid_screening_case_type(pre_classified):
+        logger.info("[start_router] 사전 스크리닝 없음 → screener 노드로 이동")
         return {}
+    logger.info("[start_router] 사전 스크리닝 감지(case_type=%s) → intake 직행", pre_classified)
     screening = build_prescreened_result(body)
     updated_body = {**body, "case_type": screening["case_type"], "intended_risk_type": screening["case_type"]}
     return {
@@ -485,6 +487,12 @@ async def planner_node_impl(
         plan = await invoke_llm_planner(flags, state.get("screening_result") or {}, replan_context, available_tools)
         if plan:
             plan_source = "llm"
+            logger.info(
+                "[planner] LLM 계획 수립 | %d개 도구: %s",
+                len(plan), " → ".join(s.get("tool", "") for s in plan),
+            )
+        else:
+            logger.info("[planner] LLM 계획 실패 → rule fallback")
 
     if not plan:
         base_plan = plan_from_flags(flags)
@@ -547,6 +555,17 @@ async def planner_node_impl(
         reasoning=reasoning_text,
     )
     last_node_summary = f"planner 완료: {reasoning_text[:80]}…" if len(reasoning_text) > 80 else f"planner 완료: {reasoning_text}"
+    if replan_context:
+        logger.info(
+            "[planner] 재계획 모드 (loop=%s) | critic 피드백: %s",
+            replan_context.get("loop_count", "?"),
+            str(replan_context.get("critic_feedback", ""))[:120],
+        )
+    logger.info(
+        "[planner] ✔ 계획 확정 (source=%s) | %s",
+        plan_source,
+        " → ".join(tool_sequence),
+    )
     pending: list[dict[str, Any]] = [
         AgentEvent(
             event_type="NODE_START",
