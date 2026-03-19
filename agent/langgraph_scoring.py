@@ -473,6 +473,14 @@ def _score(flags: dict[str, Any], tool_results: list[dict[str, Any]]) -> dict[st
         f"evidence({evidence_score:.1f}) × {evidence_weight} = {final_score:.1f} "
         f"[compound×{compound_multiplier:.2f}, amount×{amount_multiplier:.2f}]"
     )
+    logger.info(
+        "[score:rule] policy=%d evidence=%d final=%d [%s] | %s",
+        int(round(policy_score)),
+        int(round(evidence_score)),
+        int(round(final_score)),
+        severity,
+        calculation_trace,
+    )
 
     return {
         "policy_score": int(round(policy_score)),
@@ -674,21 +682,32 @@ async def _score_hybrid(
     out["verification_gate"] = rule_gate
     out["final_decision"] = _resolve_final_decision(rule_gate=rule_gate, rule_score=rule_score, llm_score=None)
     out["conflict_warning"] = False
+    logger.info(
+        "[score:hybrid] rule=%d gate=%s decision=%s fidelity=%d | llm_judge=%s",
+        rule_score,
+        rule_gate,
+        out["final_decision"],
+        rule_fidelity,
+        "enabled" if bool(settings.llm_judge_enabled) else "disabled",
+    )
 
     if not bool(settings.llm_judge_enabled):
         out["judge_skipped"] = True
         out["skip_reason"] = "llm_judge_disabled"
         out["diagnostic_log"] = "LLM Judge 비활성화 상태입니다."
+        logger.info("[score:hybrid] LLM Judge 생략 | 이유=llm_judge_disabled")
         return out
     if rule_gate in {"hold", "regenerate"}:
         out["judge_skipped"] = True
         out["skip_reason"] = "rule_gate_blocked"
         out["diagnostic_log"] = f"규칙 게이트({rule_gate})가 확정되어 LLM Judge 호출을 생략했습니다."
+        logger.info("[score:hybrid] LLM Judge 생략 | 이유=rule_gate_blocked gate=%s", rule_gate)
         return out
     if _JUDGE_CIRCUIT_OPEN:
         out["judge_skipped"] = True
         out["skip_reason"] = "circuit_breaker_open"
         out["diagnostic_log"] = "LLM Judge circuit breaker가 열려 호출을 생략했습니다."
+        logger.info("[score:hybrid] LLM Judge 생략 | 이유=circuit_breaker_open")
         return out
 
     last_error_code: str | None = None
@@ -724,6 +743,23 @@ async def _score_hybrid(
                 llm_score=llm_score,
                 conflict_warning=conflict,
             )
+            logger.info(
+                "[score:llm_judge] rule=%d → llm=%d fidelity=%d (%.0fms)%s",
+                rule_score,
+                llm_score,
+                fidelity,
+                latency_ms,
+                " ⚠ 불일치" if conflict else "",
+            )
+            if conflict:
+                logger.warning(
+                    "[score:conflict] rule=%d vs llm=%d (편차=%d ≥ threshold=%d) → decision=%s",
+                    rule_score,
+                    llm_score,
+                    abs(rule_score - llm_score),
+                    int(settings.llm_judge_conflict_threshold),
+                    out["final_decision"],
+                )
             _mark_circuit(False)
             return out
         except asyncio.TimeoutError as e:
@@ -751,7 +787,7 @@ async def _score_hybrid(
         f"LLM Judge 실패로 규칙 점수로 fallback했습니다. reason={out['fallback_reason']} detail={last_error_message[:400]}"
     )
     logger.warning(
-        "llm_judge fallback: reason=%s retries=%s rule_score=%s detail=%s",
+        "[score:fallback] LLM Judge 실패 → rule fallback | reason=%s retries=%s rule_score=%s detail=%s",
         out["fallback_reason"],
         out.get("retry_count", 0),
         rule_score,

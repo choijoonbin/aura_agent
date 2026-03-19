@@ -111,7 +111,7 @@ async def _llm_decide_hitl_verdict(
     그 판단은 LLM이 맥락을 보고 하도록 함. 하드코딩/룰베이스 금지.
     반환: (verdict, reason) — verdict는 COMPLETED_AFTER_HITL 또는 REVIEW_REQUIRED.
     """
-    logger.info("[VERDICT_LLM] _llm_decide_hitl_verdict 진입 (확정 vs 재검토 LLM 판단)")
+    logger.info("[verdict] _llm_decide_hitl_verdict 진입 (확정 vs 재검토 LLM 판단)")
     why = str(hitl_request.get("why_hitl") or hitl_request.get("blocking_reason") or "").strip()
     reasons = hitl_request.get("reasons") or hitl_request.get("auto_finalize_blockers") or []
     questions = hitl_request.get("review_questions") or hitl_request.get("questions") or []
@@ -130,7 +130,7 @@ async def _llm_decide_hitl_verdict(
             )
             reason = llm_reason or "첨부 증빙 대조 결과에서 불일치가 확인되어 추가 확인이 필요합니다."
             logger.info(
-                "[VERDICT_LLM] 증빙 불일치 강제 재검토: approved=%s evidence_passed=%s reasons=%s",
+                "[verdict] 증빙 불일치 강제 재검토: approved=%s evidence_passed=%s reasons=%s",
                 approved,
                 evidence_passed,
                 (evidence_result.get("reasons") or [])[:3],
@@ -176,7 +176,7 @@ async def _llm_decide_hitl_verdict(
         "위 맥락을 바탕으로 verdict와 reason을 JSON으로 출력하라."
     )
     logger.info(
-        "[VERDICT_LLM] 호출 직전 approved=%s comment_len=%s comment_preview=%s",
+        "[verdict] 호출 직전 approved=%s comment_len=%s comment_preview=%s",
         approved,
         len(comment),
         (comment[:80] + "…") if len(comment) > 80 else (comment or "(없음)"),
@@ -216,7 +216,7 @@ async def _llm_decide_hitl_verdict(
         raw = raw.strip()
         usage = getattr(response, "usage", None)
         logger.info(
-            "[VERDICT_LLM] 응답 수신 content_len=%s finish_reason=%s usage=%s",
+            "[verdict] 응답 수신 content_len=%s finish_reason=%s usage=%s",
             len(raw),
             getattr(choice, "finish_reason", None) if choice else None,
             (f"prompt={getattr(usage, 'prompt_tokens', None)} completion={getattr(usage, 'completion_tokens', None)}") if usage else None,
@@ -226,18 +226,18 @@ async def _llm_decide_hitl_verdict(
             refusal = getattr(choice.message, "refusal", None) if choice.message else None
             finish_details = getattr(choice, "finish_details", None)
             logger.warning(
-                "[VERDICT_LLM] 응답 본문 없음 — finish_reason=%s refusal=%s finish_details=%s (content_filter/length 등 원인 확인용)",
+                "[verdict] 응답 본문 없음 — finish_reason=%s refusal=%s finish_details=%s (content_filter/length 등 원인 확인용)",
                 finish,
                 refusal,
                 finish_details,
             )
             if approved:
                 logger.info(
-                    "[VERDICT_LLM] fallback: 응답 비어 있음, approved=True → COMPLETED_AFTER_HITL (답변 길이 제한 없음)",
+                    "[verdict] fallback: 응답 비어 있음, approved=True → COMPLETED_AFTER_HITL (답변 길이 제한 없음)",
                 )
                 return ("COMPLETED_AFTER_HITL", "담당자 승인 및 검토 의견 반영으로 확정(LLM 판단 보조 실패 시 적용).")
             logger.warning(
-                "[VERDICT_LLM] fallback: 응답 비어 있음, approved=False → REVIEW_REQUIRED",
+                "[verdict] fallback: 응답 비어 있음, approved=False → REVIEW_REQUIRED",
             )
             return ("REVIEW_REQUIRED", "판단 LLM 응답이 비어 있어 재검토 필요 처리.")
         parsed = json.loads(raw)
@@ -246,7 +246,7 @@ async def _llm_decide_hitl_verdict(
             v = "REVIEW_REQUIRED"
         reason = str(parsed.get("reason") or "").strip() or "담당자 검토 응답을 기준으로 판단함."
         logger.info(
-            "[VERDICT_LLM] LLM 정상 응답 (검토 필요 여부는 LLM 판단) verdict=%s reason=%s raw_preview=%s",
+            "[verdict] LLM 정상 응답 (검토 필요 여부는 LLM 판단) verdict=%s reason=%s raw_preview=%s",
             v,
             (reason[:80] + "…") if len(reason) > 80 else reason,
             (raw[:200] + "…") if len(raw) > 200 else raw,
@@ -256,12 +256,12 @@ async def _llm_decide_hitl_verdict(
         raw_preview = (raw[:300] + "…") if len(raw) > 300 else (raw or "(empty or not available)")
         if approved:
             logger.info(
-                "[VERDICT_LLM] fallback: LLM 호출 실패 (%s) approved=True → COMPLETED_AFTER_HITL (답변 길이 제한 없음)",
+                "[verdict] fallback: LLM 호출 실패 (%s) approved=True → COMPLETED_AFTER_HITL (답변 길이 제한 없음)",
                 type(e).__name__,
             )
             return ("COMPLETED_AFTER_HITL", "담당자 승인 및 검토 의견 반영으로 확정(LLM 판단 실패 시 적용).")
         logger.warning(
-            "[VERDICT_LLM] fallback: LLM 호출 실패 (%s) approved=False → REVIEW_REQUIRED. raw_preview=%s",
+            "[verdict] fallback: LLM 호출 실패 (%s) approved=False → REVIEW_REQUIRED. raw_preview=%s",
             type(e).__name__,
             raw_preview,
         )
@@ -321,10 +321,10 @@ async def _llm_summarize_hold_reason(hitl_response: dict[str, Any]) -> str:
             first = raw.split("\n")[0].strip()
             if len(first) > 300:
                 first = first[:297] + "…"
-            logger.info("[VERDICT_LLM] HOLD 사유 LLM 요약: %s", first[:100] + "…" if len(first) > 100 else first)
+            logger.info("[verdict] HOLD 사유 LLM 요약: %s", first[:100] + "…" if len(first) > 100 else first)
             return first
     except Exception as e:
-        logger.warning("[VERDICT_LLM] HOLD 사유 LLM 요약 실패: %s", type(e).__name__)
+        logger.warning("[verdict] HOLD 사유 LLM 요약 실패: %s", type(e).__name__)
     return ""
 
 
@@ -386,7 +386,7 @@ async def _llm_summarize_evidence_review_reason(
                 first = first[:277] + "…"
             return first
     except Exception as e:
-        logger.warning("[VERDICT_LLM] evidence review reason 요약 실패: %s", type(e).__name__)
+        logger.warning("[verdict] evidence review reason 요약 실패: %s", type(e).__name__)
     return ""
 
 
@@ -493,10 +493,10 @@ async def _llm_summarize_completed_reason(state: dict[str, Any]) -> str:
             first = raw.split("\n")[0].strip()
             if len(first) > 350:
                 first = first[:347] + "…"
-            logger.info("[VERDICT_LLM] COMPLETED 확정 사유 LLM 요약: %s", first[:100] + "…" if len(first) > 100 else first)
+            logger.info("[verdict] COMPLETED 확정 사유 LLM 요약: %s", first[:100] + "…" if len(first) > 100 else first)
             return first
     except Exception as e:
-        logger.warning("[VERDICT_LLM] COMPLETED 확정 사유 LLM 요약 실패: %s", type(e).__name__)
+        logger.warning("[verdict] COMPLETED 확정 사유 LLM 요약 실패: %s", type(e).__name__)
     return ""
 
 

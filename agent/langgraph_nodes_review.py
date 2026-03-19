@@ -577,6 +577,16 @@ async def critic_node_impl(
         and loop_count < max_critic_loop
     )
     replan_reason = " | ".join(replan_reasons) if replan_reasons else ""
+    if replan_required:
+        logger.info(
+            "[critic] 재계획 필요 (loop %d/%d) | %s",
+            loop_count + 1, max_critic_loop, replan_reason[:150],
+        )
+    else:
+        logger.info(
+            "[critic] 재계획 불필요 | evidence_score=%d final_score=%d loop=%d",
+            evidence_score, final_score, loop_count,
+        )
     critique = {
         "has_legacy_result": bool(legacy and legacy.get("facts")),
         "missing_fields": missing,
@@ -885,7 +895,14 @@ async def verify_node_impl(
     claim_results_dicts = [c.model_dump() if hasattr(c, "model_dump") else dict(c) for c in claim_results]
     display_texts = await generate_claim_display_texts(claim_results_dicts, body_evidence)
     logger.info(
-        "verify_node: claim display_text generation result claims=%s displays=%s",
+        "[verify] 주장 검증 | 클레임=%d개, 커버=%s/%s, 커버율=%.0f%%",
+        len(claim_results_dicts),
+        verification_summary.get("covered", "?"),
+        verification_summary.get("total", "?"),
+        float(verification_summary.get("coverage_ratio", 0)) * 100,
+    )
+    logger.info(
+        "[verify] claim display_text 생성 결과: claims=%s displays=%s",
         len(claim_results_dicts),
         len(display_texts or []),
     )
@@ -895,7 +912,7 @@ async def verify_node_impl(
                 row["display_text"] = str(display_texts[idx] or "").strip()
     filled_display = sum(1 for row in claim_results_dicts if str(row.get("display_text") or "").strip())
     logger.info(
-        "verify_node: claim display_text applied filled=%s/%s",
+        "[verify] claim display_text 적용: filled=%s/%s",
         filled_display,
         len(claim_results_dicts),
     )
@@ -933,6 +950,12 @@ async def verify_node_impl(
         str(verification_summary.get("gate_policy") or "").lower() == "regenerate_citations"
         or any(u.taxonomy in {"weak_citation", "wrong_scope_citation"} for u in unsupported_claim_issues)
     )
+    if has_blocking_unsupported:
+        logger.warning(
+            "[verify] FAIL-CLOSED HITL 강제 | blocking 이슈 %d건: %s",
+            len(blocking_unsupported_issues),
+            ", ".join(u.taxonomy for u in blocking_unsupported_issues[:3]),
+        )
     # Fail-closed: unsupported claim이 blocking taxonomy로 감지되면 HITL로 강제.
     if has_blocking_unsupported and not state["flags"].get("hasHitlResponse"):
         needs_hitl = True
@@ -1021,16 +1044,24 @@ async def verify_node_impl(
 
     coverage_ratio_dbg = float(verification_summary.get("coverage_ratio") or 0.0)
     cited_article_count_dbg = len(cited_article_clauses)
+    _hitl_why = (hitl_request.get("why_hitl") or "")[:100] if hitl_request else ""
+    if needs_hitl:
+        logger.info(
+            "[verify] ⚑  HITL 요청 | gate=%s case=%s | 이유: %s",
+            gate.value, screening_case_type or "-", _hitl_why,
+        )
+    else:
+        logger.info(
+            "[verify] ✔ 자동 확정 가능 | gate=%s case=%s | 커버율=%.0f%% 인용조항=%d건",
+            gate.value, screening_case_type or "-",
+            coverage_ratio_dbg * 100, cited_article_count_dbg,
+        )
     logger.info(
-        "verifier gate decision: gate=%s needs_hitl=%s case_type=%s "
-        "blocking=%s non_blocking=%s coverage_ratio=%.2f cited_article_count=%s",
-        gate.value,
-        needs_hitl,
-        screening_case_type or "-",
+        "[verify] 게이트 결정: gate=%s needs_hitl=%s case_type=%s "
+        "blocking=%s coverage=%.2f cited=%s",
+        gate.value, needs_hitl, screening_case_type or "-",
         [u.taxonomy for u in blocking_unsupported_issues],
-        [u.taxonomy for u in unsupported_claim_issues if u.taxonomy not in _UNSUPPORTED_TAXONOMY_BLOCKING],
-        coverage_ratio_dbg,
-        cited_article_count_dbg,
+        coverage_ratio_dbg, cited_article_count_dbg,
     )
 
     rationale = hitl_request.get("why_hitl") if hitl_request else "자동 확정 가능한 상태로 검증이 완료되었습니다."

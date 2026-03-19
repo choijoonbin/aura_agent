@@ -2,8 +2,11 @@ from __future__ import annotations
 
 from datetime import date
 import json
+import logging
 import re
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -1427,6 +1430,18 @@ def _run_search_policy_chunks_pipeline(
         dense_weight=dense_weight,
     )
 
+    _case_type = str(body_evidence.get("case_type") or body_evidence.get("intended_risk_type") or "UNKNOWN")
+    _keywords = build_policy_keywords(body_evidence)
+    logger.info(
+        "[rag:search] case=%s keywords=[%s](%d개) | bm25_w=%.2f dense_w=%.2f group=%s",
+        _case_type,
+        ", ".join(_keywords),
+        len(_keywords),
+        bm25_weight,
+        dense_weight,
+        group_filter or "none",
+    )
+
     retrieve_out = _retrieve_candidates(
         db,
         body_evidence,
@@ -1436,6 +1451,12 @@ def _run_search_policy_chunks_pipeline(
     )
     bm25_results = retrieve_out["bm25_results"]
     dense_results = retrieve_out["dense_results"]
+    logger.info(
+        "[rag:retrieve] bm25=%d건 dense=%d건 (candidate_limit=%d)",
+        len(bm25_results),
+        len(dense_results),
+        candidate_limit,
+    )
 
     fuse_out = _fuse_candidates(
         db,
@@ -1466,6 +1487,12 @@ def _run_search_policy_chunks_pipeline(
     rerank_input_limit = int(rerank_out["rerank_input_limit"])
     rerank_error = rerank_out.get("rerank_error")
     rerank_errors = rerank_out.get("rerank_errors") or []
+    logger.info(
+        "[rag:rerank] 방식=%s 입력=%d건 stage=%s",
+        reranker_type,
+        rerank_input_limit,
+        selection_stage,
+    )
 
     results = _finalize_context(
         enriched,
@@ -1476,6 +1503,13 @@ def _run_search_policy_chunks_pipeline(
         fallback_used=fallback_used,
         fallback_reason=fallback_reason,
         body_evidence=body_evidence,
+    )
+
+    _adopted_articles = [r.get("article") for r in results if r.get("article")]
+    logger.info(
+        "[rag:result] 최종선택=%d건 채택조항: %s",
+        len(results),
+        _adopted_articles if _adopted_articles else "(없음)",
     )
 
     normalized_trace_level = str(trace_level or "basic").strip().lower()

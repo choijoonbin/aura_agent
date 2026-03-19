@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Any, Awaitable, Callable
 
 from agent.event_schema import AgentEvent
 from agent.output_models import ExecuteOutput
 from agent.tool_schemas import ToolContextInput
 from utils.config import settings
+
+logger = logging.getLogger(__name__)
 
 _SEQUENTIAL_LAST_TOOLS = frozenset({"policy_rulebook_probe", "legacy_aura_deep_audit"})
 _PARALLEL_TOOL_DEPENDENCIES: dict[str, frozenset[str]] = {
@@ -37,17 +40,22 @@ async def execute_node_impl(
     tool_results: list[dict[str, Any]] = []
     skipped_tools: list[str] = []
     failed_tools: list[str] = []
+    plan = state.get("plan") or []
+    use_parallel = getattr(settings, "enable_parallel_tool_execution", False)
+    _tool_seq = [s.get("tool", "") for s in plan]
+    logger.info(
+        "[execute] ▶▶ 도구 실행 시작 | %d개 계획: %s | 병렬=%s",
+        len(plan), " → ".join(_tool_seq), use_parallel,
+    )
     pending_events: list[dict[str, Any]] = [
         AgentEvent(
             event_type="NODE_START",
             node="execute",
             phase="execute",
             message="계획된 도구를 순차 실행합니다.",
-            metadata={"planned_tools": [step.get("tool") for step in state.get("plan") or []]},
+            metadata={"planned_tools": _tool_seq},
         ).to_payload()
     ]
-    plan = state.get("plan") or []
-    use_parallel = getattr(settings, "enable_parallel_tool_execution", False)
 
     async def _invoke_one(
         step: dict[str, Any],
@@ -56,7 +64,9 @@ async def execute_node_impl(
         tool_name = step.get("tool", "")
         tool = tools_by_name.get(tool_name)
         if not tool:
+            logger.warning("[execute] 알 수 없는 도구: %s", tool_name)
             return {"tool": tool_name, "ok": False, "facts": {}, "summary": f"알 수 없는 도구: {tool_name}"}
+        logger.info("[execute]   ▶ %s 호출 중 ... (prior=%d건)", tool_name, len(prior))
         inp = ToolContextInput(
             case_id=state["case_id"],
             body_evidence=state["body_evidence"],
@@ -64,7 +74,15 @@ async def execute_node_impl(
             prior_tool_results=list(prior),
         )
         result = await tool.ainvoke(inp.model_dump())
-        return result if isinstance(result, dict) else {"tool": tool_name, "ok": False, "facts": {}, "summary": str(result)}
+        if not isinstance(result, dict):
+            result = {"tool": tool_name, "ok": False, "facts": {}, "summary": str(result)}
+        _ok = bool(result.get("ok"))
+        _summary = str(result.get("summary") or "")[:100]
+        if _ok:
+            logger.info("[execute]   ✔ %s 완료 — %s", tool_name, _summary)
+        else:
+            logger.warning("[execute]   ✘ %s 실패 — %s", tool_name, _summary)
+        return result
 
     if use_parallel:
         parallel_steps = [s for s in plan if s.get("tool", "") not in _SEQUENTIAL_LAST_TOOLS]
@@ -234,6 +252,7 @@ async def execute_node_impl(
                 tool_description = getattr(tool_obj, "description", None) if tool_obj else None
                 msg = reason or "기존 증거가 충분해 생략한다."
                 skipped_tools.append(tool_name)
+                logger.info("[execute]   ⏭  %s 생략 — %s", tool_name, msg[:80])
                 pending_events.append(
                     AgentEvent(
                         event_type="TOOL_SKIPPED",
@@ -251,11 +270,13 @@ async def execute_node_impl(
             tool = tools_by_name.get(tool_name)
             if not tool:
                 failed_tools.append(tool_name)
+                logger.warning("[execute]   ✘ %s — 등록되지 않은 도구", tool_name)
                 tool_results.append({"tool": tool_name, "ok": False, "facts": {}, "summary": f"알 수 없는 도구: {tool_name}"})
                 continue
             tool_description = getattr(tool, "description", None) or ""
             step_reason = step.get("reason", "")
             short_msg = _TOOL_CALL_SHORT_MESSAGE.get(tool_name) or f"{step_reason} — {tool_name} 실행."
+            logger.info("[execute]   ▶ %s 호출 중 ...", tool_name)
             pending_events.append(
                 AgentEvent(
                     event_type="TOOL_CALL",
@@ -280,6 +301,9 @@ async def execute_node_impl(
                 result = {"tool": tool_name, "ok": False, "facts": {}, "summary": str(result)}
             if not bool(result.get("ok")):
                 failed_tools.append(tool_name)
+                logger.warning("[execute]   ✘ %s 실패 — %s", tool_name, str(result.get("summary") or "")[:100])
+            else:
+                logger.info("[execute]   ✔ %s 완료 — %s", tool_name, str(result.get("summary") or "")[:100])
             tool_results.append(result)
             result_summary = result.get("summary") or "도구 결과 수집 완료"
             pending_events.append(
@@ -302,6 +326,28 @@ async def execute_node_impl(
     trace = score_breakdown.get("calculation_trace", "")
     final_decision = str(score_breakdown.get("final_decision") or "-")
     conflict_warning = bool(score_breakdown.get("conflict_warning"))
+    _p = score_breakdown.get("policy_score", 0)
+    _e = score_breakdown.get("evidence_score", 0)
+    _f = score_breakdown.get("final_score", 0)
+    _sev = score_breakdown.get("severity", "-")
+    _gate = score_breakdown.get("verification_gate", "-")
+    logger.info(
+        "[execute] 📊 점수 산출 완료 | policy=%d / evidence=%d → final=%d [%s] | gate=%s decision=%s",
+        _p, _e, _f, _sev, _gate, final_decision,
+    )
+    if trace:
+        logger.info("[execute]    계산식: %s", trace)
+    if conflict_warning:
+        _rs = score_breakdown.get("rule_score", 0)
+        _ls = score_breakdown.get("llm_score", 0)
+        logger.warning(
+            "[execute] ⚠  점수 불일치 경고: rule=%d vs llm=%d (편차=%d)",
+            _rs, _ls, abs(int(_rs or 0) - int(_ls or 0)),
+        )
+    if skipped_tools:
+        logger.info("[execute] 생략 도구: %s", ", ".join(skipped_tools))
+    if failed_tools:
+        logger.warning("[execute] 실패 도구: %s", ", ".join(sorted(set(failed_tools))))
     pending_events.append({
         "event_type": "SCORE_BREAKDOWN",
         "message": (

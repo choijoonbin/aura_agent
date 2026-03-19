@@ -327,10 +327,9 @@ def _invoke_llm_case_type(body: dict[str, Any], signals: dict[str, Any]) -> dict
             }
             messages_combined = (system_prompt + " " + user_prompt).lower()
             logger.info(
-                "screening llm request: model=%s response_format=%s messages_contain_json=%s",
+                "[screener:llm] LLM 분류 요청 | model=%s response_format=%s",
                 model_name,
                 response_format,
-                "json" in messages_combined,
             )
 
             def _call(
@@ -516,24 +515,21 @@ def _run_hybrid(body_evidence: dict[str, Any]) -> dict[str, Any]:
         deterministic["screening_source"] = "hybrid_fallback_rule"
         deterministic["hybrid_case_align_reason"] = "llm_unavailable_or_failed"
         logger.info(
-            "screening hybrid fallback: final_case_type=%s score=%s severity=%s align_reason=%s",
+            "[screener:hybrid] LLM 실패 → rule fallback | case=%s score=%s severity=%s",
             deterministic["case_type"],
             deterministic["score"],
             deterministic["severity"],
-            deterministic["hybrid_case_align_reason"],
         )
         return deterministic
 
     min_override_conf = float(getattr(settings, "screening_llm_override_min_confidence", 0.75))
     logger.info(
-        "screening guardrail input: deterministic_case_type=%s deterministic_score=%s deterministic_severity=%s llm_case_type=%s llm_confidence=%s min_override_confidence=%s signals=%s",
+        "[screener:llm] LLM 분류 결과 | llm_case=%s(conf=%.2f) vs rule_case=%s(score=%s) min_conf=%.2f",
+        llm["case_type"],
+        float(llm.get("confidence") or 0),
         deterministic["case_type"],
         deterministic["score"],
-        deterministic["severity"],
-        llm["case_type"],
-        llm.get("confidence"),
         min_override_conf,
-        json.dumps(_guardrail_signal_snapshot(signals), ensure_ascii=False, sort_keys=True),
     )
 
     aligned_case_type, align_reason = _align_hybrid_case_type(
@@ -544,13 +540,10 @@ def _run_hybrid(body_evidence: dict[str, Any]) -> dict[str, Any]:
         llm_confidence=llm.get("confidence"),
     )
     logger.info(
-        "screening guardrail decision: final_case_type=%s align_reason=%s deterministic_case_type=%s deterministic_score=%s llm_case_type=%s llm_confidence=%s",
+        "[screener:guardrail] 최종결정 | %s → case=%s | reason=%s",
+        "LLM 채택" if aligned_case_type == llm["case_type"] else "rule 유지",
         aligned_case_type,
         align_reason,
-        deterministic["case_type"],
-        deterministic["score"],
-        llm["case_type"],
-        llm.get("confidence"),
     )
 
     reason_text = llm.get("reason_text") if aligned_case_type == llm["case_type"] else ""
@@ -572,11 +565,12 @@ def _run_hybrid(body_evidence: dict[str, Any]) -> dict[str, Any]:
         "hybrid_case_align_reason": align_reason,
     }
     logger.info(
-        "screening hybrid result: llm_case_type=%s final_case_type=%s score=%s severity=%s align_reason=%s",
-        llm["case_type"],
+        "[screener:result] 스크리닝 완료 | case=%s score=%s severity=%s llm=%s(conf=%.2f) align=%s",
         aligned_case_type,
         result["score"],
         result["severity"],
+        llm["case_type"],
+        float(llm.get("confidence") or 0),
         align_reason,
     )
     return result

@@ -34,12 +34,12 @@ async def hitl_validate_node_impl(
     hitl_response = (state.get("body_evidence") or {}).get("hitlResponse") or {}
     required_inputs = hitl_request.get("required_inputs") or []
     logger.info(
-        "[RESUME_TRACE] hitl_validate_node: required_inputs=%s hitl_response_keys=%s",
+        "[hitl] hitl_validate_node: required_inputs=%s hitl_response_keys=%s",
         [r.get("field") for r in required_inputs[:10]],
         list(hitl_response.keys()) if isinstance(hitl_response, dict) else type(hitl_response).__name__,
     )
     if not required_inputs:
-        logger.info("[RESUME_TRACE] hitl_validate_node: required_inputs 비어 있음 → reporter")
+        logger.info("[hitl] hitl_validate_node: required_inputs 비어 있음 → reporter")
         return {"hitl_request": None}
 
     missing: list[dict[str, str]] = []
@@ -50,27 +50,27 @@ async def hitl_validate_node_impl(
         val = get_hitl_response_value(hitl_response, field)
         if val is None:
             missing.append(req)
-            logger.info("[RESUME_TRACE] hitl_validate_node: field=%r → 값 없음 (missing)", field)
+            logger.info("[hitl] hitl_validate_node: field=%r → 값 없음 (missing)", field)
             continue
         if isinstance(val, list):
             if not val:
                 missing.append(req)
-                logger.info("[RESUME_TRACE] hitl_validate_node: field=%r → 빈 리스트 (missing)", field)
+                logger.info("[hitl] hitl_validate_node: field=%r → 빈 리스트 (missing)", field)
             continue
         if isinstance(val, str) and not val.strip():
             missing.append(req)
-            logger.info("[RESUME_TRACE] hitl_validate_node: field=%r → 빈 문자열 (missing)", field)
+            logger.info("[hitl] hitl_validate_node: field=%r → 빈 문자열 (missing)", field)
 
     if not missing:
         flags_has = (state.get("flags") or {}).get("hasHitlResponse")
         logger.info(
-            "[RESUME_TRACE] hitl_validate_node: 모든 필수 항목 충족 → reporter (flags.hasHitlResponse=%s, True여야 사용자 답변 반영 후 verdict LLM 호출됨)",
+            "[hitl] hitl_validate_node: 모든 필수 항목 충족 → reporter (flags.hasHitlResponse=%s, True여야 사용자 답변 반영 후 verdict LLM 호출됨)",
             flags_has,
         )
         return {"hitl_request": None}
 
     logger.info(
-        "[RESUME_TRACE] hitl_validate_node: 누락 필드=%s → hitl_pause 재요청",
+        "[hitl] hitl_validate_node: 누락 필드=%s → hitl_pause 재요청",
         [m.get("field") for m in missing[:5]],
     )
     new_request = dict(hitl_request)
@@ -97,7 +97,7 @@ async def hitl_pause_node_impl(
         "approved" in hitl_response or "comment" in hitl_response or "reviewer" in hitl_response
     )
     logger.info(
-        "[RESUME_TRACE] hitl_pause_node: interrupt 반환 keys=%s looks_like_resume=%s",
+        "[hitl] hitl_pause_node: interrupt 반환 keys=%s looks_like_resume=%s",
         list(hitl_response.keys()) if hitl_response else [],
         looks_like_resume,
     )
@@ -110,7 +110,7 @@ async def hitl_pause_node_impl(
         flags["hitlApproved"] = hitl_response.get("approved") is True
         out["flags"] = flags
         logger.info(
-            "[HITL_RESPONSE_TRACE] hitl_pause_node: 재개 감지 → flags.hasHitlResponse=True hitlApproved=%s 반영 (verdict LLM 호출되도록 함)",
+            "[hitl] hitl_pause_node: 재개 감지 → flags.hasHitlResponse=True hitlApproved=%s 반영 (verdict LLM 호출되도록 함)",
             flags["hitlApproved"],
         )
     return out
@@ -145,11 +145,11 @@ async def reporter_node_impl(
     body_has_hitl = bool(hitl_response)
     if body_has_hitl and not has_hitl_response:
         logger.warning(
-            "[HITL_RESPONSE_TRACE] reporter_node 의심: body_evidence.hitlResponse 있음(keys=%s) but flags.hasHitlResponse=False → 사용자 답변 작성했는데 응답 없으면 flags 미반영 가능성",
+            "[hitl] reporter_node 의심: body_evidence.hitlResponse 있음(keys=%s) but flags.hasHitlResponse=False → 사용자 답변 작성했는데 응답 없으면 flags 미반영 가능성",
             list(hitl_response.keys())[:12] if isinstance(hitl_response, dict) else None,
         )
     logger.info(
-        "[VERDICT_LLM] reporter_node verdict 분기: hitl_request=%s hasHitlResponse=%s hitl_approved=%s (body_has_hitl=%s)",
+        "[reporter] verdict 분기: hitl_request=%s hasHitlResponse=%s hitl_approved=%s (body_has_hitl=%s)",
         bool(hitl_request),
         has_hitl_response,
         hitl_approved,
@@ -158,13 +158,13 @@ async def reporter_node_impl(
     if hitl_request:
         summary += " 담당자 검토가 필요한 상태입니다."
         verdict = "HITL_REQUIRED"
-        logger.info("[VERDICT_LLM] reporter_node → 분기: hitl_request 있음, verdict=HITL_REQUIRED (verdict LLM 미호출)")
+        logger.info("[reporter] 분기 → hitl_request 있음, verdict=HITL_REQUIRED (verdict LLM 미호출)")
     elif has_hitl_response and hitl_approved is True:
         prior_hitl_request = (body.get("hitlRequest") or {}) if isinstance(body.get("hitlRequest"), dict) else {}
         check_req = hitl_request or prior_hitl_request or {}
         evidence_result = body.get("evidenceDocumentResult") if isinstance(body.get("evidenceDocumentResult"), dict) else None
         logger.info(
-            "[VERDICT_LLM] reporter_node → verdict LLM 호출 (hasHitlResponse=True approved=True) check_req_keys=%s",
+            "[reporter] verdict LLM 호출 (hasHitlResponse=True approved=True) check_req_keys=%s",
             list(check_req.keys())[:12] if isinstance(check_req, dict) else None,
         )
         verdict, hitl_verdict_reason = await llm_decide_hitl_verdict(
@@ -173,7 +173,7 @@ async def reporter_node_impl(
             evidence_result=evidence_result,
         )
         logger.info(
-            "[VERDICT_LLM] reporter_node ← verdict LLM 반환 verdict=%s reason_preview=%s",
+            "[reporter] verdict LLM 반환 verdict=%s reason_preview=%s",
             verdict,
             (hitl_verdict_reason[:100] + "…") if hitl_verdict_reason and len(hitl_verdict_reason) > 100 else (hitl_verdict_reason or "(없음)"),
         )
@@ -195,14 +195,14 @@ async def reporter_node_impl(
                 summary += f" 담당자 검토 결과 보류합니다. 담당자 사유: {hold_reason[:400]}{'…' if len(hold_reason) > 400 else ''}"
             else:
                 summary += " 담당자 검토 결과 보류/추가 검토 의견이 있어 자동 확정을 중단합니다."
-        logger.info("[VERDICT_LLM] reporter_node → 분기: approved=False, verdict=HOLD_AFTER_HITL (verdict LLM 미호출)")
+        logger.info("[reporter] 분기 → approved=False, verdict=HOLD_AFTER_HITL (verdict LLM 미호출)")
     else:
         if is_verify_ready_without_hitl(state):
             summary += " 검증 게이트를 통과해 자동 확정 후보로 분류되었습니다."
         else:
             summary += " 현재 수집된 증거 기준으로 추가 검토 우선순위가 높습니다."
         verdict = "READY"
-        logger.info("[VERDICT_LLM] reporter_node → 분기: hasHitlResponse=False 또는 기타, verdict=READY (verdict LLM 미호출)")
+        logger.info("[reporter] 분기 → hasHitlResponse=False 또는 기타, verdict=READY (verdict LLM 미호출)")
     refs = top_policy_refs(state.get("tool_results", []), limit=5)
     refs = await select_policy_refs_by_relevance(state, refs)
     citations_list = []

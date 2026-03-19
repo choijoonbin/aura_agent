@@ -1061,8 +1061,9 @@ def _analyze_with_paddle_ocr(
     from utils.ocr_paddle import run_paddle_ocr  # ImportError → 호출자로 전파
 
     # ── Stage 1: PaddleOCR ────────────────────────────────────────────────────
+    logger.info("[vllm:ocr] PaddleOCR 실행 시작")
     ocr_words = run_paddle_ocr(image_bytes)
-    logger.info("PaddleOCR 추출 완료: %d개 텍스트 블록", len(ocr_words))
+    logger.info("[vllm:ocr] 완료: %d개 텍스트 블록 추출", len(ocr_words))
 
     if not ocr_words:
         return MultimodalAuditResult(
@@ -1080,6 +1081,10 @@ def _analyze_with_paddle_ocr(
     ocr_text_list = "\n".join(f"{i}: {w.text}" for i, w in enumerate(ocr_words))
     user_msg = f"OCR 텍스트 목록:\n{ocr_text_list}"
 
+    logger.info(
+        "[vllm:llm] OCR→LLM 필드 매핑 요청 | model=%s ocr_blocks=%d",
+        model, len(ocr_words),
+    )
     response = client.chat.completions.create(
         **completion_kwargs_for_azure(
             base_url,
@@ -1095,6 +1100,16 @@ def _analyze_with_paddle_ocr(
     )
     raw = (response.choices[0].message.content or "").strip()
     matched: dict[str, Any] = _parse_multimodal_response(raw)
+
+    _match_summary = " | ".join(
+        f"{f.split('_')[0]}={matched[f].get('text', '')}"
+        for f in ("merchant_name", "date_occurrence", "time_occurrence", "amount_total")
+        if matched.get(f) and matched[f].get("text")
+    )
+    logger.info(
+        "[vllm:match] LLM 매핑 결과 | %s",
+        _match_summary if _match_summary else "(필드 미식별)",
+    )
 
     # ── Stage 3: OCR bbox → VisualEntity 변환 ─────────────────────────────────
     entities: list[VisualEntity] = []
@@ -1185,6 +1200,18 @@ def _analyze_with_paddle_ocr(
     image_condition, cond_meta = _assess_ocr_image_condition(ocr_words, entities)
     miss = cond_meta.get("missing_fields") or []
     miss_txt = f", missing={','.join(str(x) for x in miss)}" if miss else ""
+    _entity_summary = " | ".join(
+        f"{getattr(e, 'label', '?')}=\"{getattr(e, 'text', '')}\"(conf={getattr(e, 'confidence', 0):.2f})"
+        for e in entities
+    )
+    logger.info(
+        "[vllm:result] 추출완료 | condition=%s avg_conf=%.2f entities=%d개",
+        image_condition,
+        cond_meta.get("avg_confidence", 0.0),
+        len(entities),
+    )
+    if _entity_summary:
+        logger.info("[vllm:result] %s", _entity_summary)
     return MultimodalAuditResult(
         image_analysis={"condition": image_condition, "has_stamp": has_stamp},
         entities=entities,
@@ -1341,6 +1368,8 @@ def analyze_visual_evidence(
     effective_model = model or os.getenv("MULTIMODAL_MODEL", "gpt-4o")
     timeout_sec = (timeout_ms or int(os.getenv("MULTIMODAL_TIMEOUT_MS", "45000"))) / 1000.0
 
+    logger.info("[vllm:analyze] 증빙 이미지 분석 시작 | model=%s timeout=%.1fs", effective_model, timeout_sec)
+
     try:
         from utils.config import settings
         from openai import AzureOpenAI, OpenAI
@@ -1383,14 +1412,14 @@ def analyze_visual_evidence(
                 timeout_sec=timeout_sec,
             )
             logger.info(
-                "analyze_visual_evidence: PaddleOCR 경로 성공 (%d 엔티티)",
+                "[vllm:analyze] PaddleOCR+LLM 경로 완료 | entities=%d개",
                 len(result.entities),
             )
             return result
         except ImportError:
-            logger.info("paddleocr 미설치 — Vision LLM 경로로 fallback")
+            logger.info("[vllm:analyze] paddleocr 미설치 → Vision LLM 단일 경로로 fallback")
         except Exception as ocr_exc:
-            logger.warning("PaddleOCR 경로 실패 (%s) — Vision LLM 경로로 fallback", ocr_exc)
+            logger.warning("[vllm:analyze] PaddleOCR 경로 실패 → Vision LLM fallback | reason=%s", ocr_exc)
 
         response = client.chat.completions.create(
             model=effective_model,
@@ -1497,6 +1526,17 @@ def analyze_visual_evidence(
                 )
             )
 
+        _img_cond = (parsed.get("image_analysis") or {}).get("condition", "unknown")
+        _ventity_summary = " | ".join(
+            f"{e.label}=\"{e.text}\"(conf={e.confidence:.2f})"
+            for e in entities
+        )
+        logger.info(
+            "[vllm:result] Vision LLM 추출완료 | condition=%s entities=%d개",
+            _img_cond, len(entities),
+        )
+        if _ventity_summary:
+            logger.info("[vllm:result] %s", _ventity_summary)
         return MultimodalAuditResult(
             image_analysis=parsed.get("image_analysis") or {},
             entities=entities,
