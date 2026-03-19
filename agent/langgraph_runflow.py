@@ -44,6 +44,9 @@ async def run_langgraph_agentic_analysis_impl(
             _prev,
             list(resume_value.keys())[:10] if isinstance(resume_value, dict) else [],
         )
+    force_closure_resume = bool(
+        isinstance(resume_value, dict) and resume_value.get("_force_closure_resume") is True
+    )
     config: dict[str, Any] = {
         "configurable": {"thread_id": run_id},
         "tags": ["matertask", "analysis", f"case:{case_id}"],
@@ -115,7 +118,7 @@ async def run_langgraph_agentic_analysis_impl(
                     yield "completed", final
 
     # 1차: checkpoint 기반 resume 시도
-    if resume_value is not None:
+    if resume_value is not None and not force_closure_resume:
         rv_keys = list(resume_value.keys())[:12] if isinstance(resume_value, dict) else []
         app_logger.info(
             "[RESUME_TRACE] run_langgraph run_id=%s 1차 시작: Command(resume=...) resume_value_keys=%s (hitl_pause→hitl_validate→reporter→finalizer)",
@@ -149,6 +152,11 @@ async def run_langgraph_agentic_analysis_impl(
                 checkpointer_backend,
             )
             # fallthrough to 2차 (경량 가능 시 경량, 아니면 전체)
+    elif resume_value is not None and force_closure_resume:
+        app_logger.info(
+            "[RESUME_TRACE] run_langgraph run_id=%s 1차 skip: _force_closure_resume=true → 2차 경량 우선",
+            run_id,
+        )
 
     # 2차: HITL 재개 시 기존 결과(또는 hitl_request만)가 있으면 2차 경량(closure)으로 hitl_validate→reporter→finalizer만 실행.
     # score_breakdown/tool_results가 없어도 hitl_request가 있으면 경량 경로 사용(전체 재실행 시 verify에서 또 인터럽트되는 것 방지).

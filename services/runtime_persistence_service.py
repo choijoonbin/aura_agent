@@ -232,7 +232,7 @@ def get_run_aux_state(db: Session, *, run_id: str) -> dict[str, Any]:
         where tenant_id = :tenant_id
           and resource_type = :resource_type
           and resource_id = :run_id
-          and event_type in ('RUN_CREATED', 'HITL_REQUESTED', 'HITL_REQUIRED', 'HITL_DRAFT', 'HITL_RESPONSE', 'RUN_COMPLETED', 'RUN_FAILED', 'EVIDENCE_UPLOADED')
+          and event_type in ('RUN_CREATED', 'HITL_REQUESTED', 'HITL_REQUIRED', 'HITL_DRAFT', 'HITL_RESPONSE', 'RUN_COMPLETED', 'RUN_FAILED', 'EVIDENCE_UPLOADED', 'EVIDENCE_COMPARED')
         order by occurred_at asc, activity_id asc
         """
     )
@@ -250,6 +250,7 @@ def get_run_aux_state(db: Session, *, run_id: str) -> dict[str, Any]:
     hitl_response = None
     result = None
     evidence_document_result = None
+    evidence_upload_file = None
     for row in rows:
         raw = row["metadata_json"]
         if isinstance(raw, dict):
@@ -296,6 +297,9 @@ def get_run_aux_state(db: Session, *, run_id: str) -> dict[str, Any]:
                 if isinstance(candidate_response, dict) and candidate_response:
                     hitl_response = candidate_response
         elif event_type == "EVIDENCE_UPLOADED":
+            evidence_upload_file = metadata.get("evidence_upload_file") or payload.get("evidence_upload_file")
+            evidence_document_result = metadata.get("evidence_document_result") or payload.get("evidence_document_result")
+        elif event_type == "EVIDENCE_COMPARED":
             evidence_document_result = metadata.get("evidence_document_result") or payload.get("evidence_document_result")
     return {
         "lineage": lineage,
@@ -304,4 +308,5 @@ def get_run_aux_state(db: Session, *, run_id: str) -> dict[str, Any]:
         "hitl_response": hitl_response,
         "result_payload": result,
         "evidence_document_result": evidence_document_result,
+        "evidence_upload_file": evidence_upload_file,
     }

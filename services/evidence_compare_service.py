@@ -13,6 +13,7 @@ from services.evidence_extraction import ExtractedEvidence
 AMOUNT_ABS_TOLERANCE = 100  # 원
 AMOUNT_REL_TOLERANCE = 0.005  # 0.5%
 DATE_TOLERANCE_DAYS = 3  # ±N일
+TIME_TOLERANCE_MINUTES = 60  # ±N분
 
 
 @dataclass
@@ -42,6 +43,32 @@ def _days_diff(d1: datetime | None, d2: datetime | None) -> int | None:
     return abs(delta)
 
 
+def _parse_time_to_minutes(s: str | None) -> int | None:
+    if not s:
+        return None
+    raw = str(s).strip()
+    # HH:MM(:SS) 또는 occurredAt(YYYY-MM-DDTHH:MM:SS)
+    if len(raw) >= 16 and ("T" in raw or " " in raw):
+        raw = raw[11:16]
+    if len(raw) < 5 or ":" not in raw:
+        return None
+    try:
+        hh, mm = raw[:5].split(":")
+        hhi = int(hh)
+        mmi = int(mm)
+        if not (0 <= hhi <= 23 and 0 <= mmi <= 59):
+            return None
+        return hhi * 60 + mmi
+    except Exception:
+        return None
+
+
+def _minutes_diff(t1: int | None, t2: int | None) -> int | None:
+    if t1 is None or t2 is None:
+        return None
+    return abs(t1 - t2)
+
+
 def compare_evidence_to_voucher(
     extracted: ExtractedEvidence,
     body_evidence: dict[str, Any],
@@ -60,8 +87,7 @@ def compare_evidence_to_voucher(
             voucher_amount = None
     occurred_at = body_evidence.get("occurredAt")
     voucher_date = _parse_date(occurred_at[:10] if isinstance(occurred_at, str) and len(occurred_at) >= 10 else None)
-    mcc_code = (body_evidence.get("mccCode") or "").strip() or None
-    merchant_name = (body_evidence.get("merchantName") or "").strip() or None
+    occurred_minutes = _parse_time_to_minutes(occurred_at if isinstance(occurred_at, str) else None)
 
     # 금액 비교
     if extracted.amount is not None and voucher_amount is not None:
@@ -95,20 +121,29 @@ def compare_evidence_to_voucher(
     else:
         reasons.append("날짜 비교 생략(데이터 없음)")
 
-    # 업종 비교 (mcc 또는 업종명)
-    if extracted.industry_or_mcc or mcc_code:
-        ext_mcc = (extracted.industry_or_mcc or "").strip()
-        detail["mcc"] = {"voucher": mcc_code, "extracted": ext_mcc}
-        if mcc_code and ext_mcc and (mcc_code == ext_mcc or ext_mcc in (mcc_code, merchant_name or "")):
-            reasons.append("업종/MCC 일치")
-        elif not ext_mcc:
-            mismatches.append("mcc")
-            reasons.append("증빙에서 업종/MCC 미추출")
+    # 시간 비교 (approval_time vs occurred_at의 HH:MM)
+    ev_minutes = _parse_time_to_minutes(extracted.approval_time)
+    if ev_minutes is not None and occurred_minutes is not None:
+        mins = _minutes_diff(ev_minutes, occurred_minutes)
+        detail["time"] = {
+            "voucher": occurred_at[11:16] if isinstance(occurred_at, str) and len(occurred_at) >= 16 else None,
+            "extracted": extracted.approval_time,
+            "minutes_diff": mins,
+        }
+        if mins is not None and mins <= TIME_TOLERANCE_MINUTES:
+            reasons.append("승인시간 일치")
         else:
-            mismatches.append("mcc")
-            reasons.append(f"업종 불일치: 전표={mcc_code}, 증빙={ext_mcc}")
+            mismatches.append("time")
+            reasons.append(
+                f"시간 불일치: 전표={detail['time']['voucher']}, 증빙={extracted.approval_time}"
+            )
+    elif ev_minutes is None and occurred_minutes is not None:
+        mismatches.append("time")
+        reasons.append("증빙에서 승인시간 미추출")
     else:
-        reasons.append("업종 비교 생략")
+        reasons.append("시간 비교 생략(데이터 없음)")
+
+    # 업종/MCC 비교는 현재 판정 대상에서 제외 (UI 노출 문구는 추가하지 않음)
 
     passed = len(mismatches) == 0
     confidence = extracted.confidence if passed else max(0.0, extracted.confidence - 0.3)
@@ -119,6 +154,7 @@ def compare_evidence_to_voucher(
         extracted_fields={
             "amount": extracted.amount,
             "approval_date": extracted.approval_date,
+            "approval_time": extracted.approval_time,
             "industry_or_mcc": extracted.industry_or_mcc,
             "merchant_name": extracted.merchant_name,
         },

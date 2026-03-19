@@ -126,6 +126,8 @@ def _humanize_stream_text(text: str) -> str:
     out = str(text or "")
     for key in sorted(STREAM_TERM_MAP.keys(), key=len, reverse=True):
         out = out.replace(key, STREAM_TERM_MAP[key])
+    # 예: "검토 필요(검토 필요(REVIEW_REQUIRED))" -> "검토 필요(REVIEW_REQUIRED)"
+    out = re.sub(r"([^\(\)]+)\(\1\(([A-Z_]+)\)\)", r"\1(\2)", out)
     return out
 
 
@@ -1278,21 +1280,36 @@ def _pipeline_state_from_events(events: list[dict[str, Any]]) -> tuple[list[str]
     """이벤트 목록에서 완료된 노드와 현재 노드 추출."""
     all_ids = [n[0] for n in PIPELINE_NODES]
     completed_set: set[str] = set()
+    seen_nodes: set[str] = set()
+    resume_mode = False
     current = all_ids[0] if all_ids else ""
     for event in events:
         payload = event.get("payload") or {}
         if event.get("event_type") != "AGENT_EVENT":
             continue
         event_type = str(payload.get("event_type") or "").upper()
+        if _normalize_pipeline_node(payload.get("node")) == "bootstrap":
+            meta = payload.get("metadata") or {}
+            if bool(meta.get("resume")):
+                resume_mode = True
         node_id = _normalize_pipeline_node(payload.get("node"))
         if node_id not in all_ids:
             continue
+        seen_nodes.add(node_id)
         if event_type in {"NODE_END", "SCREENING_RESULT"} and node_id == "screener":
             completed_set.add(node_id)
         elif event_type == "NODE_END":
             completed_set.add(node_id)
         elif event_type == "NODE_START":
             current = node_id
+    # 재개(run resume)에서는 후반 노드만 이벤트가 쌓일 수 있다.
+    # 이 경우 재개 시작 노드 이전 단계는 이미 완료된 것으로 간주해 진행바 왜곡을 막는다.
+    if resume_mode and seen_nodes:
+        idxs = [all_ids.index(node) for node in seen_nodes if node in all_ids]
+        if idxs:
+            earliest_idx = min(idxs)
+            for i in range(earliest_idx):
+                completed_set.add(all_ids[i])
     completed = [node_id for node_id, _ in PIPELINE_NODES if node_id in completed_set]
     if completed and current in completed:
         idx = all_ids.index(completed[-1])
@@ -1848,11 +1865,35 @@ def _latest_history_hitl_submission(latest_bundle: dict[str, Any]) -> tuple[dict
     return ({}, {})
 
 
+def _latest_history_hitl_request(latest_bundle: dict[str, Any]) -> dict[str, Any]:
+    history = latest_bundle.get("history") or []
+    run_id = str(latest_bundle.get("run_id") or "")
+    if run_id:
+        for item in reversed(history):
+            if str(item.get("run_id") or "") != run_id:
+                continue
+            req = item.get("hitl_request")
+            if isinstance(req, dict) and req:
+                return req
+    for item in reversed(history):
+        req = item.get("hitl_request")
+        if isinstance(req, dict) and req:
+            return req
+    return {}
+
+
 def _prime_hitl_form_state(run_id: str, latest_bundle: dict[str, Any]) -> dict[str, str]:
-    _prev_req, prev_resp = _latest_history_hitl_submission(latest_bundle)
+    prev_req, prev_resp = _latest_history_hitl_submission(latest_bundle)
+    if not prev_req:
+        prev_req = _latest_history_hitl_request(latest_bundle)
+    resolved_req = _resolve_hitl_request(latest_bundle)
     draft = latest_bundle.get("hitl_draft") or latest_bundle.get("hitl_response") or prev_resp or {}
     extra_facts = draft.get("extra_facts") or {}
-    required_inputs = (latest_bundle.get("hitl_request") or {}).get("required_inputs") or []
+    required_inputs = (
+        (latest_bundle.get("hitl_request") or {}).get("required_inputs")
+        or (resolved_req.get("required_inputs") or [])
+        or (prev_req.get("required_inputs") or [])
+    )
     defaults = {
         "reviewer": draft.get("reviewer") or "FINANCE_REVIEWER",
         "business_purpose": draft.get("business_purpose") or "",
@@ -2103,7 +2144,7 @@ def _render_evidence_upload_section(
         else:
             reasons = evidence_result.get("reasons") or []
             st.warning("증빙 불일치: " + ("; ".join(reasons[:5]) if reasons else "항목 확인 필요"))
-            if not is_rejected:
+            if not is_rejected and not inside_popup:
                 st.caption("불일치인 경우에도 아래 통합 버튼으로 '증빙 반려' 확정 후 케이스를 마감할 수 있습니다.")
         if not inside_popup and st.button("완료 반영 (재분석 확정)", key=f"hitl_evidence_resume_{vkey}"):
             try:
@@ -2114,10 +2155,12 @@ def _render_evidence_upload_section(
             except Exception as e:
                 st.error(f"반영 실패: {e}")
     uploaded = None
-    if is_rejected or evidence_result is None:
+    # 팝업에서는 비교 결과가 있어도 항상 재업로드를 허용한다.
+    if inside_popup or is_rejected or evidence_result is None:
+        label_suffix = " — 재업로드" if (evidence_result is not None or is_rejected) else ""
         ev_upload_key = f"hitl_evidence_file_{vkey}"
         uploaded = st.file_uploader(
-            "증빙 문서 (PDF/이미지 등)" + (" — 재업로드" if is_rejected else ""),
+            "증빙 문서 (PDF/이미지 등)" + label_suffix,
             type=["pdf", "png", "jpg", "jpeg"],
             key=ev_upload_key,
         )
@@ -2128,7 +2171,11 @@ def _render_evidence_upload_section(
                 try:
                     file_bytes = uploaded.getvalue()
                     post_multipart(f"/api/v1/analysis-runs/{run_id}/evidence-upload", uploaded.name or "upload", file_bytes)
-                    post(f"/api/v1/analysis-runs/{run_id}/evidence-resume")
+                    # 비교는 review-submit(분석 이어가기) 시점에 수행
+                    post(
+                        f"/api/v1/analysis-runs/{run_id}/review-submit",
+                        json_body={"evidence_uploaded": True, "hitl_response": None},
+                    )
                     st.success("증빙 업로드 및 재분석 반영이 완료되었습니다.")
                     st.rerun()
                 except Exception as e:
@@ -2709,38 +2756,50 @@ def render_hitl_panel(latest_bundle: dict[str, Any], *, vkey: str | None = None)
         )
 
         prev_req, prev_resp = _latest_history_hitl_submission(bundle_for_hitl)
-        if prev_resp:
+        if not prev_req:
+            prev_req = _latest_history_hitl_request(bundle_for_hitl)
+        if prev_req or prev_resp:
             prev_questions = [
                 str(x).strip()
                 for x in (prev_req.get("review_questions") or prev_req.get("questions") or [])
                 if str(x).strip()
             ]
+            if not prev_questions:
+                for req in (prev_req.get("required_inputs") or []):
+                    if not isinstance(req, dict):
+                        continue
+                    q = str(req.get("guide") or req.get("reason") or "").strip()
+                    if q:
+                        prev_questions.append(q)
             prev_extra = prev_resp.get("extra_facts") if isinstance(prev_resp.get("extra_facts"), dict) else {}
             with st.expander("이전 제출 질문/답변 보기", expanded=False):
                 if prev_questions:
                     st.markdown("**이전 질문**")
                     for idx, q in enumerate(prev_questions, start=1):
                         st.caption(f"{idx}. {q}")
-                st.markdown("**이전 답변**")
-                st.caption(f"- 판단: {'승인 가능' if prev_resp.get('approved') is True else '보류/추가 검토'}")
-                if prev_resp.get("business_purpose"):
-                    st.caption(f"- 업무 목적: {prev_resp.get('business_purpose')}")
-                attendees = prev_resp.get("attendees") or []
-                if attendees:
-                    st.caption(f"- 참석자: {', '.join(str(x) for x in attendees)}")
-                for k, v in prev_extra.items():
-                    if str(v or "").strip():
-                        st.caption(f"- {k}: {v}")
-                if prev_resp.get("comment"):
-                    st.markdown("**검토 의견(이전 제출)**")
-                    st.text_area(
-                        "이전 검토 의견",
-                        value=str(prev_resp.get("comment") or ""),
-                        height=96,
-                        disabled=True,
-                        key=f"hitl_prev_comment_{run_id}",
-                        label_visibility="collapsed",
-                    )
+                if prev_resp:
+                    st.markdown("**이전 답변**")
+                    st.caption(f"- 판단: {'승인 가능' if prev_resp.get('approved') is True else '보류/추가 검토'}")
+                    if prev_resp.get("business_purpose"):
+                        st.caption(f"- 업무 목적: {prev_resp.get('business_purpose')}")
+                    attendees = prev_resp.get("attendees") or []
+                    if attendees:
+                        st.caption(f"- 참석자: {', '.join(str(x) for x in attendees)}")
+                    for k, v in prev_extra.items():
+                        if str(v or "").strip():
+                            st.caption(f"- {k}: {v}")
+                    if prev_resp.get("comment"):
+                        st.markdown("**검토 의견(이전 제출)**")
+                        st.text_area(
+                            "이전 검토 의견",
+                            value=str(prev_resp.get("comment") or ""),
+                            height=96,
+                            disabled=True,
+                            key=f"hitl_prev_comment_{run_id}",
+                            label_visibility="collapsed",
+                        )
+                else:
+                    st.caption("- 이전 제출 답변 없음")
 
         required_inputs = (hitl_request.get("required_inputs") or [])
         _req_fields = {(req.get("field") or "").strip() for req in required_inputs}
@@ -2838,6 +2897,7 @@ def render_hitl_panel(latest_bundle: dict[str, Any], *, vkey: str | None = None)
                 "extra_facts": extra_facts,
             }
             evidence_uploaded = has_evidence_result
+            upload_failed = False
             if uploaded_file is not None and getattr(uploaded_file, "getvalue", None):
                 try:
                     file_bytes = uploaded_file.getvalue()
@@ -2849,7 +2909,13 @@ def render_hitl_panel(latest_bundle: dict[str, Any], *, vkey: str | None = None)
                     evidence_uploaded = True
                 except Exception as e:
                     st.error(f"증빙 업로드 실패: {e}")
-                    evidence_uploaded = evidence_uploaded or False
+                    evidence_uploaded = False
+                    upload_failed = True
+            # 사용자가 파일을 선택했는데 업로드 실패한 경우, HITL 제출을 막아
+            # "비교 없이 승인"으로 빠지는 우회를 방지한다.
+            if upload_failed:
+                st.warning("증빙 업로드에 실패해 분석 이어가기를 중단했습니다. 업로드 성공 후 다시 시도해 주세요.")
+                return
             if not evidence_uploaded and not _has_pending_hitl(latest_bundle):
                 st.warning("증빙이 필요한 경우 파일을 선택한 뒤 다시 눌러 주세요.")
             else:
@@ -3024,23 +3090,30 @@ def render_workspace_case_queue(items: list[dict[str, Any]], selected_key: str |
         [class*="st-key-case_kpi_"] [data-testid="stButton"] > button {
           width: 100% !important;
           text-align: center !important;
-          padding: 8px 10px !important;
+          padding: 8px 8px !important;
           border-radius: 14px !important;
           border: 1px solid #e5e7eb !important;
           background: rgba(255,255,255,0.98) !important;
           box-shadow: 0 10px 24px rgba(15,23,42,0.05) !important;
           min-height: 52px !important;
-          white-space: pre-line !important;
-          font-size: 1.75rem !important; /* count */
+          white-space: pre !important; /* 라벨 개행은 유지, 숫자 줄 강제 줄바꿈 방지 */
+          overflow-wrap: normal !important;
+          word-break: keep-all !important;
+          letter-spacing: 0 !important;
+          font-size: 1.58rem !important; /* count */
           font-weight: 900 !important;
           font-variant-numeric: tabular-nums !important;
-          line-height: 1.08 !important;
+          line-height: 1.04 !important;
         }
         [class*="st-key-case_kpi_"] [data-testid="stButton"] > button p {
           margin: 0 !important;
-          font-size: 1.75rem !important;
+          font-size: 1.58rem !important;
           font-weight: 900 !important;
-          line-height: 1.08 !important;
+          line-height: 1.04 !important;
+          white-space: pre !important;
+          overflow-wrap: normal !important;
+          word-break: keep-all !important;
+          letter-spacing: 0 !important;
           font-variant-numeric: tabular-nums !important;
         }
         /* 첫 줄(타이틀)은 더 작게 */

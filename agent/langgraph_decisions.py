@@ -14,6 +14,21 @@ from utils.llm_azure import completion_kwargs_for_azure
 logger = logging.getLogger(__name__)
 
 
+def _strip_hold_prefix(text: str) -> str:
+    """HOLD 문구 앞머리 중복 제거."""
+    raw = str(text or "").strip()
+    if not raw:
+        return ""
+    patterns = [
+        r"^\s*담당자\s*검토\s*결과\s*보류합니다\.?\s*",
+        r"^\s*보류합니다\.?\s*",
+    ]
+    cleaned = raw
+    for p in patterns:
+        cleaned = re.sub(p, "", cleaned, flags=re.IGNORECASE)
+    return cleaned.strip()
+
+
 async def _select_policy_refs_by_relevance(
     state: dict[str, Any],
     refs: list[dict[str, Any]],
@@ -107,6 +122,20 @@ async def _llm_decide_hitl_verdict(
     evidence_passed = None
     if isinstance(evidence_result, dict) and evidence_result:
         evidence_passed = evidence_result.get("passed") is True
+        if evidence_passed is False:
+            llm_reason = await _llm_summarize_evidence_review_reason(
+                evidence_result=evidence_result,
+                reviewer_approved=approved,
+                reviewer_comment=comment,
+            )
+            reason = llm_reason or "첨부 증빙 대조 결과에서 불일치가 확인되어 추가 확인이 필요합니다."
+            logger.info(
+                "[VERDICT_LLM] 증빙 불일치 강제 재검토: approved=%s evidence_passed=%s reasons=%s",
+                approved,
+                evidence_passed,
+                (evidence_result.get("reasons") or [])[:3],
+            )
+            return ("REVIEW_REQUIRED", reason)
 
     context = {
         "why_hitl": why,
@@ -118,6 +147,7 @@ async def _llm_decide_hitl_verdict(
         "reviewer_comment_preview": (comment[:200] + "…") if len(comment) > 200 else comment,
         "reviewer_extra_facts_keys": list(extra.keys())[:10] if isinstance(extra, dict) else [],
         "evidence_upload_passed": evidence_passed,
+        "evidence_reasons": (evidence_result.get("reasons") if isinstance(evidence_result, dict) else []) or [],
     }
     system = (
         "당신은 엔터프라이즈 감사 에이전트의 판단자다. "
@@ -142,6 +172,7 @@ async def _llm_decide_hitl_verdict(
         f"의견 미리보기: {context['reviewer_comment_preview'] or '(없음)'}\n"
         f"추가 사실 키: {context['reviewer_extra_facts_keys']}\n"
         f"증빙 업로드 검증 통과: {evidence_passed}\n\n"
+        f"증빙 비교 사유: {json.dumps(context['evidence_reasons'], ensure_ascii=False)}\n\n"
         "위 맥락을 바탕으로 verdict와 reason을 JSON으로 출력하라."
     )
     logger.info(
@@ -294,6 +325,68 @@ async def _llm_summarize_hold_reason(hitl_response: dict[str, Any]) -> str:
             return first
     except Exception as e:
         logger.warning("[VERDICT_LLM] HOLD 사유 LLM 요약 실패: %s", type(e).__name__)
+    return ""
+
+
+async def _llm_summarize_evidence_review_reason(
+    *,
+    evidence_result: dict[str, Any],
+    reviewer_approved: bool,
+    reviewer_comment: str,
+) -> str:
+    """증빙 비교 실패 사유를 REVIEW_REQUIRED용 한 문장으로 요약."""
+    reasons = evidence_result.get("reasons") or []
+    mismatches = evidence_result.get("mismatches") or []
+    detail = evidence_result.get("comparison_detail") or {}
+    context = {
+        "reasons": reasons[:5],
+        "mismatches": mismatches[:5],
+        "comparison_detail": detail,
+        "reviewer_choice": "approve" if reviewer_approved else "hold",
+        "reviewer_comment": (reviewer_comment or "")[:300],
+    }
+    system = (
+        "당신은 감사 결과 요약자다. "
+        "증빙-전표 비교 결과를 바탕으로 왜 추가 확인이 필요한지 한국어 한 문장(90자 내외)으로 작성하라. "
+        "문장에는 반드시 담당자가 승인/보류 중 어떤 선택으로 제출했는지 맥락을 자연스럽게 포함하라. "
+        "예: '담당자는 승인으로 제출했으나 ...', '담당자는 보류로 제출했고 ...'. "
+        "판정 단어(REVIEW_REQUIRED/HOLD/승인)를 직접 쓰지 말고, 사실 중심으로 작성하라. "
+        "문장 1개만 출력한다."
+    )
+    user = f"[증빙 비교 결과]\n{json.dumps(context, ensure_ascii=False)}"
+    try:
+        from openai import AsyncAzureOpenAI, AsyncOpenAI
+
+        base_url = (getattr(settings, "openai_base_url") or "").strip()
+        is_azure = ".openai.azure.com" in base_url
+        if is_azure:
+            azure_ep = base_url.rstrip("/")
+            if azure_ep.endswith("/openai/v1"):
+                azure_ep = azure_ep[: -len("/openai/v1")]
+            client = AsyncAzureOpenAI(
+                api_key=settings.openai_api_key,
+                azure_endpoint=azure_ep,
+                api_version=getattr(settings, "openai_api_version", "2024-02-15-preview"),
+            )
+        else:
+            client = AsyncOpenAI(api_key=settings.openai_api_key, base_url=base_url or None)
+        completion_tokens_kw = {"max_completion_tokens": 220} if is_azure else {"max_tokens": 220}
+        response = await client.chat.completions.create(
+            **completion_kwargs_for_azure(
+                base_url,
+                model=settings.reasoning_llm_model,
+                messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
+                **completion_tokens_kw,
+            )
+        )
+        raw = (response.choices[0].message.content or "").strip()
+        if raw:
+            first = raw.split("\n")[0].strip()
+            if len(first) > 280:
+                first = first[:277] + "…"
+            return first
+    except Exception as e:
+        logger.warning("[VERDICT_LLM] evidence review reason 요약 실패: %s", type(e).__name__)
     return ""
 
 
@@ -472,7 +565,8 @@ def _build_grounded_reason(state: dict[str, Any], completed_tail: str | None = N
                 status = "HOLD_AFTER_HITL"
                 hitl_reason = (state.get("reporter_output") or {}).get("hitl_verdict_reason") or ""
                 if hitl_reason:
-                    tail = f"담당자 검토 결과 보류합니다. {hitl_reason}"
+                    cleaned = _strip_hold_prefix(hitl_reason)
+                    tail = f"담당자 검토 결과 보류합니다. {cleaned}" if cleaned else "담당자 검토 결과 보류합니다."
                 else:
                     hitl_response = (body.get("hitlResponse") or {}) if isinstance(body.get("hitlResponse"), dict) else {}
                     hold_reason = (hitl_response.get("comment") or hitl_response.get("business_purpose") or "").strip()

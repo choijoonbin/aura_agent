@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
+import re
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel
@@ -14,7 +17,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from agent.aura_bridge import run_agent_analysis
-from db.session import get_db
+from db.session import SessionLocal, get_db
 from services.agent_studio_service import get_agent_detail, list_agents
 from services.case_service import (
     build_analysis_payload,
@@ -25,7 +28,7 @@ from services.case_service import (
     upsert_agent_case_from_screening_result,
 )
 from services.evidence_compare_service import compare_evidence_to_voucher
-from services.evidence_extraction import extract_from_bytes
+from services.evidence_extraction import ExtractedEvidence, extract_from_bytes, extract_from_file
 from services.demo_data_service import clear_demo_data, list_demo_scenarios, list_seeded_demo_cases, seed_demo_scenarios
 from services.graph_db_service import (
     get_case_explain_graph,
@@ -67,6 +70,43 @@ logger = logging.getLogger(__name__)
 app = FastAPI(title="AuraAgent PoC API", version="0.3.0")
 
 
+def _normalize_date_text(raw: str | None) -> str:
+    text = str(raw or "").strip()
+    if not text:
+        return ""
+    m = re.search(r"(\d{4})[./-](\d{1,2})[./-](\d{1,2})", text)
+    if not m:
+        return ""
+    yyyy, mm, dd = m.group(1), m.group(2).zfill(2), m.group(3).zfill(2)
+    return f"{yyyy}-{mm}-{dd}"
+
+
+def _normalize_time_text(raw: str | None) -> str:
+    text = str(raw or "").strip()
+    if not text:
+        return ""
+    # unicode colon normalize
+    text = text.replace("：", ":")
+    m = re.search(r"\b(\d{1,2}):(\d{2})(?::\d{2})?\s*(AM|PM)?\b", text, re.IGNORECASE)
+    if not m:
+        m = re.search(r"(\d{1,2})\s*시\s*(\d{2})\s*분", text)
+        if not m:
+            return ""
+    try:
+        hh = int(m.group(1))
+        minute = m.group(2)
+        ampm = (m.group(3) or "").upper() if len(m.groups()) >= 3 else ""
+        if ampm == "PM" and hh < 12:
+            hh += 12
+        if ampm == "AM" and hh == 12:
+            hh = 0
+        if not (0 <= hh <= 23):
+            return ""
+        return f"{hh:02d}:{minute}"
+    except Exception:
+        return ""
+
+
 def _ensure_runtime_resume_context(run_id: str, lineage: dict[str, Any] | None) -> None:
     """
     DB(aux)에서만 lineage를 복원한 재개 요청(review-submit/hitl)에서도
@@ -86,6 +126,117 @@ def _ensure_runtime_resume_context(run_id: str, lineage: dict[str, Any] | None) 
         created_at=info.get("created_at"),
     )
     logger.info("[analysis] runtime resume context ensured run_id=%s case_id=%s", run_id, case_id)
+
+
+def _extract_evidence_llm_first(
+    *,
+    file_path: str | None,
+    file_bytes: bytes,
+    filename: str | None,
+) -> ExtractedEvidence:
+    """분석 이어가기 시점 증빙 추출.
+
+    우선순위:
+    1) 이미지 + OpenAI 키 설정 시 Vision LLM 추출
+    2) 실패/비이미지 시 OCR 기반 extract_from_file fallback
+    """
+    suffix = str(filename or file_path or "").lower()
+    is_image = any(suffix.endswith(ext) for ext in (".png", ".jpg", ".jpeg", ".webp"))
+
+    if is_image and getattr(settings, "openai_api_key", None):
+        try:
+            from utils.llm_azure import analyze_visual_evidence
+
+            b64 = base64.b64encode(file_bytes).decode("utf-8")
+            mm = analyze_visual_evidence(b64)
+            entities = getattr(mm, "entities", []) or []
+
+            def _pick(label: str) -> str:
+                for e in entities:
+                    if str(getattr(e, "label", "") or "") == label:
+                        return str(getattr(e, "text", "") or "").strip()
+                return ""
+
+            def _pick_all(labels: tuple[str, ...]) -> list[str]:
+                out: list[str] = []
+                for e in entities:
+                    lbl = str(getattr(e, "label", "") or "")
+                    if lbl in labels:
+                        txt = str(getattr(e, "text", "") or "").strip()
+                        if txt:
+                            out.append(txt)
+                return out
+
+            amount_text = _pick("amount_total").replace(",", "").replace("원", "").strip()
+            amount_val: float | None = None
+            if amount_text:
+                try:
+                    amount_val = float(amount_text)
+                except Exception:
+                    amount_val = None
+
+            # date/time: 시연데이터 생성(Beta)과 동일하게 '거래일시' 합본 케이스까지 보정.
+            raw_date = _pick("date_occurrence")
+            raw_time = _pick("time_occurrence")
+            date_text = _normalize_date_text(raw_date)
+            time_text = _normalize_time_text(raw_time)
+            if not date_text:
+                date_text = _normalize_date_text(raw_time)
+            if not time_text:
+                time_text = _normalize_time_text(raw_date)
+            if not date_text or not time_text:
+                # 양 라벨을 모두 훑어서 누락 보완 (라벨 매핑 흔들림 대응)
+                dt_candidates = _pick_all(("date_occurrence", "time_occurrence"))
+                for candidate in dt_candidates:
+                    if not date_text:
+                        date_text = _normalize_date_text(candidate)
+                    if not time_text:
+                        time_text = _normalize_time_text(candidate)
+                    if date_text and time_text:
+                        break
+
+            merchant_text = _pick("merchant_name")
+            confs = [float(getattr(e, "confidence", 0.0) or 0.0) for e in entities if getattr(e, "label", None)]
+            conf = sum(confs) / len(confs) if confs else 0.0
+            extracted = ExtractedEvidence(
+                amount=amount_val,
+                approval_date=date_text or None,
+                approval_time=time_text or None,
+                industry_or_mcc=None,
+                merchant_name=merchant_text or None,
+                raw_snippets=[],
+                confidence=float(conf),
+                extractor_meta={
+                    "source": "vision_llm_review_submit",
+                    "fallback_used": bool(getattr(mm, "fallback_used", False)),
+                },
+            )
+            # LLM 결과 일부 누락 시 OCR 파서 결과로 빈 필드만 보완
+            need_fill = (
+                extracted.amount is None
+                or extracted.approval_date is None
+                or extracted.approval_time is None
+                or extracted.merchant_name is None
+            )
+            if need_fill:
+                path_obj = Path(file_path) if file_path else Path(filename or "upload")
+                ocr_ex = extract_from_file(path_obj, file_bytes=file_bytes)
+                if extracted.amount is None and ocr_ex.amount is not None:
+                    extracted.amount = ocr_ex.amount
+                if not extracted.approval_date and ocr_ex.approval_date:
+                    extracted.approval_date = _normalize_date_text(ocr_ex.approval_date) or ocr_ex.approval_date
+                if not extracted.approval_time and ocr_ex.approval_time:
+                    extracted.approval_time = _normalize_time_text(ocr_ex.approval_time) or ocr_ex.approval_time
+                if not extracted.merchant_name and ocr_ex.merchant_name:
+                    extracted.merchant_name = ocr_ex.merchant_name
+                extracted.extractor_meta["ocr_backfill"] = True
+                extracted.extractor_meta["ocr_backfill_source"] = (ocr_ex.extractor_meta or {}).get("source")
+            return extracted
+        except Exception as exc:
+            logger.warning("review-submit LLM evidence extract failed, fallback to OCR: %s", exc)
+
+    path_obj = Path(file_path) if file_path else Path(filename or "upload")
+    return extract_from_file(path_obj, file_bytes=file_bytes)
 
 
 @app.on_event("startup")
@@ -528,6 +679,160 @@ async def _run_analysis_task(
             await runtime.close(run_id)
 
 
+async def _publish_system_progress(
+    run_id: str,
+    *,
+    node: str,
+    message: str,
+    step: str,
+) -> None:
+    try:
+        await runtime.publish(
+            run_id,
+            "AGENT_EVENT",
+            {
+                "event_type": "NODE_START",
+                "node": node,
+                "phase": "system",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "message": message,
+                "metadata": {"step": step},
+            },
+        )
+    except Exception:
+        pass
+
+
+async def _run_analysis_with_evidence_prepare(
+    *,
+    run_id: str,
+    case_id: str,
+    voucher_key: str,
+    body_evidence: dict[str, Any],
+    intended_risk_type: str | None,
+    resume_value: dict[str, Any] | None,
+    previous_result: dict[str, Any] | None,
+    evidence_upload_file: dict[str, Any] | None,
+    evidence_result: dict[str, Any] | None,
+) -> None:
+    evidence_doc = evidence_result
+    try:
+        if not evidence_doc and isinstance(evidence_upload_file, dict):
+            saved_path = str(evidence_upload_file.get("saved_path") or "").strip()
+            filename = str(evidence_upload_file.get("filename") or "upload").strip()
+            if saved_path:
+                await _publish_system_progress(
+                    run_id,
+                    node="evidence_prepare",
+                    message="증빙 검증을 시작합니다.",
+                    step="evidence_start",
+                )
+                await _publish_system_progress(
+                    run_id,
+                    node="evidence_prepare",
+                    message="증빙 파일을 확인하고 있습니다.",
+                    step="evidence_read",
+                )
+                file_bytes = await asyncio.to_thread(Path(saved_path).read_bytes)
+                await _publish_system_progress(
+                    run_id,
+                    node="evidence_prepare",
+                    message="증빙 이미지에서 필드 값을 추출 중입니다.",
+                    step="evidence_extract",
+                )
+                extracted = await asyncio.to_thread(
+                    _extract_evidence_llm_first,
+                    file_path=saved_path,
+                    file_bytes=file_bytes,
+                    filename=filename,
+                )
+                await _publish_system_progress(
+                    run_id,
+                    node="evidence_prepare",
+                    message="전표 데이터와 증빙 추출값을 비교 중입니다.",
+                    step="evidence_compare",
+                )
+                comparison = await asyncio.to_thread(compare_evidence_to_voucher, extracted, body_evidence)
+                evidence_doc = {
+                    "passed": comparison.passed,
+                    "confidence": comparison.confidence,
+                    "reasons": comparison.reasons,
+                    "extracted_fields": comparison.extracted_fields,
+                    "comparison_detail": comparison.comparison_detail,
+                    "mismatches": comparison.mismatches,
+                    "file_sha256": evidence_upload_file.get("file_sha256"),
+                    "filename": filename,
+                    "extractor_meta": getattr(extracted, "extractor_meta", {}) or {},
+                }
+                with SessionLocal() as persist_db:
+                    try:
+                        log_run_event(
+                            persist_db,
+                            run_id=run_id,
+                            case_id=case_id,
+                            voucher_key=voucher_key,
+                            stage="evidence",
+                            event_type="EVIDENCE_COMPARED",
+                            metadata={
+                                "stored_event_type": "EVIDENCE_COMPARED",
+                                "evidence_document_result": evidence_doc,
+                            },
+                        )
+                    except Exception:
+                        pass
+                await _publish_system_progress(
+                    run_id,
+                    node="evidence_prepare",
+                    message="증빙 검증을 완료했습니다. 분석을 이어갑니다.",
+                    step="evidence_done",
+                )
+        if evidence_doc:
+            body_evidence["evidenceDocumentResult"] = evidence_doc
+
+        await _run_analysis_task(
+            run_id=run_id,
+            case_id=case_id,
+            body_evidence=body_evidence,
+            intended_risk_type=intended_risk_type,
+            resume_value=resume_value,
+            previous_result=previous_result,
+        )
+    except Exception as e:
+        logger.exception("review-submit async evidence prepare failed run_id=%s", run_id)
+        fail_text = f"증빙 검증 준비 중 오류가 발생했습니다: {e}"
+        fail_payload = {"status": "REVIEW_REQUIRED", "error": str(e), "reasonText": fail_text, "stage": "evidence_prepare"}
+        try:
+            await runtime.publish(run_id, "failed", fail_payload)
+        except Exception:
+            pass
+        try:
+            with SessionLocal() as persist_db:
+                result_payload = {
+                    "result": {
+                        "status": "REVIEW_REQUIRED",
+                        "reasonText": fail_text,
+                        "severity": "MEDIUM",
+                        "score": 50,
+                        "score_breakdown": {},
+                        "tool_results": [],
+                    }
+                }
+                log_run_event(
+                    persist_db,
+                    run_id=run_id,
+                    case_id=case_id,
+                    voucher_key=voucher_key,
+                    stage="evidence",
+                    event_type="RUN_FAILED",
+                    metadata={"stored_event_type": "RUN_FAILED", "payload": fail_payload, "result": result_payload},
+                )
+                persist_analysis_result(persist_db, run_id=run_id, result_payload=result_payload)
+                update_agent_case_status_from_run(persist_db, voucher_key, "REVIEW_REQUIRED")
+                runtime.set_result(run_id, result_payload)
+        except Exception:
+            pass
+
+
 @app.post("/api/v1/cases/{voucher_key}/screen")
 def screen_voucher(voucher_key: str, db: Session = Depends(get_db)) -> dict[str, Any]:
     """
@@ -635,7 +940,11 @@ async def submit_hitl(run_id: str, request: HitlSubmitRequest, db: Session = Dep
             voucher_key=voucher_key,
             stage="hitl",
             event_type="HITL_RESPONSE",
-            metadata={"stored_event_type": "HITL_RESPONSE", "hitl_response": hitl_payload},
+            metadata={
+                "stored_event_type": "HITL_RESPONSE",
+                "hitl_response": hitl_payload,
+                "hitl_request": hitl_request,
+            },
         )
     except Exception:
         pass
@@ -695,8 +1004,8 @@ async def evidence_upload(
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     """
-    Phase 1–2: REVIEW_REQUIRED인 run에 대해 증빙 파일 업로드 → 저장·추출·전표 비교 후
-    evidence_document_result를 agent_activity_log에 기록. 이후 evidence-resume으로 완료 처리.
+    HITL/검토 단계 증빙 파일 업로드.
+    이 단계에서는 파일 저장만 수행하고, 값 추출/전표 비교는 review-submit(분석 이어가기) 시점에 수행한다.
     """
     lineage = runtime.get_lineage(run_id)
     aux = get_run_aux_state(db, run_id=run_id)
@@ -708,10 +1017,24 @@ async def evidence_upload(
     if not voucher_key:
         raise HTTPException(status_code=400, detail="voucher_key not found for run")
     current_status = get_agent_case_status(db, voucher_key)
-    if current_status not in ("REVIEW_REQUIRED", "EVIDENCE_REJECTED"):
+    # HITL 팝업 단계에서도 증빙 비교를 허용한다.
+    # (기존 REVIEW_REQUIRED/EVIDENCE_REJECTED만 허용하면 HITL_REQUIRED에서 업로드가 막혀
+    #  비교 없이 review-submit으로 진행될 수 있음)
+    allowed_statuses = {
+        "REVIEW_REQUIRED",
+        "EVIDENCE_REJECTED",
+        "HITL_REQUIRED",
+        "REVIEW_AFTER_HITL",
+        "HOLD_AFTER_HITL",
+        "IN_REVIEW",
+    }
+    if str(current_status or "").upper() not in allowed_statuses:
         raise HTTPException(
             status_code=400,
-            detail=f"evidence upload only when case status is REVIEW_REQUIRED or EVIDENCE_REJECTED (current: {current_status})",
+            detail=(
+                "evidence upload only when case status is one of "
+                f"{sorted(allowed_statuses)} (current: {current_status})"
+            ),
         )
     try:
         payload = build_analysis_payload(db, voucher_key)
@@ -721,17 +1044,11 @@ async def evidence_upload(
     content = await file.read()
     if not content:
         raise HTTPException(status_code=400, detail="empty file")
-    extracted, sha256_hex, _ = extract_from_bytes(content, run_id, file.filename or "upload")
-    comparison = compare_evidence_to_voucher(extracted, body_evidence)
-    evidence_document_result = {
-        "passed": comparison.passed,
-        "confidence": comparison.confidence,
-        "reasons": comparison.reasons,
-        "extracted_fields": comparison.extracted_fields,
-        "comparison_detail": comparison.comparison_detail,
-        "mismatches": comparison.mismatches,
+    _, sha256_hex, saved_path = extract_from_bytes(content, run_id, file.filename or "upload")
+    evidence_upload_file = {
         "file_sha256": sha256_hex,
         "filename": file.filename,
+        "saved_path": str(saved_path),
     }
     try:
         log_run_event(
@@ -743,7 +1060,7 @@ async def evidence_upload(
             event_type="EVIDENCE_UPLOADED",
             metadata={
                 "stored_event_type": "EVIDENCE_UPLOADED",
-                "evidence_document_result": evidence_document_result,
+                "evidence_upload_file": evidence_upload_file,
             },
         )
     except Exception:
@@ -751,7 +1068,7 @@ async def evidence_upload(
     return {
         "accepted": True,
         "run_id": run_id,
-        "evidence_document_result": evidence_document_result,
+        "evidence_upload_file": evidence_upload_file,
     }
 
 
@@ -875,7 +1192,8 @@ async def review_submit(
         or aux.get("hitl_request")
         or (base_result.get("hitl_request") if isinstance(base_result.get("hitl_request"), dict) else None)
     )
-    evidence_result = aux.get("evidence_document_result") if request.evidence_uploaded else None
+    evidence_result = aux.get("evidence_document_result")
+    evidence_upload_file = aux.get("evidence_upload_file") if isinstance(aux.get("evidence_upload_file"), dict) else {}
 
     # hitl_request가 있는데 body에 hitl_response가 없으면 최소 payload로 진행(400 방지). 판단은 이후 LLM이 수행.
     if hitl_request and request.hitl_response is None:
@@ -897,7 +1215,11 @@ async def review_submit(
                 voucher_key=voucher_key,
                 stage="hitl",
                 event_type="HITL_RESPONSE",
-                metadata={"stored_event_type": "HITL_RESPONSE", "hitl_response": hitl_payload},
+                metadata={
+                    "stored_event_type": "HITL_RESPONSE",
+                    "hitl_response": hitl_payload,
+                    "hitl_request": hitl_request,
+                },
             )
         except Exception:
             pass
@@ -912,6 +1234,20 @@ async def review_submit(
         # body_evidence에 HITL 응답을 명시적으로 주입해 재분석 입력으로 항상 전달한다.
         body_evidence["hitlResponse"] = hitl_payload
         body_evidence["hitlRequest"] = hitl_request
+        # 증빙 비교는 업로드 시점이 아니라 review-submit(분석 이어가기) 시점에 수행한다.
+        # 여기서는 파일 존재만 확인하고 즉시 스트림을 열어, 진행 상태를 SSE로 보여준다.
+        if request.evidence_uploaded and not evidence_result:
+            saved_path = str(evidence_upload_file.get("saved_path") or "").strip()
+            if not saved_path:
+                raise HTTPException(
+                    status_code=400,
+                    detail="evidence file not found; please upload evidence in HITL popup and retry",
+                )
+            if not Path(saved_path).exists():
+                raise HTTPException(
+                    status_code=400,
+                    detail="uploaded evidence file path is invalid; please upload evidence again",
+                )
         if evidence_result:
             body_evidence["evidenceDocumentResult"] = evidence_result
         # HITL_REQUIRED(실제 interrupt 대기)에서만 Command(resume=...)로 재개.
@@ -919,7 +1255,18 @@ async def review_submit(
         base_status = str((base_result or {}).get("status") or "").upper()
         has_runtime_hitl = bool(runtime.get_hitl_request(run_id))
         use_resume_value = hitl_payload if (base_status == "HITL_REQUIRED" or has_runtime_hitl) else None
-        path_kind = "1차(checkpoint 재개)" if use_resume_value is not None else "2차(처음부터 재실행)"
+        # 증빙이 있는 경우 Command(resume=...) 1차 경로는 스킵하고 2차 경량 재개를 강제한다.
+        # (execute 재실행은 피하면서도 evidenceDocumentResult를 reporter/finalizer에 반영)
+        if (request.evidence_uploaded or evidence_result) and isinstance(use_resume_value, dict):
+            use_resume_value = dict(use_resume_value)
+            use_resume_value["_force_closure_resume"] = True
+        force_closure = bool(isinstance(use_resume_value, dict) and use_resume_value.get("_force_closure_resume") is True)
+        if use_resume_value is None:
+            path_kind = "2차(처음부터 재실행)"
+        elif force_closure:
+            path_kind = "2차경량(증빙 반영 재개)"
+        else:
+            path_kind = "1차(checkpoint 재개)"
         logger.info(
             "[RESUME_TRACE] review_submit 경로 결정: run_id=%s base_status=%s has_runtime_hitl=%s → %s",
             run_id, base_status, has_runtime_hitl, path_kind,
@@ -931,9 +1278,14 @@ async def review_submit(
             "yes" if use_resume_value else "no",
             use_resume_value is not None,
         )
-        if use_resume_value is not None:
+        if use_resume_value is not None and not force_closure:
             logger.info(
                 "[RESUME_TRACE] review_submit run_id=%s → 1차: Command(resume=...) 사용 (execute 재실행 없음 예상)",
+                run_id,
+            )
+        elif use_resume_value is not None and force_closure:
+            logger.info(
+                "[RESUME_TRACE] review_submit run_id=%s → 2차경량: 증빙 반영을 위해 1차 체크포인트 재개를 건너뛰고 closure 재개",
                 run_id,
             )
         else:
@@ -947,13 +1299,16 @@ async def review_submit(
             run_id, case_id, path_kind, list(body_evidence.keys())[:15] if isinstance(body_evidence, dict) else [],
         )
         asyncio.create_task(
-            _run_analysis_task(
+            _run_analysis_with_evidence_prepare(
                 run_id=run_id,
                 case_id=case_id,
+                voucher_key=voucher_key,
                 body_evidence=body_evidence,
                 intended_risk_type=payload.get("intended_risk_type"),
                 resume_value=use_resume_value,
                 previous_result=base_result,
+                evidence_upload_file=evidence_upload_file if request.evidence_uploaded else None,
+                evidence_result=evidence_result,
             )
         )
         await asyncio.sleep(0)
@@ -963,6 +1318,54 @@ async def review_submit(
             "resumed_run_id": run_id,
             "stream_path": f"/api/v1/analysis-runs/{run_id}/stream",
         }
+
+    if request.evidence_uploaded and not evidence_result and not hitl_request:
+        saved_path = str(evidence_upload_file.get("saved_path") or "").strip()
+        filename = str(evidence_upload_file.get("filename") or "upload").strip()
+        if not saved_path:
+            raise HTTPException(
+                status_code=400,
+                detail="evidence file not found; please upload evidence in HITL popup and retry",
+            )
+        try:
+            payload = build_analysis_payload(db, voucher_key)
+            body_evidence = dict(payload.get("body_evidence") or {})
+            file_bytes = await asyncio.to_thread(Path(saved_path).read_bytes)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"evidence compare preparation failed: {e}") from e
+        extracted = await asyncio.to_thread(
+            _extract_evidence_llm_first,
+            file_path=saved_path,
+            file_bytes=file_bytes,
+            filename=filename,
+        )
+        comparison = await asyncio.to_thread(compare_evidence_to_voucher, extracted, body_evidence)
+        evidence_result = {
+            "passed": comparison.passed,
+            "confidence": comparison.confidence,
+            "reasons": comparison.reasons,
+            "extracted_fields": comparison.extracted_fields,
+            "comparison_detail": comparison.comparison_detail,
+            "mismatches": comparison.mismatches,
+            "file_sha256": evidence_upload_file.get("file_sha256"),
+            "filename": filename,
+            "extractor_meta": getattr(extracted, "extractor_meta", {}) or {},
+        }
+        try:
+            log_run_event(
+                db,
+                run_id=run_id,
+                case_id=case_id,
+                voucher_key=voucher_key,
+                stage="evidence",
+                event_type="EVIDENCE_COMPARED",
+                metadata={
+                    "stored_event_type": "EVIDENCE_COMPARED",
+                    "evidence_document_result": evidence_result,
+                },
+            )
+        except Exception:
+            pass
 
     if not hitl_request and evidence_result:
         passed = evidence_result.get("passed") is True

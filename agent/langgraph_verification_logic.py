@@ -5,7 +5,7 @@ import logging
 from typing import Any
 
 from agent.langgraph_domain import _find_tool_result
-from services.policy_case_alignment import has_entertainment_context
+from services.policy_case_alignment import has_business_trip_context, has_entertainment_context
 from utils.config import settings
 from utils.llm_azure import completion_kwargs_for_azure
 
@@ -64,9 +64,30 @@ _ENTERTAINMENT_ONLY_HITL_KEYWORDS = (
     "접대비",
     "업무추진비",
     "참석자 명단",
+    "참석자 수",
+    "참석자",
+    "내부/외부",
+    "내부 외부",
+    "내부참석자",
+    "외부참석자",
+    "외부 참석자",
     "외부 참석자 소속",
     "접대 목적",
     "외부 이해관계자",
+)
+
+_TRAVEL_ONLY_HITL_KEYWORDS = (
+    "출장",
+    "출장비",
+    "출장명령",
+    "출장계획",
+    "출장번호",
+    "출장기간",
+    "출장지",
+    "교통비",
+    "숙박비",
+    "일비",
+    "교통/숙박",
 )
 
 
@@ -152,9 +173,19 @@ def _is_holiday_non_entertainment_case(body: dict[str, Any]) -> bool:
     return case_type == "HOLIDAY_USAGE" and not has_entertainment_context(body)
 
 
+def _is_holiday_non_trip_case(body: dict[str, Any]) -> bool:
+    case_type = str(body.get("case_type") or body.get("intended_risk_type") or "").upper()
+    return case_type == "HOLIDAY_USAGE" and not has_business_trip_context(body)
+
+
 def _is_entertainment_only_text(text: str) -> bool:
     lowered = str(text or "").lower()
     return any(token.lower() in lowered for token in _ENTERTAINMENT_ONLY_HITL_KEYWORDS)
+
+
+def _is_travel_only_text(text: str) -> bool:
+    lowered = str(text or "").lower()
+    return any(token.lower() in lowered for token in _TRAVEL_ONLY_HITL_KEYWORDS)
 
 
 def _filter_hitl_content_by_case(
@@ -165,6 +196,7 @@ def _filter_hitl_content_by_case(
 ) -> tuple[list[dict[str, str]], list[str]]:
     if not _is_holiday_non_entertainment_case(body):
         return required_inputs, review_questions
+    block_travel = _is_holiday_non_trip_case(body)
 
     filtered_required_inputs: list[dict[str, str]] = []
     for req in required_inputs:
@@ -173,9 +205,30 @@ def _filter_hitl_content_by_case(
         )
         if _is_entertainment_only_text(combined):
             continue
+        if block_travel and _is_travel_only_text(combined):
+            continue
         filtered_required_inputs.append(req)
 
-    filtered_questions = [q for q in review_questions if not _is_entertainment_only_text(q)]
+    filtered_questions = []
+    for q in review_questions:
+        text = str(q or "").strip()
+        if not text:
+            continue
+        if _is_entertainment_only_text(text):
+            continue
+        if block_travel and _is_travel_only_text(text):
+            continue
+        # HOLIDAY_USAGE(비접대)에서는 참석자/내·외부 구분 질문을 추가 차단
+        lowered = text.lower().replace(" ", "")
+        if (
+            ("참석자" in text)
+            or ("참석자수" in lowered)
+            or ("내부/외부" in text)
+            or ("내부외부" in lowered)
+            or ("외부소속" in lowered)
+        ):
+            continue
+        filtered_questions.append(text)
     return filtered_required_inputs, filtered_questions
 
 

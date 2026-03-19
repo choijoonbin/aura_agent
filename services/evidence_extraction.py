@@ -23,6 +23,7 @@ _KNOWN_RECEIPTS: dict[str, dict[str, Any]] = {
     "af0da561f3faf1f3fbcd30a8cc384fb8ba35e00b17c6ed0db5cbdbf1f07f8691": {
         "amount": 95000.0,
         "approval_date": "2026-03-03",
+        "approval_time": "19:45",
         "industry_or_mcc": "일반음식점",
         "merchant_name": "가온 식당",
     },
@@ -67,7 +68,7 @@ def _image_to_text(content: bytes, path: Path | None) -> str:
 
 def _parse_receipt_text(text: str) -> dict[str, Any]:
     """OCR 텍스트에서 금액·거래일자·업종·거래처명 추출."""
-    out: dict[str, Any] = {"amount": None, "approval_date": None, "industry_or_mcc": None, "merchant_name": None}
+    out: dict[str, Any] = {"amount": None, "approval_date": None, "approval_time": None, "industry_or_mcc": None, "merchant_name": None}
     if not text:
         return out
     lines = [ln.strip() for ln in text.replace("\r", "\n").split("\n") if ln.strip()]
@@ -91,6 +92,22 @@ def _parse_receipt_text(text: str) -> dict[str, Any]:
             out["approval_date"] = f"{y}-{mo}-{d}"
         except (IndexError, ValueError):
             pass
+    # 거래시간: 19:45 / 7:45 PM
+    m = re.search(r"(?:거래\s*시간|결제\s*시간|거래\s*일시|결제\s*일시)[:\s]*(\d{1,2})[:\uff1a](\d{2})\s*(AM|PM)?", text, re.IGNORECASE)
+    if not m:
+        m = re.search(r"\b(\d{1,2})[:\uff1a](\d{2})\s*(AM|PM)?\b", text, re.IGNORECASE)
+    if m:
+        try:
+            hh = int(m.group(1))
+            mm = m.group(2)
+            ampm = (m.group(3) or "").upper()
+            if ampm == "PM" and hh < 12:
+                hh += 12
+            if ampm == "AM" and hh == 12:
+                hh = 0
+            out["approval_time"] = f"{hh:02d}:{mm}"
+        except Exception:
+            pass
     # 업종: 일반음식점
     m = re.search(r"업종\s*[:\s]*([^\s\n,]+(?:\s*[^\s\n,]+)?)", text)
     if m:
@@ -112,6 +129,7 @@ class ExtractedEvidence:
     """증빙문서에서 추출한 구조화 필드."""
     amount: float | None = None
     approval_date: str | None = None  # ISO date or YYYY-MM-DD
+    approval_time: str | None = None  # HH:MM
     industry_or_mcc: str | None = None
     merchant_name: str | None = None
     raw_snippets: list[str] = field(default_factory=list)
@@ -155,6 +173,7 @@ def extract_from_file(file_path: Path, file_bytes: bytes | None = None) -> Extra
             return ExtractedEvidence(
                 amount=kw.get("amount"),
                 approval_date=kw.get("approval_date"),
+                approval_time=kw.get("approval_time"),
                 industry_or_mcc=kw.get("industry_or_mcc"),
                 merchant_name=kw.get("merchant_name"),
                 raw_snippets=[],
@@ -166,11 +185,19 @@ def extract_from_file(file_path: Path, file_bytes: bytes | None = None) -> Extra
     if is_image and content and _ocr_available():
         text = _image_to_text(content, path)
         parsed = _parse_receipt_text(text)
-        n_found = sum(1 for v in (parsed.get("amount"), parsed.get("approval_date"), parsed.get("industry_or_mcc"), parsed.get("merchant_name")) if v is not None)
+        n_found = sum(
+            1 for v in (
+                parsed.get("amount"),
+                parsed.get("approval_date"),
+                parsed.get("approval_time"),
+                parsed.get("merchant_name"),
+            ) if v is not None
+        )
         confidence = min(1.0, 0.3 + n_found * 0.2)
         return ExtractedEvidence(
             amount=parsed.get("amount"),
             approval_date=parsed.get("approval_date"),
+            approval_time=parsed.get("approval_time"),
             industry_or_mcc=parsed.get("industry_or_mcc"),
             merchant_name=parsed.get("merchant_name"),
             raw_snippets=[text[:500]] if text else [],
@@ -182,6 +209,7 @@ def extract_from_file(file_path: Path, file_bytes: bytes | None = None) -> Extra
     return ExtractedEvidence(
         amount=None,
         approval_date=None,
+        approval_time=None,
         industry_or_mcc=None,
         merchant_name=None,
         raw_snippets=[],

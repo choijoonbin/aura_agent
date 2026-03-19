@@ -9,6 +9,18 @@ from agent.output_models import Citation, ReporterOutput, ReporterSentence
 logger = logging.getLogger(__name__)
 
 
+def _strip_hold_prefix(text: str) -> str:
+    raw = str(text or "").strip()
+    if not raw:
+        return ""
+    prefixes = ("담당자 검토 결과 보류합니다.", "보류합니다.")
+    out = raw
+    for p in prefixes:
+        if out.startswith(p):
+            out = out[len(p):].strip()
+    return out
+
+
 async def hitl_validate_node_impl(
     state: dict[str, Any],
     *,
@@ -173,8 +185,9 @@ async def reporter_node_impl(
         verdict = "HOLD_AFTER_HITL"
         hold_summary = await llm_summarize_hold_reason(hitl_response)
         if hold_summary:
-            hitl_verdict_reason = hold_summary
-            summary += f" 담당자 검토 결과 보류합니다. {hold_summary}"
+            cleaned = _strip_hold_prefix(hold_summary)
+            hitl_verdict_reason = cleaned or hold_summary
+            summary += f" 담당자 검토 결과 보류합니다. {cleaned}" if cleaned else " 담당자 검토 결과 보류합니다."
         else:
             hitl_verdict_reason = ""
             hold_reason = (hitl_response.get("comment") or hitl_response.get("business_purpose") or "").strip()

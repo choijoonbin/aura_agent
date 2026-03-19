@@ -903,6 +903,142 @@ def _assess_ocr_image_condition(
     return "clear", {"avg_confidence": round(avg_conf, 3), "low_conf_ratio": round(low_conf_ratio, 3), "missing_fields": missing_fields}
 
 
+def _display_width(text: str) -> int:
+    """한글/CJK를 고려한 표시 폭."""
+    return sum(
+        2 if "\uac00" <= ch <= "\ud7a3" or "\u4e00" <= ch <= "\u9fff" else 1
+        for ch in str(text or "")
+    )
+
+
+def _normalize_for_find(text: str) -> str:
+    return str(text or "").replace("：", ":").replace(" ", "").strip().lower()
+
+
+def _find_value_start_idx(full_text: str, field_name: str, value_text: str) -> int:
+    """같은 OCR 블록에서 값 시작 위치를 일반 규칙으로 찾는다.
+
+    우선순위:
+    1) field 패턴(날짜/시간/금액)
+    2) value_text exact/정규화 매칭
+    3) 라벨 키워드 이후 위치
+    """
+    import re
+
+    full = str(full_text or "")
+    full_norm = _normalize_for_find(full)
+    value = str(value_text or "").strip()
+    value_norm = _normalize_for_find(value)
+
+    # 1) 필드 패턴
+    if field_name == "date_occurrence":
+        m = re.search(r"\d{4}[./-]\d{1,2}[./-]\d{1,2}", full)
+        if m:
+            return m.start()
+    elif field_name == "time_occurrence":
+        m = re.search(r"\d{1,2}[:\uff1a]\d{2}(?::\d{2})?\s*(AM|PM)?", full, re.IGNORECASE)
+        if m:
+            return m.start()
+    elif field_name == "amount_total":
+        # 같은 줄의 첫 금액 토큰을 값 시작으로 간주
+        m = re.search(r"\d[\d,\s]*(?:\.\d+)?\s*원?", full)
+        if m:
+            return m.start()
+
+    # 2) 값 문자열 매칭 (구분자 차이 허용)
+    if value:
+        pos = full.find(value)
+        if pos >= 0:
+            return pos
+        if value_norm and value_norm in full_norm:
+            # 공백/콜론 제거로 찾았으므로 원문 인덱스 역매핑
+            compact_idx = full_norm.find(value_norm)
+            if compact_idx >= 0:
+                acc = 0
+                for i, ch in enumerate(full):
+                    if ch in {" ", "："}:
+                        continue
+                    if ch == ":":
+                        ch_norm = ":"
+                    else:
+                        ch_norm = ch.lower()
+                    if acc == compact_idx:
+                        return i
+                    acc += 1
+
+    # 3) 라벨 키워드 이후 위치 (구분자 미존재 케이스 포함)
+    kw_map = {
+        "merchant_name": _MERCHANT_LABEL_KW,
+        "date_occurrence": _DATETIME_LABEL_KW,
+        "time_occurrence": _DATETIME_LABEL_KW,
+        "amount_total": _AMOUNT_LABEL_KW,
+    }
+    kws = kw_map.get(field_name, ())
+    best_end = -1
+    for kw in kws:
+        p = full.find(str(kw))
+        if p >= 0:
+            best_end = max(best_end, p + len(str(kw)))
+    if best_end >= 0:
+        # 라벨 뒤 공백/구분자(:,：,-,|) 스킵
+        j = best_end
+        while j < len(full) and full[j] in {" ", ":", "：", "-", "|", "]", "）", ")"}:
+            j += 1
+        return min(j, max(len(full) - 1, 0))
+
+    return -1
+
+
+def _split_word_by_field(
+    word: "Any",
+    *,
+    field_name: str,
+    value_text: str,
+) -> "tuple[Any, Any] | None":
+    """OcrWord 한 블록을 라벨/값으로 일반 분리한다.
+
+    - ':' 유무와 무관하게 동작
+    - 날짜/시간/금액 패턴 우선
+    """
+    from utils.ocr_paddle import OcrWord
+
+    full = str(getattr(word, "text", "") or "")
+    if not full:
+        return None
+    start = _find_value_start_idx(full, field_name, value_text)
+    if start <= 0:
+        return None
+
+    total_w = max(_display_width(full), 1)
+    left_w = _display_width(full[:start])
+    split_x = int(word.xmin + (word.xmax - word.xmin) * (left_w / total_w))
+    # 박스 최소 폭 보장
+    if split_x - word.xmin < 8 or word.xmax - split_x < 8:
+        return None
+
+    key_word = OcrWord(
+        text=full[:start].strip(),
+        xmin=word.xmin,
+        ymin=word.ymin,
+        xmax=split_x,
+        ymax=word.ymax,
+        confidence=float(getattr(word, "confidence", 0.0)),
+        img_width=int(getattr(word, "img_width", 0)),
+        img_height=int(getattr(word, "img_height", 0)),
+    )
+    val_word = OcrWord(
+        text=full[start:].strip(),
+        xmin=split_x,
+        ymin=word.ymin,
+        xmax=word.xmax,
+        ymax=word.ymax,
+        confidence=float(getattr(word, "confidence", 0.0)),
+        img_width=int(getattr(word, "img_width", 0)),
+        img_height=int(getattr(word, "img_height", 0)),
+    )
+    return key_word, val_word
+
+
 def _analyze_with_paddle_ocr(
     image_bytes: bytes,
     *,
@@ -987,8 +1123,9 @@ def _analyze_with_paddle_ocr(
 
         # ── 값(bbox) — OCR 좌표 그대로 ──────────────────────────────────────
         # 레이블+값이 같은 줄이면 값만 분리 시도
-        if text and text in val_word.text and text != val_word.text:
-            _, split_val = val_word.split_key_value(text)
+        split_pair = _split_word_by_field(val_word, field_name=field_name, value_text=text)
+        if split_pair is not None:
+            _, split_val = split_pair
             bbox_val = VisualBox(
                 ymin=split_val.norm_ymin, xmin=split_val.norm_xmin,
                 ymax=split_val.norm_ymax, xmax=split_val.norm_xmax,
@@ -1003,10 +1140,11 @@ def _analyze_with_paddle_ocr(
         bbox_key: VisualBox | None = None
         if key_idx is not None and 0 <= key_idx < len(ocr_words):
             key_word = ocr_words[key_idx]
-            if key_idx == val_idx and text in key_word.text and text != key_word.text:
+            if key_idx == val_idx:
                 # 같은 줄에 레이블+값 → 레이블 부분만 추출
-                split_key, _ = key_word.split_key_value(text)
-                if split_key.xmin < split_key.xmax:
+                split_pair_key = _split_word_by_field(key_word, field_name=field_name, value_text=text)
+                if split_pair_key is not None:
+                    split_key, _ = split_pair_key
                     bbox_key = VisualBox(
                         ymin=split_key.norm_ymin, xmin=split_key.norm_xmin,
                         ymax=split_key.norm_ymax, xmax=split_key.norm_xmax,

@@ -26,6 +26,20 @@ _ENTERTAINMENT_TERMS = (
     "참석자 명단",
 )
 
+_TRAVEL_TERMS = (
+    "출장",
+    "출장비",
+    "출장명령",
+    "출장계획",
+    "출장번호",
+    "출장기간",
+    "출장지",
+    "교통비",
+    "숙박비",
+    "일비",
+    "교통/숙박",
+)
+
 _LIMIT_EXCEED_TERMS = (
     "예산",
     "한도",
@@ -107,6 +121,34 @@ def has_entertainment_context(body_evidence: dict[str, Any] | None) -> bool:
     return _contains_any(combined, _ENTERTAINMENT_TERMS)
 
 
+def has_business_trip_context(body_evidence: dict[str, Any] | None) -> bool:
+    body = body_evidence or {}
+    doc = body.get("document") or {}
+    header = doc.get("header") or {}
+    lines: list[str] = []
+    for item in (doc.get("items") or [])[:8]:
+        if isinstance(item, dict):
+            lines.extend([str(item.get("sgtxt") or ""), str(item.get("hkont") or "")])
+    hr_status = str(body.get("hrStatus") or "").upper()
+    if hr_status == "BUSINESS_TRIP":
+        return True
+    combined = " ".join(
+        str(v or "")
+        for v in (
+            body.get("expenseType"),
+            body.get("expenseTypeName"),
+            body.get("merchantName"),
+            body.get("mccName"),
+            body.get("businessPurpose"),
+            body.get("user_reason"),
+            body.get("bktxt"),
+            header.get("bktxt"),
+            " ".join(lines),
+        )
+    )
+    return _contains_any(combined, _TRAVEL_TERMS)
+
+
 def is_clear_case_mismatch(ref: dict[str, Any], body_evidence: dict[str, Any] | None) -> bool:
     case_type = _normalize_case_type(body_evidence)
     if is_common_evidence_article(ref):
@@ -118,6 +160,12 @@ def is_clear_case_mismatch(ref: dict[str, Any], body_evidence: dict[str, Any] | 
     if case_type == "HOLIDAY_USAGE":
         if has_entertainment_context(body_evidence):
             return False
+        # 휴일 의심 케이스에서 실제 출장 맥락이 없으면 출장 조항/문구는 오채택으로 간주.
+        # (제25조 출장비 조항이 질문 생성으로 전파되는 현상 방지)
+        if not has_business_trip_context(body_evidence):
+            has_travel = _contains_any(merged, _TRAVEL_TERMS) or article == "제25조"
+            if has_travel:
+                return True
         has_holiday = _contains_any(merged, _HOLIDAY_TERMS)
         has_entertainment = _contains_any(merged, _ENTERTAINMENT_TERMS)
         if article in _HOLIDAY_CORE_ARTICLES:
