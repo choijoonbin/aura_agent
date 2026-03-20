@@ -100,11 +100,12 @@ def _extract_entity_value(entities: list, label: str) -> str:
 
 
 def _normalize_amount_text(text: str) -> str:
-    return "".join(ch for ch in str(text or "") if ch.isdigit())
+    raw = unicodedata.normalize("NFKC", str(text or ""))
+    return "".join(ch for ch in raw if ch.isdigit())
 
 
 def _normalize_date_text(text: str) -> str:
-    raw = str(text or "").strip().replace(".", "-").replace("/", "-")
+    raw = unicodedata.normalize("NFKC", str(text or "")).strip().replace(".", "-").replace("/", "-")
     parts = [p for p in raw.split("-") if p]
     if len(parts) == 3 and all(p.isdigit() for p in parts):
         y, m, d = parts[0], parts[1].zfill(2), parts[2].zfill(2)
@@ -113,7 +114,7 @@ def _normalize_date_text(text: str) -> str:
 
 
 def _normalize_time_text(text: str) -> str:
-    raw = str(text or "").strip().replace(".", ":").replace("：", ":")
+    raw = unicodedata.normalize("NFKC", str(text or "")).strip().replace(".", ":").replace("：", ":")
     parts = raw.split(":")
     if len(parts) >= 2 and parts[0].isdigit() and parts[1].isdigit():
         return f"{parts[0].zfill(2)}:{parts[1].zfill(2)}"
@@ -121,7 +122,7 @@ def _normalize_time_text(text: str) -> str:
 
 
 def _normalize_merchant_text(text: str) -> str:
-    raw = unicodedata.normalize("NFC", str(text or ""))
+    raw = unicodedata.normalize("NFKC", str(text or ""))
     return "".join(ch for ch in raw.lower() if ch.isalnum())
 
 
@@ -144,8 +145,8 @@ def _build_entity_color_map(entities: list) -> dict[str, str]:
 
 def _is_field_mismatch(field: str, extracted: str, current: str) -> bool:
     # 동일 텍스트(공백/정규화 포함)는 불일치로 보지 않는다.
-    ext_raw = unicodedata.normalize("NFC", str(extracted or "")).strip()
-    cur_raw = unicodedata.normalize("NFC", str(current or "")).strip()
+    ext_raw = unicodedata.normalize("NFKC", str(extracted or "")).strip()
+    cur_raw = unicodedata.normalize("NFKC", str(current or "")).strip()
     if ext_raw == cur_raw:
         return False
     # 특수문자/공백 제거 후 동일하면 일치로 간주한다.
@@ -171,11 +172,14 @@ def _field_wrap_css(is_mismatch: bool, color: str) -> str:
         return """{padding: 0; margin: 0;}"""
     return (
         "{"
-        f"border: 2px solid {color}; border-radius: 12px; padding: 6px 8px 2px 8px; margin: 0; overflow: visible;"
+        f"border: 2px solid {color}; border-radius: 12px; padding: 6px 8px 4px 8px; margin: 0 0 4px 0;"
         "box-shadow: 0 0 0 2px rgba(15,23,42,0.03);"
+        "box-sizing: border-box !important; overflow: hidden; width: 100%;"
         "}"
         "\n"
-        "[data-testid='stTextInput'], [data-testid='stTextInput'] > div {width: 100% !important; max-width: 100% !important; min-width: 0 !important;}"
+        "[data-testid='stTextInput'] {width: 100% !important; max-width: 100% !important; min-width: 0 !important; box-sizing: border-box !important;}"
+        "\n"
+        "[data-testid='stTextInput'] > div {width: 100% !important; max-width: 100% !important; min-width: 0 !important;}"
         "\n"
         "[data-testid='stTextInput'] input {width: 100% !important; max-width: 100% !important; min-width: 0 !important; box-sizing: border-box !important;}"
     )
@@ -428,7 +432,6 @@ def render_demo_new_page() -> None:
             ):
                 amount_val = st.text_input(
                     "금액 (amount_total) *",
-                    value=auto_amount,
                     placeholder="예: 97042",
                     key="demo_new_field_amount",
                 )
@@ -442,7 +445,6 @@ def render_demo_new_page() -> None:
             ):
                 merchant_val = st.text_input(
                     "가맹점 (merchant_name) *",
-                    value=auto_merchant,
                     placeholder="예: 가온 식당",
                     key="demo_new_field_merchant",
                 )
@@ -459,7 +461,6 @@ def render_demo_new_page() -> None:
             ):
                 date_val = st.text_input(
                     "일자 (date_occurrence) *",
-                    value=auto_date,
                     placeholder="예: 2026-03-14",
                     key="demo_new_field_date",
                 )
@@ -473,7 +474,6 @@ def render_demo_new_page() -> None:
             ):
                 time_val = st.text_input(
                     "시간 (time_occurrence)",
-                    value=auto_time,
                     placeholder="예: 19:45",
                     key="demo_new_field_time",
                     help="영수증의 거래시간. 이미지 분석 시 자동 추출. HH:MM 형식 (24시간제)",
