@@ -309,7 +309,7 @@ def render_demo_new_page() -> None:
           display: flex;
           align-items: center;
           gap: 0;
-          margin: 0.6rem 0 1.2rem;
+          margin: 0.2rem 0 0.55rem;
         }
         .step-item {
           display: flex;
@@ -400,7 +400,7 @@ def render_demo_new_page() -> None:
         selected_case_type, ("badge-normal", "⚪", selected_case_type)
     )
     st.markdown(
-        f'<span class="case-badge {badge_cls}">{badge_icon} {badge_label}</span>',
+        f'<div style="margin:0.1rem 0 0.15rem;"><span class="case-badge {badge_cls}">{badge_icon} {badge_label}</span></div>',
         unsafe_allow_html=True,
     )
 
@@ -463,6 +463,7 @@ def render_demo_new_page() -> None:
           </div>
         </div>"""
     st.markdown(step_html, unsafe_allow_html=True)
+    st.markdown('<div style="margin-top:-1.2rem"></div>', unsafe_allow_html=True)
 
     # ── 레이아웃: 좌(필드 편집) / 우(이미지+분석) ──────────
     col_right, col_left = st.columns([1, 1], gap="large")
@@ -542,7 +543,7 @@ def render_demo_new_page() -> None:
 
         else:
             st.markdown(
-                '<div style="background:#f0f7ff;border:1px solid #bfdbfe;border-radius:8px;padding:0.6rem 0.9rem;font-size:0.85rem;color:#1e40af">📷 영수증·전표 이미지를 업로드하면 Vision LLM이 자동으로 금액·가맹점·일자를 추출합니다.</div>',
+                '<div style="background:#f0f7ff;border:1px solid #bfdbfe;border-radius:8px;padding:0.6rem 0.9rem;font-size:0.85rem;color:#1e40af">📷 영수증·전표 이미지를 업로드하면 Vision LLM이 자동으로 금액·가맹점·일자,일시를 추출합니다.</div>',
                 unsafe_allow_html=True,
             )
             # 이전 분석 결과 및 자동 채우기 위젯 키 초기화
