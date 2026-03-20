@@ -2888,7 +2888,7 @@ def render_hitl_panel(latest_bundle: dict[str, Any], *, vkey: str | None = None)
                         "[RESUME_TRACE] 분석 이어가기 버튼 클릭: run_id=%s voucher_key=%s approved=%s comment_len=%s comment_preview=%s evidence_uploaded=%s — mt_pending_review_submit 설정",
                         run_id, latest_bundle.get("voucher_key") or vkey, hr.get("approved"), len(_comment), _preview or "(없음)", evidence_uploaded,
                     )
-                    logger.info("[HITL_CLOSE] 버튼 클릭: run_id=%s — mt_pending_review_submit 설정, open=False, st.rerun()", run_id)
+                    logger.debug("[HITL_CLOSE] 버튼 클릭: run_id=%s — mt_pending_review_submit 설정, open=False, st.rerun()", run_id)
                     st.session_state.pop(_hitl_state_key("dismissed", run_id), None)
                     st.session_state.pop(_hitl_state_key("open", run_id), None)
                     st.session_state[_hitl_state_key("open", run_id)] = False
@@ -3376,7 +3376,7 @@ def render_workspace_chat_panel(selected: dict[str, Any], latest_bundle: dict[st
     # 2) 다이얼로그 블록 직후 mt_review_submit_api_pending이 있으면 그때 st.rerun() 해서 다음 run에서 API 호출
     # 3) 다음 run에서 review-submit API 호출 → queued 저장 후 rerun
     # 4) queued -> resume 승격 rerun, 그 다음 run에서 SSE 시작
-    logger.info("[HITL_CLOSE] run 시작: mt_pending_review_submit=%s mt_review_submit_api_pending=%s", bool(st.session_state.get("mt_pending_review_submit")), bool(st.session_state.get("mt_review_submit_api_pending")))
+    logger.debug("[HITL_CLOSE] run 시작: mt_pending_review_submit=%s mt_review_submit_api_pending=%s", bool(st.session_state.get("mt_pending_review_submit")), bool(st.session_state.get("mt_review_submit_api_pending")))
     pending_review_submit = st.session_state.get("mt_pending_review_submit")
     just_set_api_pending = False
     if pending_review_submit and (
@@ -3384,7 +3384,7 @@ def render_workspace_chat_panel(selected: dict[str, Any], latest_bundle: dict[st
         or str(pending_review_submit.get("run_id") or "") == str(latest_bundle.get("run_id") or "")
     ):
         _run_id = str(pending_review_submit.get("run_id") or "")
-        logger.info("[HITL_CLOSE] 1단계 진입: run_id=%s open=False, skip 설정 (이 run에서 한 프레임 그린 뒤 다이얼로그 블록 뒤에서 rerun)", _run_id)
+        logger.debug("[HITL_CLOSE] 1단계 진입: run_id=%s open=False, skip 설정 (이 run에서 한 프레임 그린 뒤 다이얼로그 블록 뒤에서 rerun)", _run_id)
         st.session_state[_hitl_state_key("open", _run_id)] = False
         st.session_state["mt_skip_hitl_dialog_run_id"] = _run_id
         st.session_state["mt_review_submit_api_pending"] = dict(pending_review_submit)
@@ -3403,7 +3403,7 @@ def render_workspace_chat_panel(selected: dict[str, Any], latest_bundle: dict[st
             "[RESUME_TRACE] UI 2단계 review-submit 직전: run_id=%s payload_keys=%s approved=%s comment_len=%s comment_preview=%s evidence_uploaded=%s",
             _run_id, list(_payload.keys()) if isinstance(_payload, dict) else [], _hr.get("approved"), len(_cmt), _prev or "(없음)", _payload.get("evidence_uploaded"),
         )
-        logger.info("[HITL_CLOSE] 2단계 진입: run_id=%s review-submit API 호출", _run_id)
+        logger.debug("[HITL_CLOSE] 2단계 진입: run_id=%s review-submit API 호출", _run_id)
         logger.info(
             "[RESUME_TRACE] UI → review-submit run_id=%s (백엔드에서 base_status=HITL_REQUIRED면 checkpoint 재개, 아니면 스크리닝부터 재실행)",
             _run_id,
@@ -3434,7 +3434,7 @@ def render_workspace_chat_panel(selected: dict[str, Any], latest_bundle: dict[st
 
     skip_dialog_run_id = st.session_state.pop("mt_skip_hitl_dialog_run_id", None)
     if skip_dialog_run_id is not None:
-        logger.info("[HITL_CLOSE] skip_dialog_run_id popped = %s (이 run_id에 대해서는 다이얼로그 미렌더)", skip_dialog_run_id)
+        logger.debug("[HITL_CLOSE] skip_dialog_run_id popped = %s (이 run_id에 대해서는 다이얼로그 미렌더)", skip_dialog_run_id)
 
     # HITL 확인 체크 해제 시: 해당 run은 검토 팝업/배너를 자동 노출하지 않는다.
     ui_run_id = str(latest_bundle.get("run_id") or "")
@@ -3478,20 +3478,20 @@ def render_workspace_chat_panel(selected: dict[str, Any], latest_bundle: dict[st
         if run_id and str(run_id) != str(skip_dialog_run_id):
             st.session_state.setdefault(dismissed_key, False)
             open_val = st.session_state.get(open_key)
-            logger.info("[HITL_CLOSE] 다이얼로그 분기: run_id=%s skip_dialog_run_id=%s open_key=%s", run_id, skip_dialog_run_id, open_val)
+            logger.debug("[HITL_CLOSE] 다이얼로그 분기: run_id=%s skip_dialog_run_id=%s open_key=%s", run_id, skip_dialog_run_id, open_val)
             if open_val:
                 st.session_state[open_key] = False
-                logger.info("[HITL_CLOSE] 다이얼로그 렌더 함 run_id=%s", run_id)
+                logger.debug("[HITL_CLOSE] 다이얼로그 렌더 함 run_id=%s", run_id)
                 render_hitl_dialog(latest_bundle, vkey=vkey)
             else:
-                logger.info("[HITL_CLOSE] 다이얼로그 미렌더 run_id=%s (open_key=False)", run_id)
+                logger.debug("[HITL_CLOSE] 다이얼로그 미렌더 run_id=%s (open_key=False)", run_id)
         elif run_id and str(run_id) == str(skip_dialog_run_id):
-            logger.info("[HITL_CLOSE] 다이얼로그 스킵 run_id=%s (skip과 동일 — 분석 이어가기 직후)", run_id)
+            logger.debug("[HITL_CLOSE] 다이얼로그 스킵 run_id=%s (skip과 동일 — 분석 이어가기 직후)", run_id)
 
     # 1단계 직후: "다이얼로그 미호출" 한 프레임을 브라우저에 보냈으면 rerun 하지 않음(just_set_api_pending).
     # api_pending만 있고 방금 세팅한 run이 아니면 rerun.
     if st.session_state.get("mt_review_submit_api_pending") and not just_set_api_pending:
-        logger.info("[HITL_CLOSE] api_pending 있음 → st.rerun() (다음 run에서 2단계 API 호출)")
+        logger.debug("[HITL_CLOSE] api_pending 있음 → st.rerun() (다음 run에서 2단계 API 호출)")
         st.rerun()
 
     # 팝업 방금 닫은 run(just_set_api_pending): fragment 대신 "한 번 더 클릭"으로 2단계 트리거 (fragment 제거 시 run_every 오류 무한 반복 방지)
