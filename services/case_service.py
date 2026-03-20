@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
 
 from sqlalchemy import and_, desc, func, select
 from sqlalchemy.orm import Session
@@ -66,6 +69,21 @@ def _scenario_for_header(header: FiDocHeader) -> str | None:
         return None
     raw = xblnr.replace("DEMO-", "")
     return raw.rsplit("-", 1)[0] if "-" in raw else raw
+
+
+def _load_beta_meta_by_voucher(voucher_key: str) -> dict[str, Any]:
+    """POC/Beta 저장 메타(data/evidence_uploads/*/meta.json)에서 voucher_key 매칭 항목을 반환."""
+    root = Path("data/evidence_uploads")
+    if not root.exists():
+        return {}
+    for meta_path in root.glob("*/meta.json"):
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if isinstance(meta, dict) and str(meta.get("voucher_key") or "").strip() == voucher_key:
+            return meta
+    return {}
 
 
 def _build_screening_body(header: FiDocHeader, amount: float | None) -> dict:
@@ -508,6 +526,9 @@ def build_analysis_payload(db: Session, voucher_key: str) -> dict:
 
     scenario = _scenario_for_header(header)
     is_normal_demo = scenario == "NORMAL_BASELINE"
+    beta_meta = _load_beta_meta_by_voucher(voucher_key)
+    beta_memo = beta_meta.get("memo") if isinstance(beta_meta.get("memo"), dict) else {}
+    approval_doc = beta_meta.get("approval_doc") if isinstance(beta_meta.get("approval_doc"), dict) else {}
 
     body_evidence = {
         "doc_id": f"{bukrs}-{belnr}-{gjahr}",
@@ -553,6 +574,11 @@ def build_analysis_payload(db: Session, voucher_key: str) -> dict:
                 }.items() if value in (None, "")
             ],
         },
+        "memo": {
+            "bktxt": str(beta_memo.get("bktxt") or header.bktxt or "").strip(),
+            "sgtxt": str(beta_memo.get("sgtxt") or (item.sgtxt if item else "") or "").strip(),
+            "user_reason": str(beta_memo.get("user_reason") or "").strip(),
+        },
     }
 
     # 정상 케이스 테스트 데이터는 규정 "필수 입력/증빙" 항목을 사전 충족 상태로 채워 전달한다.
@@ -580,6 +606,37 @@ def build_analysis_payload(db: Session, voucher_key: str) -> dict:
         document["location"] = body_evidence["location"]
         document["paymentMethod"] = body_evidence["paymentMethod"]
         document["receiptQualified"] = True
+        body_evidence["document"] = document
+
+    # Beta 시연데이터: 품의서(전자결재) 및 참석자 컨텍스트를 분석 입력에 주입.
+    # DB 스키마 추가 없이 meta.json 기반으로만 보강한다.
+    approval_title = str(approval_doc.get("title") or "").strip()
+    approval_content = str(approval_doc.get("content") or "").strip()
+    approval_attendees = approval_doc.get("attendees") if isinstance(approval_doc.get("attendees"), list) else []
+    approval_approved = bool(approval_doc.get("approved"))
+    image_path = str(beta_meta.get("image_path") or "").strip()
+    has_image_evidence = bool(image_path and Path(image_path).exists())
+    if approval_title or approval_content or approval_attendees:
+        body_evidence["preApprovalDoc"] = {
+            "title": approval_title,
+            "content": approval_content,
+            "approved": approval_approved,
+        }
+        if approval_attendees:
+            body_evidence["attendees"] = approval_attendees
+            body_evidence["attendeeCount"] = len(approval_attendees)
+        if approval_content and not str(body_evidence.get("businessPurpose") or "").strip():
+            body_evidence["businessPurpose"] = approval_content
+        body_evidence["evidenceProvided"] = has_image_evidence
+        document = body_evidence.get("document") or {}
+        document["preApprovalDoc"] = body_evidence["preApprovalDoc"]
+        if approval_attendees and not document.get("attendees"):
+            document["attendees"] = approval_attendees
+            document["attendeeCount"] = len(approval_attendees)
+        if approval_content and not str(document.get("businessPurpose") or "").strip():
+            document["businessPurpose"] = approval_content
+        if has_image_evidence:
+            document["receiptQualified"] = True
         body_evidence["document"] = document
 
     case_id_int = _case_id_from_voucher(tenant_id, bukrs, belnr, gjahr)

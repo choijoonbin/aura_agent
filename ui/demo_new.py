@@ -9,9 +9,11 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import unicodedata
 from typing import Any
 
 import streamlit as st
+from streamlit_extras.stylable_container import stylable_container
 
 from ui.api_client import delete
 from ui.shared import inject_css, render_page_header
@@ -26,12 +28,34 @@ _CASE_TYPE_OPTIONS: list[tuple[str, str]] = [
     ("UNUSUAL_PATTERN", "비정상 패턴 (UNUSUAL_PATTERN)"),
 ]
 _ABNORMAL_CASE_TYPES = {"HOLIDAY_USAGE", "LIMIT_EXCEED", "PRIVATE_USE_RISK", "UNUSUAL_PATTERN"}
+_APPROVAL_DOC_OPTIONS: list[tuple[str, str]] = [
+    ("", "선택 안 함"),
+    ("HOLIDAY_WORK_APPROVAL", "휴일근무 품의서"),
+]
+_APPROVAL_DOC_PRESETS: dict[str, dict[str, Any]] = {
+    "HOLIDAY_WORK_APPROVAL": {
+        "title": "휴일근무 품의서",
+        "content": "2명이 주말출근 승인을 받아서 회사 근처 식당 이용",
+        "attendees": [
+            {"name": "내부참석자A", "type": "INTERNAL", "org": "재무팀"},
+            {"name": "내부참석자B", "type": "INTERNAL", "org": "재무팀"},
+        ],
+        "approved": True,
+    },
+}
 
 _IMAGE_CONDITION_LABELS: dict[str, str] = {
     "clear": "선명",
     "blurry": "흐림",
     "damaged": "훼손",
     "partial_cut": "일부 잘림",
+}
+_BBOX_COLORS = ["#ef4444", "#3b82f6", "#10b981", "#f59e0b", "#8b5cf6"]
+_HOLIDAY_DEFAULTS: dict[str, str] = {
+    "amount_total": "68000",
+    "merchant_name": "가온식당 강남점",
+    "date_occurrence": "2026-03-14",
+    "time_occurrence": "23:42",
 }
 
 
@@ -73,6 +97,88 @@ def _extract_entity_value(entities: list, label: str) -> str:
         if ent_label == label:
             return e.text if hasattr(e, "text") else e.get("text", "")
     return ""
+
+
+def _normalize_amount_text(text: str) -> str:
+    return "".join(ch for ch in str(text or "") if ch.isdigit())
+
+
+def _normalize_date_text(text: str) -> str:
+    raw = str(text or "").strip().replace(".", "-").replace("/", "-")
+    parts = [p for p in raw.split("-") if p]
+    if len(parts) == 3 and all(p.isdigit() for p in parts):
+        y, m, d = parts[0], parts[1].zfill(2), parts[2].zfill(2)
+        return f"{y}-{m}-{d}"
+    return raw
+
+
+def _normalize_time_text(text: str) -> str:
+    raw = str(text or "").strip().replace(".", ":").replace("：", ":")
+    parts = raw.split(":")
+    if len(parts) >= 2 and parts[0].isdigit() and parts[1].isdigit():
+        return f"{parts[0].zfill(2)}:{parts[1].zfill(2)}"
+    return raw
+
+
+def _normalize_merchant_text(text: str) -> str:
+    raw = unicodedata.normalize("NFC", str(text or ""))
+    return "".join(ch for ch in raw.lower() if ch.isalnum())
+
+
+def _build_entity_color_map(entities: list) -> dict[str, str]:
+    """엔티티 라벨별 bbox 색상(hex) 맵."""
+    out: dict[str, str] = {}
+    group_idx = 0
+    for ent in entities:
+        conf = ent.confidence if hasattr(ent, "confidence") else ent.get("confidence", 1.0)
+        if float(conf) < 0.5:
+            continue
+        raw_label = ent.label if hasattr(ent, "label") else ent.get("label", "")
+        if not raw_label or raw_label in out:
+            group_idx += 1
+            continue
+        out[str(raw_label)] = _BBOX_COLORS[group_idx % len(_BBOX_COLORS)]
+        group_idx += 1
+    return out
+
+
+def _is_field_mismatch(field: str, extracted: str, current: str) -> bool:
+    # 동일 텍스트(공백/정규화 포함)는 불일치로 보지 않는다.
+    ext_raw = unicodedata.normalize("NFC", str(extracted or "")).strip()
+    cur_raw = unicodedata.normalize("NFC", str(current or "")).strip()
+    if ext_raw == cur_raw:
+        return False
+    # 특수문자/공백 제거 후 동일하면 일치로 간주한다.
+    ext_compact = "".join(ch for ch in ext_raw.lower() if ch.isalnum())
+    cur_compact = "".join(ch for ch in cur_raw.lower() if ch.isalnum())
+    if ext_compact and cur_compact and ext_compact == cur_compact:
+        return False
+    if not str(extracted or "").strip():
+        return False
+    if field == "amount_total":
+        return _normalize_amount_text(extracted) != _normalize_amount_text(current)
+    if field == "merchant_name":
+        return _normalize_merchant_text(extracted) != _normalize_merchant_text(current)
+    if field == "date_occurrence":
+        return _normalize_date_text(extracted) != _normalize_date_text(current)
+    if field == "time_occurrence":
+        return _normalize_time_text(extracted) != _normalize_time_text(current)
+    return False
+
+
+def _field_wrap_css(is_mismatch: bool, color: str) -> str:
+    if not is_mismatch:
+        return """{padding: 0; margin: 0;}"""
+    return (
+        "{"
+        f"border: 2px solid {color}; border-radius: 12px; padding: 6px 8px 2px 8px; margin: 0; overflow: visible;"
+        "box-shadow: 0 0 0 2px rgba(15,23,42,0.03);"
+        "}"
+        "\n"
+        "[data-testid='stTextInput'], [data-testid='stTextInput'] > div {width: 100% !important; max-width: 100% !important; min-width: 0 !important;}"
+        "\n"
+        "[data-testid='stTextInput'] input {width: 100% !important; max-width: 100% !important; min-width: 0 !important; box-sizing: border-box !important;}"
+    )
 
 
 def _entities_to_boxes_and_labels(
@@ -169,6 +275,15 @@ def render_demo_new_page() -> None:
     is_abnormal = selected_case_type in _ABNORMAL_CASE_TYPES
     is_normal_baseline = selected_case_type == "NORMAL_BASELINE"
 
+    prev_case_type = str(st.session_state.get("demo_new_prev_case_type") or "")
+    # HOLIDAY_USAGE는 POC 시연 기본값을 즉시 채워 시작한다.
+    if selected_case_type == "HOLIDAY_USAGE" and prev_case_type != "HOLIDAY_USAGE":
+        st.session_state["demo_new_field_amount"] = _HOLIDAY_DEFAULTS["amount_total"]
+        st.session_state["demo_new_field_merchant"] = _HOLIDAY_DEFAULTS["merchant_name"]
+        st.session_state["demo_new_field_date"] = _HOLIDAY_DEFAULTS["date_occurrence"]
+        st.session_state["demo_new_field_time"] = _HOLIDAY_DEFAULTS["time_occurrence"]
+    st.session_state["demo_new_prev_case_type"] = selected_case_type
+
     if is_abnormal:
         st.warning("비정상 케이스는 증빙 이미지 첨부를 권장합니다. 미첨부 시 금액/일자/가맹점을 직접 입력해야 합니다.")
 
@@ -216,26 +331,10 @@ def render_demo_new_page() -> None:
                 with st.spinner("Vision LLM으로 분석 중..."):
                     result = _run_visual_analysis(image_bytes)
                     st.session_state["demo_new_analysis_result"] = result
-                    # 추출 결과를 편집 필드에 직접 반영 (widget key + auto fallback 동시 갱신)
+                    # 추출 결과는 불일치 검출/하이라이트 용도로만 사용한다.
+                    # 편집 필드 값은 자동으로 덮어쓰지 않는다.
                     entities = result.entities if hasattr(result, "entities") else []
-                    extracted = {
-                        "amount_total": _extract_entity_value(entities, "amount_total"),
-                        "date_occurrence": _extract_entity_value(entities, "date_occurrence"),
-                        "time_occurrence": _extract_entity_value(entities, "time_occurrence"),
-                        "merchant_name": _extract_entity_value(entities, "merchant_name"),
-                        "summary": result.suggested_summary if hasattr(result, "suggested_summary") else "",
-                    }
-                    st.session_state["demo_new_auto_amount"] = extracted["amount_total"]
-                    st.session_state["demo_new_auto_date"] = extracted["date_occurrence"]
-                    st.session_state["demo_new_auto_time"] = extracted["time_occurrence"]
-                    st.session_state["demo_new_auto_merchant"] = extracted["merchant_name"]
-                    st.session_state["demo_new_auto_summary"] = extracted["summary"]
-                    # Streamlit 위젯 key에도 직접 기록해야 재렌더 시 value= 파라미터 무시 문제를 해결
-                    st.session_state["demo_new_field_amount"] = extracted["amount_total"]
-                    st.session_state["demo_new_field_date"] = extracted["date_occurrence"]
-                    st.session_state["demo_new_field_time"] = extracted["time_occurrence"]
-                    st.session_state["demo_new_field_merchant"] = extracted["merchant_name"]
-                    st.session_state["demo_new_field_bktxt"] = extracted["summary"]
+                    st.session_state["demo_new_entity_color_map"] = _build_entity_color_map(entities)
                 st.rerun()
 
             analysis_result = st.session_state.get("demo_new_analysis_result")
@@ -246,6 +345,7 @@ def render_demo_new_page() -> None:
 
                 entities = analysis_result.entities if hasattr(analysis_result, "entities") else []
                 boxes, bbox_labels, color_groups = _entities_to_boxes_and_labels(entities)
+                st.session_state["demo_new_entity_color_map"] = _build_entity_color_map(entities)
 
                 if boxes:
                     st.caption("추출 위치 하이라이트 (항목명·값 동일 색 매칭)")
@@ -270,11 +370,6 @@ def render_demo_new_page() -> None:
                 "demo_new_auto_time",
                 "demo_new_auto_merchant",
                 "demo_new_auto_summary",
-                "demo_new_field_amount",
-                "demo_new_field_date",
-                "demo_new_field_time",
-                "demo_new_field_merchant",
-                "demo_new_field_bktxt",
             ):
                 st.session_state.pop(key, None)
             image_bytes = None
@@ -302,49 +397,89 @@ def render_demo_new_page() -> None:
         auto_merchant = st.session_state.get("demo_new_auto_merchant", "")
         auto_summary = st.session_state.get("demo_new_auto_summary", "")
 
-        # 입력 레이아웃: 3, 3, 1
-        # 1행: 금액 / 가맹점 / 업종코드
-        c1, c2, c3 = st.columns(3)
+        analysis_result = st.session_state.get("demo_new_analysis_result")
+        color_map = st.session_state.get("demo_new_entity_color_map") or {}
+        entities_for_mismatch = analysis_result.entities if (analysis_result is not None and hasattr(analysis_result, "entities")) else []
+        extracted_map = {
+            "amount_total": _extract_entity_value(entities_for_mismatch, "amount_total"),
+            "merchant_name": _extract_entity_value(entities_for_mismatch, "merchant_name"),
+            "date_occurrence": _extract_entity_value(entities_for_mismatch, "date_occurrence"),
+            "time_occurrence": _extract_entity_value(entities_for_mismatch, "time_occurrence"),
+        }
+        current_seed = {
+            "amount_total": str(st.session_state.get("demo_new_field_amount", auto_amount) or ""),
+            "merchant_name": str(st.session_state.get("demo_new_field_merchant", auto_merchant) or ""),
+            "date_occurrence": str(st.session_state.get("demo_new_field_date", auto_date) or ""),
+            "time_occurrence": str(st.session_state.get("demo_new_field_time", auto_time) or ""),
+        }
+        mismatch_state = {
+            key: _is_field_mismatch(key, extracted_map.get(key, ""), current_seed.get(key, ""))
+            for key in extracted_map.keys()
+        }
+
+        # 입력 레이아웃: 2, 3
+        # 1행: 금액 / 가맹점
+        c1, c2 = st.columns(2)
         with c1:
-            amount_val = st.text_input(
-                "금액 (amount_total) *",
-                value=auto_amount,
-                placeholder="예: 97042",
-                key="demo_new_field_amount",
-            )
+            amount_color = str(color_map.get("amount_total") or "#ef4444")
+            with stylable_container(
+                key=f"demo_new_wrap_amount_{'m' if mismatch_state.get('amount_total') else 'n'}",
+                css_styles=_field_wrap_css(bool(mismatch_state.get("amount_total")), amount_color),
+            ):
+                amount_val = st.text_input(
+                    "금액 (amount_total) *",
+                    value=auto_amount,
+                    placeholder="예: 97042",
+                    key="demo_new_field_amount",
+                )
+                if mismatch_state.get("amount_total"):
+                    st.caption(f"불일치 · 이미지 추출값: {extracted_map.get('amount_total')}")
         with c2:
-            merchant_val = st.text_input(
-                "가맹점 (merchant_name) *",
-                value=auto_merchant,
-                placeholder="예: 가온 식당",
-                key="demo_new_field_merchant",
-            )
-        with c3:
-            mcc_code_val = st.text_input(
-                "업종코드 (mcc_code)",
-                value="",
-                placeholder="예: 5812 (음식점), 5813 (주점), 7011 (호텔)",
-                key="demo_new_field_mcc_code",
-                help="MCC 코드: 5812=일반음식점, 5813=주점/bar, 7011=숙박, 4722=여행사, 7992=골프",
-            )
+            merchant_color = str(color_map.get("merchant_name") or "#ef4444")
+            with stylable_container(
+                key=f"demo_new_wrap_merchant_{'m' if mismatch_state.get('merchant_name') else 'n'}",
+                css_styles=_field_wrap_css(bool(mismatch_state.get("merchant_name")), merchant_color),
+            ):
+                merchant_val = st.text_input(
+                    "가맹점 (merchant_name) *",
+                    value=auto_merchant,
+                    placeholder="예: 가온 식당",
+                    key="demo_new_field_merchant",
+                )
+                if mismatch_state.get("merchant_name"):
+                    st.caption(f"불일치 · 이미지 추출값: {extracted_map.get('merchant_name')}")
 
         # 2행: 일자 / 시간 / 적요
         c4, c5, c6 = st.columns(3)
         with c4:
-            date_val = st.text_input(
-                "일자 (date_occurrence) *",
-                value=auto_date,
-                placeholder="예: 2026-03-14",
-                key="demo_new_field_date",
-            )
+            date_color = str(color_map.get("date_occurrence") or "#ef4444")
+            with stylable_container(
+                key=f"demo_new_wrap_date_{'m' if mismatch_state.get('date_occurrence') else 'n'}",
+                css_styles=_field_wrap_css(bool(mismatch_state.get("date_occurrence")), date_color),
+            ):
+                date_val = st.text_input(
+                    "일자 (date_occurrence) *",
+                    value=auto_date,
+                    placeholder="예: 2026-03-14",
+                    key="demo_new_field_date",
+                )
+                if mismatch_state.get("date_occurrence"):
+                    st.caption(f"불일치 · 이미지 추출값: {extracted_map.get('date_occurrence')}")
         with c5:
-            time_val = st.text_input(
-                "시간 (time_occurrence)",
-                value=auto_time,
-                placeholder="예: 19:45",
-                key="demo_new_field_time",
-                help="영수증의 거래시간. 이미지 분석 시 자동 추출. HH:MM 형식 (24시간제)",
-            )
+            time_color = str(color_map.get("time_occurrence") or "#ef4444")
+            with stylable_container(
+                key=f"demo_new_wrap_time_{'m' if mismatch_state.get('time_occurrence') else 'n'}",
+                css_styles=_field_wrap_css(bool(mismatch_state.get("time_occurrence")), time_color),
+            ):
+                time_val = st.text_input(
+                    "시간 (time_occurrence)",
+                    value=auto_time,
+                    placeholder="예: 19:45",
+                    key="demo_new_field_time",
+                    help="영수증의 거래시간. 이미지 분석 시 자동 추출. HH:MM 형식 (24시간제)",
+                )
+                if mismatch_state.get("time_occurrence"):
+                    st.caption(f"불일치 · 이미지 추출값: {extracted_map.get('time_occurrence')}")
         with c6:
             bktxt_val = st.text_input(
                 "적요 (bktxt)",
@@ -353,7 +488,32 @@ def render_demo_new_page() -> None:
                 key="demo_new_field_bktxt",
             )
 
-        st.divider()
+        st.markdown('<div style="height:8px;"></div>', unsafe_allow_html=True)
+        doc_labels = [label for _, label in _APPROVAL_DOC_OPTIONS]
+        doc_keys = [key for key, _ in _APPROVAL_DOC_OPTIONS]
+        opt_left, opt_right = st.columns(2)
+        with opt_left:
+            selected_doc_label = st.selectbox(
+                "품의서(전자결재)",
+                options=doc_labels,
+                key="demo_new_approval_doc_label",
+                help="POC 시연용 하드코딩 품의서를 선택합니다.",
+            )
+        with opt_right:
+            create_count = st.slider(
+                "생성건수",
+                min_value=1,
+                max_value=20,
+                value=1,
+                key="demo_new_create_count",
+            )
+        selected_doc_key = doc_keys[doc_labels.index(selected_doc_label)]
+        approval_doc = _APPROVAL_DOC_PRESETS.get(selected_doc_key)
+        if approval_doc:
+            st.caption(f"선택된 품의서: {approval_doc.get('title')}")
+            st.caption(f"내용: {approval_doc.get('content')}")
+
+        st.markdown('<div style="height:8px;"></div>', unsafe_allow_html=True)
 
         # 필수 입력 유효성 + 버튼 활성화 판단
         # NORMAL_BASELINE은 즉시 생성 가능하도록 필수값 검증을 우회한다.
@@ -374,14 +534,6 @@ def render_demo_new_page() -> None:
 
         generate_disabled = _is_generate_disabled(all_valid, is_abnormal, uploaded_file is not None)
 
-        create_count = st.slider(
-            "생성건수",
-            min_value=1,
-            max_value=20,
-            value=1,
-            key="demo_new_create_count",
-        )
-
         if st.button(
             "테스트 데이터 생성",
             key="demo_new_generate_btn",
@@ -395,7 +547,7 @@ def render_demo_new_page() -> None:
                 time_occ=time_val,
                 merchant=merchant_val,
                 bktxt=bktxt_val,
-                mcc_code=mcc_code_val,
+                approval_doc=approval_doc,
                 create_count=int(create_count),
                 image_bytes=st.session_state.get("demo_new_image_bytes"),
                 uploaded_filename=uploaded_file.name if uploaded_file else None,
@@ -411,7 +563,7 @@ def _handle_generate(
     time_occ: str,
     merchant: str,
     bktxt: str,
-    mcc_code: str,
+    approval_doc: dict[str, Any] | None,
     create_count: int,
     image_bytes: bytes | None,
     uploaded_filename: str | None,
@@ -427,7 +579,7 @@ def _handle_generate(
         "time_occurrence": time_occ.strip(),
         "merchant_name": merchant.strip(),
         "bktxt": bktxt.strip(),
-        "mcc_code": mcc_code.strip(),
+        "approval_doc": approval_doc or {},
     }
 
     # 분석 결과 직렬화

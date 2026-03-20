@@ -490,6 +490,7 @@ def save_custom_demo_case(
     now_iso = datetime.now(timezone.utc).isoformat()
     case_type = payload.get("case_type", "UNKNOWN")
     q_data = generate_preview_questions(case_type, payload)
+    approval_doc = payload.get("approval_doc") if isinstance(payload.get("approval_doc"), dict) else {}
 
     meta: dict[str, Any] = {
         "case_uuid": case_uuid,
@@ -520,6 +521,12 @@ def save_custom_demo_case(
             "bktxt": payload.get("bktxt", ""),
             "sgtxt": payload.get("sgtxt", ""),
             "user_reason": payload.get("user_reason", ""),
+        },
+        "approval_doc": {
+            "title": str(approval_doc.get("title") or "").strip(),
+            "content": str(approval_doc.get("content") or "").strip(),
+            "attendees": approval_doc.get("attendees") if isinstance(approval_doc.get("attendees"), list) else [],
+            "approved": bool(approval_doc.get("approved")),
         },
     }
 

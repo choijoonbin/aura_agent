@@ -1995,28 +1995,38 @@ def _build_hitl_summary_sections(latest_bundle: dict[str, Any]) -> dict[str, lis
             raw_stop.append(str(hitl_request.get("blocking_reason")))
     stop_reasons = [_plain_stop_reason(s, verification_summary) for s in raw_stop] if raw_stop else ["자동 확정 중단 사유 데이터가 비어 있습니다."]
 
-    questions = [str(x) for x in (hitl_request.get("review_questions") or hitl_request.get("questions") or []) if str(x).strip()]
-    if not questions:
-        # review_questions가 비어도, HITL payload의 required_inputs guide/reason을
-        # 사용자 질문으로 표시해 최초 팝업에서 작성 포인트가 보이도록 한다.
-        req_questions: list[str] = []
+    context_checks = hitl_request.get("context_checks") if isinstance(hitl_request.get("context_checks"), dict) else {}
+    evidence_attached = bool(context_checks.get("evidence_attached"))
+    preapproval_attached = bool(context_checks.get("preapproval_attached"))
+    check_title = "검토자가 확인해야 할 내용" if not (evidence_attached and preapproval_attached) else "검토 참고 사항"
+
+    check_items = [str(x) for x in (hitl_request.get("review_questions") or hitl_request.get("questions") or []) if str(x).strip()]
+    if not check_items:
+        req_checks: list[str] = []
         for req in (hitl_request.get("required_inputs") or []):
             if not isinstance(req, dict):
                 continue
             q = str(req.get("guide") or req.get("reason") or "").strip()
             if q:
-                req_questions.append(q)
-        # 중복 제거 + 상위 2개만 표시(기존 HITL 질문 개수 정책 유지)
+                req_checks.append(q)
         seen_q: set[str] = set()
         dedup_req: list[str] = []
-        for q in req_questions:
+        for q in req_checks:
             if q in seen_q:
                 continue
             seen_q.add(q)
             dedup_req.append(q)
-        questions = dedup_req[:2]
-    if not questions:
-        questions = ["검토 질문이 누락되었습니다. (run 데이터를 확인해 주세요)"]
+        check_items = dedup_req[:2]
+    if not check_items:
+        if not evidence_attached or not preapproval_attached:
+            missing_bits: list[str] = []
+            if not evidence_attached:
+                missing_bits.append("증빙파일")
+            if not preapproval_attached:
+                missing_bits.append("품의서(전자결재)")
+            check_items = [f"{', '.join(missing_bits)} 첨부 여부와 내용 타당성을 우선 확인해 주세요."]
+        else:
+            check_items = ["추가 확인사항이 없습니다. 담당자는 근거 요약을 참고해 승인/보류를 판단해 주세요."]
 
     evidence_lines: list[str] = []
     snapshot = hitl_request.get("evidence_snapshot") or []
@@ -2050,7 +2060,8 @@ def _build_hitl_summary_sections(latest_bundle: dict[str, Any]) -> dict[str, lis
     return {
         "review_reasons": review_reasons,
         "stop_reasons": stop_reasons,
-        "questions": questions,
+        "check_title": check_title,
+        "check_items": check_items,
         "evidence_lines": evidence_lines,
         "debug": {
             "hitl_request": hitl_request,
@@ -2740,8 +2751,8 @@ def render_hitl_panel(latest_bundle: dict[str, Any], *, vkey: str | None = None)
                 "■",
             )
             + _render_box(
-                "검토자가 답해야 할 질문",
-                summary["questions"],
+                summary.get("check_title") or "검토자가 확인해야 할 내용",
+                summary.get("check_items") or [],
                 "question",
                 "?",
             )
@@ -2801,35 +2812,8 @@ def render_hitl_panel(latest_bundle: dict[str, Any], *, vkey: str | None = None)
                 else:
                     st.caption("- 이전 제출 답변 없음")
 
-        required_inputs = (hitl_request.get("required_inputs") or [])
-        _req_fields = {(req.get("field") or "").strip() for req in required_inputs}
-        info_cols = st.columns(3)
-        with info_cols[0]:
-            st.text_input("검토자", key=form_keys["reviewer"])
-        with info_cols[1]:
-            st.text_input("업무 목적" + (" *" if "business_purpose" in _req_fields else ""), key=form_keys["business_purpose"], placeholder="예: 주말 장애 대응 회의")
-        with info_cols[2]:
-            st.text_input("참석자(쉼표 구분)" + (" *" if "attendees" in _req_fields else ""), key=form_keys["attendees"], placeholder="예: 홍길동, 김민수, 외부 파트너 1명")
-        for req in required_inputs:
-            field = (req.get("field") or "").strip()
-            if not field or field in ("business_purpose", "attendees"):
-                continue
-            label = (req.get("guide") or req.get("reason") or field).strip()
-            key = form_keys.get(f"extra_{field}")
-            if key:
-                st.text_input(f"{label} *", key=key, placeholder=f"규정 요구 항목(필수): {label[:50]}")
-        # 검토 의견 placeholder: LLM/규정에서 요구한 항목을 동적으로 안내
-        # UI에는 LLM 생성 질문(review_questions)만 노출한다.
-        # required_inputs는 서버 검증(누락 체크) 용도로 유지한다.
-        must_fill: list[str] = []
-        for q in (hitl_request.get("review_questions") or hitl_request.get("questions") or []):
-            s = str(q or "").strip()
-            if s:
-                must_fill.append(s[:120])
-        if must_fill:
-            comment_placeholder = "반드시 작성할 내용:\n" + "\n".join(f"• {m}" for m in must_fill[:8]) + "\n\n왜 승인 또는 보류로 판단했는지 핵심 근거를 적습니다."
-        else:
-            comment_placeholder = "왜 승인 또는 보류로 판단했는지 핵심 근거를 적습니다.\n예: 주말 대응 프로젝트로 야간 회의 후 식대 사용. 사전 승인 메일 확인됨."
+        st.text_input("검토자", key=form_keys["reviewer"])
+        comment_placeholder = "표시된 확인사항과 근거요약을 참고해 승인/보류 판단 근거를 작성하세요."
         st.text_area(
             "검토 의견",
             height=96,
@@ -2848,14 +2832,8 @@ def render_hitl_panel(latest_bundle: dict[str, Any], *, vkey: str | None = None)
 
         # 통합 제출: 버튼은 상단(담당자 검토 라인 우측)에 있음
         if submit_clicked:
-            extra_facts = {}
-            for k, form_key in form_keys.items():
-                if k.startswith("extra_") and form_key in st.session_state:
-                    extra_facts[k.replace("extra_", "", 1)] = str(st.session_state.get(form_key, "") or "").strip()
             reviewer = str(st.session_state.get(form_keys["reviewer"], "") or "").strip()
             comment = str(st.session_state.get(form_keys["comment"], "") or "").strip()
-            business_purpose = str(st.session_state.get(form_keys["business_purpose"], "") or "").strip()
-            attendees_raw = str(st.session_state.get(form_keys["attendees"], "") or "")
             # 위 st.radio() 반환값 사용 — session_state 기본값으로 인한 approved=False 오류 방지
             approved = decision_val == "승인 가능"
             logger.info(
@@ -2863,38 +2841,10 @@ def render_hitl_panel(latest_bundle: dict[str, Any], *, vkey: str | None = None)
                 decision_val,
                 approved,
             )
-            # 필수 입력값 검사: 누락 시 제출/팝업 닫기 불가
-            missing_required: list[str] = []
-            for req in required_inputs:
-                field = (req.get("field") or "").strip()
-                if not field:
-                    continue
-                label = (req.get("guide") or req.get("reason") or req.get("field") or field).strip()
-                if field == "attendees":
-                    if not [p.strip() for p in attendees_raw.split(",") if p.strip()]:
-                        missing_required.append(label)
-                elif field == "business_purpose":
-                    if not business_purpose:
-                        missing_required.append(label)
-                else:
-                    if not (extra_facts.get(field) or "").strip():
-                        missing_required.append(label)
-            if missing_required:
-                logger.warning(
-                    "[HITL_SUBMIT] 필수 입력 누락 상태로 제출 진행: run_id=%s missing=%s",
-                    run_id,
-                    missing_required[:8],
-                )
-                st.warning(
-                    "필수 입력 일부가 비어 있습니다. 우선 검토 반영 후 분석을 이어가며, 필요하면 다음 단계에서 추가 입력 요청이 다시 표시됩니다."
-                )
             hitl_response = {
                 "reviewer": reviewer or "FINANCE_REVIEWER",
                 "comment": comment or None,
-                "business_purpose": business_purpose or None,
-                "attendees": [p.strip() for p in attendees_raw.split(",") if p.strip()],
                 "approved": approved,
-                "extra_facts": extra_facts,
             }
             evidence_uploaded = has_evidence_result
             upload_failed = False

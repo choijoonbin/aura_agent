@@ -69,19 +69,18 @@ async def hitl_validate_node_impl(
         )
         return {"hitl_request": None}
 
+    # UI 정책 변경: HITL 팝업은 '질문/답변 수집' 대신 '확인사항 + 담당자 판단' 흐름으로 운영.
+    # 누락 항목은 재요청 루프로 돌리지 않고, 판단 컨텍스트로만 남겨 reporter/verdict 단계에서 반영한다.
     logger.info(
-        "[hitl] hitl_validate_node: 누락 필드=%s → hitl_pause 재요청",
+        "[hitl] hitl_validate_node: 누락 필드=%s, 재요청 없이 reporter 진행",
         [m.get("field") for m in missing[:5]],
     )
-    new_request = dict(hitl_request)
-    new_request["required_inputs"] = missing
-    new_request["why_hitl"] = "규정에서 요구한 필수 입력/증빙 항목 중 아래 항목이 비어 있어 추가 입력이 필요합니다."
-    new_request["reasons"] = [f"필수 항목 미기입: {m.get('field', '')} — {m.get('reason', '')}" for m in missing[:5]]
-    new_request["review_questions"] = [m.get("guide", m.get("reason", "")) for m in missing if m.get("guide") or m.get("reason")]
-    if not new_request.get("review_questions"):
-        new_request["review_questions"] = [f"{m.get('field')}: {m.get('reason')}" for m in missing]
-    new_request["questions"] = new_request["review_questions"]
-    return {"hitl_request": new_request}
+    body = dict(state.get("body_evidence") or {})
+    body["hitlValidationMissing"] = [
+        {"field": str(m.get("field") or ""), "reason": str(m.get("reason") or ""), "guide": str(m.get("guide") or "")}
+        for m in missing[:8]
+    ]
+    return {"hitl_request": None, "body_evidence": body}
 
 
 async def hitl_pause_node_impl(

@@ -215,6 +215,48 @@ def _is_excluded_required_input(req: dict[str, Any]) -> bool:
     )
 
 
+def _extract_context_checks(body_evidence: dict[str, Any]) -> dict[str, bool]:
+    doc = body_evidence.get("document") or {}
+    pre = body_evidence.get("preApprovalDoc") if isinstance(body_evidence.get("preApprovalDoc"), dict) else {}
+    pre_title = str(pre.get("title") or "").strip()
+    pre_content = str(pre.get("content") or "").strip()
+    preapproval_attached = bool(pre_title or pre_content)
+
+    attendees = body_evidence.get("attendees") or doc.get("attendees") or []
+    attendees_confirmed = isinstance(attendees, list) and len(attendees) > 0
+
+    evidence_attached = bool(
+        body_evidence.get("evidenceProvided") is True
+        or doc.get("receiptQualified") is True
+        or body_evidence.get("evidenceDocumentResult")
+    )
+    return {
+        "preapproval_attached": preapproval_attached,
+        "attendees_confirmed": attendees_confirmed,
+        "evidence_attached": evidence_attached,
+    }
+
+
+def _filter_questions_by_context(
+    questions: list[str],
+    *,
+    preapproval_attached: bool,
+    attendees_confirmed: bool,
+) -> list[str]:
+    if not questions:
+        return []
+    out: list[str] = []
+    for q in questions:
+        text = str(q or "").strip()
+        compact = re.sub(r"\s+", "", text.lower())
+        if preapproval_attached and any(k in compact for k in ("사전승인", "승인", "품의서", "전자결재", "전자결재")):
+            continue
+        if attendees_confirmed and any(k in compact for k in ("참석자", "참석인원", "동석", "내부외부")):
+            continue
+        out.append(text)
+    return out
+
+
 def _extract_article_tokens(text: str) -> list[str]:
     if not text:
         return []
@@ -1137,9 +1179,16 @@ async def verify_node_impl(
         if not final_reasons:
             final_reasons = [f"[{u.taxonomy}] {u.reason or u.claim}" for u in unsupported_claim_issues[:5]]
         final_questions = [str(x).strip() for x in (hitl_request.get("review_questions") or hitl_request.get("questions") or []) if str(x).strip()]
+        checks = _extract_context_checks(state.get("body_evidence") or {})
+        final_questions = _filter_questions_by_context(
+            final_questions,
+            preapproval_attached=checks["preapproval_attached"],
+            attendees_confirmed=checks["attendees_confirmed"],
+        )
         hitl_request["unresolved_claims"] = final_reasons[:5]
         hitl_request["review_questions"] = final_questions[:MAX_HITL_QUESTIONS]
         hitl_request["questions"] = final_questions[:MAX_HITL_QUESTIONS]
+        hitl_request["context_checks"] = checks
 
         # ── Sprint 3: 전표 제출자 사전 답변 Q&A 매칭 ──────────────────────────
         memo = (state.get("body_evidence") or {}).get("memo") or {}
