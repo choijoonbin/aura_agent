@@ -622,6 +622,50 @@ def render_demo_new_page() -> None:
         else:
             uploaded_file = None
 
+        # ── 유효성 + 생성 버튼 (좌측 컬럼 하단) ──
+        st.markdown('<div style="height:6px;"></div>', unsafe_allow_html=True)
+
+        if selected_case_type == "NORMAL_BASELINE":
+            all_valid, validation_errors = True, []
+        else:
+            all_valid, validation_errors = _check_required_fields(amount_val, date_val, merchant_val)
+
+        if validation_errors:
+            st.markdown(
+                "".join(f'<div style="color:#b91c1c;font-size:0.82rem;margin:2px 0">⚠ {e}</div>' for e in validation_errors),
+                unsafe_allow_html=True,
+            )
+
+        if is_abnormal and uploaded_file is None:
+            st.markdown(
+                '<div style="background:#fef9c3;border:1px solid #fde047;border-radius:8px;'
+                'padding:0.5rem 0.8rem;font-size:0.83rem;color:#854d0e;margin:0.4rem 0">'
+                '📎 비정상 케이스는 증빙 이미지 첨부 후 데이터 생성이 가능합니다.</div>',
+                unsafe_allow_html=True,
+            )
+
+        generate_disabled = _is_generate_disabled(all_valid, is_abnormal, uploaded_file is not None)
+        if st.button(
+            "🚀  테스트 데이터 생성",
+            key="demo_new_generate_btn",
+            type="primary",
+            disabled=generate_disabled,
+            use_container_width=True,
+        ):
+            _handle_generate(
+                case_type=selected_case_type,
+                amount=amount_val,
+                date_occ=date_val,
+                time_occ=time_val,
+                merchant=merchant_val,
+                bktxt=bktxt_val,
+                approval_doc=approval_doc,
+                create_count=int(create_count),
+                image_bytes=st.session_state.get("demo_new_image_bytes"),
+                uploaded_filename=st.session_state.get("demo_new_uploader_name") if uploaded_file else None,
+                analysis_result=st.session_state.get("demo_new_analysis_result"),
+            )
+
     # ══ 우: 증빙 이미지 + Vision LLM 분석 결과 ═══════════════
     with col_image:
         st.markdown(
@@ -706,49 +750,6 @@ def render_demo_new_page() -> None:
                 unsafe_allow_html=True,
             )
 
-    # ══ 하단: 유효성 + 생성 버튼 (full-width) ════════════════
-    st.markdown('<div style="height:4px;"></div>', unsafe_allow_html=True)
-
-    if selected_case_type == "NORMAL_BASELINE":
-        all_valid, validation_errors = True, []
-    else:
-        all_valid, validation_errors = _check_required_fields(amount_val, date_val, merchant_val)
-
-    if validation_errors:
-        st.markdown(
-            "".join(f'<div style="color:#b91c1c;font-size:0.82rem;margin:2px 0">⚠ {e}</div>' for e in validation_errors),
-            unsafe_allow_html=True,
-        )
-
-    if is_abnormal and uploaded_file is None:
-        st.markdown(
-            '<div style="background:#fef9c3;border:1px solid #fde047;border-radius:8px;'
-            'padding:0.5rem 0.8rem;font-size:0.83rem;color:#854d0e;margin:0.4rem 0">'
-            '📎 비정상 케이스는 증빙 이미지 첨부 후 데이터 생성이 가능합니다.</div>',
-            unsafe_allow_html=True,
-        )
-
-    generate_disabled = _is_generate_disabled(all_valid, is_abnormal, uploaded_file is not None)
-    if st.button(
-        "🚀  테스트 데이터 생성",
-        key="demo_new_generate_btn",
-        type="primary",
-        disabled=generate_disabled,
-        use_container_width=True,
-    ):
-        _handle_generate(
-            case_type=selected_case_type,
-            amount=amount_val,
-            date_occ=date_val,
-            time_occ=time_val,
-            merchant=merchant_val,
-            bktxt=bktxt_val,
-            approval_doc=approval_doc,
-            create_count=int(create_count),
-            image_bytes=st.session_state.get("demo_new_image_bytes"),
-            uploaded_filename=st.session_state.get("demo_new_uploader_name") if uploaded_file else None,
-            analysis_result=st.session_state.get("demo_new_analysis_result"),
-        )
 
 
 def _handle_generate(
