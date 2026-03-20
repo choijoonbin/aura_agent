@@ -309,7 +309,7 @@ def render_demo_new_page() -> None:
           display: flex;
           align-items: center;
           gap: 0;
-          margin: 0.2rem 0 0.55rem;
+          margin: 0.02rem 0 0.16rem;
         }
         .step-item {
           display: flex;
@@ -336,11 +336,19 @@ def render_demo_new_page() -> None:
         /* ── 케이스 배지 ── */
         .case-badge {
           display: inline-flex; align-items: center; gap: 0.35rem;
-          padding: 0.3rem 0.85rem;
+          padding: 0.22rem 0.72rem;
           border-radius: 999px;
           font-size: 0.78rem; font-weight: 700;
           letter-spacing: 0.02em;
         }
+        .demo-top-flow {
+          display: flex;
+          align-items: center;
+          gap: 1rem;
+          margin: 0.02rem 0 0.08rem;
+          flex-wrap: nowrap;
+        }
+        .demo-top-flow .step-bar { margin: 0; }
         .badge-critical { background: #fef2f2; color: #b91c1c; border: 1px solid #fca5a5; }
         .badge-normal   { background: #f0fdf4; color: #15803d; border: 1px solid #86efac; }
         .badge-warning  { background: #fff7ed; color: #c2410c; border: 1px solid #fdba74; }
@@ -399,11 +407,6 @@ def render_demo_new_page() -> None:
     badge_cls, badge_icon, badge_label = _CASE_BADGE_META.get(
         selected_case_type, ("badge-normal", "⚪", selected_case_type)
     )
-    st.markdown(
-        f'<div style="margin:0.1rem 0 0.15rem;"><span class="case-badge {badge_cls}">{badge_icon} {badge_label}</span></div>',
-        unsafe_allow_html=True,
-    )
-
     prev_case_type = str(st.session_state.get("demo_new_prev_case_type") or "")
     # HOLIDAY_USAGE는 POC 시연 기본값을 즉시 채워 시작한다.
     if selected_case_type == "HOLIDAY_USAGE" and prev_case_type != "HOLIDAY_USAGE":
@@ -462,8 +465,10 @@ def render_demo_new_page() -> None:
             <div class="step-circle">4</div> 데이터 생성
           </div>
         </div>"""
-    st.markdown(step_html, unsafe_allow_html=True)
-    st.markdown('<div style="margin-top:-1.2rem"></div>', unsafe_allow_html=True)
+    st.markdown(
+        f'<div class="demo-top-flow"><span class="case-badge {badge_cls}">{badge_icon} {badge_label}</span>{step_html}</div>',
+        unsafe_allow_html=True,
+    )
 
     # ── 레이아웃: 좌(필드 편집) / 우(이미지+분석) ──────────
     col_right, col_left = st.columns([1, 1], gap="large")
