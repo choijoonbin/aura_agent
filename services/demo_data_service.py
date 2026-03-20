@@ -439,11 +439,7 @@ def _create_beta_voucher(
         db.rollback()
         raise
 
-    logger.info(
-        "save_custom_demo_case: DB voucher created (voucher_key=%s, uuid=%s)",
-        voucher_key,
-        case_uuid,
-    )
+    logger.info("[voucher] 생성 완료 | voucher_key=%s", voucher_key)
     return voucher_key
 
 
@@ -484,7 +480,7 @@ def save_custom_demo_case(
         img_path = save_dir / img_filename
         img_path.write_bytes(image_bytes)
         image_path = str(img_path)
-        logger.info("save_custom_demo_case: image saved to %s", image_path)
+        logger.debug("save_custom_demo_case: image saved to %s", image_path)
 
     # 메타데이터 JSON 저장
     now_iso = datetime.now(timezone.utc).isoformat()
@@ -538,7 +534,7 @@ def save_custom_demo_case(
 
     meta_path = save_dir / "meta.json"
     meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
-    logger.info("save_custom_demo_case: meta saved to %s (uuid=%s)", meta_path, case_uuid)
+    logger.debug("save_custom_demo_case: meta saved to %s (uuid=%s)", meta_path, case_uuid)
 
     result: dict[str, Any] = {
         "case_uuid": case_uuid,

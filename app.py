@@ -9,6 +9,10 @@ try:
 except TypeError:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s", datefmt="%H:%M:%S")
 
+# 불필요한 라이브러리 로그 억제 (httpx, openai 등이 터미널을 오염하지 않도록)
+for _noisy_logger in ("httpx", "httpcore", "openai", "openai._base_client"):
+    logging.getLogger(_noisy_logger).setLevel(logging.WARNING)
+
 from ui.demo_new import render_demo_new_page
 from ui.rag import render_rag_library_page
 from ui.shared import inject_css
