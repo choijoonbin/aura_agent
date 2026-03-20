@@ -380,7 +380,8 @@ async def invoke_llm_planner_impl(
         "당신은 기업 경비 감사 에이전트의 Planner다.\n"
         "아래 케이스 정보를 분석하여 최적의 도구 실행 순서를 결정하라.\n"
         "규칙:\n"
-        "1. 공통 사항: 규정상 모든 전표는 증빙이 필요하므로 document_evidence_probe(전표 증거 수집)와 policy_rulebook_probe(규정 조항 조회)는 반드시 계획에 포함하라.\n"
+        "1. 공통 사항: document_evidence_probe(전표 증거 수집)와 policy_rulebook_probe(규정 조항 조회)는 반드시 계획에 포함하라.\n"
+        "   단, 증빙 의무 문맥은 비정상 케이스에 우선 적용하고 NORMAL_BASELINE에는 자동 강제하지 마라.\n"
         "2. 케이스 유형(휴일/한도/업종 등)에 따라 holiday_compliance_probe, budget_risk_probe, merchant_risk_probe 등을 추가로 포함하라.\n"
         "3. 앞 도구 결과가 뒷 도구에 영향을 준다면 순서를 고려하라.\n"
         "4. 반드시 JSON 배열로만 응답하라. 각 항목: {\"tool\": string, \"reason\": string}\n"
@@ -511,7 +512,7 @@ async def planner_node_impl(
     if "document_evidence_probe" not in plan_tools:
         plan.append({"tool": "document_evidence_probe", "reason": "공통: 전표 증빙(라인/항목) 수집", "owner": "common"})
     if "policy_rulebook_probe" not in plan_tools:
-        plan.append({"tool": "policy_rulebook_probe", "reason": "공통: 규정 조항(증빙 의무 포함) 조회", "owner": "common"})
+        plan.append({"tool": "policy_rulebook_probe", "reason": "공통: 규정 조항 조회", "owner": "common"})
 
     def _build_planner_reasoning() -> str:
         lines: list[str] = []

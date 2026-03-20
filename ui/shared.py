@@ -1117,6 +1117,7 @@ def _draw_graph_plotly(
     pos: dict[str, tuple[float, float]],
     hitl_nodes: set[str] | None = None,
     skill_nodes: set[str] | None = None,
+    edge_style_map: dict[tuple[str, str], dict[str, Any]] | None = None,
     height: int = 400,
 ):
     """Plotly Figure로 노드/엣지를 그려 반환. st.plotly_chart()로 표시.
@@ -1127,6 +1128,7 @@ def _draw_graph_plotly(
 
     hitl_nodes = hitl_nodes or set()
     skill_nodes = skill_nodes or set()
+    edge_style_map = edge_style_map or {}
     node_w, node_h = 1.8, 0.46
 
     def _colors(key: str) -> tuple[str, str]:
@@ -1163,7 +1165,7 @@ def _draw_graph_plotly(
             x=x, y=y,
             text=f"<b>{label}</b>",
             showarrow=False,
-            font=dict(size=10, color="#1e293b", family="Inter, Arial, sans-serif"),
+            font=dict(size=11, color="#1e293b", family="Inter, Arial, sans-serif"),
             xanchor="center", yanchor="middle",
         ))
         node_hover_x.append(x)
@@ -1175,6 +1177,9 @@ def _draw_graph_plotly(
     for src, dst, elabel in edges:
         if src not in pos or dst not in pos:
             continue
+        style = edge_style_map.get((src, dst), {})
+        arrow_color = style.get("color", "#94a3b8")
+        arrow_width = float(style.get("width", 1.8))
         sx, sy = pos[src]
         dx, dy = pos[dst]
         delta_x = dx - sx
@@ -1201,7 +1206,7 @@ def _draw_graph_plotly(
             ax=ax_pt, ay=ay_pt,
             xref="x", yref="y", axref="x", ayref="y",
             showarrow=True,
-            arrowhead=2, arrowsize=0.9, arrowwidth=1.6, arrowcolor="#94a3b8",
+            arrowhead=2, arrowsize=0.95, arrowwidth=arrow_width, arrowcolor=arrow_color,
             text="",
         ))
 
@@ -1213,7 +1218,7 @@ def _draw_graph_plotly(
                 x=mid_x, y=mid_y + off,
                 text=f"<i>{elabel}</i>",
                 showarrow=False,
-                font=dict(size=8, color="#64748b"),
+                font=dict(size=9, color=arrow_color),
                 xanchor="center",
             ))
 
@@ -1286,8 +1291,20 @@ def draw_agent_graph_plotly():
         ("reporter", "finalizer", ""),
         ("finalizer", "__end__", ""),
     ]
+    edge_style_map: dict[tuple[str, str], dict[str, Any]] = {
+        ("start_router", "screener"): {"color": "#0ea5e9", "width": 2.0},
+        ("start_router", "intake"): {"color": "#0ea5e9", "width": 2.0},
+        ("critic", "planner"): {"color": "#f97316", "dash": "dash", "width": 2.2},
+        ("verify", "hitl_pause"): {"color": "#f59e0b", "dash": "dash", "width": 2.2},
+        ("verify", "reporter"): {"color": "#16a34a", "width": 2.0},
+        ("hitl_pause", "hitl_validate"): {"color": "#f59e0b", "width": 2.0},
+        ("hitl_validate", "reporter"): {"color": "#16a34a", "width": 2.0},
+        ("hitl_validate", "hitl_pause"): {"color": "#f59e0b", "dash": "dash", "width": 2.0},
+    }
     return _draw_graph_plotly(nodes, edges, pos,
-                              hitl_nodes={"hitl_pause", "hitl_validate"}, height=420)
+                              hitl_nodes={"hitl_pause", "hitl_validate"},
+                              edge_style_map=edge_style_map,
+                              height=420)
 
 
 def draw_deep_screening_graph_plotly():
@@ -1305,7 +1322,14 @@ def draw_deep_screening_graph_plotly():
     pos = {k: (i * step, 0.0) for i, k in enumerate(keys)}
     nodes = [(k, label_map.get(k, k), "") for k in keys]
     edges = [(keys[i], keys[i + 1], "") for i in range(len(keys) - 1)]
-    return _draw_graph_plotly(nodes, edges, pos, height=260)
+    edge_style_map: dict[tuple[str, str], dict[str, Any]] = {
+        ("__start__", "intake_normalize"): {"color": "#0ea5e9", "width": 2.0},
+        ("intake_normalize", "hypothesis_generate"): {"color": "#0ea5e9", "width": 2.0},
+        ("hypothesis_generate", "rule_guardrail"): {"color": "#0ea5e9", "width": 2.0},
+        ("rule_guardrail", "finalize_screening"): {"color": "#0ea5e9", "width": 2.0},
+        ("finalize_screening", "__end__"): {"color": "#16a34a", "width": 2.0},
+    }
+    return _draw_graph_plotly(nodes, edges, pos, edge_style_map=edge_style_map, height=260)
 
 
 def draw_tool_execution_graph_plotly():
@@ -1328,8 +1352,19 @@ def draw_tool_execution_graph_plotly():
     nodes = [(k, label_map.get(k, k), "") for k in pos]
     edges = ([("execute", k, "cond." if k == "legacy" else "") for k in tool_keys]
              + [(k, "score", "") for k in tool_keys])
-    return _draw_graph_plotly(nodes, edges, pos,
-                              skill_nodes=set(tool_keys) | {"execute", "score"}, height=480)
+    edge_style_map: dict[tuple[str, str], dict[str, Any]] = {}
+    for k in tool_keys:
+        edge_style_map[("execute", k)] = {"color": "#2563eb", "width": 2.0}
+        edge_style_map[(k, "score")] = {"color": "#64748b", "width": 1.9}
+    edge_style_map[("execute", "legacy")] = {"color": "#f59e0b", "dash": "dash", "width": 2.2}
+    return _draw_graph_plotly(
+        nodes,
+        edges,
+        pos,
+        skill_nodes=set(tool_keys) | {"execute", "score"},
+        edge_style_map=edge_style_map,
+        height=500,
+    )
 
 
 _TOOL_EXECUTION_MERMAID = """graph TD

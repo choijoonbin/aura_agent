@@ -57,6 +57,7 @@ def _dedupe_keep_order(values: list[str]) -> list[str]:
 
 def build_policy_keywords(body_evidence: dict[str, Any]) -> list[str]:
     case_type = str(body_evidence.get("case_type") or body_evidence.get("intended_risk_type") or "").upper()
+    is_normal_baseline = case_type == "NORMAL_BASELINE"
     keywords = list(KEYWORD_HINTS.get(case_type, []))
     if case_type == "HOLIDAY_USAGE":
         if has_entertainment_context(body_evidence):
@@ -68,10 +69,12 @@ def build_policy_keywords(body_evidence: dict[str, Any]) -> list[str]:
     if article_hint:
         keywords.append(article_hint)
 
-    # 규정 제14조: 모든 경비 지출은 증빙 구비 의무. case_type 무관하게 공통 증빙 관련 조항 검색에 포함.
-    for kw in ["증빙", "공통", "제14조", "필수 증빙"]:
-        if kw not in keywords:
-            keywords.append(kw)
+    # 비정상 케이스에서는 제14조(증빙 제출 원칙)까지 함께 조회한다.
+    # 정상 비교군은 증빙 강제 문맥을 기본 검색에 주입하지 않는다.
+    if not is_normal_baseline:
+        for kw in ["증빙", "공통", "제14조", "필수 증빙"]:
+            if kw not in keywords:
+                keywords.append(kw)
 
     merchant = str(body_evidence.get("merchantName") or "").strip()
     expense_type = str(body_evidence.get("expenseType") or "").strip()
@@ -549,9 +552,11 @@ def _build_dense_query(body_evidence: dict[str, Any]) -> str:
     if is_holiday and "공휴일" not in query and "휴일" not in query:
         query += " 해당 날은 공휴일 또는 주말이다."
 
-    # 규정 제14조: 모든 전표에 공통 적용되는 증빙 의무 조항 포함 검색
-    if "증빙" not in query and "공통" not in query:
-        query += " 모든 경비 지출에 공통 적용되는 증빙 의무(제14조 공통 증빙) 규정을 포함해야 한다."
+    case_type_norm = str(body_evidence.get("case_type") or body_evidence.get("intended_risk_type") or "").upper()
+    is_normal_baseline = case_type_norm == "NORMAL_BASELINE"
+    # 비정상 케이스에서는 제14조(증빙 제출 원칙) 조항을 강제 포함한다.
+    if not is_normal_baseline and "증빙" not in query and "공통" not in query:
+        query += " 비정상 지출건에 적용되는 증빙 제출 원칙(제14조) 규정을 포함해야 한다."
 
     return query
 
