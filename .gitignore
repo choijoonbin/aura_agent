@@ -46,3 +46,7 @@ htmlcov/
 # Local docs (keep local only)
 /docs/
 /규정집/
+
+# Local runtime artifacts
+/data/evidence_uploads/
+/.claude/
