@@ -470,12 +470,13 @@ def render_demo_new_page() -> None:
         unsafe_allow_html=True,
     )
 
-    # ── 레이아웃: 좌(필드 편집) / 우(이미지+분석) ──────────
-    col_right, col_left = st.columns([1, 1], gap="large")
+    # ── 레이아웃: 좌(전표+업로드) / 우(이미지+분석결과) ──────────
+    col_data, col_image = st.columns([1, 1], gap="large")
 
-    with col_left:
+    # ══ 좌: 전표 데이터 확인 + 파일 업로드 ══════════════════
+    with col_data:
         st.markdown(
-            '<div class="demo-section-title">📎 증빙 이미지</div>',
+            '<div class="demo-section-title">📋 전표 데이터 확인 및 저장</div>',
             unsafe_allow_html=True,
         )
 
@@ -492,291 +493,72 @@ def render_demo_new_page() -> None:
             ):
                 st.session_state.pop(key, None)
 
-        uploaded_file = st.file_uploader(
-            "영수증/전표 이미지 업로드 (JPG/PNG/WEBP)",
-            type=["jpg", "jpeg", "png", "webp"],
-            key="demo_new_uploader",
-            disabled=is_normal_baseline,
-        )
-
-        analysis_result = st.session_state.get("demo_new_analysis_result")
-        image_bytes: bytes | None = None
-
-        if is_normal_baseline:
-            st.markdown(
-                '<div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:0.6rem 0.9rem;font-size:0.85rem;color:#64748b">ℹ️ 정상 케이스는 증빙 이미지 업로드를 사용하지 않습니다.</div>',
-                unsafe_allow_html=True,
-            )
-            uploaded_file = None
-            analysis_result = None
-            image_bytes = None
-        elif uploaded_file is not None:
-            image_bytes = uploaded_file.read()
-            st.session_state["demo_new_image_bytes"] = image_bytes
-
-            if st.button("이미지 분석 실행", key="demo_new_analyze_btn", type="primary"):
-                with st.spinner("Vision LLM으로 분석 중..."):
-                    result = _run_visual_analysis(image_bytes)
-                    st.session_state["demo_new_analysis_result"] = result
-                    # 추출 결과는 불일치 검출/하이라이트 용도로만 사용한다.
-                    # 편집 필드 값은 자동으로 덮어쓰지 않는다.
-                    entities = result.entities if hasattr(result, "entities") else []
-                    st.session_state["demo_new_entity_color_map"] = _build_entity_color_map(entities)
-                st.rerun()
-
-            analysis_result = st.session_state.get("demo_new_analysis_result")
-
-            # bbox 오버레이 미리보기
-            if analysis_result is not None:
-                from ui.shared import render_image_with_bboxes
-
-                entities = analysis_result.entities if hasattr(analysis_result, "entities") else []
-                boxes, bbox_labels, color_groups = _entities_to_boxes_and_labels(entities)
-                st.session_state["demo_new_entity_color_map"] = _build_entity_color_map(entities)
-
-                if boxes:
-                    st.caption("추출 위치 하이라이트 (항목명·값 동일 색 매칭)")
-                    render_image_with_bboxes(image_bytes, boxes, bbox_labels, color_groups=color_groups)
-                else:
-                    st.image(image_bytes, use_container_width=True)
-                    if getattr(analysis_result, "fallback_used", False):
-                        st.warning(f"분석 실패 (fallback): {analysis_result.audit_comment}")
-                    else:
-                        st.caption("추출된 bbox가 없습니다.")
-            else:
-                st.image(image_bytes, use_container_width=True)
-
-        else:
-            st.markdown(
-                '<div style="background:#f0f7ff;border:1px solid #bfdbfe;border-radius:8px;padding:0.6rem 0.9rem;font-size:0.85rem;color:#1e40af">📷 영수증·전표 이미지를 업로드하면 Vision LLM이 자동으로 금액·가맹점·일자,일시를 추출합니다.</div>',
-                unsafe_allow_html=True,
-            )
-            # 이전 분석 결과 및 자동 채우기 위젯 키 초기화
-            for key in (
-                "demo_new_analysis_result",
-                "demo_new_image_bytes",
-                "demo_new_auto_amount",
-                "demo_new_auto_date",
-                "demo_new_auto_time",
-                "demo_new_auto_merchant",
-                "demo_new_auto_summary",
-            ):
-                st.session_state.pop(key, None)
-            image_bytes = None
-            analysis_result = None
-
-        # 분석 정보 + 추출 요약 카드
-        if analysis_result is not None:
-            cond = (analysis_result.image_analysis or {}).get("condition", "-")
-            fallback = getattr(analysis_result, "fallback_used", False)
-            st.caption(
-                f"이미지 상태: **{_image_condition_display(str(cond))}**"
-                + (" | ⚠️ fallback" if fallback else "")
-            )
-            if analysis_result.audit_comment:
-                st.caption(f"감사 코멘트: {analysis_result.audit_comment}")
-
-            # ── Vision LLM 추출 요약 카드 ──
-            _ents = analysis_result.entities if hasattr(analysis_result, "entities") else []
-            def _get(label: str) -> tuple[str, float]:
-                for e in _ents:
-                    if (e.label if hasattr(e, "label") else e.get("label", "")) == label:
-                        v = e.text if hasattr(e, "text") else e.get("text", "-")
-                        c = float(e.confidence if hasattr(e, "confidence") else e.get("confidence", 0))
-                        return v or "-", c
-                return "-", 0.0
-
-            merchant_v, merchant_c = _get("merchant_name")
-            date_v,     date_c     = _get("date_occurrence")
-            time_v,     time_c     = _get("time_occurrence")
-            amount_v,   amount_c   = _get("amount_total")
-
-            def _conf_bar(c: float) -> str:
-                pct = int(c * 100)
-                color = "#16a34a" if c >= 0.9 else "#f59e0b" if c >= 0.7 else "#ef4444"
-                return (
-                    f'<div style="margin-top:4px;height:4px;border-radius:2px;background:#e2e8f0;width:100%">'
-                    f'<div style="height:4px;border-radius:2px;background:{color};width:{pct}%"></div></div>'
-                    f'<div style="font-size:0.7rem;color:{color};margin-top:2px">신뢰도 {pct}%</div>'
-                )
-
-            st.markdown(
-                f"""
-                <div style="background:#f8faff;border:1px solid #c7d7f9;border-radius:10px;
-                            padding:0.75rem 1rem 0.6rem;margin-top:0.5rem">
-                  <div style="font-size:0.8rem;font-weight:700;color:#1e40af;margin-bottom:0.55rem">
-                    ✅ Vision LLM 추출 결과
-                  </div>
-                  <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.55rem 1rem">
-                    <div>
-                      <div style="font-size:0.72rem;color:#64748b;font-weight:600">🏪 가맹점</div>
-                      <div style="font-size:0.88rem;font-weight:700;color:#0f172a">{merchant_v}</div>
-                      {_conf_bar(merchant_c)}
-                    </div>
-                    <div>
-                      <div style="font-size:0.72rem;color:#64748b;font-weight:600">💰 금액</div>
-                      <div style="font-size:0.88rem;font-weight:700;color:#0f172a">{amount_v}</div>
-                      {_conf_bar(amount_c)}
-                    </div>
-                    <div>
-                      <div style="font-size:0.72rem;color:#64748b;font-weight:600">📅 일자</div>
-                      <div style="font-size:0.88rem;font-weight:700;color:#0f172a">{date_v}</div>
-                      {_conf_bar(date_c)}
-                    </div>
-                    <div>
-                      <div style="font-size:0.72rem;color:#64748b;font-weight:600">⏰ 시간</div>
-                      <div style="font-size:0.88rem;font-weight:700;color:#0f172a">{time_v}</div>
-                      {_conf_bar(time_c)}
-                    </div>
-                  </div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-
-    with col_right:
-        st.markdown(
-            '<div class="demo-section-title">📋 전표 데이터 확인 및 저장</div>',
-            unsafe_allow_html=True,
-        )
-
-        # 자동 추출된 값을 초기값으로 (분석 후 처음 한 번만 채움)
-        auto_amount = st.session_state.get("demo_new_auto_amount", "")
-        auto_date = st.session_state.get("demo_new_auto_date", "")
-        auto_time = st.session_state.get("demo_new_auto_time", "")
+        auto_amount   = st.session_state.get("demo_new_auto_amount", "")
+        auto_date     = st.session_state.get("demo_new_auto_date", "")
+        auto_time     = st.session_state.get("demo_new_auto_time", "")
         auto_merchant = st.session_state.get("demo_new_auto_merchant", "")
-        auto_summary = st.session_state.get("demo_new_auto_summary", "")
+        auto_summary  = st.session_state.get("demo_new_auto_summary", "")
 
         analysis_result = st.session_state.get("demo_new_analysis_result")
         entities_for_mismatch = analysis_result.entities if (analysis_result is not None and hasattr(analysis_result, "entities")) else []
         extracted_map = {
-            "amount_total": _extract_entity_value(entities_for_mismatch, "amount_total"),
-            "merchant_name": _extract_entity_value(entities_for_mismatch, "merchant_name"),
+            "amount_total":    _extract_entity_value(entities_for_mismatch, "amount_total"),
+            "merchant_name":   _extract_entity_value(entities_for_mismatch, "merchant_name"),
             "date_occurrence": _extract_entity_value(entities_for_mismatch, "date_occurrence"),
             "time_occurrence": _extract_entity_value(entities_for_mismatch, "time_occurrence"),
         }
-        if "demo_new_field_amount" not in st.session_state and auto_amount:
-            st.session_state["demo_new_field_amount"] = str(auto_amount)
-        if "demo_new_field_merchant" not in st.session_state and auto_merchant:
-            st.session_state["demo_new_field_merchant"] = str(auto_merchant)
-        if "demo_new_field_date" not in st.session_state and auto_date:
-            st.session_state["demo_new_field_date"] = str(auto_date)
-        if "demo_new_field_time" not in st.session_state and auto_time:
-            st.session_state["demo_new_field_time"] = str(auto_time)
+        if "demo_new_field_amount"   not in st.session_state and auto_amount:   st.session_state["demo_new_field_amount"]   = str(auto_amount)
+        if "demo_new_field_merchant" not in st.session_state and auto_merchant: st.session_state["demo_new_field_merchant"] = str(auto_merchant)
+        if "demo_new_field_date"     not in st.session_state and auto_date:     st.session_state["demo_new_field_date"]     = str(auto_date)
+        if "demo_new_field_time"     not in st.session_state and auto_time:     st.session_state["demo_new_field_time"]     = str(auto_time)
 
         mismatch_state = dict(st.session_state.get("demo_new_mismatch_state") or {})
         if analysis_result is None:
             mismatch_state = {}
 
-        # 입력 레이아웃: 2, 3
         # 1행: 금액 / 가맹점
         c1, c2 = st.columns(2)
         with c1:
-            st.markdown(
-                _mismatch_badge_label("금액 *", bool(mismatch_state.get("amount_total"))),
-                unsafe_allow_html=True,
-            )
-            amount_val = st.text_input(
-                "금액 *",
-                placeholder="예: 97042",
-                key="demo_new_field_amount",
-                label_visibility="collapsed",
-            )
+            st.markdown(_mismatch_badge_label("금액 *", bool(mismatch_state.get("amount_total"))), unsafe_allow_html=True)
+            amount_val = st.text_input("금액 *", placeholder="예: 97042", key="demo_new_field_amount", label_visibility="collapsed")
             if mismatch_state.get("amount_total"):
                 st.caption(f"이미지추출값: {extracted_map.get('amount_total')}")
         with c2:
-            st.markdown(
-                _mismatch_badge_label("가맹점 *", bool(mismatch_state.get("merchant_name"))),
-                unsafe_allow_html=True,
-            )
-            merchant_val = st.text_input(
-                "가맹점 *",
-                placeholder="예: 가온 식당",
-                key="demo_new_field_merchant",
-                label_visibility="collapsed",
-            )
+            st.markdown(_mismatch_badge_label("가맹점 *", bool(mismatch_state.get("merchant_name"))), unsafe_allow_html=True)
+            merchant_val = st.text_input("가맹점 *", placeholder="예: 가온 식당", key="demo_new_field_merchant", label_visibility="collapsed")
             if mismatch_state.get("merchant_name"):
                 st.caption(f"이미지추출값: {extracted_map.get('merchant_name')}")
 
         # 2행: 일자 / 시간 / 적요
         c4, c5, c6 = st.columns(3)
         with c4:
-            st.markdown(
-                _mismatch_badge_label("사용일자 *", bool(mismatch_state.get("date_occurrence"))),
-                unsafe_allow_html=True,
-            )
-            date_val = st.text_input(
-                "사용일자 *",
-                placeholder="예: 2026-03-14",
-                key="demo_new_field_date",
-                label_visibility="collapsed",
-            )
+            st.markdown(_mismatch_badge_label("사용일자 *", bool(mismatch_state.get("date_occurrence"))), unsafe_allow_html=True)
+            date_val = st.text_input("사용일자 *", placeholder="예: 2026-03-14", key="demo_new_field_date", label_visibility="collapsed")
             if mismatch_state.get("date_occurrence"):
                 st.caption(f"이미지추출값: {extracted_map.get('date_occurrence')}")
         with c5:
-            st.markdown(
-                _mismatch_badge_label("사용시간 *", bool(mismatch_state.get("time_occurrence"))),
-                unsafe_allow_html=True,
-            )
-            time_val = st.text_input(
-                "사용시간 *",
-                placeholder="예: 19:45",
-                key="demo_new_field_time",
-                help="영수증의 거래시간. 이미지 분석 시 자동 추출. HH:MM 형식 (24시간제)",
-                label_visibility="collapsed",
-            )
+            st.markdown(_mismatch_badge_label("사용시간 *", bool(mismatch_state.get("time_occurrence"))), unsafe_allow_html=True)
+            time_val = st.text_input("사용시간 *", placeholder="예: 19:45", key="demo_new_field_time",
+                                     help="HH:MM 형식 (24시간제)", label_visibility="collapsed")
             if mismatch_state.get("time_occurrence"):
                 st.caption(f"이미지추출값: {extracted_map.get('time_occurrence')}")
         with c6:
-            st.markdown(
-                _mismatch_badge_label("적요", False),
-                unsafe_allow_html=True,
-            )
-            bktxt_val = st.text_input(
-                "적요",
-                value=auto_summary if auto_summary else "",
-                placeholder="예: 휴일 야간 식대",
-                key="demo_new_field_bktxt",
-                label_visibility="collapsed",
-            )
+            st.markdown(_mismatch_badge_label("적요", False), unsafe_allow_html=True)
+            bktxt_val = st.text_input("적요", value=auto_summary if auto_summary else "",
+                                      placeholder="예: 휴일 야간 식대", key="demo_new_field_bktxt", label_visibility="collapsed")
 
         recalculated_mismatch = {
-            "amount_total": _is_field_mismatch("amount_total", extracted_map.get("amount_total", ""), amount_val),
-            "merchant_name": _is_field_mismatch("merchant_name", extracted_map.get("merchant_name", ""), merchant_val),
+            "amount_total":    _is_field_mismatch("amount_total",    extracted_map.get("amount_total", ""),    amount_val),
+            "merchant_name":   _is_field_mismatch("merchant_name",   extracted_map.get("merchant_name", ""),   merchant_val),
             "date_occurrence": _is_field_mismatch("date_occurrence", extracted_map.get("date_occurrence", ""), date_val),
             "time_occurrence": _is_field_mismatch("time_occurrence", extracted_map.get("time_occurrence", ""), time_val),
         }
         debug_rows = {
-            "amount_total": {
-                "extracted_raw": extracted_map.get("amount_total", ""),
-                "current_raw": amount_val,
-                "extracted_norm": _normalize_amount_text(extracted_map.get("amount_total", "")),
-                "current_norm": _normalize_amount_text(amount_val),
-                "mismatch": recalculated_mismatch.get("amount_total", False),
-            },
-            "merchant_name": {
-                "extracted_raw": extracted_map.get("merchant_name", ""),
-                "current_raw": merchant_val,
-                "extracted_norm": _normalize_merchant_text(extracted_map.get("merchant_name", "")),
-                "current_norm": _normalize_merchant_text(merchant_val),
-                "mismatch": recalculated_mismatch.get("merchant_name", False),
-            },
-            "date_occurrence": {
-                "extracted_raw": extracted_map.get("date_occurrence", ""),
-                "current_raw": date_val,
-                "extracted_norm": _normalize_date_text(extracted_map.get("date_occurrence", "")),
-                "current_norm": _normalize_date_text(date_val),
-                "mismatch": recalculated_mismatch.get("date_occurrence", False),
-            },
-            "time_occurrence": {
-                "extracted_raw": extracted_map.get("time_occurrence", ""),
-                "current_raw": time_val,
-                "extracted_norm": _normalize_time_text(extracted_map.get("time_occurrence", "")),
-                "current_norm": _normalize_time_text(time_val),
-                "mismatch": recalculated_mismatch.get("time_occurrence", False),
-            },
+            "amount_total":    {"extracted_raw": extracted_map.get("amount_total", ""),    "current_raw": amount_val,   "extracted_norm": _normalize_amount_text(extracted_map.get("amount_total", "")),    "current_norm": _normalize_amount_text(amount_val),   "mismatch": recalculated_mismatch.get("amount_total", False)},
+            "merchant_name":   {"extracted_raw": extracted_map.get("merchant_name", ""),   "current_raw": merchant_val, "extracted_norm": _normalize_merchant_text(extracted_map.get("merchant_name", "")),  "current_norm": _normalize_merchant_text(merchant_val), "mismatch": recalculated_mismatch.get("merchant_name", False)},
+            "date_occurrence": {"extracted_raw": extracted_map.get("date_occurrence", ""), "current_raw": date_val,     "extracted_norm": _normalize_date_text(extracted_map.get("date_occurrence", "")),    "current_norm": _normalize_date_text(date_val),         "mismatch": recalculated_mismatch.get("date_occurrence", False)},
+            "time_occurrence": {"extracted_raw": extracted_map.get("time_occurrence", ""), "current_raw": time_val,     "extracted_norm": _normalize_time_text(extracted_map.get("time_occurrence", "")),    "current_norm": _normalize_time_text(time_val),         "mismatch": recalculated_mismatch.get("time_occurrence", False)},
         }
-        # 불일치 디버그 로그 (개발 확인용 — 시연 시 숨김)
         if st.session_state.get("_dev_mode_debug"):
             if st.checkbox("불일치 비교 로그 보기", key="demo_new_show_mismatch_debug", value=False):
                 st.json(debug_rows, expanded=False)
@@ -786,84 +568,187 @@ def render_demo_new_page() -> None:
             st.session_state["demo_new_mismatch_state"] = recalculated_mismatch
             st.rerun()
 
-        st.markdown('<div style="height:8px;"></div>', unsafe_allow_html=True)
+        # 품의서 + 생성건수
+        st.markdown('<div style="height:6px;"></div>', unsafe_allow_html=True)
         doc_labels = [label for _, label in _APPROVAL_DOC_OPTIONS]
-        doc_keys = [key for key, _ in _APPROVAL_DOC_OPTIONS]
+        doc_keys   = [key   for key,   _ in _APPROVAL_DOC_OPTIONS]
         opt_left, opt_right = st.columns(2)
         with opt_left:
-            selected_doc_label = st.selectbox(
-                "품의서(전자결재)",
-                options=doc_labels,
-                key="demo_new_approval_doc_label",
-                help="POC 시연용 하드코딩 품의서를 선택합니다.",
-            )
+            selected_doc_label = st.selectbox("품의서(전자결재)", options=doc_labels,
+                                              key="demo_new_approval_doc_label",
+                                              help="POC 시연용 하드코딩 품의서를 선택합니다.")
         with opt_right:
-            create_count = st.slider(
-                "생성건수",
-                min_value=1,
-                max_value=20,
-                value=1,
-                key="demo_new_create_count",
-            )
+            create_count = st.slider("생성건수", min_value=1, max_value=20, value=1, key="demo_new_create_count")
         selected_doc_key = doc_keys[doc_labels.index(selected_doc_label)]
         approval_doc = _APPROVAL_DOC_PRESETS.get(selected_doc_key)
         if approval_doc:
             st.markdown(
-                f"""<div class="approval-card">
-                  ✅ <strong>{approval_doc.get('title')}</strong><br>
-                  <span style="color:#166534">{approval_doc.get('content')}</span>
-                </div>""",
+                f"""<div class="approval-card">✅ <strong>{approval_doc.get('title')}</strong><br>
+                  <span style="color:#166534">{approval_doc.get('content')}</span></div>""",
                 unsafe_allow_html=True,
             )
 
-        st.markdown('<div style="height:8px;"></div>', unsafe_allow_html=True)
-
-        # 필수 입력 유효성 + 버튼 활성화 판단
-        # NORMAL_BASELINE은 즉시 생성 가능하도록 필수값 검증을 우회한다.
-        if selected_case_type == "NORMAL_BASELINE":
-            all_valid, validation_errors = True, []
+        # ── 증빙 업로드 + 분석 (이동: 필드 하단) ──
+        if not is_normal_baseline:
+            st.markdown('<hr style="margin:0.9rem 0 0.6rem;border:none;border-top:1px solid #e2e8f0">', unsafe_allow_html=True)
+            st.markdown('<div class="demo-section-title" style="font-size:0.9rem;margin-bottom:0.4rem">📎 증빙 업로드</div>', unsafe_allow_html=True)
+            uploaded_file = st.file_uploader(
+                "영수증/전표 이미지 업로드 (JPG/PNG/WEBP)",
+                type=["jpg", "jpeg", "png", "webp"],
+                key="demo_new_uploader",
+            )
+            if uploaded_file is not None:
+                image_bytes: bytes = uploaded_file.read()
+                st.session_state["demo_new_image_bytes"]      = image_bytes
+                st.session_state["demo_new_uploader_name"]    = uploaded_file.name
+                if st.button("이미지 분석 실행", key="demo_new_analyze_btn", type="primary"):
+                    with st.spinner("Vision LLM으로 분석 중..."):
+                        result = _run_visual_analysis(image_bytes)
+                        st.session_state["demo_new_analysis_result"] = result
+                        entities = result.entities if hasattr(result, "entities") else []
+                        st.session_state["demo_new_entity_color_map"] = _build_entity_color_map(entities)
+                    st.rerun()
+            else:
+                for key in ("demo_new_analysis_result", "demo_new_image_bytes",
+                            "demo_new_auto_amount", "demo_new_auto_date",
+                            "demo_new_auto_time", "demo_new_auto_merchant", "demo_new_auto_summary"):
+                    st.session_state.pop(key, None)
+                st.markdown(
+                    '<div style="background:#f0f7ff;border:1px solid #bfdbfe;border-radius:8px;'
+                    'padding:0.5rem 0.8rem;font-size:0.83rem;color:#1e40af">'
+                    '📷 영수증·전표 이미지를 업로드하면 Vision LLM이 자동으로 금액·가맹점·일자·시간을 추출합니다.</div>',
+                    unsafe_allow_html=True,
+                )
         else:
-            all_valid, validation_errors = _check_required_fields(
-                amount_val, date_val, merchant_val
-            )
+            uploaded_file = None
 
-        if validation_errors:
+    # ══ 우: 증빙 이미지 + Vision LLM 분석 결과 ═══════════════
+    with col_image:
+        st.markdown(
+            '<div class="demo-section-title">📎 증빙 이미지</div>',
+            unsafe_allow_html=True,
+        )
+
+        analysis_result_disp   = st.session_state.get("demo_new_analysis_result")
+        image_bytes_disp: bytes | None = st.session_state.get("demo_new_image_bytes")
+
+        if analysis_result_disp is not None and image_bytes_disp is not None:
+            from ui.shared import render_image_with_bboxes
+            entities_disp = analysis_result_disp.entities if hasattr(analysis_result_disp, "entities") else []
+            boxes, bbox_labels, color_groups = _entities_to_boxes_and_labels(entities_disp)
+            st.session_state["demo_new_entity_color_map"] = _build_entity_color_map(entities_disp)
+
+            if boxes:
+                st.caption("추출 위치 하이라이트 (항목명·값 동일 색 매칭)")
+                render_image_with_bboxes(image_bytes_disp, boxes, bbox_labels, color_groups=color_groups)
+            else:
+                st.image(image_bytes_disp, use_container_width=True)
+                if getattr(analysis_result_disp, "fallback_used", False):
+                    st.warning(f"분석 실패 (fallback): {analysis_result_disp.audit_comment}")
+
+            cond    = (analysis_result_disp.image_analysis or {}).get("condition", "-")
+            fallback = getattr(analysis_result_disp, "fallback_used", False)
+            st.caption(f"이미지 상태: **{_image_condition_display(str(cond))}**" + (" | ⚠️ fallback" if fallback else ""))
+            if analysis_result_disp.audit_comment:
+                st.caption(f"감사 코멘트: {analysis_result_disp.audit_comment}")
+
+            # ── Vision LLM 추출 요약 카드 ──
+            _ents = entities_disp
+            def _get(label: str) -> tuple[str, float]:
+                for e in _ents:
+                    if (e.label if hasattr(e, "label") else e.get("label", "")) == label:
+                        v = e.text if hasattr(e, "text") else e.get("text", "-")
+                        c = float(e.confidence if hasattr(e, "confidence") else e.get("confidence", 0))
+                        return v or "-", c
+                return "-", 0.0
+            def _conf_bar(c: float) -> str:
+                pct   = int(c * 100)
+                color = "#16a34a" if c >= 0.9 else "#f59e0b" if c >= 0.7 else "#ef4444"
+                return (f'<div style="margin-top:4px;height:4px;border-radius:2px;background:#e2e8f0;width:100%">'
+                        f'<div style="height:4px;border-radius:2px;background:{color};width:{pct}%"></div></div>'
+                        f'<div style="font-size:0.7rem;color:{color};margin-top:2px">신뢰도 {pct}%</div>')
+            merchant_v, merchant_c = _get("merchant_name")
+            date_v,     date_c     = _get("date_occurrence")
+            time_v,     time_c     = _get("time_occurrence")
+            amount_v,   amount_c   = _get("amount_total")
             st.markdown(
-                "".join(f'<div style="color:#b91c1c;font-size:0.82rem;margin:2px 0">⚠ {e}</div>' for e in validation_errors),
+                f"""<div style="background:#f8faff;border:1px solid #c7d7f9;border-radius:10px;
+                               padding:0.75rem 1rem 0.6rem;margin-top:0.5rem">
+                  <div style="font-size:0.8rem;font-weight:700;color:#1e40af;margin-bottom:0.55rem">✅ Vision LLM 추출 결과</div>
+                  <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.55rem 1rem">
+                    <div><div style="font-size:0.72rem;color:#64748b;font-weight:600">🏪 가맹점</div>
+                         <div style="font-size:0.88rem;font-weight:700;color:#0f172a">{merchant_v}</div>{_conf_bar(merchant_c)}</div>
+                    <div><div style="font-size:0.72rem;color:#64748b;font-weight:600">💰 금액</div>
+                         <div style="font-size:0.88rem;font-weight:700;color:#0f172a">{amount_v}</div>{_conf_bar(amount_c)}</div>
+                    <div><div style="font-size:0.72rem;color:#64748b;font-weight:600">📅 일자</div>
+                         <div style="font-size:0.88rem;font-weight:700;color:#0f172a">{date_v}</div>{_conf_bar(date_c)}</div>
+                    <div><div style="font-size:0.72rem;color:#64748b;font-weight:600">⏰ 시간</div>
+                         <div style="font-size:0.88rem;font-weight:700;color:#0f172a">{time_v}</div>{_conf_bar(time_c)}</div>
+                  </div></div>""",
                 unsafe_allow_html=True,
             )
 
-        # 비정상 케이스 + 파일 미첨부 → 버튼 항상 disabled
-        if is_abnormal and uploaded_file is None:
+        elif image_bytes_disp is not None:
+            st.image(image_bytes_disp, use_container_width=True)
+
+        elif is_normal_baseline:
             st.markdown(
-                '<div style="background:#fef9c3;border:1px solid #fde047;border-radius:8px;padding:0.5rem 0.8rem;font-size:0.83rem;color:#854d0e;margin:0.4rem 0">'
-                '📎 비정상 케이스는 증빙 이미지 첨부 후 데이터 생성이 가능합니다.</div>',
+                '<div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;'
+                'padding:0.6rem 0.9rem;font-size:0.85rem;color:#64748b">'
+                'ℹ️ 정상 케이스는 증빙 이미지 업로드를 사용하지 않습니다.</div>',
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown(
+                '<div style="background:#f8fafc;border:2px dashed #e2e8f0;border-radius:10px;'
+                'padding:2.5rem 1rem;text-align:center;color:#94a3b8;font-size:0.85rem">'
+                '📷 좌측에서 영수증을 업로드하고<br>이미지 분석 실행 후 결과가 표시됩니다.</div>',
                 unsafe_allow_html=True,
             )
 
-        generate_disabled = _is_generate_disabled(all_valid, is_abnormal, uploaded_file is not None)
+    # ══ 하단: 유효성 + 생성 버튼 (full-width) ════════════════
+    st.markdown('<div style="height:4px;"></div>', unsafe_allow_html=True)
 
-        st.markdown('<div style="height:6px;"></div>', unsafe_allow_html=True)
-        if st.button(
-            "🚀  테스트 데이터 생성",
-            key="demo_new_generate_btn",
-            type="primary",
-            disabled=generate_disabled,
-            use_container_width=True,
-        ):
-            _handle_generate(
-                case_type=selected_case_type,
-                amount=amount_val,
-                date_occ=date_val,
-                time_occ=time_val,
-                merchant=merchant_val,
-                bktxt=bktxt_val,
-                approval_doc=approval_doc,
-                create_count=int(create_count),
-                image_bytes=st.session_state.get("demo_new_image_bytes"),
-                uploaded_filename=uploaded_file.name if uploaded_file else None,
-                analysis_result=st.session_state.get("demo_new_analysis_result"),
-            )
+    if selected_case_type == "NORMAL_BASELINE":
+        all_valid, validation_errors = True, []
+    else:
+        all_valid, validation_errors = _check_required_fields(amount_val, date_val, merchant_val)
+
+    if validation_errors:
+        st.markdown(
+            "".join(f'<div style="color:#b91c1c;font-size:0.82rem;margin:2px 0">⚠ {e}</div>' for e in validation_errors),
+            unsafe_allow_html=True,
+        )
+
+    if is_abnormal and uploaded_file is None:
+        st.markdown(
+            '<div style="background:#fef9c3;border:1px solid #fde047;border-radius:8px;'
+            'padding:0.5rem 0.8rem;font-size:0.83rem;color:#854d0e;margin:0.4rem 0">'
+            '📎 비정상 케이스는 증빙 이미지 첨부 후 데이터 생성이 가능합니다.</div>',
+            unsafe_allow_html=True,
+        )
+
+    generate_disabled = _is_generate_disabled(all_valid, is_abnormal, uploaded_file is not None)
+    if st.button(
+        "🚀  테스트 데이터 생성",
+        key="demo_new_generate_btn",
+        type="primary",
+        disabled=generate_disabled,
+        use_container_width=True,
+    ):
+        _handle_generate(
+            case_type=selected_case_type,
+            amount=amount_val,
+            date_occ=date_val,
+            time_occ=time_val,
+            merchant=merchant_val,
+            bktxt=bktxt_val,
+            approval_doc=approval_doc,
+            create_count=int(create_count),
+            image_bytes=st.session_state.get("demo_new_image_bytes"),
+            uploaded_filename=st.session_state.get("demo_new_uploader_name") if uploaded_file else None,
+            analysis_result=st.session_state.get("demo_new_analysis_result"),
+        )
 
 
 def _handle_generate(
