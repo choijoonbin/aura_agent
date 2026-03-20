@@ -408,6 +408,12 @@ def render_demo_new_page() -> None:
         selected_case_type, ("badge-normal", "⚪", selected_case_type)
     )
     prev_case_type = str(st.session_state.get("demo_new_prev_case_type") or "")
+    # 케이스 타입 변경 시 이전 분석 데이터를 명시적으로 클리어
+    if prev_case_type and selected_case_type != prev_case_type:
+        for _k in ("demo_new_analysis_result", "demo_new_image_bytes", "demo_new_uploader_name",
+                   "demo_new_auto_amount", "demo_new_auto_date", "demo_new_auto_time",
+                   "demo_new_auto_merchant", "demo_new_auto_summary", "demo_new_uploader"):
+            st.session_state.pop(_k, None)
     # HOLIDAY_USAGE는 POC 시연 기본값을 즉시 채워 시작한다.
     if selected_case_type == "HOLIDAY_USAGE" and prev_case_type != "HOLIDAY_USAGE":
         st.session_state["demo_new_field_amount"] = _HOLIDAY_DEFAULTS["amount_total"]
@@ -520,12 +526,22 @@ def render_demo_new_page() -> None:
         c1, c2 = st.columns(2)
         with c1:
             st.markdown(_mismatch_badge_label("금액 *", bool(mismatch_state.get("amount_total"))), unsafe_allow_html=True)
-            amount_val = st.text_input("금액 *", placeholder="예: 97042", key="demo_new_field_amount", label_visibility="collapsed")
+            amount_val = st.text_input(
+                "금액 *",
+                placeholder="97042",
+                key="demo_new_field_amount",
+                label_visibility="collapsed",
+            )
             if mismatch_state.get("amount_total"):
                 st.caption(f"이미지추출값: {extracted_map.get('amount_total')}")
         with c2:
             st.markdown(_mismatch_badge_label("가맹점 *", bool(mismatch_state.get("merchant_name"))), unsafe_allow_html=True)
-            merchant_val = st.text_input("가맹점 *", placeholder="예: 가온 식당", key="demo_new_field_merchant", label_visibility="collapsed")
+            merchant_val = st.text_input(
+                "가맹점 *",
+                placeholder="가온 식당",
+                key="demo_new_field_merchant",
+                label_visibility="collapsed",
+            )
             if mismatch_state.get("merchant_name"):
                 st.caption(f"이미지추출값: {extracted_map.get('merchant_name')}")
 
@@ -533,19 +549,29 @@ def render_demo_new_page() -> None:
         c4, c5, c6 = st.columns(3)
         with c4:
             st.markdown(_mismatch_badge_label("사용일자 *", bool(mismatch_state.get("date_occurrence"))), unsafe_allow_html=True)
-            date_val = st.text_input("사용일자 *", placeholder="예: 2026-03-14", key="demo_new_field_date", label_visibility="collapsed")
+            date_val = st.text_input(
+                "사용일자 *",
+                placeholder="2026-03-14",
+                key="demo_new_field_date",
+                label_visibility="collapsed",
+            )
             if mismatch_state.get("date_occurrence"):
                 st.caption(f"이미지추출값: {extracted_map.get('date_occurrence')}")
         with c5:
             st.markdown(_mismatch_badge_label("사용시간 *", bool(mismatch_state.get("time_occurrence"))), unsafe_allow_html=True)
-            time_val = st.text_input("사용시간 *", placeholder="예: 19:45", key="demo_new_field_time",
-                                     help="HH:MM 형식 (24시간제)", label_visibility="collapsed")
+            time_val = st.text_input(
+                "사용시간 *",
+                placeholder="19:45",
+                key="demo_new_field_time",
+                help="HH:MM 형식 (24시간제)",
+                label_visibility="collapsed",
+            )
             if mismatch_state.get("time_occurrence"):
                 st.caption(f"이미지추출값: {extracted_map.get('time_occurrence')}")
         with c6:
             st.markdown(_mismatch_badge_label("적요", False), unsafe_allow_html=True)
             bktxt_val = st.text_input("적요", value=auto_summary if auto_summary else "",
-                                      placeholder="예: 휴일 야간 식대", key="demo_new_field_bktxt", label_visibility="collapsed")
+                                      placeholder="휴일 야간 식대", key="demo_new_field_bktxt", label_visibility="collapsed")
 
         recalculated_mismatch = {
             "amount_total":    _is_field_mismatch("amount_total",    extracted_map.get("amount_total", ""),    amount_val),
@@ -591,17 +617,41 @@ def render_demo_new_page() -> None:
         # ── 증빙 업로드 + 분석 (이동: 필드 하단) ──
         if not is_normal_baseline:
             st.markdown('<hr style="margin:0.9rem 0 0.6rem;border:none;border-top:1px solid #e2e8f0">', unsafe_allow_html=True)
-            st.markdown('<div class="demo-section-title" style="font-size:0.9rem;margin-bottom:0.4rem">📎 증빙 업로드</div>', unsafe_allow_html=True)
+            # 타이틀(좌) + 분석버튼 자리(우): st.empty()로 자리 확보 후 파일 업로더 렌더 뒤에 채움
+            _title_col, _btn_area_col = st.columns([0.72, 0.28], gap="small")
+            with _title_col:
+                st.markdown(
+                    '<div class="demo-section-title" style="font-size:0.9rem;margin-bottom:0.3rem">'
+                    '📎 증빙 업로드 '
+                    '<span style="font-size:0.76rem;font-weight:400;color:#64748b">'
+                    '— Vision LLM이 금액·가맹점·일자·시간을 자동 추출합니다.</span></div>',
+                    unsafe_allow_html=True,
+                )
+            with _btn_area_col:
+                st.markdown('<div style="height:0.25rem"></div>', unsafe_allow_html=True)
+                _btn_placeholder = st.empty()  # 파일 업로드 여부 확인 후 채움
+            # 파일 업로더: 타이틀 컬럼 밖 → col_data 직접 자식 (rerun 후 widget state 유지)
             uploaded_file = st.file_uploader(
                 "영수증/전표 이미지 업로드 (JPG/PNG/WEBP)",
                 type=["jpg", "jpeg", "png", "webp"],
                 key="demo_new_uploader",
+                label_visibility="collapsed",
             )
+            # 파일이 있으면 타이틀 우측 자리(placeholder)에 분석 버튼 채우기
+            analyze_clicked = False
+            if uploaded_file is not None:
+                with _btn_placeholder:
+                    analyze_clicked = st.button(
+                        "🔍 이미지 분석",
+                        key="demo_new_analyze_btn",
+                        type="primary",
+                        use_container_width=True,
+                    )
             if uploaded_file is not None:
                 image_bytes: bytes = uploaded_file.read()
                 st.session_state["demo_new_image_bytes"]      = image_bytes
                 st.session_state["demo_new_uploader_name"]    = uploaded_file.name
-                if st.button("이미지 분석 실행", key="demo_new_analyze_btn", type="primary"):
+                if analyze_clicked:
                     with st.spinner("Vision LLM으로 분석 중..."):
                         result = _run_visual_analysis(image_bytes)
                         st.session_state["demo_new_analysis_result"] = result
@@ -609,16 +659,11 @@ def render_demo_new_page() -> None:
                         st.session_state["demo_new_entity_color_map"] = _build_entity_color_map(entities)
                     st.rerun()
             else:
-                for key in ("demo_new_analysis_result", "demo_new_image_bytes",
-                            "demo_new_auto_amount", "demo_new_auto_date",
+                # uploaded_file=None 은 rerun 후 위젯 리셋일 수 있음 → image_bytes/analysis_result 는 보존
+                # 자동채우기 임시값만 클리어 (명시적 클리어는 케이스 변경·생성 완료 시 처리됨)
+                for key in ("demo_new_auto_amount", "demo_new_auto_date",
                             "demo_new_auto_time", "demo_new_auto_merchant", "demo_new_auto_summary"):
                     st.session_state.pop(key, None)
-                st.markdown(
-                    '<div style="background:#f0f7ff;border:1px solid #bfdbfe;border-radius:8px;'
-                    'padding:0.5rem 0.8rem;font-size:0.83rem;color:#1e40af">'
-                    '📷 영수증·전표 이미지를 업로드하면 Vision LLM이 자동으로 금액·가맹점·일자·시간을 추출합니다.</div>',
-                    unsafe_allow_html=True,
-                )
         else:
             uploaded_file = None
 
@@ -636,7 +681,9 @@ def render_demo_new_page() -> None:
                 unsafe_allow_html=True,
             )
 
-        if is_abnormal and uploaded_file is None:
+        # 파일 유무 판단: 위젯 상태(rerun 후 리셋 가능) 대신 세션에 저장된 바이트로 확인
+        has_image_in_session = bool(st.session_state.get("demo_new_image_bytes"))
+        if is_abnormal and not has_image_in_session:
             st.markdown(
                 '<div style="background:#fef9c3;border:1px solid #fde047;border-radius:8px;'
                 'padding:0.5rem 0.8rem;font-size:0.83rem;color:#854d0e;margin:0.4rem 0">'
@@ -644,7 +691,7 @@ def render_demo_new_page() -> None:
                 unsafe_allow_html=True,
             )
 
-        generate_disabled = _is_generate_disabled(all_valid, is_abnormal, uploaded_file is not None)
+        generate_disabled = _is_generate_disabled(all_valid, is_abnormal, has_image_in_session)
         if st.button(
             "🚀  테스트 데이터 생성",
             key="demo_new_generate_btn",
