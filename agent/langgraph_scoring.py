@@ -469,8 +469,8 @@ def _score(flags: dict[str, Any], tool_results: list[dict[str, Any]]) -> dict[st
     final_score = min(100.0, max(0.0, round(final_score_raw, 1)))
     severity = _score_to_severity(final_score)
     calculation_trace = (
-        f"policy({policy_score:.1f}) × {policy_weight} + "
-        f"evidence({evidence_score:.1f}) × {evidence_weight} = {final_score:.1f} "
+        f"policy({policy_score:.1f}) × {policy_weight:.2f} + "
+        f"evidence({evidence_score:.1f}) × {evidence_weight:.2f} = {final_score:.1f} "
         f"[compound×{compound_multiplier:.2f}, amount×{amount_multiplier:.2f}]"
     )
     logger.info(
@@ -786,12 +786,11 @@ async def _score_hybrid(
     out["diagnostic_log"] = (
         f"LLM Judge 실패로 규칙 점수로 fallback했습니다. reason={out['fallback_reason']} detail={last_error_message[:400]}"
     )
-    logger.warning(
-        "[score:fallback] LLM Judge 실패 → rule fallback | reason=%s retries=%s rule_score=%s detail=%s",
+    logger.info(
+        "[score:hybrid] LLM Judge 생략 → rule score 적용 | reason=%s retries=%s rule_score=%s",
         out["fallback_reason"],
         out.get("retry_count", 0),
         rule_score,
-        last_error_message[:200],
     )
     out["final_decision"] = _resolve_final_decision(rule_gate=rule_gate, rule_score=rule_score, llm_score=None)
     _mark_circuit(True)

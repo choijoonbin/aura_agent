@@ -1437,11 +1437,13 @@ def _run_search_policy_chunks_pipeline(
 
     _case_type = str(body_evidence.get("case_type") or body_evidence.get("intended_risk_type") or "UNKNOWN")
     _keywords = build_policy_keywords(body_evidence)
+    _kw_preview = ", ".join(_keywords[:7])
+    _kw_suffix = f" ...({len(_keywords)}개)" if len(_keywords) > 7 else f"({len(_keywords)}개)"
     logger.info(
-        "[rag:search] case=%s keywords=[%s](%d개) | bm25_w=%.2f dense_w=%.2f group=%s",
+        "[rag:search] case=%s keywords=[%s%s] | bm25_w=%.2f dense_w=%.2f group=%s",
         _case_type,
-        ", ".join(_keywords),
-        len(_keywords),
+        _kw_preview,
+        _kw_suffix,
         bm25_weight,
         dense_weight,
         group_filter or "none",
@@ -1511,10 +1513,12 @@ def _run_search_policy_chunks_pipeline(
     )
 
     _adopted_articles = [r.get("article") for r in results if r.get("article")]
+    _unique_articles = list(dict.fromkeys(_adopted_articles))  # 순서 유지 중복 제거
     logger.info(
-        "[rag:result] 최종선택=%d건 채택조항: %s",
+        "[rag:result] 최종선택=%d건 채택조항(%d건): %s",
         len(results),
-        _adopted_articles if _adopted_articles else "(없음)",
+        len(_unique_articles),
+        _unique_articles if _unique_articles else "(없음)",
     )
 
     normalized_trace_level = str(trace_level or "basic").strip().lower()

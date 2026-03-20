@@ -489,7 +489,7 @@ async def _derive_hitl_from_regulation(state: dict[str, Any]) -> dict[str, Any]:
                     if isinstance(x, dict) and str(x.get("field", "")).strip()
                 ]
             logger.info(
-                "derive_hitl_from_regulation required_inputs filtered: before=%s after=%s",
+                "[hitl] 필수 입력 필터: before=%s after=%s",
                 len(required_inputs),
                 len(filtered_required_inputs),
             )
@@ -728,7 +728,7 @@ async def _generate_claim_display_texts(
 
         tok_kw = {"max_completion_tokens": 1200} if is_azure else {"max_tokens": 1200}
         logger.info(
-            "claim_display_text: llm request model=%s claims=%s azure=%s",
+            "[verify:claim] LLM 요청 | model=%s claims=%s azure=%s",
             getattr(settings, "reasoning_llm_model", "gpt-4o-mini"),
             len(claim_results),
             is_azure,
@@ -749,21 +749,21 @@ async def _generate_claim_display_texts(
         parsed = json.loads(raw)
         texts = parsed.get("display_texts") or []
         if not isinstance(texts, list):
-            logger.warning("claim_display_text: fallback (display_texts not list)")
+            logger.warning("[verify:claim] fallback (display_texts not list)")
             return baseline
         cleaned = [str(t).strip() for t in texts]
         if len(cleaned) != len(claim_results):
             # 길이가 다르면 안전하게 baseline 사용
             logger.warning(
-                "claim_display_text: fallback (length mismatch llm=%s claims=%s)",
+                "[verify:claim] fallback (length mismatch llm=%s claims=%s)",
                 len(cleaned),
                 len(claim_results),
             )
             return baseline
-        logger.info("claim_display_text: llm ok (count=%s)", len(cleaned))
+        logger.info("[verify:claim] 완료 | count=%s", len(cleaned))
         return [c if c else b for c, b in zip(cleaned, baseline)]
     except Exception as ex:
-        logger.exception("claim_display_text: fallback (llm error: %s)", ex)
+        logger.exception("[verify:claim] fallback (llm error: %s)", ex)
         return baseline
 
 
@@ -1015,11 +1015,11 @@ async def _match_questions_to_prior_answers(
                     "basis_field": str(item.get("basis_field") or "").strip(),
                 })
         logger.info(
-            "_match_questions_to_prior_answers: %d/%d covered",
+            "[verify] 사전 답변 매칭: %d/%d covered",
             sum(1 for r in results if r["covered"]),
             len(results),
         )
         return results
     except Exception as exc:
-        logger.warning("_match_questions_to_prior_answers: fallback (error: %s)", exc)
+        logger.warning("[verify] 사전 답변 매칭 실패 (error: %s)", exc)
         return fallback

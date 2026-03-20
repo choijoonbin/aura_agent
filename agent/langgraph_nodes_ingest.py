@@ -493,7 +493,7 @@ async def planner_node_impl(
                 len(plan), " → ".join(s.get("tool", "") for s in plan),
             )
         else:
-            logger.info("[planner] LLM 계획 실패 → rule fallback")
+            logger.info("[planner] LLM 계획 미사용 → 규칙 기반 탐침 계획 적용")
 
     if not plan:
         base_plan = plan_from_flags(flags)

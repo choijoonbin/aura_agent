@@ -28,8 +28,8 @@ async def run_langgraph_agentic_analysis_impl(
 
     if not run_id:
         run_id = "default-thread"
-    app_logger.info(
-        "[RESUME_TRACE] run_langgraph 진입: run_id=%s case_id=%s resume_value=%s (None이면 처음부터, 있으면 1차 checkpoint 재개 시도)",
+    app_logger.debug(
+        "[agent] run_langgraph 진입: run_id=%s case_id=%s resume=%s",
         run_id,
         case_id,
         "있음" if resume_value else "없음",
@@ -37,12 +37,11 @@ async def run_langgraph_agentic_analysis_impl(
     if resume_value:
         _cmt = str(resume_value.get("comment") or "") if isinstance(resume_value, dict) else ""
         _prev = (_cmt[:80] + "…" ) if len(_cmt) > 80 else _cmt or "(없음)"
-        app_logger.info(
-            "[RESUME_TRACE] run_langgraph resume_value 요약: approved=%s comment_len=%s comment_preview=%s keys=%s",
+        app_logger.debug(
+            "[agent] resume_value 요약: approved=%s comment_len=%s comment_preview=%s",
             resume_value.get("approved") if isinstance(resume_value, dict) else None,
             len(_cmt),
             _prev,
-            list(resume_value.keys())[:10] if isinstance(resume_value, dict) else [],
         )
     force_closure_resume = bool(
         isinstance(resume_value, dict) and resume_value.get("_force_closure_resume") is True
@@ -98,11 +97,9 @@ async def run_langgraph_agentic_analysis_impl(
                 if _node == "__interrupt__":
                     continue
                 update = update or {}
-                app_logger.info("[RESUME_TRACE] run_langgraph%s 노드 실행: run_id=%s node=%s", path_label, run_id, _node)
+                app_logger.debug("[agent] 노드 실행: run_id=%s node=%s", run_id, _node)
                 pending = (update.get("pending_events") or []) or []
                 thinking_count = sum(1 for e in pending if (e or {}).get("event_type", "").upper().startswith("THINKING"))
-                if thinking_count:
-                    app_logger.info("[agent] node=%s pending_events=%s (THINKING_*=%s)", _node, len(pending), thinking_count)
                 for ev in pending:
                     ev = ev or {}
                     if ev.get("event_type") == "SCORE_BREAKDOWN":
@@ -120,8 +117,8 @@ async def run_langgraph_agentic_analysis_impl(
     # 1차: checkpoint 기반 resume 시도
     if resume_value is not None and not force_closure_resume:
         rv_keys = list(resume_value.keys())[:12] if isinstance(resume_value, dict) else []
-        app_logger.info(
-            "[RESUME_TRACE] run_langgraph run_id=%s 1차 시작: Command(resume=...) resume_value_keys=%s (hitl_pause→hitl_validate→reporter→finalizer)",
+        app_logger.debug(
+            "[agent] 1차 재개 시작: run_id=%s resume_value_keys=%s",
             run_id,
             rv_keys,
         )
@@ -133,12 +130,12 @@ async def run_langgraph_agentic_analysis_impl(
                     yielded_terminal = True
                 yield ev
             if yielded_terminal:
-                app_logger.info("[RESUME_TRACE] run_langgraph run_id=%s 1차 완료: checkpoint 재개 성공", run_id)
+                app_logger.debug("[agent] 1차 재개 완료: run_id=%s checkpoint 재개 성공", run_id)
                 return
             # 일부 환경/버전에서 Command(resume=...)가 예외 없이 이벤트 없이 끝나는 경우가 있다.
             # 이 경우 HOLD로 마감하기보다는 2차 경로(스크리닝부터 재실행)로 자동 전환해 결과를 반환한다.
             app_logger.warning(
-                "[RESUME_TRACE] run_langgraph run_id=%s 1차: 스트림이 터미널 이벤트(completed/failed) 없이 종료됨 → 2차 경로로 자동 전환(스크리닝부터 재실행)",
+                "[agent] 1차 재개: 터미널 이벤트 없이 종료 → 2차 전환 run_id=%s",
                 run_id,
             )
         except KeyError as e:
@@ -146,17 +143,13 @@ async def run_langgraph_agentic_analysis_impl(
             if str(e) != "'body_evidence'":
                 raise
             app_logger.warning(
-                "[RESUME_TRACE] run_langgraph run_id=%s 1차 실패: checkpoint 없음 (checkpointer=%s). "
-                "2차 경량(기존 결과 있음) 또는 2차 전체 재실행으로 진행.",
-                run_id,
+                "[agent] 1차 재개 실패: checkpoint 없음 (checkpointer=%s) → 2차 전환 run_id=%s",
                 checkpointer_backend,
+                run_id,
             )
             # fallthrough to 2차 (경량 가능 시 경량, 아니면 전체)
     elif resume_value is not None and force_closure_resume:
-        app_logger.info(
-            "[RESUME_TRACE] run_langgraph run_id=%s 1차 skip: _force_closure_resume=true → 2차 경량 우선",
-            run_id,
-        )
+        app_logger.debug("[agent] 1차 skip: force_closure_resume=true → 2차 경량 run_id=%s", run_id)
 
     # 2차: HITL 재개 시 기존 결과(또는 hitl_request만)가 있으면 2차 경량(closure)으로 hitl_validate→reporter→finalizer만 실행.
     # score_breakdown/tool_results가 없어도 hitl_request가 있으면 경량 경로 사용(전체 재실행 시 verify에서 또 인터럽트되는 것 방지).
@@ -165,10 +158,7 @@ async def run_langgraph_agentic_analysis_impl(
         and previous_result
         and (previous_result.get("hitl_request") or previous_result.get("score_breakdown") or previous_result.get("tool_results"))
     ):
-        app_logger.info(
-            "[RESUME_TRACE] run_langgraph run_id=%s 2차 경량: 기존 결과+검토의견 반영 (execute 재실행 없음, hitl_validate→reporter→finalizer)",
-            run_id,
-        )
+        app_logger.debug("[agent] 2차 경량 재개: run_id=%s hitl_validate→reporter→finalizer", run_id)
         body_with_hitl = dict(body_evidence or {})
         body_with_hitl["hitlResponse"] = resume_value
         body_with_hitl["_enable_hitl"] = enable_hitl
@@ -194,12 +184,9 @@ async def run_langgraph_agentic_analysis_impl(
         return
 
     if resume_value is not None:
-        app_logger.info(
-            "[RESUME_TRACE] run_langgraph run_id=%s 2차 시작: 스크리닝부터 전체 실행 (execute 포함 재실행, body_evidence에 hitlResponse 주입)",
-            run_id,
-        )
+        app_logger.debug("[agent] 2차 전체 재실행: run_id=%s (스크리닝부터)", run_id)
     else:
-        app_logger.info("[RESUME_TRACE] run_langgraph run_id=%s 경로: 스크리닝부터 전체 실행 (resume_value 없음)", run_id)
+        app_logger.debug("[agent] 신규 분석 실행: run_id=%s", run_id)
     body_with_hitl = dict(body_evidence or {})
     if resume_value is not None:
         body_with_hitl["hitlResponse"] = resume_value

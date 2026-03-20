@@ -94,8 +94,8 @@ def build_hitl_request(
 
     case_type = screening_result.get("case_type") or screening_result.get("caseType") or body_evidence.get("case_type")
     severity = screening_result.get("severity") or body_evidence.get("severity")
-    logger.info(
-        "[HITL_BUILD] case_type source: screening_result.case_type=%s body_evidence.case_type=%s → case_type=%s",
+    logger.debug(
+        "[HITL_BUILD] case_type source: screening_result=%s body_evidence=%s → %s",
         screening_result.get("case_type") or screening_result.get("caseType"),
         body_evidence.get("case_type"),
         case_type,
@@ -166,7 +166,7 @@ def build_hitl_request(
 
     is_normal_baseline = str(case_type or "").upper() == "NORMAL_BASELINE"
     critical_required = [r for r in required_inputs if (r.get("field") or "").strip() in ("missing_fields", "document_items")]
-    logger.info(
+    logger.debug(
         "[HITL_BUILD] case_type=%s is_normal_baseline=%s len(missing_evidence)=%s len(required_inputs)=%s len(critical_required)=%s len(blocking_reasons)=%s reg_required=%s",
         case_type,
         is_normal_baseline,

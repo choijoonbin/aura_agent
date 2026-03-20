@@ -459,15 +459,12 @@ async def _run_analysis_task(
         rv_comment = str(resume_value.get("comment") or "") if isinstance(resume_value, dict) else ""
         rv_comment_len = len(rv_comment)
         rv_comment_preview = (rv_comment[:80] + "…") if len(rv_comment) > 80 else rv_comment or "(없음)"
-        logger.info(
-            "[RESUME_TRACE] _run_analysis_task run_id=%s case_id=%s → 에이전트에 resume_value 전달 (keys=%s approved=%s comment_len=%s comment_preview=%s), checkpoint 재개 시도 예정",
-            run_id, case_id, rv_keys, rv_approved, rv_comment_len, rv_comment_preview,
+        logger.debug(
+            "[agent] resume_value 전달: run_id=%s approved=%s comment_len=%s",
+            run_id, rv_approved, rv_comment_len,
         )
     else:
-        logger.info(
-            "[RESUME_TRACE] _run_analysis_task run_id=%s case_id=%s → resume_value 없음, 스크리닝부터 전체 재실행",
-            run_id, case_id,
-        )
+        logger.debug("[agent] 신규 실행: run_id=%s case_id=%s", run_id, case_id)
     try:
         _first_ev = True
         async for ev_type, ev_payload in run_agent_analysis(
@@ -481,11 +478,11 @@ async def _run_analysis_task(
         ):
             data = ev_payload if isinstance(ev_payload, dict) else {"value": ev_payload}
             if _first_ev:
-                logger.info("[RESUME_TRACE] _run_analysis_task run_id=%s 첫 스트림 이벤트: ev_type=%s", run_id, ev_type)
+                logger.debug("[agent] 첫 스트림 이벤트: run_id=%s ev_type=%s", run_id, ev_type)
                 _first_ev = False
             if ev_type in ("completed", "failed"):
-                logger.info(
-                    "[RESUME_TRACE] _run_analysis_task run_id=%s 터미널 이벤트: ev_type=%s status=%s",
+                logger.debug(
+                    "[agent] 터미널 이벤트: run_id=%s ev_type=%s status=%s",
                     run_id, ev_type, (data.get("status") or data.get("result", {}).get("status") if isinstance(data.get("result"), dict) else None),
                 )
             await runtime.publish(run_id, ev_type, data)

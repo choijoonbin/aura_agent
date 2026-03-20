@@ -1205,12 +1205,12 @@ async def verify_node_impl(
             )
             hitl_request["qa_matches"] = qa_matches
             logger.info(
-                "verify_node: qa_matches %d/%d covered",
+                "[verify] 사전 답변 매칭: %d/%d covered",
                 sum(1 for m in qa_matches if m.get("covered")),
                 len(qa_matches),
             )
         except Exception as _qa_err:
-            logger.warning("verify_node: qa_matching skipped (%s)", _qa_err)
+            logger.warning("[verify] 사전 답변 매칭 생략 (%s)", _qa_err)
             hitl_request["qa_matches"] = []
 
     events: list[dict[str, Any]] = [

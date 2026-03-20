@@ -207,7 +207,7 @@ async def policy_rulebook_probe(context: dict[str, Any]) -> dict[str, Any]:
         candidates = search_policy_chunks(db, enriched_body, limit=20)
         case_type = str(enriched_body.get("case_type") or "").upper()
         common_in_candidates = any(_is_common_evidence_article(r) for r in candidates)
-        logger.info(
+        logger.debug(
             "[POLICY_REF_TRACE] start case_type=%s candidates=%s common_in_candidates=%s candidate_preview=%s",
             case_type or "-",
             len(candidates),
@@ -239,7 +239,7 @@ async def policy_rulebook_probe(context: dict[str, Any]) -> dict[str, Any]:
         need_common_evidence_first = case_type not in {"", "NORMAL_BASELINE"}
         common_evidence_ref = next((ref for ref in ranked_unique_refs if _is_common_evidence_article(ref)), None)
         max_ref_count = 4 if (need_common_evidence_first and common_evidence_ref is not None) else 3
-        logger.info(
+        logger.debug(
             "[POLICY_REF_TRACE] dedup case_type=%s unique_refs=%s need_common_evidence_first=%s common_found=%s common_ref=%s max_ref_count=%s",
             case_type or "-",
             len(ranked_unique_refs),
@@ -249,13 +249,13 @@ async def policy_rulebook_probe(context: dict[str, Any]) -> dict[str, Any]:
             max_ref_count,
         )
         if mismatch_dropped:
-            logger.info(
+            logger.debug(
                 "[POLICY_REF_TRACE] case_alignment_mismatch_dropped case_type=%s dropped=%s",
                 case_type or "-",
                 mismatch_dropped,
             )
         if need_common_evidence_first and common_evidence_ref is None:
-            logger.warning(
+            logger.debug(
                 "[POLICY_REF_TRACE] common evidence article(제14조) not found in ranked_unique_refs for case_type=%s; common_in_candidates=%s",
                 case_type or "-",
                 common_in_candidates,
@@ -274,7 +274,7 @@ async def policy_rulebook_probe(context: dict[str, Any]) -> dict[str, Any]:
                 continue
             refs.append(ref)
             picked_keys.add(key)
-        logger.info(
+        logger.debug(
             "[POLICY_REF_TRACE] final case_type=%s selected_refs=%s selected_preview=%s",
             case_type or "-",
             len(refs),
