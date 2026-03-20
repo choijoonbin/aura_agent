@@ -3040,6 +3040,17 @@ def render_workspace_case_queue(items: list[dict[str, Any]], selected_key: str |
     active_filter = str(st.session_state.get("mt_case_filter") or "전체")
     if active_filter not in grouped:
         active_filter = "전체"
+    # 선택 전표가 상태 변경으로 다른 버킷으로 이동한 경우,
+    # 좌측 카운트/목록 포커스도 해당 버킷으로 자동 동기화한다.
+    if selected_key and active_filter != "전체":
+        selected_bucket = None
+        for bucket_name in ("검토 필요", "완료", "HITL 대기"):
+            if any(str(item.get("voucher_key") or "") == str(selected_key) for item in grouped.get(bucket_name) or []):
+                selected_bucket = bucket_name
+                break
+        if selected_bucket and selected_bucket != active_filter:
+            active_filter = selected_bucket
+            st.session_state["mt_case_filter"] = selected_bucket
 
     st.markdown(
         """
