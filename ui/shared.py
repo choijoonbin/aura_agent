@@ -515,16 +515,32 @@ def case_type_badge(case_type: str | None) -> str:
 def render_page_header(title: str, subtitle: str, right_html: str | None = None) -> None:
     with stylable_container(
         key=f"page_header_{title}",
-        css_styles="""
-        {
-          padding: 4px 20px 14px 20px;
-          border: 1px solid #e5e7eb;
-          background: rgba(255,255,255,0.94);
-          border-radius: 18px;
-          box-shadow: 0 8px 28px rgba(15,23,42,0.05);
-          margin-bottom: 12px;
-        }
-        """,
+        css_styles=[
+            # 컨테이너: 다크 네이비 그라데이션 헤더 (glow는 배경 그라데이션에 통합)
+            """{
+              padding: 6px 24px 16px 24px;
+              background: linear-gradient(135deg, #0f172a 0%, #1e293b 45%, #1e3a5f 80%,
+                          rgba(59,130,246,0.08) 100%);
+              border: 1px solid rgba(59,130,246,0.22);
+              border-radius: 20px;
+              box-shadow: 0 8px 32px rgba(15,23,42,0.18), inset 0 1px 0 rgba(255,255,255,0.06);
+              margin-bottom: 14px;
+            }""",
+            # 페이지 타이틀 — 흰색
+            """ .mt-page-title {
+              color: #f8fafc !important;
+              font-size: 1.6rem !important;
+              font-weight: 900 !important;
+              letter-spacing: -0.03em !important;
+            }""",
+            # 부제목 — 뮤트 슬레이트
+            """ .mt-page-sub {
+              color: #94a3b8 !important;
+              font-size: 0.84rem !important;
+              margin-top: 4px !important;
+              white-space: normal !important;
+            }""",
+        ],
     ):
         cols = st.columns([0.78, 0.22])
         with cols[0]:

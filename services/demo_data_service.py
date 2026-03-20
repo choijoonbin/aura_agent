@@ -135,8 +135,8 @@ SCENARIO_PROFILES: dict[str, dict[str, Any]] = {
         "merchant_name": "일반 식대",
         "item_text": "정상 업무 식대",
         "amount_range": (12000, 45000),
-        # 낮 시간만 사용(심야 제한 규정 회피). 11~13시 = 업무 시간대.
-        "hour_candidates": [11, 12, 13],
+        # 낮 시간만 사용(심야 제한 규정 회피). 12~13시 = 업무 시간대.
+        "hour_candidates": [12, 13],
         "day_mode": "weekday",
         "belnr_prefix": "N",
         "risk_type": "NORMAL_BASELINE",

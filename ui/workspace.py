@@ -1317,12 +1317,22 @@ def _pipeline_state_from_events(events: list[dict[str, Any]]) -> tuple[list[str]
     return completed, current
 
 
-def render_timeline_cards(events: list[dict[str, Any]], *, view_mode: str = "business", nested_under_expander: bool = False) -> None:
+def render_timeline_cards(
+    events: list[dict[str, Any]],
+    *,
+    view_mode: str = "business",
+    nested_under_expander: bool = False,
+    show_event_details: bool = True,
+    show_pipeline_progress: bool = True,
+) -> None:
     if not events:
         render_empty_state("표시할 스트림 이벤트가 없습니다.")
         return
     completed_nodes, current_node = _pipeline_state_from_events(events)
-    render_pipeline_progress(completed_nodes, current_node)
+    if show_pipeline_progress:
+        render_pipeline_progress(completed_nodes, current_node)
+    if not show_event_details:
+        return
     node_labels_map = dict(PIPELINE_NODES)
     node_groups = defaultdict(list)
     node_order = []
@@ -3703,9 +3713,25 @@ def render_workspace_chat_panel(selected: dict[str, Any], latest_bundle: dict[st
 
         ag = [e for e in timeline if e.get("event_type") == "AGENT_EVENT"]
         if ag:
-            with st.container():
-                st.caption("이전 타임라인 카드 보기")
-                render_timeline_cards(ag, nested_under_expander=True)
+            # st.caption("이전 타임라인 카드 보기")
+            render_timeline_cards(
+                ag,
+                nested_under_expander=True,
+                show_event_details=False,
+                show_pipeline_progress=True,
+            )
+            show_prev_timeline = st.toggle(
+                "이전 타임라인 카드 보기",
+                value=False,
+                key=f"workspace_prev_timeline_toggle_{vkey}",
+            )
+            if show_prev_timeline:
+                render_timeline_cards(
+                    ag,
+                    nested_under_expander=True,
+                    show_event_details=True,
+                    show_pipeline_progress=False,
+                )
 
 
 def render_workspace_results(latest_bundle: dict[str, Any], debug_mode: bool) -> None:
@@ -4589,6 +4615,255 @@ def render_workspace_graph_insights(selected_key: str | None, latest_bundle: dic
 
 
 def render_ai_workspace_page() -> None:
+    # ── 워크스페이스 프리미엄 UI 강화 CSS (기능 코드 무변경, 시각 레이어만) ──
+    st.markdown("""
+    <style>
+    /* ━━━ 페이지 헤더 ━━━ */
+    .mt-page-title { font-size:1.75rem !important; font-weight:900 !important; letter-spacing:-0.03em !important; }
+    .mt-page-sub   { font-size:0.88rem !important; color:#475569 !important; margin-top:6px !important; }
+
+    /* ━━━ 메인 카드 패널 (케이스 큐·채팅·결과) ━━━ */
+    [class*="st-key-workspace_case_queue_card"],
+    [class*="st-key-workspace_chat_card"],
+    [class*="st-key-workspace_result_card"] {
+      background: rgba(255,255,255,0.98) !important;
+      border: 1px solid rgba(226,232,240,0.8) !important;
+      border-radius: 24px !important;
+      box-shadow: 0 4px 6px -1px rgba(15,23,42,0.04),
+                  0 20px 40px -8px rgba(15,23,42,0.08) !important;
+      backdrop-filter: blur(8px) !important;
+    }
+
+    /* ━━━ 패널 타이틀 ━━━ */
+    .mt-panel-title {
+      font-size: 1.0rem !important;
+      font-weight: 900 !important;
+      color: #0f172a !important;
+      letter-spacing: -0.02em !important;
+    }
+    .mt-panel-sub {
+      font-size: 0.82rem !important;
+      color: #64748b !important;
+      line-height: 1.5 !important;
+    }
+
+    /* ━━━ KPI 버튼 카드 (전체·검토필요·완료·HITL) ━━━ */
+    [class*="st-key-case_kpi_"] [data-testid="stButton"] > button,
+    [class*="st-key-case_kpi_sel_"] [data-testid="stButton"] > button {
+      border-radius: 16px !important;
+      transition: all 0.18s ease !important;
+      backdrop-filter: blur(4px) !important;
+    }
+    [class*="st-key-case_kpi_all"] [data-testid="stButton"] > button {
+      background: linear-gradient(135deg,#f8fafc 0%,#eff6ff 100%) !important;
+      border-color: #dbeafe !important; color: #1e40af !important;
+    }
+    [class*="st-key-case_kpi_review"] [data-testid="stButton"] > button {
+      background: linear-gradient(135deg,#fffbeb 0%,#fef3c7 100%) !important;
+      border-color: #fde68a !important; color: #92400e !important;
+    }
+    [class*="st-key-case_kpi_done"] [data-testid="stButton"] > button {
+      background: linear-gradient(135deg,#f0fdf4 0%,#dcfce7 100%) !important;
+      border-color: #bbf7d0 !important; color: #14532d !important;
+    }
+    [class*="st-key-case_kpi_hitl"] [data-testid="stButton"] > button {
+      background: linear-gradient(135deg,#fdf4ff 0%,#f3e8ff 100%) !important;
+      border-color: #e9d5ff !important; color: #6b21a8 !important;
+    }
+    /* 선택된 KPI: 블루 강조 + glow */
+    [class*="st-key-case_kpi_sel_"] [data-testid="stButton"] > button {
+      background: linear-gradient(135deg,#eff6ff 0%,#dbeafe 100%) !important;
+      border: 2px solid #2563eb !important;
+      box-shadow: 0 0 0 3px rgba(37,99,235,0.12), 0 8px 20px rgba(37,99,235,0.15) !important;
+      color: #1e40af !important;
+    }
+
+    /* ━━━ 케이스 목록 카드 ━━━ */
+    [class*="st-key-case_btn_"] {
+      border: 1px solid #e2e8f0 !important;
+      border-radius: 20px !important;
+      background: #fff !important;
+      box-shadow: 0 2px 8px rgba(15,23,42,0.04), 0 8px 18px rgba(15,23,42,0.04) !important;
+      margin-bottom: 0.75rem !important;
+      padding: 12px 12px 0 12px !important;
+      transition: box-shadow 0.15s ease, border-color 0.15s ease, transform 0.12s ease !important;
+    }
+    [class*="st-key-case_btn_"]:hover {
+      box-shadow: 0 4px 12px rgba(15,23,42,0.06), 0 16px 32px rgba(15,23,42,0.08) !important;
+      border-color: #bfdbfe !important;
+    }
+    [class*="st-key-case_btn_sel_"] {
+      border: 2px solid #2563eb !important;
+      background: linear-gradient(135deg, #fafcff 0%, #eff6ff 100%) !important;
+      box-shadow: 0 0 0 3px rgba(37,99,235,0.08), 0 12px 28px rgba(37,99,235,0.12) !important;
+    }
+    [class*="st-key-case_btn_"] [data-testid="stButton"] > button {
+      font-size: 0.88rem !important;
+      line-height: 1.45 !important;
+      color: #0f172a !important;
+    }
+    [class*="st-key-case_btn_"] [data-testid="stButton"] > button strong {
+      font-size: 0.94rem !important;
+      font-weight: 800 !important;
+      color: #0f172a !important;
+    }
+
+    /* ━━━ 분석 시작 버튼 ━━━ */
+    [class*="st-key-workspace_cta_right_1"] [data-testid="stButton"] > button[kind="primary"] {
+      background: linear-gradient(135deg, #1d4ed8 0%, #2563eb 50%, #3b82f6 100%) !important;
+      border: none !important;
+      border-radius: 12px !important;
+      box-shadow: 0 4px 12px rgba(37,99,235,0.35), 0 2px 4px rgba(37,99,235,0.2) !important;
+      font-weight: 800 !important;
+      font-size: 0.9rem !important;
+      letter-spacing: 0.01em !important;
+      padding: 0.5rem 1.4rem !important;
+      transition: all 0.18s ease !important;
+    }
+    [class*="st-key-workspace_cta_right_1"] [data-testid="stButton"] > button[kind="primary"]:hover {
+      background: linear-gradient(135deg, #1e40af 0%, #1d4ed8 100%) !important;
+      box-shadow: 0 6px 18px rgba(37,99,235,0.45) !important;
+      transform: translateY(-1px) !important;
+    }
+
+    /* ━━━ 스트리밍 영역 ━━━ */
+    .mt-stream-shell {
+      background: linear-gradient(160deg, #0f172a 0%, #111827 60%, #0f1a2e 100%) !important;
+      border: 1px solid rgba(59,130,246,0.2) !important;
+      border-radius: 20px !important;
+      padding: 18px !important;
+      box-shadow: inset 0 1px 0 rgba(255,255,255,0.05), 0 8px 24px rgba(15,23,42,0.25) !important;
+    }
+    .mt-stream-shell p, .mt-stream-shell div, .mt-stream-shell span, .mt-stream-shell li,
+    .mt-stream-shell code, .mt-stream-shell strong, .mt-stream-shell em {
+      color: #e2e8f0 !important;
+    }
+    .mt-stream-shell strong { color: #93c5fd !important; }
+    .mt-stream-shell hr { border-color: rgba(99,102,241,0.3) !important; margin: 10px 0 !important; }
+
+    /* ━━━ 탭 스타일 (Streamlit 기본 indicator 유지 — 추가 border-bottom 없음) ━━━ */
+    [class*="st-key-workspace_result_card"] [data-testid="stTabs"] [data-testid="stTab"] {
+      font-size: 0.87rem !important;
+      font-weight: 700 !important;
+      color: #64748b !important;
+      transition: color 0.15s !important;
+    }
+    [class*="st-key-workspace_result_card"] [data-testid="stTabs"] [data-testid="stTab"][aria-selected="true"] {
+      color: #1d4ed8 !important;
+    }
+    [class*="st-key-workspace_result_card"] [data-testid="stTabs"] {
+      gap: 2px !important;
+    }
+
+    /* ━━━ 스크리닝 strip 텍스트 ━━━ */
+    .mt-workspace-strip-inline {
+      font-size: 0.82rem !important;
+      color: #475569 !important;
+      background: linear-gradient(135deg, #f8fafc, #eff6ff) !important;
+      border: 1px solid #dbeafe !important;
+      border-radius: 999px !important;
+      padding: 4px 14px !important;
+      display: inline-block !important;
+      font-weight: 600 !important;
+    }
+
+    /* ━━━ 판단 요약 hero 카드 (결과 없음 / 분석 결과) ━━━ */
+    .mt-card-quiet {
+      background: linear-gradient(135deg, #f8faff 0%, #eff6ff 100%) !important;
+      border: 1px solid #dbeafe !important;
+      border-radius: 16px !important;
+      padding: 18px 20px !important;
+      margin-bottom: 14px !important;
+    }
+    .mt-hero-title {
+      font-size: 1.15rem !important;
+      font-weight: 900 !important;
+      color: #1e3a5f !important;
+      letter-spacing: -0.02em !important;
+      margin-bottom: 6px !important;
+    }
+    .mt-hero-sub {
+      font-size: 0.85rem !important;
+      color: #475569 !important;
+      line-height: 1.55 !important;
+    }
+
+    /* ━━━ 상태·심각도·점수 메트릭 그리드 ━━━ */
+    .mt-result-grid {
+      display: grid !important;
+      grid-template-columns: repeat(3, 1fr) !important;
+      gap: 12px !important;
+      margin-top: 4px !important;
+    }
+    .mt-result-metric {
+      background: #fff !important;
+      border: 1px solid #e2e8f0 !important;
+      border-radius: 16px !important;
+      padding: 16px 18px !important;
+      box-shadow: 0 2px 8px rgba(15,23,42,0.04) !important;
+      border-top: 3px solid #2563eb !important;
+    }
+    .mt-result-metric-label {
+      font-size: 0.72rem !important;
+      font-weight: 800 !important;
+      text-transform: uppercase !important;
+      letter-spacing: 0.08em !important;
+      color: #64748b !important;
+      margin-bottom: 10px !important;
+    }
+    .mt-result-metric-value {
+      font-size: 1.5rem !important;
+      font-weight: 900 !important;
+      color: #0f172a !important;
+      line-height: 1.1 !important;
+      letter-spacing: -0.02em !important;
+    }
+    .mt-result-metric-foot {
+      font-size: 0.74rem !important;
+      color: #94a3b8 !important;
+      margin-top: 8px !important;
+      line-height: 1.4 !important;
+    }
+
+    /* ━━━ 실시간 스트림 expander ━━━ */
+    [class*="st-key-workspace_chat_card"] [data-testid="stExpander"] {
+      border: 1px solid rgba(59,130,246,0.2) !important;
+      border-radius: 14px !important;
+      background: linear-gradient(135deg, #f8faff 0%, #eff6ff 100%) !important;
+      overflow: hidden !important;
+    }
+    [class*="st-key-workspace_chat_card"] [data-testid="stExpander"] summary {
+      font-size: 0.87rem !important;
+      font-weight: 700 !important;
+      color: #1e3a5f !important;
+      padding: 10px 16px !important;
+    }
+
+    /* ━━━ 결과 영역 — section 카드 ━━━ */
+    [class*="st-key-workspace_result_card"] .mt-section-card,
+    [class*="st-key-workspace_result_card"] .mt-section-card-tight {
+      background: linear-gradient(135deg, #fafcff 0%, #f0f7ff 100%) !important;
+      border-color: #dbeafe !important;
+    }
+
+    /* ━━━ 배지 공통 세련화 ━━━ */
+    .mt-badge { letter-spacing: 0.01em !important; font-size: 0.7rem !important; }
+    .mt-badge-red   { background: linear-gradient(135deg,#fef2f2,#fee2e2) !important; }
+    .mt-badge-amber { background: linear-gradient(135deg,#fffbeb,#fef3c7) !important; }
+    .mt-badge-green { background: linear-gradient(135deg,#ecfdf5,#d1fae5) !important; }
+    .mt-badge-blue  { background: linear-gradient(135deg,#eff6ff,#dbeafe) !important; }
+
+    /* ━━━ 스크롤바 세련화 + 가로 스크롤 차단 ━━━ */
+    [class*="st-key-workspace_case_scroll_"] { overflow-x: hidden !important; }
+    [class*="st-key-workspace_case_scroll_"]::-webkit-scrollbar { width: 4px !important; }
+    [class*="st-key-workspace_case_scroll_"]::-webkit-scrollbar-track { background: transparent !important; }
+    [class*="st-key-workspace_case_scroll_"]::-webkit-scrollbar-thumb { background: #cbd5e1 !important; border-radius: 4px !important; }
+    [class*="st-key-workspace_case_scroll_"]::-webkit-scrollbar-thumb:hover { background: #94a3b8 !important; }
+    /* 케이스 카드 자체도 가로 넘침 방지 */
+    [class*="st-key-case_btn_"] { overflow: hidden !important; box-sizing: border-box !important; }
+    </style>
+    """, unsafe_allow_html=True)
+
     render_page_header("AI 워크스페이스", "전표 기반 자율형 에이전트가 실제로 추론하고, 도구를 호출하고, 규정 근거를 바탕으로 판단하는 메인 시연 화면입니다.")
     items = get("/api/v1/vouchers?queue=all&limit=50").get("items") or []
     debug_mode = bool(st.session_state.get("mt_debug_mode", False))
