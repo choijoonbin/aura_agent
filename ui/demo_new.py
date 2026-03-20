@@ -345,7 +345,7 @@ def render_demo_new_page() -> None:
           display: flex;
           align-items: center;
           gap: 1rem;
-          margin: 0.02rem 0 0.08rem;
+          margin: 0.02rem 0 0.6rem;
           flex-wrap: nowrap;
         }
         .demo-top-flow .step-bar { margin: 0; }
