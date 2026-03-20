@@ -250,47 +250,116 @@ def _entities_to_boxes_and_labels(
 def render_demo_new_page() -> None:
     render_page_header(
         "시연데이터 생성",
-        "증빙 기반으로 시연 케이스를 빠르게 생성하고 검토할 수 있습니다.",
+        "SAP FI 전표 데이터를 확인하고 증빙을 첨부하여 감사 분석 케이스를 생성합니다.",
     )
     st.markdown(
         """
         <style>
+        /* ── 파일 업로더 ── */
         [data-testid="stFileUploaderDropzone"] {
-          background: #eaf2ff !important;
-          border: 1px dashed #93c5fd !important;
+          background: #f0f7ff !important;
+          border: 2px dashed #60a5fa !important;
+          border-radius: 10px !important;
         }
-        [data-testid="stFileUploaderDropzone"] * {
-          color: #0f172a !important;
-        }
+        [data-testid="stFileUploaderDropzone"] * { color: #0f172a !important; }
         [data-testid="stFileUploaderDropzone"] button {
           background: #ffffff !important;
-          color: #0f172a !important;
-          border: 1px solid #bfdbfe !important;
+          color: #1d4ed8 !important;
+          border: 1px solid #93c5fd !important;
+          border-radius: 6px !important;
         }
         [data-testid="stFileUploaderDropzone"] button:hover {
-          background: #f8fbff !important;
-          border-color: #93c5fd !important;
+          background: #eff6ff !important;
+          border-color: #3b82f6 !important;
         }
-        /* 우측 입력 필드 가독성 개선 */
+        /* ── 텍스트 입력 ── */
         [data-testid="stTextInput"] input {
           background: #ffffff !important;
           color: #0f172a !important;
-          border: 1px solid #cbd5e1 !important;
+          border: 1.5px solid #e2e8f0 !important;
+          border-radius: 8px !important;
+          font-size: 0.95rem !important;
+          padding: 0.45rem 0.75rem !important;
         }
-        [data-testid="stTextInput"] input::placeholder {
-          color: #64748b !important;
-          opacity: 1 !important;
-        }
+        [data-testid="stTextInput"] input::placeholder { color: #94a3b8 !important; opacity: 1 !important; }
         [data-testid="stTextInput"] input:focus {
-          border-color: #60a5fa !important;
-          box-shadow: 0 0 0 1px #93c5fd !important;
+          border-color: #3b82f6 !important;
+          box-shadow: 0 0 0 3px rgba(59,130,246,0.15) !important;
+        }
+        /* ── 섹션 카드 ── */
+        .demo-card {
+          background: #ffffff;
+          border: 1px solid #e2e8f0;
+          border-radius: 12px;
+          padding: 1.2rem 1.4rem 1rem;
+          margin-bottom: 0.5rem;
+          box-shadow: 0 1px 4px rgba(0,0,0,0.06);
+        }
+        .demo-section-title {
+          font-size: 1.05rem;
+          font-weight: 700;
+          color: #1e293b;
+          margin-bottom: 0.75rem;
+          display: flex;
+          align-items: center;
+          gap: 0.4rem;
+        }
+        /* ── 스텝 인디케이터 ── */
+        .step-bar {
+          display: flex;
+          align-items: center;
+          gap: 0;
+          margin: 0.6rem 0 1.2rem;
+        }
+        .step-item {
+          display: flex;
+          align-items: center;
+          gap: 0.45rem;
+          font-size: 0.82rem;
+          font-weight: 600;
+          color: #94a3b8;
+          white-space: nowrap;
+        }
+        .step-item.active { color: #1d4ed8; }
+        .step-item.done { color: #16a34a; }
+        .step-circle {
+          width: 26px; height: 26px;
+          border-radius: 50%;
+          display: flex; align-items: center; justify-content: center;
+          font-size: 0.75rem; font-weight: 700;
+          background: #e2e8f0; color: #64748b;
+          flex-shrink: 0;
+        }
+        .step-item.active .step-circle { background: #1d4ed8; color: #fff; }
+        .step-item.done .step-circle { background: #16a34a; color: #fff; }
+        .step-arrow { color: #cbd5e1; margin: 0 0.6rem; font-size: 1rem; }
+        /* ── 케이스 배지 ── */
+        .case-badge {
+          display: inline-flex; align-items: center; gap: 0.35rem;
+          padding: 0.3rem 0.85rem;
+          border-radius: 999px;
+          font-size: 0.78rem; font-weight: 700;
+          letter-spacing: 0.02em;
+        }
+        .badge-critical { background: #fef2f2; color: #b91c1c; border: 1px solid #fca5a5; }
+        .badge-normal   { background: #f0fdf4; color: #15803d; border: 1px solid #86efac; }
+        .badge-warning  { background: #fff7ed; color: #c2410c; border: 1px solid #fdba74; }
+        /* ── 품의서 카드 ── */
+        .approval-card {
+          background: #f0fdf4;
+          border: 1px solid #86efac;
+          border-radius: 8px;
+          padding: 0.6rem 0.9rem;
+          margin-top: 0.3rem;
+          font-size: 0.82rem;
+          color: #15803d;
         }
         </style>
         """,
         unsafe_allow_html=True,
     )
 
-    # ── 케이스 타입 선택 + 전체 삭제(legacy 동일 동작) ─────
+    # ── 케이스 타입 선택 + 전체 삭제 ─────
     case_type_labels = [label for _, label in _CASE_TYPE_OPTIONS]
     case_type_keys = [key for key, _ in _CASE_TYPE_OPTIONS]
     case_type_col, delete_col = st.columns([0.74, 0.26])
@@ -301,7 +370,6 @@ def render_demo_new_page() -> None:
             key="demo_new_case_type_label",
         )
     with delete_col:
-        # selectbox 레이블 높이에 맞춰 버튼을 같은 라인 우측 끝에 배치
         st.markdown('<div style="height:1.75rem"></div>', unsafe_allow_html=True)
         if st.button("시연 데이터 전체 삭제", key="demo_new_delete_all", use_container_width=True):
             out = delete("/api/v1/demo/seed")
@@ -319,6 +387,22 @@ def render_demo_new_page() -> None:
     selected_case_type = case_type_keys[case_type_labels.index(selected_label)]
     is_abnormal = selected_case_type in _ABNORMAL_CASE_TYPES
     is_normal_baseline = selected_case_type == "NORMAL_BASELINE"
+
+    # ── 케이스 배지 표시 ──
+    _CASE_BADGE_META = {
+        "HOLIDAY_USAGE":    ("badge-critical", "🔴", "고위험 · 휴일 사용 의심"),
+        "LIMIT_EXCEED":     ("badge-warning",  "🟠", "경고 · 한도 초과 의심"),
+        "PRIVATE_USE_RISK": ("badge-warning",  "🟠", "경고 · 사적 사용 위험"),
+        "UNUSUAL_PATTERN":  ("badge-warning",  "🟠", "경고 · 비정상 패턴"),
+        "NORMAL_BASELINE":  ("badge-normal",   "🟢", "정상 · 일반 케이스"),
+    }
+    badge_cls, badge_icon, badge_label = _CASE_BADGE_META.get(
+        selected_case_type, ("badge-normal", "⚪", selected_case_type)
+    )
+    st.markdown(
+        f'<span class="case-badge {badge_cls}">{badge_icon} {badge_label}</span>',
+        unsafe_allow_html=True,
+    )
 
     prev_case_type = str(st.session_state.get("demo_new_prev_case_type") or "")
     # HOLIDAY_USAGE는 POC 시연 기본값을 즉시 채워 시작한다.
@@ -339,16 +423,43 @@ def render_demo_new_page() -> None:
             st.session_state["demo_new_field_time"] = _HOLIDAY_DEFAULTS["time_occurrence"]
     st.session_state["demo_new_prev_case_type"] = selected_case_type
 
-    if is_abnormal:
-        st.warning("비정상 케이스는 증빙 이미지 첨부를 권장합니다. 미첨부 시 금액/일자/가맹점을 직접 입력해야 합니다.")
-
-    st.divider()
+    # ── 스텝 인디케이터 ──
+    has_image = bool(st.session_state.get("demo_new_image_bytes"))
+    has_analysis = bool(st.session_state.get("demo_new_analysis_result"))
+    step1_cls = "done" if (has_image or is_normal_baseline) else "active"
+    step2_cls = "done" if has_analysis else ("active" if has_image else "step-item")
+    step3_cls = "active" if (has_analysis or is_normal_baseline) else "step-item"
+    st.markdown(
+        f"""
+        <div class="step-bar">
+          <div class="step-item done">
+            <div class="step-circle">✓</div> 케이스 선택
+          </div>
+          <span class="step-arrow">›</span>
+          <div class="step-item {step1_cls}">
+            <div class="step-circle">{"✓" if step1_cls == "done" else "2"}</div> 증빙 업로드
+          </div>
+          <span class="step-arrow">›</span>
+          <div class="step-item {step2_cls}">
+            <div class="step-circle">{"✓" if step2_cls == "done" else "3"}</div> 이미지 분석
+          </div>
+          <span class="step-arrow">›</span>
+          <div class="step-item {step3_cls}">
+            <div class="step-circle">4</div> 데이터 생성
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
     # ── 레이아웃: 좌(필드 편집) / 우(이미지+분석) ──────────
     col_right, col_left = st.columns([1, 1], gap="large")
 
     with col_left:
-        st.subheader("증빙 이미지")
+        st.markdown(
+            '<div class="demo-section-title">📎 증빙 이미지</div>',
+            unsafe_allow_html=True,
+        )
 
         if is_normal_baseline:
             for key in (
@@ -374,7 +485,10 @@ def render_demo_new_page() -> None:
         image_bytes: bytes | None = None
 
         if is_normal_baseline:
-            st.info("정상 케이스는 증빙 이미지 업로드를 사용하지 않습니다.")
+            st.markdown(
+                '<div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:0.6rem 0.9rem;font-size:0.85rem;color:#64748b">ℹ️ 정상 케이스는 증빙 이미지 업로드를 사용하지 않습니다.</div>',
+                unsafe_allow_html=True,
+            )
             uploaded_file = None
             analysis_result = None
             image_bytes = None
@@ -415,7 +529,10 @@ def render_demo_new_page() -> None:
                 st.image(image_bytes, use_container_width=True)
 
         else:
-            st.info("이미지를 업로드하면 자동 분석이 가능합니다.")
+            st.markdown(
+                '<div style="background:#f0f7ff;border:1px solid #bfdbfe;border-radius:8px;padding:0.6rem 0.9rem;font-size:0.85rem;color:#1e40af">📷 영수증·전표 이미지를 업로드하면 Vision LLM이 자동으로 금액·가맹점·일자를 추출합니다.</div>',
+                unsafe_allow_html=True,
+            )
             # 이전 분석 결과 및 자동 채우기 위젯 키 초기화
             for key in (
                 "demo_new_analysis_result",
@@ -443,7 +560,10 @@ def render_demo_new_page() -> None:
                 st.caption(f"감사 코멘트: {analysis_result.audit_comment}")
 
     with col_right:
-        st.subheader("데이터 보정 및 저장")
+        st.markdown(
+            '<div class="demo-section-title">📋 전표 데이터 확인 및 저장</div>',
+            unsafe_allow_html=True,
+        )
 
         # 자동 추출된 값을 초기값으로 (분석 후 처음 한 번만 채움)
         auto_amount = st.session_state.get("demo_new_auto_amount", "")
@@ -581,8 +701,10 @@ def render_demo_new_page() -> None:
                 "mismatch": recalculated_mismatch.get("time_occurrence", False),
             },
         }
-        if st.checkbox("불일치 비교 로그 보기", key="demo_new_show_mismatch_debug", value=False):
-            st.json(debug_rows, expanded=False)
+        # 불일치 디버그 로그 (개발 확인용 — 시연 시 숨김)
+        if st.session_state.get("_dev_mode_debug"):
+            if st.checkbox("불일치 비교 로그 보기", key="demo_new_show_mismatch_debug", value=False):
+                st.json(debug_rows, expanded=False)
         if analysis_result is None:
             recalculated_mismatch = {}
         if recalculated_mismatch != mismatch_state:
@@ -611,8 +733,13 @@ def render_demo_new_page() -> None:
         selected_doc_key = doc_keys[doc_labels.index(selected_doc_label)]
         approval_doc = _APPROVAL_DOC_PRESETS.get(selected_doc_key)
         if approval_doc:
-            st.caption(f"선택된 품의서: {approval_doc.get('title')}")
-            st.caption(f"내용: {approval_doc.get('content')}")
+            st.markdown(
+                f"""<div class="approval-card">
+                  ✅ <strong>{approval_doc.get('title')}</strong><br>
+                  <span style="color:#166534">{approval_doc.get('content')}</span>
+                </div>""",
+                unsafe_allow_html=True,
+            )
 
         st.markdown('<div style="height:8px;"></div>', unsafe_allow_html=True)
 
@@ -626,20 +753,28 @@ def render_demo_new_page() -> None:
             )
 
         if validation_errors:
-            for err in validation_errors:
-                st.caption(f"⚠ {err}")
+            st.markdown(
+                "".join(f'<div style="color:#b91c1c;font-size:0.82rem;margin:2px 0">⚠ {e}</div>' for e in validation_errors),
+                unsafe_allow_html=True,
+            )
 
-        # 비정상 케이스 + 파일 미첨부 → 버튼 항상 disabled (스펙 정책)
+        # 비정상 케이스 + 파일 미첨부 → 버튼 항상 disabled
         if is_abnormal and uploaded_file is None:
-            st.info("비정상 케이스는 증빙 이미지 첨부가 필수입니다.")
+            st.markdown(
+                '<div style="background:#fef9c3;border:1px solid #fde047;border-radius:8px;padding:0.5rem 0.8rem;font-size:0.83rem;color:#854d0e;margin:0.4rem 0">'
+                '📎 비정상 케이스는 증빙 이미지 첨부 후 데이터 생성이 가능합니다.</div>',
+                unsafe_allow_html=True,
+            )
 
         generate_disabled = _is_generate_disabled(all_valid, is_abnormal, uploaded_file is not None)
 
+        st.markdown('<div style="height:6px;"></div>', unsafe_allow_html=True)
         if st.button(
-            "테스트 데이터 생성",
+            "🚀  테스트 데이터 생성",
             key="demo_new_generate_btn",
             type="primary",
             disabled=generate_disabled,
+            use_container_width=True,
         ):
             _handle_generate(
                 case_type=selected_case_type,
