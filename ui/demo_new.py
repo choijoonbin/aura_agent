@@ -362,7 +362,7 @@ def render_demo_new_page() -> None:
     # ── 케이스 타입 선택 + 전체 삭제 ─────
     case_type_labels = [label for _, label in _CASE_TYPE_OPTIONS]
     case_type_keys = [key for key, _ in _CASE_TYPE_OPTIONS]
-    case_type_col, delete_col = st.columns([0.74, 0.26])
+    case_type_col, _spacer, delete_col = st.columns([0.48, 0.35, 0.17])
     with case_type_col:
         selected_label = st.selectbox(
             "케이스 유형",
@@ -371,7 +371,7 @@ def render_demo_new_page() -> None:
         )
     with delete_col:
         st.markdown('<div style="height:1.75rem"></div>', unsafe_allow_html=True)
-        if st.button("시연 데이터 전체 삭제", key="demo_new_delete_all", use_container_width=True):
+        if st.button("🗑 전체 삭제", key="demo_new_delete_all", use_container_width=True):
             out = delete("/api/v1/demo/seed")
             st.warning(
                 "삭제 완료: "
@@ -426,31 +426,43 @@ def render_demo_new_page() -> None:
     # ── 스텝 인디케이터 ──
     has_image = bool(st.session_state.get("demo_new_image_bytes"))
     has_analysis = bool(st.session_state.get("demo_new_analysis_result"))
-    step1_cls = "done" if (has_image or is_normal_baseline) else "active"
-    step2_cls = "done" if has_analysis else ("active" if has_image else "step-item")
-    step3_cls = "active" if (has_analysis or is_normal_baseline) else "step-item"
-    st.markdown(
-        f"""
+
+    if is_normal_baseline:
+        # 정상 케이스: 업로드·분석 없이 바로 생성
+        step_html = """
         <div class="step-bar">
           <div class="step-item done">
             <div class="step-circle">✓</div> 케이스 선택
           </div>
           <span class="step-arrow">›</span>
-          <div class="step-item {step1_cls}">
-            <div class="step-circle">{"✓" if step1_cls == "done" else "2"}</div> 증빙 업로드
+          <div class="step-item active">
+            <div class="step-circle">2</div> 데이터 생성
+          </div>
+        </div>"""
+    else:
+        # 비정상 케이스: 4단계
+        s2 = "done" if has_image    else "active"
+        s3 = "done" if has_analysis else ("active" if has_image else "step-item")
+        s4 = "active" if has_analysis else "step-item"
+        step_html = f"""
+        <div class="step-bar">
+          <div class="step-item done">
+            <div class="step-circle">✓</div> 케이스 선택
           </div>
           <span class="step-arrow">›</span>
-          <div class="step-item {step2_cls}">
-            <div class="step-circle">{"✓" if step2_cls == "done" else "3"}</div> 이미지 분석
+          <div class="step-item {s2}">
+            <div class="step-circle">{"✓" if s2 == "done" else "2"}</div> 증빙 업로드
           </div>
           <span class="step-arrow">›</span>
-          <div class="step-item {step3_cls}">
+          <div class="step-item {s3}">
+            <div class="step-circle">{"✓" if s3 == "done" else "3"}</div> 이미지 분석
+          </div>
+          <span class="step-arrow">›</span>
+          <div class="step-item {s4}">
             <div class="step-circle">4</div> 데이터 생성
           </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+        </div>"""
+    st.markdown(step_html, unsafe_allow_html=True)
 
     # ── 레이아웃: 좌(필드 편집) / 우(이미지+분석) ──────────
     col_right, col_left = st.columns([1, 1], gap="large")
