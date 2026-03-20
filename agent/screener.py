@@ -441,7 +441,7 @@ def _invoke_llm_case_type(body: dict[str, Any], signals: dict[str, Any]) -> dict
             except Exception:
                 confidence = None
             logger.info(
-                "screening llm proposal: model=%s llm_case_type=%s llm_confidence=%s llm_reason=%s",
+                "[screener:llm] LLM 제안 | model=%s case=%s conf=%s reason=%s",
                 model_name,
                 case_type,
                 confidence,
