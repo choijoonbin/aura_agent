@@ -177,7 +177,7 @@ def build_hitl_request(
         bool(reg_required),
     )
     if is_normal_baseline and not missing_evidence and not critical_required:
-        logger.info("[HITL_BUILD] NORMAL_BASELINE → HITL skip (no missing_evidence, no critical required_inputs; reg_required ignored for 정상비교군)")
+        logger.info("[HITL_BUILD] NORMAL_BASELINE → HITL skip (no missing_evidence, no critical required_inputs; reg_required ignored for 정상 케이스)")
         return None
     if is_normal_baseline and (missing_evidence or critical_required):
         logger.info(

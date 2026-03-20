@@ -19,7 +19,7 @@ from ui.shared import inject_css, render_page_header
 logger = logging.getLogger(__name__)
 
 _CASE_TYPE_OPTIONS: list[tuple[str, str]] = [
-    ("NORMAL_BASELINE", "정상 비교군 (NORMAL_BASELINE)"),
+    ("NORMAL_BASELINE", "정상 케이스 (NORMAL_BASELINE)"),
     ("HOLIDAY_USAGE", "휴일 사용 의심 (HOLIDAY_USAGE)"),
     ("LIMIT_EXCEED", "한도 초과 의심 (LIMIT_EXCEED)"),
     ("PRIVATE_USE_RISK", "사적 사용 위험 (PRIVATE_USE_RISK)"),
@@ -204,7 +204,7 @@ def render_demo_new_page() -> None:
         image_bytes: bytes | None = None
 
         if is_normal_baseline:
-            st.info("정상 비교군은 증빙 이미지 업로드를 사용하지 않습니다.")
+            st.info("정상 케이스는 증빙 이미지 업로드를 사용하지 않습니다.")
             uploaded_file = None
             analysis_result = None
             image_bytes = None

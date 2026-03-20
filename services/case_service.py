@@ -555,7 +555,7 @@ def build_analysis_payload(db: Session, voucher_key: str) -> dict:
         },
     }
 
-    # 정상 비교군 테스트 데이터는 규정 "필수 입력/증빙" 항목을 사전 충족 상태로 채워 전달한다.
+    # 정상 케이스 테스트 데이터는 규정 "필수 입력/증빙" 항목을 사전 충족 상태로 채워 전달한다.
     # (업무 목적, 참석자(내부/외부), 일시/장소, 결제수단, 적격 증빙 여부)
     if is_normal_demo:
         attendees = [

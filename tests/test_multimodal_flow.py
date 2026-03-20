@@ -3,7 +3,7 @@
 
 테스트 범위:
   1. bbox 좌표 범위 검증 (VisualBox Pydantic 모델)
-  2. 정상비교군(NORMAL_BASELINE) 회귀 - 증빙 없이 generate 가능
+  2. 정상 케이스(NORMAL_BASELINE) 회귀 - 증빙 없이 generate 가능
   3. 비정상 케이스 필수 입력 차단 로직
   4. analyze_visual_evidence fallback (API 키 없을 때 fallback_used=True)
   5. save_custom_demo_case 저장 무결성 (uuid 폴더 + json + 이미지)
@@ -69,7 +69,7 @@ def test_multimodal_audit_result_defaults():
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 2. 정상비교군(NORMAL_BASELINE) 회귀: 증빙 없이 generate 가능
+# 2. 정상 케이스(NORMAL_BASELINE) 회귀: 증빙 없이 generate 가능
 # ──────────────────────────────────────────────────────────────────────────────
 
 
@@ -203,7 +203,7 @@ def test_is_generate_disabled_abnormal_no_file():
     # 비정상 + 파일 있음 + 필드 OK → enabled
     assert _is_generate_disabled(all_valid=True, is_abnormal=True, has_file=True) is False
 
-    # 정상 비교군 + 파일 없음 + 필드 OK → enabled (회귀 유지)
+    # 정상 케이스 + 파일 없음 + 필드 OK → enabled (회귀 유지)
     assert _is_generate_disabled(all_valid=True, is_abnormal=False, has_file=False) is False
 
     # 정상/비정상 무관, 필드 미완 → disabled

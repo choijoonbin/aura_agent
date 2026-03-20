@@ -70,7 +70,7 @@ def build_policy_keywords(body_evidence: dict[str, Any]) -> list[str]:
         keywords.append(article_hint)
 
     # 비정상 케이스에서는 제14조(증빙 제출 원칙)까지 함께 조회한다.
-    # 정상 비교군은 증빙 강제 문맥을 기본 검색에 주입하지 않는다.
+    # 정상 케이스는 증빙 강제 문맥을 기본 검색에 주입하지 않는다.
     if not is_normal_baseline:
         for kw in ["증빙", "공통", "제14조", "필수 증빙"]:
             if kw not in keywords:

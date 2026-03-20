@@ -88,7 +88,7 @@ async def merchant_risk_probe(context: dict[str, Any]) -> dict[str, Any]:
     elif mcc_str in mcc_sets["leisure"] or mcc_str in mcc_sets["medium_risk"]:
         base_risk = "MEDIUM"
     else:
-        # high/medium/leisure 어디에도 없으면 위험도 없음(정상 비교군 등)
+        # high/medium/leisure 어디에도 없으면 위험도 없음(정상 케이스 등)
         base_risk = "LOW"
 
     prior = context.get("prior_tool_results") or []
@@ -150,7 +150,7 @@ def _adoption_reason_for_ref(ref: dict[str, Any], body_evidence: dict[str, Any])
         if alignment <= -20:
             return f"{case_type} 직접 조항은 아니지만 보조 참고용 조항({article})으로 채택"
     if case_type == "NORMAL_BASELINE" and article:
-        return f"정상 비교군 검증에 필요한 기본 조항({article})이어서 채택"
+        return f"정상 케이스 검증에 필요한 기본 조항({article})이어서 채택"
     if parent_title:
         return f"규정 '{parent_title}'과 관련되어 채택"
     return "규정 근거로 채택"
