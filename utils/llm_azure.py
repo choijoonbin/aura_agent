@@ -325,6 +325,162 @@ def _apply_combined_datetime_fix(
             logger.warning("time 엔티티 자동 생성 실패: %s", exc)
 
 
+def _extract_merchant_value_from_line(text: str) -> str:
+    """가맹점 라벨이 포함된 OCR 한 줄에서 값(상호명)만 추출."""
+    raw = str(text or "").strip()
+    if not raw:
+        return ""
+    for kw in _MERCHANT_LABEL_KW:
+        pos = raw.find(kw)
+        if pos < 0:
+            continue
+        tail = raw[pos + len(kw):].strip()
+        while tail and tail[0] in {" ", ":", "：", "-", "|", "]", "）", ")"}:
+            tail = tail[1:].strip()
+        if tail:
+            return tail
+    # 라벨이 없더라도 ':' 구분자 형식이면 우측 값을 사용
+    for sep in ("：", ":"):
+        idx = raw.find(sep)
+        if idx >= 0 and idx + 1 < len(raw):
+            cand = raw[idx + 1:].strip()
+            if cand:
+                return cand
+    return raw
+
+
+def _edit_distance(a: str, b: str) -> int:
+    if a == b:
+        return 0
+    if not a:
+        return len(b)
+    if not b:
+        return len(a)
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, start=1):
+        curr = [i]
+        for j, cb in enumerate(b, start=1):
+            cost = 0 if ca == cb else 1
+            curr.append(min(prev[j] + 1, curr[j - 1] + 1, prev[j - 1] + cost))
+        prev = curr
+    return prev[-1]
+
+
+def _load_merchant_lexicon() -> list[str]:
+    """시연 시나리오 프로파일에서 가맹점 기준 사전을 로드한다."""
+    try:
+        from services.demo_data_service import SCENARIO_PROFILES  # 지연 import
+        names = [
+            str((v or {}).get("merchant_name") or "").strip()
+            for v in SCENARIO_PROFILES.values()
+        ]
+    except Exception:
+        names = []
+    out: list[str] = []
+    seen: set[str] = set()
+    for n in names:
+        compact = n.replace(" ", "")
+        if compact and compact not in seen:
+            out.append(compact)
+            seen.add(compact)
+    return out
+
+
+def _refine_merchant_by_lexicon(merchant_text: str) -> str:
+    """가맹점명 첫 토큰을 사전 기반으로 근접 교정한다(하드코딩 매핑 없음)."""
+    raw = str(merchant_text or "").strip()
+    if not raw:
+        return raw
+    tokens = raw.split()
+    first = tokens[0].replace(" ", "")
+    lexicon = _load_merchant_lexicon()
+    if not lexicon:
+        return raw
+    best = first
+    best_dist = 999
+    for cand in lexicon:
+        d = _edit_distance(first, cand)
+        if d < best_dist:
+            best_dist = d
+            best = cand
+    if best_dist <= 1 and best != first:
+        tokens[0] = best
+        return " ".join(tokens)
+    return raw
+
+
+def _refine_merchant_name_with_llm(
+    *,
+    client: "Any",
+    base_url: str,
+    model: str,
+    timeout_sec: float,
+    merchant_text: str,
+    ocr_words: "list[Any]",
+) -> str:
+    """OCR merchant 후보를 LLM으로 오탈자 보정한다(과도한 변경은 차단)."""
+    original = str(merchant_text or "").strip()
+    if not original:
+        return original
+    lexicon_refined = _refine_merchant_by_lexicon(original)
+    if lexicon_refined != original:
+        return lexicon_refined
+
+    context_lines: list[str] = []
+    for idx, w in enumerate(ocr_words):
+        text = str(getattr(w, "text", "") or "").strip()
+        if not text:
+            continue
+        if any(kw in text for kw in _MERCHANT_LABEL_KW) or "식당" in text or "가맹점" in text:
+            context_lines.append(f"{idx}: {text}")
+        if len(context_lines) >= 8:
+            break
+    if not context_lines:
+        context_lines = [f"{i}: {str(getattr(w, 'text', '') or '').strip()}" for i, w in enumerate(ocr_words[:8])]
+
+    system_prompt = (
+        "당신은 한국어 OCR 상호명 교정기입니다. "
+        "입력 merchant_text의 오탈자 가능 문자만 최소한으로 교정하세요. "
+        "확신이 낮으면 원문을 그대로 반환하세요. "
+        "절대 임의의 신규 단어/지점을 추가하지 마세요. "
+        "반드시 JSON만 반환: {\"merchant_name_corrected\":\"...\"}"
+    )
+    user_prompt = (
+        f"merchant_text: {original}\n"
+        f"ocr_context:\n" + "\n".join(context_lines)
+    )
+    try:
+        resp = client.chat.completions.create(
+            **completion_kwargs_for_azure(
+                base_url,
+                model=model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                max_tokens=120,
+                temperature=0.0,
+            ),
+            timeout=max(8.0, min(timeout_sec, 20.0)),
+        )
+        raw = str(resp.choices[0].message.content or "").strip()
+        parsed = json.loads(raw)
+        candidate = str(parsed.get("merchant_name_corrected") or "").strip()
+    except Exception as exc:
+        logger.debug("merchant llm refine 실패: %s", exc)
+        return original
+
+    if not candidate:
+        return original
+
+    org_compact = original.replace(" ", "")
+    cand_compact = candidate.replace(" ", "")
+    # 과교정 방지: 편집거리 2 이하의 근접 변경만 허용
+    if _edit_distance(org_compact, cand_compact) > 2:
+        return original
+    return candidate
+
+
 def _fix_amount_nearby(
     entities: "list[Any]",
     matched: "dict[str, Any]",
@@ -534,7 +690,7 @@ def _keyword_spatial_override(
                         confidence=float(best.confidence),
                     )
                     updated = True
-                    logger.info(
+                    logger.debug(
                         "_keyword_spatial_override[amount]: 교체 → text=%s", best_digits
                     )
                 except Exception as exc:
@@ -548,7 +704,7 @@ def _keyword_spatial_override(
                     text=best_digits, bbox=best_box, bbox_key=key_box,
                     confidence=float(best.confidence),
                 ))
-                logger.info(
+                logger.debug(
                     "_keyword_spatial_override[amount]: 새로 추가 → text=%s", best_digits
                 )
             except Exception as exc:
@@ -602,7 +758,7 @@ def _keyword_spatial_override(
                         confidence=float(merchant_block.confidence),
                     )
                     updated = True
-                    logger.info(
+                    logger.debug(
                         "_keyword_spatial_override[merchant]: 교체 → text=%s", merchant_text
                     )
                 except Exception as exc:
@@ -616,7 +772,7 @@ def _keyword_spatial_override(
                     text=merchant_text, bbox=best_box, bbox_key=key_box,
                     confidence=float(merchant_block.confidence),
                 ))
-                logger.info(
+                logger.debug(
                     "_keyword_spatial_override[merchant]: 새로 추가 → text=%s", merchant_text
                 )
             except Exception as exc:
@@ -1102,9 +1258,9 @@ def _analyze_with_paddle_ocr(
     matched: dict[str, Any] = _parse_multimodal_response(raw)
 
     _match_summary = " | ".join(
-        f"{f.split('_')[0]}={matched[f].get('text', '')}"
+        f"{f.split('_')[0]}(k={matched[f].get('key_index')},v={matched[f].get('value_index')})"
         for f in ("merchant_name", "date_occurrence", "time_occurrence", "amount_total")
-        if matched.get(f) and matched[f].get("text")
+        if matched.get(f)
     )
     logger.info(
         "[vllm:match] LLM 매핑 결과 | %s",
@@ -1131,10 +1287,16 @@ def _analyze_with_paddle_ocr(
 
         if val_idx is None or not (0 <= val_idx < len(ocr_words)):
             continue
-        if not text:
-            continue
 
         val_word = ocr_words[val_idx]
+        if field_name == "merchant_name":
+            # merchant는 LLM 문자열보다 OCR 원문(라벨 기준 분리)을 우선 신뢰한다.
+            if key_idx is not None and key_idx == val_idx:
+                text = _extract_merchant_value_from_line(str(getattr(val_word, "text", "")))
+            else:
+                text = str(getattr(val_word, "text", "")).strip() or text
+        if not text:
+            continue
 
         # ── 값(bbox) — OCR 좌표 그대로 ──────────────────────────────────────
         # 레이블+값이 같은 줄이면 값만 분리 시도
@@ -1194,7 +1356,38 @@ def _analyze_with_paddle_ocr(
     # LLM 비결정적 인덱스 선택과 무관하게 올바른 블록을 직접 탐색해 덮어씀.
     _keyword_spatial_override(entities, ocr_words)
 
-    # ── 후처리 4: 거래일시/결제일시 OCR 라인 기반 date/time 복구 ────────────
+    # ── 후처리 4: merchant OCR 오탈자 보정 (하드코딩 없이 LLM 최소 교정) ────
+    for i, ent in enumerate(list(entities)):
+        if getattr(ent, "label", "") != "merchant_name":
+            continue
+        corrected = _refine_merchant_name_with_llm(
+            client=client,
+            base_url=base_url,
+            model=model,
+            timeout_sec=timeout_sec,
+            merchant_text=str(getattr(ent, "text", "") or ""),
+            ocr_words=ocr_words,
+        )
+        if corrected and corrected != str(getattr(ent, "text", "") or ""):
+            try:
+                entities[i] = VisualEntity(
+                    id=ent.id,
+                    label=ent.label,
+                    text=corrected,
+                    bbox=ent.bbox,
+                    bbox_key=ent.bbox_key,
+                    confidence=ent.confidence,
+                )
+                logger.info(
+                    "[vllm:merchant] OCR 교정 적용 | before=%s -> after=%s",
+                    getattr(ent, "text", ""),
+                    corrected,
+                )
+            except Exception as exc:
+                logger.warning("merchant 교정 반영 실패: %s", exc)
+        break
+
+    # ── 후처리 5: 거래일시/결제일시 OCR 라인 기반 date/time 복구 ────────────
     _recover_datetime_from_ocr(entities, ocr_words)
 
     image_condition, cond_meta = _assess_ocr_image_condition(ocr_words, entities)
