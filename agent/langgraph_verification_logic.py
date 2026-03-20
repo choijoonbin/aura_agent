@@ -1014,7 +1014,7 @@ async def _match_questions_to_prior_answers(
                     "matched_answer": str(item.get("matched_answer") or "").strip(),
                     "basis_field": str(item.get("basis_field") or "").strip(),
                 })
-        logger.info(
+        logger.debug(
             "[verify] 사전 답변 매칭: %d/%d covered",
             sum(1 for r in results if r["covered"]),
             len(results),

@@ -786,8 +786,8 @@ async def _score_hybrid(
     out["diagnostic_log"] = (
         f"LLM Judge 실패로 규칙 점수로 fallback했습니다. reason={out['fallback_reason']} detail={last_error_message[:400]}"
     )
-    logger.info(
-        "[score:hybrid] LLM Judge 생략 → rule score 적용 | reason=%s retries=%s rule_score=%s",
+    logger.warning(
+        "[score:hybrid] LLM Judge 타임아웃 → rule score 폴백 | reason=%s retries=%s rule_score=%s",
         out["fallback_reason"],
         out.get("retry_count", 0),
         rule_score,

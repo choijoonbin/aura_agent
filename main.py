@@ -428,7 +428,7 @@ async def _run_analysis_task(
     last_payload: dict[str, Any] | None = None
     voucher_key = case_id.replace("POC-", "")
     is_resume = resume_value is not None
-    logger.info(
+    logger.debug(
         "[analysis] _run_analysis_task run_id=%s case_id=%s resume=%s (resume_value keys=%s)",
         run_id,
         case_id,
@@ -544,7 +544,7 @@ async def _run_analysis_task(
             except Exception:
                 pass
             if ev_type == "completed":
-                logger.info("[analysis] task ev_type=completed run_id=%s status=%s", run_id, data.get("status"))
+                logger.debug("[analysis] task ev_type=completed run_id=%s status=%s", run_id, data.get("status"))
                 if data.get("status") == "HITL_REQUIRED":
                     logger.info("[analysis] HITL_REQUIRED run_id=%s — stream will pause, waiting for review-submit", run_id)
                     # HITL_REQUESTED 이벤트로 이미 전체 payload(reasons, review_questions 등)가 설정된 경우 유지.

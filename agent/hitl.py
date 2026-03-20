@@ -224,7 +224,7 @@ def build_hitl_request(
         why_parts.append(unresolved_claims[0])
 
     logger.info(
-        "[HITL_BUILD] building hitl_request: case_type=%s why_preview=%s",
+        "[hitl:build] HITL 요청 구성 | case_type=%s why=%s",
         case_type,
         (why_parts[0][:80] + "…") if why_parts else "",
     )

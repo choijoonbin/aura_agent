@@ -943,7 +943,7 @@ async def verify_node_impl(
         verification_summary.get("total", "?"),
         float(verification_summary.get("coverage_ratio", 0)) * 100,
     )
-    logger.info(
+    logger.debug(
         "[verify] claim display_text 생성 결과: claims=%s displays=%s",
         len(claim_results_dicts),
         len(display_texts or []),
@@ -953,7 +953,7 @@ async def verify_node_impl(
             if idx < len(display_texts):
                 row["display_text"] = str(display_texts[idx] or "").strip()
     filled_display = sum(1 for row in claim_results_dicts if str(row.get("display_text") or "").strip())
-    logger.info(
+    logger.debug(
         "[verify] claim display_text 적용: filled=%s/%s",
         filled_display,
         len(claim_results_dicts),
@@ -1204,7 +1204,7 @@ async def verify_node_impl(
                 body_evidence=state.get("body_evidence") or {},
             )
             hitl_request["qa_matches"] = qa_matches
-            logger.info(
+            logger.debug(
                 "[verify] 사전 답변 매칭: %d/%d covered",
                 sum(1 for m in qa_matches if m.get("covered")),
                 len(qa_matches),

@@ -68,7 +68,7 @@ SCENARIO_PROFILES: dict[str, dict[str, Any]] = {
         "label": "휴일 사용 의심",
         "description": "주말/휴무일 식당 사용 시나리오",
         "blart": "SA",
-        "hr_status": "LEAVE",  # BE: weekend→OFF, calendar or fallback
+        "hr_status": "OFF",  # 휴일 시나리오는 '휴무'로 명확히 표기
         "mcc_code": "5813",   # BE preferred: 5813, 5812, 5814
         "budget_flag": "N",   # BE: HOLIDAY_USAGE는 N
         "merchant_name": "가온 식당",
