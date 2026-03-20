@@ -165,11 +165,11 @@ def get_paddle_ocr(lang: str = "korean") -> Any:
         ]:
             try:
                 _paddle_instance = PaddleOCR(**kwargs)
-                logger.info("PaddleOCR 3.x 초기화 성공: %s", kwargs)
+                logger.info("PaddleOCR 3.4 초기화 성공: %s", kwargs)
                 return _paddle_instance
             except TypeError as e:
                 last_exc = e
-                logger.debug("PaddleOCR 3.x 초기화 시도 실패 (%s): %s", kwargs, e)
+                logger.debug("PaddleOCR 3.4 초기화 시도 실패 (%s): %s", kwargs, e)
     else:
         # ── 2.x 기존 방식 ─────────────────────────────────────────────────────
         for kwargs in [
@@ -239,7 +239,7 @@ def _parse_line(line: Any) -> "tuple[list, str, float] | None":
 
 
 def _parse_result_obj(result_obj: Any, w: int, h: int) -> list[OcrWord]:
-    """paddleocr 3.x OCRResult 파싱.
+    """paddleocr 3.4 OCRResult 파싱.
 
     PaddleOCR 3.4 실제 포맷: OCRResult는 dict-like 객체.
     데이터는 result_obj.json['res'] 안에 있다.
@@ -329,7 +329,7 @@ def run_paddle_ocr(image_bytes: bytes, lang: str = "korean") -> list[OcrWord]:
         except Exception as exc:
             raise RuntimeError(f"PaddleOCR predict() 실행 실패: {exc}") from exc
 
-        logger.debug("PaddleOCR 3.x predict() 결과: %d건", len(results))
+        logger.debug("PaddleOCR 3.4 predict() 결과: %d건", len(results))
         for i, res in enumerate(results or []):
             if res is None:
                 continue
@@ -342,7 +342,7 @@ def run_paddle_ocr(image_bytes: bytes, lang: str = "korean") -> list[OcrWord]:
         words.sort(key=lambda ww: (ww.ymin // 8, ww.xmin))
         _avg_conf = sum(ww.confidence for ww in words) / max(len(words), 1)
         logger.info(
-            "[vllm:ocr] PaddleOCR 3.x 완료 | blocks=%d avg_conf=%.2f img=%dx%d",
+            "[vllm:ocr] PaddleOCR 3.4 완료 | blocks=%d avg_conf=%.2f img=%dx%d",
             len(words), _avg_conf, w, h,
         )
         return words

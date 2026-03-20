@@ -37,7 +37,7 @@ elif selected_menu == "에이전트 스튜디오":
     render_agent_studio_page()
 elif selected_menu == "규정문서 라이브러리":
     render_rag_library_page()
-elif selected_menu == "시연데이터 생성 (Beta)":
+elif selected_menu in ("시연데이터 생성", "시연데이터 생성 (Beta)"):
     render_demo_new_page()
 else:
     render_ai_workspace_page()

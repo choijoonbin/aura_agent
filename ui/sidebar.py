@@ -9,7 +9,7 @@ MENU_OPTIONS = [
     ("AI 워크스페이스", "grid", ""),
     ("에이전트 스튜디오", "cpu", "Agent model, prompt, tool, knowledge"),
     ("규정문서 라이브러리", "journal-text", "RAG document governance and quality"),
-    ("시연데이터 생성 (Beta)", "camera", "Upload evidence, extract entities, save test case"),
+    ("시연데이터 생성", "camera", "Upload evidence, extract entities, save test case"),
 ]
 
 # _ICON_MAP = {
