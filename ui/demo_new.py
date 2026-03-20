@@ -565,17 +565,74 @@ def render_demo_new_page() -> None:
             image_bytes = None
             analysis_result = None
 
-        # 분석 정보 표시
+        # 분석 정보 + 추출 요약 카드
         if analysis_result is not None:
             cond = (analysis_result.image_analysis or {}).get("condition", "-")
-            has_stamp = (analysis_result.image_analysis or {}).get("has_stamp", False)
             fallback = getattr(analysis_result, "fallback_used", False)
             st.caption(
-                f"이미지 상태: **{_image_condition_display(str(cond))}** | 직인: {'있음' if has_stamp else '없음'}"
+                f"이미지 상태: **{_image_condition_display(str(cond))}**"
                 + (" | ⚠️ fallback" if fallback else "")
             )
             if analysis_result.audit_comment:
                 st.caption(f"감사 코멘트: {analysis_result.audit_comment}")
+
+            # ── Vision LLM 추출 요약 카드 ──
+            _ents = analysis_result.entities if hasattr(analysis_result, "entities") else []
+            def _get(label: str) -> tuple[str, float]:
+                for e in _ents:
+                    if (e.label if hasattr(e, "label") else e.get("label", "")) == label:
+                        v = e.text if hasattr(e, "text") else e.get("text", "-")
+                        c = float(e.confidence if hasattr(e, "confidence") else e.get("confidence", 0))
+                        return v or "-", c
+                return "-", 0.0
+
+            merchant_v, merchant_c = _get("merchant_name")
+            date_v,     date_c     = _get("date_occurrence")
+            time_v,     time_c     = _get("time_occurrence")
+            amount_v,   amount_c   = _get("amount_total")
+
+            def _conf_bar(c: float) -> str:
+                pct = int(c * 100)
+                color = "#16a34a" if c >= 0.9 else "#f59e0b" if c >= 0.7 else "#ef4444"
+                return (
+                    f'<div style="margin-top:4px;height:4px;border-radius:2px;background:#e2e8f0;width:100%">'
+                    f'<div style="height:4px;border-radius:2px;background:{color};width:{pct}%"></div></div>'
+                    f'<div style="font-size:0.7rem;color:{color};margin-top:2px">신뢰도 {pct}%</div>'
+                )
+
+            st.markdown(
+                f"""
+                <div style="background:#f8faff;border:1px solid #c7d7f9;border-radius:10px;
+                            padding:0.75rem 1rem 0.6rem;margin-top:0.5rem">
+                  <div style="font-size:0.8rem;font-weight:700;color:#1e40af;margin-bottom:0.55rem">
+                    ✅ Vision LLM 추출 결과
+                  </div>
+                  <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.55rem 1rem">
+                    <div>
+                      <div style="font-size:0.72rem;color:#64748b;font-weight:600">🏪 가맹점</div>
+                      <div style="font-size:0.88rem;font-weight:700;color:#0f172a">{merchant_v}</div>
+                      {_conf_bar(merchant_c)}
+                    </div>
+                    <div>
+                      <div style="font-size:0.72rem;color:#64748b;font-weight:600">💰 금액</div>
+                      <div style="font-size:0.88rem;font-weight:700;color:#0f172a">{amount_v}</div>
+                      {_conf_bar(amount_c)}
+                    </div>
+                    <div>
+                      <div style="font-size:0.72rem;color:#64748b;font-weight:600">📅 일자</div>
+                      <div style="font-size:0.88rem;font-weight:700;color:#0f172a">{date_v}</div>
+                      {_conf_bar(date_c)}
+                    </div>
+                    <div>
+                      <div style="font-size:0.72rem;color:#64748b;font-weight:600">⏰ 시간</div>
+                      <div style="font-size:0.88rem;font-weight:700;color:#0f172a">{time_v}</div>
+                      {_conf_bar(time_c)}
+                    </div>
+                  </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
 
     with col_right:
         st.markdown(
@@ -672,11 +729,11 @@ def render_demo_new_page() -> None:
                 st.caption(f"이미지추출값: {extracted_map.get('time_occurrence')}")
         with c6:
             st.markdown(
-                _mismatch_badge_label("적요 (bktxt)", False),
+                _mismatch_badge_label("적요", False),
                 unsafe_allow_html=True,
             )
             bktxt_val = st.text_input(
-                "적요 (bktxt)",
+                "적요",
                 value=auto_summary if auto_summary else "",
                 placeholder="예: 휴일 야간 식대",
                 key="demo_new_field_bktxt",
