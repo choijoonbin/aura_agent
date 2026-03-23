@@ -30,6 +30,11 @@ if "mt_redirect_to_menu" in st.session_state:
     st.session_state["mt_menu"] = target
 
 selected_menu = render_sidebar()
+prev_menu = st.session_state.get("mt_prev_menu_rendered")
+st.session_state["mt_workspace_menu_entered"] = bool(
+    selected_menu == "AI 워크스페이스" and prev_menu != "AI 워크스페이스"
+)
+st.session_state["mt_prev_menu_rendered"] = selected_menu
 
 if selected_menu == "AI 워크스페이스":
     render_ai_workspace_page()

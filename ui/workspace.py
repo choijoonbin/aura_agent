@@ -3071,9 +3071,14 @@ def render_workspace_case_queue(items: list[dict[str, Any]], selected_key: str |
         [item for item in items if str(item.get("case_status") or "").upper() in hitl_wait_statuses]
     )
     # 워크스페이스 진입 기본값:
-    # - 검토 필요가 1건 이상이면 "검토 필요" 기본 선택
-    # - 검토 필요가 0건이면 "전체" 기본 선택
-    if "mt_case_filter" not in st.session_state:
+    # - 다른 메뉴에서 워크스페이스로 "새로" 진입하면 항상 기본값 재적용
+    # - 검토 필요가 1건 이상이면 "검토 필요"
+    # - 검토 필요가 0건이면 "전체"
+    entered_workspace = bool(st.session_state.pop("mt_workspace_menu_entered", False))
+    if entered_workspace:
+        st.session_state["mt_case_filter"] = "검토 필요" if review_count > 0 else "전체"
+        st.session_state["mt_case_filter_follow_selected"] = False
+    elif "mt_case_filter" not in st.session_state:
         st.session_state["mt_case_filter"] = "검토 필요" if review_count > 0 else "전체"
 
     # 상단 KPI(클릭) → 목록 필터 상태
@@ -3087,10 +3092,25 @@ def render_workspace_case_queue(items: list[dict[str, Any]], selected_key: str |
     if active_filter not in grouped:
         active_filter = "전체"
         st.session_state["mt_case_filter"] = "전체"
-    # 검토 필요 건수가 0인데 필터가 검토 필요로 고정되어 있으면 전체로 자동 복귀
+
+    # 분석 추적 모드: 선택 케이스 상태가 바뀌면 해당 KPI 버킷으로 필터를 자동 이동
+    follow_selected = bool(st.session_state.get("mt_case_filter_follow_selected", False))
+    selected_bucket = None
+    if selected_key:
+        for bucket_name in ("검토 필요", "완료", "HITL 대기"):
+            if any(str(item.get("voucher_key") or "") == str(selected_key) for item in grouped.get(bucket_name) or []):
+                selected_bucket = bucket_name
+                break
+    if follow_selected and selected_bucket and selected_bucket != active_filter:
+        active_filter = selected_bucket
+        st.session_state["mt_case_filter"] = selected_bucket
+
+    # 검토 필요 건수가 0인데 필터가 검토 필요로 남아 있으면:
+    # 추적 모드 + 선택 케이스 버킷이 있으면 그쪽으로, 아니면 전체로 복귀
     if active_filter == "검토 필요" and review_count == 0:
-        active_filter = "전체"
-        st.session_state["mt_case_filter"] = "전체"
+        fallback_filter = selected_bucket if (follow_selected and selected_bucket) else "전체"
+        active_filter = fallback_filter
+        st.session_state["mt_case_filter"] = fallback_filter
 
     st.markdown(
         """
@@ -3195,21 +3215,25 @@ def render_workspace_case_queue(items: list[dict[str, Any]], selected_key: str |
             key = "case_kpi_sel_all" if active_filter == "전체" else "case_kpi_all"
             if st.button(f"전체 케이스\n{len(items)}", key=key):
                 st.session_state["mt_case_filter"] = "전체"
+                st.session_state["mt_case_filter_follow_selected"] = False
                 st.rerun()
         with k2:
             key = "case_kpi_sel_review" if active_filter == "검토 필요" else "case_kpi_review"
             if st.button(f"검토 필요\n{review_count}", key=key):
                 st.session_state["mt_case_filter"] = "검토 필요"
+                st.session_state["mt_case_filter_follow_selected"] = False
                 st.rerun()
         with k3:
             key = "case_kpi_sel_done" if active_filter == "완료" else "case_kpi_done"
             if st.button(f"완료\n{completed_count}", key=key):
                 st.session_state["mt_case_filter"] = "완료"
+                st.session_state["mt_case_filter_follow_selected"] = False
                 st.rerun()
         with k4:
             key = "case_kpi_sel_hitl" if active_filter == "HITL 대기" else "case_kpi_hitl"
             if st.button(f"HITL 대기\n{hitl_count}", key=key):
                 st.session_state["mt_case_filter"] = "HITL 대기"
+                st.session_state["mt_case_filter_follow_selected"] = False
                 st.rerun()
     filtered = grouped.get(active_filter) or []
     if not filtered:
@@ -3413,6 +3437,7 @@ def render_workspace_chat_panel(selected: dict[str, Any], latest_bundle: dict[st
             ):
                 run_clicked = st.button("분석 시작", key=f"workspace_run_{vkey}", type="primary")
     if run_clicked:
+        st.session_state["mt_case_filter_follow_selected"] = True
         # 분석 시작 시 스트림/타임라인 패널을 자동으로 펼침
         st.session_state[f"agent_stream_exp_{vkey}"] = True
         # 새 분석 시작 → bundle 캐시 무효화 (이전 결과 대신 새 결과 반영)
@@ -3606,6 +3631,7 @@ def render_workspace_chat_panel(selected: dict[str, Any], latest_bundle: dict[st
                 ],
             ):
                 if st.button("분석 이어가기 실행", key=f"hitl_resume_trigger_{_pending_run_id}_{selected_vkey or ''}"):
+                    st.session_state["mt_case_filter_follow_selected"] = True
                     st.rerun()
 
     # 증빙 확정(완료 반영) 직후 rerun 시 성공 메시지 표시
@@ -5129,13 +5155,34 @@ def render_ai_workspace_page() -> None:
     render_page_header("AI 워크스페이스", "전표 기반 자율형 에이전트가 실제로 추론하고, 도구를 호출하고, 규정 근거를 바탕으로 판단하는 메인 시연 화면입니다.")
     items = get("/api/v1/vouchers?queue=all&limit=50").get("items") or []
     debug_mode = bool(st.session_state.get("mt_debug_mode", False))
+    entered_workspace = bool(st.session_state.pop("mt_workspace_menu_entered", False))
+    review_statuses = {"NEW", "IN_REVIEW", "REVIEW_REQUIRED", "EVIDENCE_REJECTED", "REVIEW_AFTER_HITL", "HOLD_AFTER_HITL"}
+    default_filter = (
+        "검토 필요"
+        if any(str(item.get("case_status") or "").upper() in review_statuses for item in items)
+        else "전체"
+    )
+    if entered_workspace:
+        st.session_state["mt_case_filter"] = default_filter
+        st.session_state["mt_case_filter_follow_selected"] = False
+
     item_keys = {str(item.get("voucher_key") or "") for item in items if item.get("voucher_key")}
     selected_key = str(st.session_state.get("mt_selected_voucher") or "")
     # 삭제/필터 변경 후에도 stale 선택키가 남지 않도록 현재 목록 기준으로 보정한다.
     if selected_key and selected_key not in item_keys:
         st.session_state.pop("mt_selected_voucher", None)
         selected_key = ""
-    if not selected_key and items:
+    if entered_workspace:
+        if default_filter == "검토 필요":
+            target_items = [item for item in items if str(item.get("case_status") or "").upper() in review_statuses]
+        else:
+            target_items = list(items)
+        selected_key = str((target_items[0].get("voucher_key") if target_items else "") or "")
+        if selected_key:
+            st.session_state["mt_selected_voucher"] = selected_key
+        else:
+            st.session_state.pop("mt_selected_voucher", None)
+    elif not selected_key and items:
         selected_key = str(items[0].get("voucher_key") or "")
         if selected_key:
             st.session_state["mt_selected_voucher"] = selected_key
