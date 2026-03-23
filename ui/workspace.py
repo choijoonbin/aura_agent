@@ -4077,6 +4077,65 @@ def _merge_policy_adoption_claim_nodes(
     return merged_nodes, merged_edges
 
 
+def _merge_policy_adoption_claim_results(claim_results: list[Any]) -> list[dict[str, Any]]:
+    """
+    verifier_output.claim_results UI 표시용 병합:
+    정책 검색 채택 조항 관련 claim이 조항별로 분리되어도
+    사용자에게는 하나의 주장으로 보이도록 통합한다.
+    """
+    normalized: list[dict[str, Any]] = []
+    for raw in (claim_results or []):
+        item = raw if isinstance(raw, dict) else (raw.model_dump() if hasattr(raw, "model_dump") else {})
+        if isinstance(item, dict):
+            normalized.append(dict(item))
+    if not normalized:
+        return []
+
+    target_indexes: list[int] = []
+    merged_supporting: list[str] = []
+    seen_articles: set[str] = set()
+    covered_any = False
+    uncovered_gaps: list[str] = []
+
+    for idx, item in enumerate(normalized):
+        claim_text = str(item.get("claim") or "")
+        display_text = str(item.get("display_text") or "")
+        if "policy_rulebook_probe 채택 조항" not in claim_text and "정책 검색 채택 조항 검증" not in display_text:
+            continue
+        target_indexes.append(idx)
+        covered_any = covered_any or bool(item.get("covered"))
+        for raw_article in (item.get("supporting_articles") or []):
+            article = str(raw_article).strip()
+            if not article or article in seen_articles:
+                continue
+            seen_articles.add(article)
+            merged_supporting.append(article)
+        gap = str(item.get("gap") or "").strip()
+        if gap and gap not in uncovered_gaps:
+            uncovered_gaps.append(gap)
+
+    if len(target_indexes) <= 1:
+        return normalized
+
+    rep_index = target_indexes[0]
+    rep = dict(normalized[rep_index])
+    rep["covered"] = covered_any
+    rep["supporting_articles"] = merged_supporting
+    rep["display_text"] = _claim_user_facing_text("policy_rulebook_probe 채택 조항 검증", merged_supporting)
+    if not covered_any and uncovered_gaps:
+        rep["gap"] = " / ".join(uncovered_gaps)
+
+    merged: list[dict[str, Any]] = []
+    for idx, item in enumerate(normalized):
+        if idx == rep_index:
+            merged.append(rep)
+            continue
+        if idx in target_indexes:
+            continue
+        merged.append(item)
+    return merged
+
+
 _RELATED_REASON_LABELS: dict[str, str] = {
     "same_merchant": "동일 가맹점(40점)",
     "same_mcc": "동일 업종 코드(25점)",
@@ -4286,7 +4345,7 @@ def render_workspace_evidence_map(latest_bundle: dict[str, Any], debug_mode: boo
 
     # 검증 주장 ↔ 규정 매핑: 어떤 주장이 어떤 규정 조항으로 뒷받침됐는지 표시
     verifier_output = result.get("verifier_output") or {}
-    claim_results = verifier_output.get("claim_results") or []
+    claim_results = _merge_policy_adoption_claim_results(verifier_output.get("claim_results") or [])
     if claim_results:
         st.markdown("#### 검증 주장 ↔ 규정 매핑")
         st.caption("각 검증 주장이 어떤 규정 조항으로 연결되었는지 확인할 수 있습니다.")
