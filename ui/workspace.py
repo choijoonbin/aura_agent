@@ -845,6 +845,37 @@ def summarize_tool_results(tool_results: list[dict[str, Any]]) -> list[dict[str,
     return cards
 
 
+def _tool_results_from_timeline(timeline: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """result.tool_results가 비어 있을 때 AGENT_EVENT/TOOL_RESULT에서 요약용 정보를 복원한다."""
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for event in timeline:
+        if event.get("event_type") != "AGENT_EVENT":
+            continue
+        payload = event.get("payload") or {}
+        if str(payload.get("event_type") or "").upper() != "TOOL_RESULT":
+            continue
+        meta = payload.get("metadata") or {}
+        tool_name = str(meta.get("tool") or meta.get("skill") or "").strip()
+        if not tool_name:
+            continue
+        obs = str(payload.get("observation") or "")
+        summary = str(payload.get("message") or obs[:140] or "실행 완료")
+        key = f"{tool_name}:{summary[:80]}"
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(
+            {
+                "tool": tool_name,
+                "ok": bool(meta.get("ok", True)),
+                "summary": summary,
+                "facts": meta.get("facts") or {},
+            }
+        )
+    return out
+
+
 def render_tool_trace_summary(tool_results: list[dict[str, Any]]) -> None:
     cards = summarize_tool_results(tool_results)
     if not cards:
@@ -3383,6 +3414,8 @@ def render_workspace_chat_panel(selected: dict[str, Any], latest_bundle: dict[st
     if run_clicked:
         # 분석 시작 시 스트림/타임라인 패널을 자동으로 펼침
         st.session_state[f"agent_stream_exp_{vkey}"] = True
+        # 새 분석 시작 → bundle 캐시 무효화 (이전 결과 대신 새 결과 반영)
+        st.session_state.pop(f"mt_bundle_cache_{vkey}", None)
         response = post(f"/api/v1/cases/{vkey}/analysis-runs", json_body={"enable_hitl": enable_hitl})
         run_id = response["run_id"]
         st.session_state.pop(f"mt_run_terminal_status_{run_id}", None)
@@ -4246,6 +4279,8 @@ def render_workspace_evidence_map(latest_bundle: dict[str, Any], debug_mode: boo
 def render_workspace_execution_review(latest_bundle: dict[str, Any], debug_mode: bool) -> None:
     timeline = latest_bundle.get("timeline") or []
     tool_results = ((latest_bundle.get("result") or {}).get("result") or {}).get("tool_results") or []
+    if not tool_results and timeline:
+        tool_results = _tool_results_from_timeline(timeline)
     plan_steps = build_workspace_plan_steps(latest_bundle)
     exec_logs = build_workspace_execution_logs(latest_bundle)
     render_panel_header("실행 내역", "계획 수립, 도구 실행, 게이트 판정 등 실제 오케스트레이션 흔적을 요약해 보여줍니다.")
@@ -4548,10 +4583,14 @@ def render_workspace_graph_insights(selected_key: str | None, latest_bundle: dic
 
     st.markdown("#### 근거 경로")
     try:
-        path = f"/api/v1/graph/cases/{selected_key}/explain"
-        if run_id:
-            path = f"{path}?run_id={run_id}"
-        explain = get(path) or {}
+        _explain_cache_key = f"mt_graph_explain_{selected_key}_{run_id}"
+        explain = st.session_state.get(_explain_cache_key)
+        if explain is None:
+            path = f"/api/v1/graph/cases/{selected_key}/explain"
+            if run_id:
+                path = f"{path}?run_id={run_id}"
+            explain = get(path) or {}
+            st.session_state[_explain_cache_key] = explain
     except Exception as e:
         st.warning(f"근거 경로 조회 실패: {e}")
         explain = {}
@@ -4661,7 +4700,11 @@ def render_workspace_graph_insights(selected_key: str | None, latest_bundle: dic
     st.markdown("---")
     st.markdown("#### 연관 케이스")
     try:
-        related = get(f"/api/v1/graph/cases/{selected_key}/related?limit=10") or {}
+        _related_cache_key = f"mt_graph_related_{selected_key}"
+        related = st.session_state.get(_related_cache_key)
+        if related is None:
+            related = get(f"/api/v1/graph/cases/{selected_key}/related?limit=10") or {}
+            st.session_state[_related_cache_key] = related
     except Exception as e:
         st.warning(f"연관 케이스 조회 실패: {e}")
         related = {}
@@ -4959,15 +5002,27 @@ def render_ai_workspace_page() -> None:
     selected_key = selected_key or None
     # 스트림 종료 직후 rerun인 경우, 그때 가져둔 번들로 판단요약 등 하단 탭을 즉시 갱신
     post_stream = st.session_state.pop("mt_post_stream_bundle", None)
+    _bundle_cache_key = f"mt_bundle_cache_{selected_key}"
     if selected_key and post_stream and post_stream.get("voucher_key") == selected_key:
         latest_bundle = post_stream.get("bundle") or fetch_case_bundle(selected_key)
+        # 스트림 완료 후 가져온 번들을 캐시에도 저장 (이후 키 입력 등에서 재사용)
+        st.session_state[_bundle_cache_key] = latest_bundle
         logger.info(
             "[ui] render_ai_workspace_page mt_post_stream_bundle 사용 selected_key=%s run_id=%s — 하단 탭(판단요약 등) 이 번들로 렌더",
             selected_key,
             (latest_bundle or {}).get("run_id"),
         )
     else:
-        latest_bundle = fetch_case_bundle(selected_key) if selected_key else {"timeline": [], "history": []}
+        if selected_key:
+            # bundle 캐시 hit: 케이스 선택이 바뀌지 않은 rerun에서는 API 재호출 없이 캐시 반환
+            cached_bundle = st.session_state.get(_bundle_cache_key)
+            if cached_bundle and cached_bundle.get("voucher_key") == selected_key:
+                latest_bundle = cached_bundle
+            else:
+                latest_bundle = fetch_case_bundle(selected_key)
+                st.session_state[_bundle_cache_key] = latest_bundle
+        else:
+            latest_bundle = {"timeline": [], "history": []}
         if post_stream is not None:
             logger.info(
                 "[ui] render_ai_workspace_page mt_post_stream_bundle 있으나 voucher 불일치 또는 selected_key 없음 — fetch_case_bundle 사용 post_stream.voucher_key=%s selected_key=%s",

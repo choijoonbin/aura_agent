@@ -44,12 +44,14 @@
   - 독립 호출 가능: `POST /api/v1/cases/{voucher_key}/screen`
 
 **Phase 1 — 심층 분석 (Analysis)**
+- **start_router**: 기존 스크리닝 결과 존재 여부 확인(있으면 intake, 없으면 screener)
 - **intake**: 전표 입력 정규화, 스크리닝 결과 기반 데이터 확정
 - **planner**: 케이스 유형별 조사 계획 수립 및 도구 선택
 - **execute**: LangChain tool 순차 실행 (policy_rulebook_probe, document_evidence_probe 등)
-- **critic**: tool 결과 기반 과잉 주장·반례 검토
-- **verify**: 점수 산정, HITL 필요 여부 판단
+- **critic**: tool 결과 기반 과잉 주장·반례 검토 (필요 시 planner로 재계획 루프)
+- **verify**: 점수 산정, HITL 필요 여부 판단 (필요 시 planner로 재시도 라우팅)
 - **hitl_pause** (HITL 시): 사람 검토 대기(interrupt), 응답 후 같은 run으로 resume
+- **hitl_validate**: HITL 응답 유효성 확인 후 reporter 또는 재요청 분기
 - **reporter**: 최종 설명 문장·요약 생성
 - **finalizer**: 최종 결과 생성 및 근거 기반 설명
 
@@ -198,26 +200,35 @@ AuraAgent/
 
 ```mermaid
 graph TD
-    Start([시작]) --> Screener[screener: 유형 스크리닝]
+    Start([시작]) --> StartRouter[start_router: 스크리닝 결과 라우팅]
+    StartRouter -->|기존 screening_result 있음| Intake[intake: 입력 정규화]
+    StartRouter -->|없음| Screener[screener: 유형 스크리닝]
     Screener --> Intake[intake: 입력 정규화]
     Intake --> Planner[planner: 조사 계획 수립]
     Planner --> Execute[execute: LangChain tool 실행]
     Execute --> Critic[critic: 반례/과잉 주장 점검]
-    Critic --> Verify[verify: 게이트 + HITL 판단]
+    Critic -->|재계획 필요| Planner
+    Critic -->|통과| Verify[verify: 게이트 + HITL 판단]
+    Verify -->|재계획 필요| Planner
     Verify -->|HITL 필요| HitlPause[hitl_pause: interrupt]
-    HitlPause -->|응답 제출| Resume[Command(resume)]
-    Resume --> Reporter[reporter: 설명/요약]
+    HitlPause -->|응답 제출| HitlValidate[hitl_validate: 응답 검증]
+    HitlValidate -->|추가 확인 필요| HitlPause
+    HitlValidate -->|검증 완료| Reporter[reporter: 설명/요약]
     Verify -->|자동 진행| Reporter
     Reporter --> Finalizer[finalizer: 최종 확정]
     Finalizer --> End([종료])
     
-    style Intake fill:#e1f5ff
-    style Planner fill:#e1f5ff
-    style Execute fill:#fff4e1
-    style Critic fill:#e8f5e9
-    style Verify fill:#e8f5e9
-    style Reporter fill:#f3e5f5
-    style HitlPause fill:#ffebee
+    style StartRouter fill:#e3f2fd,color:#111111
+    style Screener fill:#e0f2f1,color:#111111
+    style Intake fill:#e1f5ff,color:#111111
+    style Planner fill:#e1f5ff,color:#111111
+    style Execute fill:#fff4e1,color:#111111
+    style Critic fill:#e8f5e9,color:#111111
+    style Verify fill:#e8f5e9,color:#111111
+    style Reporter fill:#f3e5f5,color:#111111
+    style HitlPause fill:#ffebee,color:#111111
+    style HitlValidate fill:#ffebee,color:#111111
+    style Finalizer fill:#ede7f6,color:#111111
 ```
 
 | 관련 기초 문서 | [Langgraph_Logic.md](docs/Edu/Langgraph_Logic.md) §2–3 |
@@ -227,15 +238,17 @@ graph TD
 
 | 노드 | 역할 | 출력 |
 |------|------|------|
-| **screener** | 전표 원시 데이터에서 케이스 유형 분류 | `screening_result`, `intended_risk_type` |
-| **intake** | 전표 입력 정규화, flags 추출 | `flags`, `pending_events` |
-| **planner** | 위험 유형별 조사 계획 수립 | `plan`, `pending_events` |
-| **execute** | LangChain tool 순차 호출, 점수 산정 | `tool_results`, `score_breakdown`, `pending_events` |
-| **critic** | 과잉 주장·반례 검토, 재계획 여부 | `critic_output`, `replan_context` |
-| **verify** | 게이트 적용 + HITL 승격 판단 | `hitl_request` 또는 null, `verification` |
-| **hitl_pause** | HITL 시 interrupt, 재개 시 `hitlResponse` 반영 | — |
-| **reporter** | 근거 기반 최종 설명/요약 생성 | `final_result` |
-| **finalizer** | 상태·점수·이력 최종 확정 | `final_result` |
+| **start_router(시작 라우터)** | 기존 `screening_result` 존재 여부에 따라 진입 노드 결정 | `intake` 또는 `screener` 라우팅 |
+| **screener(스크리너)** | 전표 원시 데이터에서 케이스 유형 분류 | `screening_result`, `intended_risk_type` |
+| **intake(인테이크)** | 전표 입력 정규화, flags 추출 | `flags`, `pending_events` |
+| **planner(플래너)** | 위험 유형별 조사 계획 수립 | `plan`, `pending_events` |
+| **execute(실행기)** | LangChain tool 순차 호출, 점수 산정 | `tool_results`, `score_breakdown`, `pending_events` |
+| **critic(크리틱)** | 과잉 주장·반례 검토, 재계획 여부 | `critic_output`, `replan_context` |
+| **verify(검증기)** | 게이트 적용 + HITL 승격 판단 | `hitl_request` 또는 null, `verification` |
+| **hitl_pause(HITL 대기)** | HITL 시 interrupt, 재개 시 `hitlResponse` 반영 | — |
+| **hitl_validate(HITL 검증기)** | HITL 응답 필수값 점검 후 `reporter`/`hitl_pause` 분기 | `body_evidence.hitlValidationMissing`(필요 시) |
+| **reporter(리포터)** | 근거 기반 설명·요약 및 중간 판정 생성 | `reporter_output`, `last_node_summary`, `pending_events` |
+| **finalizer(최종확정기)** | 상태·점수·이력 최종 확정 | `final_result` |
 
 ### 3. Tool 선택 흐름 (plan 기반)
 

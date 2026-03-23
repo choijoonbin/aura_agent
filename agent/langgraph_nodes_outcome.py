@@ -21,6 +21,105 @@ def _strip_hold_prefix(text: str) -> str:
     return out
 
 
+def _truncate(text: Any, limit: int = 70) -> str:
+    s = str(text or "").strip()
+    if not s:
+        return ""
+    return s if len(s) <= limit else (s[: limit - 1] + "…")
+
+
+def _unique_nonempty(items: list[str], *, limit: int = 3) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for raw in items:
+        s = str(raw or "").strip()
+        if not s:
+            continue
+        if s in seen:
+            continue
+        seen.add(s)
+        out.append(s)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _is_generic_review_reason(text: str) -> bool:
+    s = str(text or "").strip()
+    if not s:
+        return True
+    generic_markers = (
+        "검토에 충분하지 않",
+        "추가 확인이 필요",
+        "재검토 필요",
+        "기준 미충족",
+        "판단 LLM",
+        "판단함",
+    )
+    return len(s) < 30 or any(marker in s for marker in generic_markers)
+
+
+def _augment_review_required_reason(
+    *,
+    base_reason: str,
+    hitl_request: dict[str, Any],
+    hitl_response: dict[str, Any],
+    body: dict[str, Any],
+    evidence_result: dict[str, Any] | None,
+) -> str:
+    details: list[str] = []
+
+    missing_items = body.get("hitlValidationMissing") if isinstance(body.get("hitlValidationMissing"), list) else []
+    if missing_items:
+        missing_labels: list[str] = []
+        for item in missing_items[:3]:
+            if not isinstance(item, dict):
+                continue
+            reason = _truncate(item.get("reason"), 40)
+            field = _truncate(item.get("field"), 20)
+            guide = _truncate(item.get("guide"), 40)
+            if reason:
+                missing_labels.append(reason)
+            elif field and guide:
+                missing_labels.append(f"{field}({guide})")
+            elif field:
+                missing_labels.append(field)
+        missing_labels = _unique_nonempty(missing_labels, limit=3)
+        if missing_labels:
+            details.append(f"필수 입력 미충족: {', '.join(missing_labels)}")
+
+    unresolved = hitl_request.get("unresolved_claims")
+    if not isinstance(unresolved, list) or not unresolved:
+        unresolved = hitl_request.get("reasons") or hitl_request.get("auto_finalize_blockers") or []
+    unresolved_labels = _unique_nonempty([_truncate(x, 45) for x in (unresolved or [])], limit=2)
+    if unresolved_labels:
+        details.append(f"미해소 쟁점: {', '.join(unresolved_labels)}")
+
+    if isinstance(evidence_result, dict) and evidence_result:
+        passed = evidence_result.get("passed")
+        if passed is False:
+            ev_reasons = evidence_result.get("reasons") or evidence_result.get("mismatches") or []
+            ev_labels = _unique_nonempty([_truncate(x, 45) for x in ev_reasons], limit=2)
+            if ev_labels:
+                details.append(f"증빙 대조 불일치: {', '.join(ev_labels)}")
+
+    comment = str(hitl_response.get("comment") or "").strip()
+    if len(comment) < 8:
+        details.append("검토의견이 짧아 판단 근거를 확인하기 어려움")
+
+    detail_text = " / ".join(_unique_nonempty(details, limit=3))
+    base = str(base_reason or "").strip()
+    if not detail_text:
+        return base or "담당자 승인 의견만으로는 재검토 해소 근거가 부족합니다."
+    if not base:
+        return f"담당자 승인 의견만으로는 재검토 해소 근거가 부족합니다. 불충분 사유: {detail_text}."
+    if "불충분 사유:" in base or "추가 확인사항:" in base:
+        return base
+    if _is_generic_review_reason(base):
+        return f"{base.rstrip('. ')} 불충분 사유: {detail_text}."
+    return f"{base.rstrip('. ')} 추가 확인사항: {detail_text}."
+
+
 async def hitl_validate_node_impl(
     state: dict[str, Any],
     *,
@@ -179,6 +278,13 @@ async def reporter_node_impl(
         if verdict == "COMPLETED_AFTER_HITL":
             summary += f" {hitl_verdict_reason}" if hitl_verdict_reason else " 담당자 검토 결과 승인 가능으로 판단되어 최종 확정 후보로 전환되었습니다."
         else:
+            hitl_verdict_reason = _augment_review_required_reason(
+                base_reason=hitl_verdict_reason,
+                hitl_request=check_req if isinstance(check_req, dict) else {},
+                hitl_response=hitl_response if isinstance(hitl_response, dict) else {},
+                body=body if isinstance(body, dict) else {},
+                evidence_result=evidence_result if isinstance(evidence_result, dict) else None,
+            )
             summary += f" {hitl_verdict_reason}" if hitl_verdict_reason else " 담당자 검토 기준 미충족으로 재검토가 필요합니다."
     elif has_hitl_response and hitl_approved is False:
         verdict = "HOLD_AFTER_HITL"

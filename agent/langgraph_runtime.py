@@ -112,7 +112,7 @@ def build_agent_graph(
     workflow.add_edge("planner", "execute")
     workflow.add_edge("execute", "critic")
     workflow.add_conditional_edges("critic", route_after_critic, {"planner": "planner", "verify": "verify"})
-    workflow.add_conditional_edges("verify", route_after_verify, {"hitl_pause": "hitl_pause", "reporter": "reporter"})
+    workflow.add_conditional_edges("verify", route_after_verify, {"planner": "planner", "hitl_pause": "hitl_pause", "reporter": "reporter"})
     workflow.add_edge("hitl_pause", "hitl_validate")
     workflow.add_conditional_edges("hitl_validate", route_after_hitl_validate, {"hitl_pause": "hitl_pause", "reporter": "reporter"})
     workflow.add_edge("reporter", "finalizer")

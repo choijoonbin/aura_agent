@@ -1491,11 +1491,13 @@ def get_latest_analysis(voucher_key: str, db: Session = Depends(get_db)) -> dict
             result = dict(result)
             result["result"] = dict(inner)
             result["result"]["status"] = derived_status or "IN_PROGRESS"
+    runtime_timeline = runtime.get_timeline(run_id)
+    persisted_timeline = get_persisted_timeline(db, run_id=run_id)
     return {
         "case_id": case_id,
         "run_id": run_id,
         "result": result,
-        "timeline_count": len(runtime.get_timeline(run_id)) or len(get_persisted_timeline(db, run_id=run_id)),
+        "timeline_count": max(len(runtime_timeline), len(persisted_timeline)),
         "hitl_request": hitl_request,
         "hitl_draft": runtime.get_hitl_draft(run_id) or aux.get("hitl_draft"),
         "hitl_response": runtime.get_hitl_response(run_id) or aux.get("hitl_response"),
@@ -1535,29 +1537,45 @@ def get_analysis_history(voucher_key: str, db: Session = Depends(get_db)) -> dic
 @app.get("/api/v1/analysis-runs/{run_id}/events")
 def get_run_events(run_id: str) -> dict[str, Any]:
     from db.session import SessionLocal
-    events = runtime.get_timeline(run_id)
+    runtime_events = runtime.get_timeline(run_id)
+    events = list(runtime_events)
     result = runtime.get_result(run_id)
     hitl_request = runtime.get_hitl_request(run_id)
     hitl_draft = runtime.get_hitl_draft(run_id)
     hitl_response = runtime.get_hitl_response(run_id)
     lineage = runtime.get_lineage(run_id)
     evidence_document_result = None
-    if not events or result is None or lineage is None:
-        with SessionLocal() as db:
-            if not events:
-                events = get_persisted_timeline(db, run_id=run_id)
-            aux = get_run_aux_state(db, run_id=run_id)
-            if result is None and aux.get("result_payload") is not None:
-                result = {"run_id": run_id, "event_type": "completed", "result": aux.get("result_payload")}
-            hitl_request = hitl_request or aux.get("hitl_request")
-            hitl_draft = hitl_draft or aux.get("hitl_draft")
-            hitl_response = hitl_response or aux.get("hitl_response")
-            lineage = lineage or aux.get("lineage")
-            evidence_document_result = aux.get("evidence_document_result")
-    else:
-        with SessionLocal() as db:
-            aux = get_run_aux_state(db, run_id=run_id)
-            evidence_document_result = aux.get("evidence_document_result")
+    with SessionLocal() as db:
+        persisted_events = get_persisted_timeline(db, run_id=run_id)
+        if persisted_events:
+            # 서버 재시작/재개 후 메모리 타임라인이 일부만 남는 경우를 보정한다.
+            # persisted + runtime를 병합해 전체 이력을 반환한다.
+            merged: list[dict[str, Any]] = []
+            seen: set[str] = set()
+            for ev in (persisted_events + runtime_events):
+                key = json.dumps(
+                    {
+                        "event_type": ev.get("event_type"),
+                        "at": ev.get("at"),
+                        "payload": ev.get("payload"),
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    default=str,
+                )
+                if key in seen:
+                    continue
+                seen.add(key)
+                merged.append(ev)
+            events = merged
+        aux = get_run_aux_state(db, run_id=run_id)
+        if result is None and aux.get("result_payload") is not None:
+            result = {"run_id": run_id, "event_type": "completed", "result": aux.get("result_payload")}
+        hitl_request = hitl_request or aux.get("hitl_request")
+        hitl_draft = hitl_draft or aux.get("hitl_draft")
+        hitl_response = hitl_response or aux.get("hitl_response")
+        lineage = lineage or aux.get("lineage")
+        evidence_document_result = aux.get("evidence_document_result")
     return {
         "run_id": run_id,
         "events": events,

@@ -151,12 +151,15 @@ async def run_langgraph_agentic_analysis_impl(
     elif resume_value is not None and force_closure_resume:
         app_logger.debug("[agent] 1차 skip: force_closure_resume=true → 2차 경량 run_id=%s", run_id)
 
-    # 2차: HITL 재개 시 기존 결과(또는 hitl_request만)가 있으면 2차 경량(closure)으로 hitl_validate→reporter→finalizer만 실행.
-    # score_breakdown/tool_results가 없어도 hitl_request가 있으면 경량 경로 사용(전체 재실행 시 verify에서 또 인터럽트되는 것 방지).
+    # 2차: HITL 재개 시 기존 결과가 충분히 남아 있을 때만 2차 경량(closure)으로 hitl_validate→reporter→finalizer만 실행.
+    # 이전 결과가 hitl_request만 있는 축약본이면 점수/도구 결과가 0으로 왜곡될 수 있어 전체 재실행으로 전환한다.
+    has_prior_score = bool(isinstance(previous_result, dict) and previous_result.get("score_breakdown"))
+    has_prior_tools = bool(isinstance(previous_result, dict) and previous_result.get("tool_results"))
+    can_use_closure_resume = bool(has_prior_score or has_prior_tools)
     if (
         resume_value is not None
         and previous_result
-        and (previous_result.get("hitl_request") or previous_result.get("score_breakdown") or previous_result.get("tool_results"))
+        and can_use_closure_resume
     ):
         app_logger.debug("[agent] 2차 경량 재개: run_id=%s hitl_validate→reporter→finalizer", run_id)
         body_with_hitl = dict(body_evidence or {})

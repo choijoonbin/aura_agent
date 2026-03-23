@@ -1267,60 +1267,220 @@ def _draw_graph_plotly(
     return fig
 
 
-def draw_agent_graph_plotly():
-    """메인 오케스트레이션 그래프 Plotly Figure."""
-    step = 2.0
-    x = [i * step for i in range(11)]
-    keys_main = [
+def draw_agent_graph_plotly():  # noqa: PLR0912, PLR0914, PLR0915
+    """메인 오케스트레이션 그래프 Plotly Figure — 시연용 고품질 버전."""
+    import plotly.graph_objects as go
+
+    # ── 레이아웃 상수 ──────────────────────────────────────────────────────────
+    STEP   = 2.55   # 메인 라인 노드 수평 간격 (HITL 노드 간격 확보)
+    Y_MAIN = 0.0    # 메인 라인 y
+    Y_HITL = 2.3    # HITL 노드 y (위쪽)
+    Y_B1   = -1.25  # critic → planner 역방향 경유 y
+    Y_B2   = -1.95  # verify  → planner 역방향 경유 y (Y_B1과 분리)
+    NW, NH = 2.0, 0.70  # 노드 폭, 높이
+
+    main_keys = [
         "__start__", "start_router", "screener", "intake", "planner",
         "execute", "critic", "verify", "reporter", "finalizer", "__end__",
     ]
-    pos = {k: (x[i], 0.0) for i, k in enumerate(keys_main)}
-    pos["hitl_pause"]    = (x[7], 1.5)
-    pos["hitl_validate"] = (x[8], 1.5)
+    pos: dict[str, tuple[float, float]] = {k: (i * STEP, Y_MAIN) for i, k in enumerate(main_keys)}
+    pos["hitl_pause"]    = (pos["verify"][0],   Y_HITL)
+    pos["hitl_validate"] = (pos["reporter"][0],  Y_HITL)
 
-    label_map = {
-        "__start__": "START", "__end__": "END",
-        "start_router": "Start Router", "screener": "Screener",
-        "intake": "Intake", "planner": "Planner",
-        "execute": "Execute", "critic": "Critic",
-        "verify": "Verifier", "hitl_pause": "HITL Pause",
-        "hitl_validate": "HITL Validate", "reporter": "Reporter",
-        "finalizer": "Finalizer",
+    # ── 노드 메타 (주라벨, 서브라벨, 배경색, 테두리색, 점선여부) ─────────────────
+    node_meta: dict[str, tuple[str, str, str, str, bool]] = {
+        "__start__":     ("START",          "",                   "#dcfce7", "#16a34a", False),
+        "__end__":       ("END",            "",                   "#dcfce7", "#16a34a", False),
+        "start_router":  ("Start Router",   "스크리닝 결과 라우팅",   "#eff6ff", "#2563eb", False),
+        "screener":      ("Screener",       "유형 분류 · 위험 탐지", "#f5f3ff", "#7c3aed", False),
+        "intake":        ("Intake",         "전표 정규화",           "#eff6ff", "#2563eb", False),
+        "planner":       ("Planner",        "조사 계획 수립",        "#eff6ff", "#2563eb", False),
+        "execute":       ("Execute",        "도구 실행",             "#fef9c3", "#b45309", False),
+        "critic":        ("Critic",         "근거 검토 · 재계획",    "#f0fdf4", "#15803d", False),
+        "verify":        ("Verifier",       "게이트 · HITL 판단",   "#f0fdf4", "#15803d", False),
+        "hitl_pause":    ("HITL Pause",     "담당자 검토 대기",      "#fff7ed", "#ea580c", True),
+        "hitl_validate": ("HITL Validate",  "응답 검증 · 재개",      "#fff7ed", "#ea580c", True),
+        "reporter":      ("Reporter",       "판단 문장 생성",        "#f5f3ff", "#7c3aed", False),
+        "finalizer":     ("Finalizer",      "최종 확정 저장",        "#f5f3ff", "#7c3aed", False),
     }
-    nodes = [(k, label_map.get(k, k), "") for k in pos]
-    edges = [
-        ("__start__", "start_router", ""),
-        ("start_router", "screener", "else"),
-        ("start_router", "intake", "if prescreened"),
-        ("screener", "intake", ""),
-        ("intake", "planner", ""),
-        ("planner", "execute", ""),
-        ("execute", "critic", ""),
-        ("critic", "planner", "retry"),
-        ("critic", "verify", "approved"),
-        ("verify", "hitl_pause", "if needed"),
-        ("verify", "reporter", "continue"),
-        ("hitl_pause", "hitl_validate", ""),
-        ("hitl_validate", "reporter", "resume"),
-        ("hitl_validate", "hitl_pause", "re-request"),
-        ("reporter", "finalizer", ""),
-        ("finalizer", "__end__", ""),
+
+    # ── 엣지 정의 (src, dst, label, color, is_backward, y_route) ──────────────
+    edge_defs: list[tuple[str, str, str, str, bool, float]] = [
+        ("__start__",    "start_router",  "",               "#94a3b8", False, 0),
+        ("start_router", "screener",      "else",           "#0ea5e9", False, 0),
+        ("start_router", "intake",        "if prescreened", "#0ea5e9", False, 0),
+        ("screener",     "intake",        "",               "#64748b", False, 0),
+        ("intake",       "planner",       "",               "#64748b", False, 0),
+        ("planner",      "execute",       "",               "#64748b", False, 0),
+        ("execute",      "critic",        "",               "#64748b", False, 0),
+        ("critic",       "verify",        "approved",       "#7c3aed", False, 0),
+        ("critic",       "planner",       "retry",          "#f97316", True,  Y_B1),
+        ("verify",       "hitl_pause",    "if needed",      "#f59e0b", False, 0),
+        ("verify",       "reporter",      "continue",       "#16a34a", False, 0),
+        ("verify",       "planner",       "재시도",          "#f97316", True,  Y_B2),
+        ("hitl_pause",   "hitl_validate", "",               "#ea580c", False, 0),
+        ("hitl_validate","reporter",      "resume",         "#16a34a", False, 0),
+        ("hitl_validate","hitl_pause",    "re-request",     "#f59e0b", False, 0),
+        ("reporter",     "finalizer",     "",               "#64748b", False, 0),
+        ("finalizer",    "__end__",       "",               "#16a34a", False, 0),
     ]
-    edge_style_map: dict[tuple[str, str], dict[str, Any]] = {
-        ("start_router", "screener"): {"color": "#0ea5e9", "width": 2.0},
-        ("start_router", "intake"): {"color": "#0ea5e9", "width": 2.0},
-        ("critic", "planner"): {"color": "#f97316", "dash": "dash", "width": 2.2},
-        ("verify", "hitl_pause"): {"color": "#f59e0b", "dash": "dash", "width": 2.2},
-        ("verify", "reporter"): {"color": "#16a34a", "width": 2.0},
-        ("hitl_pause", "hitl_validate"): {"color": "#f59e0b", "width": 2.0},
-        ("hitl_validate", "reporter"): {"color": "#16a34a", "width": 2.0},
-        ("hitl_validate", "hitl_pause"): {"color": "#f59e0b", "dash": "dash", "width": 2.0},
-    }
-    return _draw_graph_plotly(nodes, edges, pos,
-                              hitl_nodes={"hitl_pause", "hitl_validate"},
-                              edge_style_map=edge_style_map,
-                              height=420)
+
+    shapes: list[dict] = []
+    annotations: list[dict] = []
+
+    # ── HITL 그룹 박스 ─────────────────────────────────────────────────────────
+    hitl_xs = [pos["hitl_pause"][0], pos["hitl_validate"][0]]
+    hb_x0 = min(hitl_xs) - NW / 2 - 0.3
+    hb_x1 = max(hitl_xs) + NW / 2 + 0.3
+    hb_y0 = Y_HITL - NH / 2 - 0.28
+    hb_y1 = Y_HITL + NH / 2 + 0.55
+    shapes.append(dict(
+        type="rect",
+        x0=hb_x0, y0=hb_y0, x1=hb_x1, y1=hb_y1,
+        fillcolor="rgba(254,243,199,0.25)",
+        line=dict(color="#f59e0b", width=1.6, dash="dot"),
+        layer="below",
+    ))
+    annotations.append(dict(
+        x=(hb_x0 + hb_x1) / 2, y=hb_y1 + 0.08,
+        text="<b style='color:#92400e;font-size:10px;'>HITL — Human-in-the-Loop</b>",
+        showarrow=False, xanchor="center", yanchor="bottom",
+    ))
+
+    # ── 노드 렌더링 ────────────────────────────────────────────────────────────
+    hov_x: list[float] = []
+    hov_y: list[float] = []
+    hov_txt: list[str] = []
+
+    for key, (cx, cy) in pos.items():
+        if key not in node_meta:
+            continue
+        main_lbl, sub_lbl, fc, ec, is_dot = node_meta[key]
+        is_ep   = key in {"__start__", "__end__"}
+        bw      = 2.6 if is_ep else 2.0
+        dash    = "dot" if is_dot else "solid"
+        shapes.append(dict(
+            type="rect",
+            x0=cx - NW / 2, y0=cy - NH / 2,
+            x1=cx + NW / 2, y1=cy + NH / 2,
+            fillcolor=fc,
+            line=dict(color=ec, width=bw, dash=dash),
+            layer="above",
+        ))
+        lbl_html = f"<b>{main_lbl}</b>"
+        if sub_lbl:
+            lbl_html += f"<br><span style='font-size:8px;color:#64748b;'>{sub_lbl}</span>"
+        annotations.append(dict(
+            x=cx, y=cy, text=lbl_html,
+            showarrow=False,
+            font=dict(size=10, color="#0f172a", family="Inter, Arial, sans-serif"),
+            xanchor="center", yanchor="middle", align="center",
+        ))
+        hov_x.append(cx)
+        hov_y.append(cy)
+        cat = "HITL 노드" if is_dot else ("시작/종료" if is_ep else "에이전트 노드")
+        hov_txt.append(
+            f"<b>{main_lbl}</b><br>"
+            f"<span style='color:#6b7280;font-size:11px;'>{sub_lbl or cat}</span>"
+        )
+
+    # ── 엣지 렌더링 ────────────────────────────────────────────────────────────
+    for src, dst, elabel, ecolor, is_bw, y_route in edge_defs:
+        if src not in pos or dst not in pos:
+            continue
+        sx, sy = pos[src]
+        dx, dy = pos[dst]
+
+        if is_bw:
+            # 역방향: src 하단 → y_route → dst 하단 꺾임 경로
+            path = (
+                f"M {sx},{sy - NH / 2}"
+                f" L {sx},{y_route}"
+                f" L {dx},{y_route}"
+                f" L {dx},{dy - NH / 2}"
+            )
+            shapes.append(dict(
+                type="path", path=path,
+                line=dict(color=ecolor, width=1.9, dash="dash"),
+                layer="below",
+            ))
+            # 화살촉 (dst 하단 진입점)
+            annotations.append(dict(
+                x=dx, y=dy - NH / 2,
+                ax=dx, ay=dy - NH / 2 - 0.2,
+                xref="x", yref="y", axref="x", ayref="y",
+                showarrow=True, arrowhead=2, arrowsize=1.0,
+                arrowwidth=2.0, arrowcolor=ecolor, text="",
+            ))
+            if elabel:
+                mid_x = (sx + dx) / 2
+                annotations.append(dict(
+                    x=mid_x, y=y_route - 0.06,
+                    text=f"<i>{elabel}</i>",
+                    showarrow=False,
+                    font=dict(size=9, color=ecolor),
+                    bgcolor="rgba(255,255,255,0.88)", borderpad=3,
+                    xanchor="center", yanchor="top",
+                ))
+        else:
+            # 순방향: 노드 면(face)→면 직선 화살표
+            ddx, ddy = dx - sx, dy - sy
+            if abs(ddx) >= abs(ddy):
+                if ddx >= 0:
+                    ax_pt, ay_pt = sx + NW / 2, sy
+                    tip_x, tip_y = dx - NW / 2, dy
+                else:
+                    ax_pt, ay_pt = sx - NW / 2, sy
+                    tip_x, tip_y = dx + NW / 2, dy
+            else:
+                if ddy >= 0:
+                    ax_pt, ay_pt = sx, sy + NH / 2
+                    tip_x, tip_y = dx, dy - NH / 2
+                else:
+                    ax_pt, ay_pt = sx, sy - NH / 2
+                    tip_x, tip_y = dx, dy + NH / 2
+            annotations.append(dict(
+                x=tip_x, y=tip_y,
+                ax=ax_pt, ay=ay_pt,
+                xref="x", yref="y", axref="x", ayref="y",
+                showarrow=True, arrowhead=2, arrowsize=1.0,
+                arrowwidth=2.0, arrowcolor=ecolor, text="",
+            ))
+            if elabel:
+                mid_x = (ax_pt + tip_x) / 2
+                mid_y = (ay_pt + tip_y) / 2
+                # 수평 엣지: 라벨을 선 위로 올림. 수직/대각 엣지: 중앙 옆에 배치
+                off   = 0.20 if abs(ddy) < 0.3 else 0.0
+                x_off = 0.18 if abs(ddy) >= 0.3 and ddx < 0 else 0.0
+                annotations.append(dict(
+                    x=mid_x + x_off, y=mid_y + off,
+                    text=f"<i>{elabel}</i>",
+                    showarrow=False,
+                    font=dict(size=9, color=ecolor),
+                    bgcolor="rgba(255,255,255,0.90)", borderpad=3,
+                    xanchor="center",
+                ))
+
+    xs = [p[0] for p in pos.values()]
+    ys = [p[1] for p in pos.values()]
+
+    fig = go.Figure(data=[go.Scatter(
+        x=hov_x, y=hov_y, mode="markers",
+        marker=dict(size=NW * 30, opacity=0, symbol="square"),
+        text=hov_txt, hovertemplate="%{text}<extra></extra>",
+        showlegend=False,
+    )])
+    fig.update_layout(
+        shapes=shapes, annotations=annotations,
+        height=560,
+        paper_bgcolor="#f8fafc", plot_bgcolor="#f8fafc",
+        xaxis=dict(range=[min(xs) - 1.5, max(xs) + 1.5], visible=False),
+        yaxis=dict(range=[Y_B2 - 0.55, Y_HITL + 1.15], visible=False),
+        margin=dict(l=10, r=10, t=20, b=10),
+        hoverlabel=dict(bgcolor="white", bordercolor="#e2e8f0", font_size=12),
+        dragmode="pan",
+    )
+    return fig
 
 
 def draw_deep_screening_graph_plotly():
