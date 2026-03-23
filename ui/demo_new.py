@@ -9,6 +9,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import time
 import unicodedata
 from typing import Any
 
@@ -87,6 +88,17 @@ def _image_condition_display(condition: str) -> str:
         return "-"
     ko = _IMAGE_CONDITION_LABELS.get(token)
     return f"{ko}({token})" if ko else token
+
+
+def _format_elapsed_short(seconds: float | int | None) -> str:
+    try:
+        total = int(round(float(seconds or 0)))
+    except Exception:
+        total = 0
+    m, s = divmod(max(0, total), 60)
+    if m > 0:
+        return f"{m}m {s}s"
+    return f"{s}s"
 
 
 def _extract_entity_value(entities: list, label: str) -> str:
@@ -412,7 +424,8 @@ def render_demo_new_page() -> None:
     if prev_case_type and selected_case_type != prev_case_type:
         for _k in ("demo_new_analysis_result", "demo_new_image_bytes", "demo_new_uploader_name",
                    "demo_new_auto_amount", "demo_new_auto_date", "demo_new_auto_time",
-                   "demo_new_auto_merchant", "demo_new_auto_summary", "demo_new_uploader"):
+                   "demo_new_auto_merchant", "demo_new_auto_summary", "demo_new_uploader",
+                   "demo_new_analysis_elapsed_sec", "demo_new_analysis_started_at"):
             st.session_state.pop(_k, None)
     # HOLIDAY_USAGE는 POC 시연 기본값을 즉시 채워 시작한다.
     if selected_case_type == "HOLIDAY_USAGE" and prev_case_type != "HOLIDAY_USAGE":
@@ -652,11 +665,15 @@ def render_demo_new_page() -> None:
                 st.session_state["demo_new_image_bytes"]      = image_bytes
                 st.session_state["demo_new_uploader_name"]    = uploaded_file.name
                 if analyze_clicked:
+                    started_at = time.monotonic()
+                    st.session_state["demo_new_analysis_started_at"] = started_at
                     with st.spinner("Vision LLM으로 분석 중..."):
                         result = _run_visual_analysis(image_bytes)
                         st.session_state["demo_new_analysis_result"] = result
                         entities = result.entities if hasattr(result, "entities") else []
                         st.session_state["demo_new_entity_color_map"] = _build_entity_color_map(entities)
+                    st.session_state["demo_new_analysis_elapsed_sec"] = max(0.0, time.monotonic() - started_at)
+                    st.session_state.pop("demo_new_analysis_started_at", None)
                     st.rerun()
             else:
                 # uploaded_file=None 은 rerun 후 위젯 리셋일 수 있음 → image_bytes/analysis_result 는 보존
@@ -715,10 +732,19 @@ def render_demo_new_page() -> None:
 
     # ══ 우: 증빙 이미지 + Vision LLM 분석 결과 ═══════════════
     with col_image:
-        st.markdown(
-            '<div class="demo-section-title">📎 증빙 이미지</div>',
-            unsafe_allow_html=True,
-        )
+        _img_title_col, _img_time_col = st.columns([0.72, 0.28], gap="small")
+        with _img_title_col:
+            st.markdown(
+                '<div class="demo-section-title">📎 증빙 이미지</div>',
+                unsafe_allow_html=True,
+            )
+        with _img_time_col:
+            elapsed_sec = st.session_state.get("demo_new_analysis_elapsed_sec")
+            if elapsed_sec is not None:
+                st.markdown(
+                    f'<div style="text-align:right;font-size:0.82rem;color:#475569;margin-top:0.1rem">분석 소요: <b>{_format_elapsed_short(elapsed_sec)}</b></div>',
+                    unsafe_allow_html=True,
+                )
 
         analysis_result_disp   = st.session_state.get("demo_new_analysis_result")
         image_bytes_disp: bytes | None = st.session_state.get("demo_new_image_bytes")
@@ -910,6 +936,8 @@ def _handle_generate(
                 "demo_new_auto_merchant",
                 "demo_new_auto_summary",
                 "demo_new_field_reason",
+                "demo_new_analysis_elapsed_sec",
+                "demo_new_analysis_started_at",
             ):
                 st.session_state.pop(key, None)
 

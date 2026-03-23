@@ -2246,7 +2246,12 @@ def render_hitl_panel(latest_bundle: dict[str, Any], *, vkey: str | None = None)
     if not run_id:
         return
     # 검토 상태일 때 분기 없이 HITL·증빙 전체를 한 팝업에 표시
-    hitl_request = _resolve_hitl_request(latest_bundle)
+    # hitl_request는 run_id 단위 캐싱 — 키 입력마다 재파싱 방지
+    _req_cache_key = f"_hitl_req_cache_{run_id}"
+    hitl_request = st.session_state.get(_req_cache_key)
+    if hitl_request is None:
+        hitl_request = _resolve_hitl_request(latest_bundle) or {}
+        st.session_state[_req_cache_key] = hitl_request
     if not hitl_request:
         st.warning("검토 요청 세부 데이터(hitl_request)를 아직 불러오지 못했습니다. 증빙/의견 제출은 계속 가능합니다.")
     bundle_for_hitl = dict(latest_bundle)
@@ -2739,7 +2744,12 @@ def render_hitl_panel(latest_bundle: dict[str, Any], *, vkey: str | None = None)
         """,
     ):
         # HITL 영역: 항상 표시 (대기 중이 아니면 fallback 요약으로 표시)
-        summary = _build_hitl_summary_sections(bundle_for_hitl)
+        # summary는 run_id 단위로 session_state 캐싱 — 키 입력마다 재계산 방지
+        _summary_cache_key = f"_hitl_summary_cache_{run_id}"
+        summary = st.session_state.get(_summary_cache_key)
+        if summary is None:
+            summary = _build_hitl_summary_sections(bundle_for_hitl)
+            st.session_state[_summary_cache_key] = summary
         # 조건은 아래 '자동 확정 중단 이유' 박스에 나열되므로, 상단은 안내만 표시
         stop_reasons = summary.get("stop_reasons") or []
         if stop_reasons:
@@ -2938,6 +2948,9 @@ def render_hitl_panel(latest_bundle: dict[str, Any], *, vkey: str | None = None)
                     st.session_state.pop(_hitl_state_key("open", run_id), None)
                     st.session_state[_hitl_state_key("open", run_id)] = False
                     st.session_state.pop(_hitl_state_key("shown", run_id), None)
+                    # 팝업 닫힐 때 HITL 캐시 제거 (다음 run에서 fresh 데이터 로드)
+                    st.session_state.pop(f"_hitl_summary_cache_{run_id}", None)
+                    st.session_state.pop(f"_hitl_req_cache_{run_id}", None)
                     # 다음 run에서 selected_vkey가 바뀌어도 다이얼로그가 즉시 닫히도록 선제 스킵 키를 심는다.
                     st.session_state["mt_skip_hitl_dialog_run_id"] = run_id
                     st.rerun()
@@ -4289,7 +4302,8 @@ def _render_explain_graph_plotly(nodes: list[dict[str, Any]], edges: list[dict[s
     type_color = {
         "Case": "#2563eb",
         "Run": "#0ea5e9",
-        "Claim": "#f59e0b",
+        "Claim": "#f59e0b",       # covered 클레임 (기본)
+        "ClaimUncovered": "#ef4444",  # 미연결 클레임
         "Policy": "#16a34a",
     }
 
@@ -4357,7 +4371,12 @@ def _render_explain_graph_plotly(nodes: list[dict[str, Any]], edges: list[dict[s
         x, y = pos[nid]
         typ = str(n.get("type") or "Etc")
         raw_lbl = str(n.get("label") or nid)
+        # Claim 노드: covered 여부로 색상 분기
         if typ == "Claim":
+            props = n.get("props") or {}
+            covered_flag = props.get("covered")
+            if covered_flag is False:
+                typ = "ClaimUncovered"
             lbl = _graph_claim_label(raw_lbl, claim_support_articles.get(nid) or [])
         elif typ == "Policy":
             lbl = _policy_label_compact(raw_lbl)
@@ -4578,12 +4597,16 @@ def render_workspace_graph_insights(selected_key: str | None, latest_bundle: dic
 
         if claim_nodes:
             st.markdown("**핵심 근거 경로**")
-            shown = 0
             for c in claim_nodes:
                 claim_id = str(c.get("id") or "")
                 claim_label = str(c.get("label") or "").strip()
                 if not claim_label:
                     continue
+                props = c.get("props") or {}
+                covered_flag = props.get("covered")
+                # covered가 None(기존 데이터)이면 policy 연결 여부로 판단
+                is_covered = covered_flag if covered_flag is not None else bool(claim_support.get(claim_id))
+                icon = "✅" if is_covered else "❌"
                 policies = claim_support.get(claim_id) or []
                 policy_labels: list[str] = []
                 support_articles: list[str] = []
@@ -4599,19 +4622,18 @@ def render_workspace_graph_insights(selected_key: str | None, latest_bundle: dic
                 if policy_labels:
                     st.markdown(
                         "<div class='mt-graph-note'>"
-                        f"• 주장: {claim_text_ui[:90]}{'…' if len(claim_text_ui) > 90 else ''}  →  "
+                        f"{icon} {claim_text_ui[:90]}{'…' if len(claim_text_ui) > 90 else ''}  →  "
                         + ", ".join(policy_labels)
                         + "</div>",
                         unsafe_allow_html=True,
                     )
                 else:
+                    gap = str(props.get("gap") or "").strip()
+                    gap_note = f" ({gap[:60]}{'…' if len(gap) > 60 else ''})" if gap else ""
                     st.markdown(
-                        f"<div class='mt-graph-note'>• 주장: {claim_text_ui[:90]}{'…' if len(claim_text_ui) > 90 else ''}</div>",
+                        f"<div class='mt-graph-note'>{icon} {claim_text_ui[:90]}{'…' if len(claim_text_ui) > 90 else ''}{gap_note}</div>",
                         unsafe_allow_html=True,
                     )
-                shown += 1
-                if shown >= 4:
-                    break
 
         _render_explain_graph_plotly(
             nodes,

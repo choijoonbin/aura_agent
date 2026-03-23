@@ -55,31 +55,40 @@ def _extract_policy_refs(result: dict[str, Any]) -> list[dict[str, Any]]:
     return list(dedup.values())
 
 
-def _extract_claims(result: dict[str, Any]) -> list[str]:
-    claims: list[str] = []
-
-    reason = str(result.get("reasonText") or "").strip()
-    if reason:
-        parts = [p.strip() for p in reason.replace("\n", " ").split(". ") if p.strip()]
-        claims.extend(parts[:3])
-
+def _extract_claim_results(result: dict[str, Any]) -> list[dict[str, Any]]:
+    """verifier_output.claim_results 기반 구조화 클레임 추출.
+    covered/supporting_articles/gap 정보를 보존해 정밀한 claim→policy 연결에 사용.
+    claim_results가 없으면 reasonText 문장 분리로 fallback."""
     verifier = result.get("verifier_output") or {}
-    unsupported = verifier.get("unsupported_claims") or []
-    for item in unsupported:
-        if isinstance(item, dict):
-            t = str(item.get("claim_text") or item.get("claim") or "").strip()
-            if t:
-                claims.append(t)
+    raw_list = verifier.get("claim_results") or []
 
-    # 중복 제거(순서 유지)
+    out: list[dict[str, Any]] = []
     seen: set[str] = set()
-    out: list[str] = []
-    for c in claims:
-        if c in seen:
+
+    for item in raw_list:
+        if not isinstance(item, dict):
+            item = item.model_dump() if hasattr(item, "model_dump") else {}
+        text = str(item.get("claim") or "").strip()
+        if not text or text in seen:
             continue
-        seen.add(c)
-        out.append(c)
-    return out[:6]
+        seen.add(text)
+        out.append({
+            "text": text,
+            "covered": bool(item.get("covered")),
+            "supporting_articles": [str(a) for a in (item.get("supporting_articles") or []) if a],
+            "gap": str(item.get("gap") or "").strip(),
+        })
+
+    # fallback: claim_results 없으면 reasonText 첫 3문장 (covered=True 가정)
+    if not out:
+        reason = str(result.get("reasonText") or "").strip()
+        if reason:
+            for p in [s.strip() for s in reason.replace("\n", " ").split(". ") if s.strip()][:3]:
+                if p not in seen:
+                    seen.add(p)
+                    out.append({"text": p, "covered": True, "supporting_articles": [], "gap": ""})
+
+    return out[:8]
 
 
 class GraphDBService:
@@ -149,7 +158,15 @@ class GraphDBService:
         }
 
         policy_refs = _extract_policy_refs(result)
-        claims = _extract_claims(result)
+        claim_results = _extract_claim_results(result)
+
+        # article → policy_key 역맵 (claim별 정밀 연결용)
+        article_to_policy_key: dict[str, str] = {}
+        for ref in policy_refs:
+            a = str(ref.get("article") or "").strip()
+            c = str(ref.get("clause") or "").strip()
+            if a:
+                article_to_policy_key[a] = f"{a}:{c}" if c else a
 
         with drv.session(database=settings.neo4j_database) as s:
             # Case + Run upsert
@@ -181,7 +198,14 @@ class GraphDBService:
                 },
             )
 
-            # 기존 run 하위 링크 정리 후 재생성 (idempotent)
+            # 기존 run 하위 링크 + claim→policy 엣지 정리 (idempotent)
+            s.run(
+                """
+                MATCH (r:Run {run_id: $run_id})-[:HAS_CLAIM]->(cl:Claim)-[rel:SUPPORTED_BY]->()
+                DELETE rel
+                """,
+                {"run_id": run_id},
+            )
             s.run(
                 """
                 MATCH (r:Run {run_id: $run_id})-[rel:HAS_CLAIM|CITES]->()
@@ -190,19 +214,30 @@ class GraphDBService:
                 {"run_id": run_id},
             )
 
-            for idx, claim_text in enumerate(claims, start=1):
+            # Claim 노드 저장 (covered/gap 포함)
+            for idx, cr in enumerate(claim_results, start=1):
                 claim_id = f"{run_id}:C{idx}"
                 s.run(
                     """
                     MATCH (r:Run {run_id: $run_id})
                     MERGE (cl:Claim {claim_id: $claim_id})
                     SET cl.text = $text,
-                        cl.source = 'reasoning'
+                        cl.covered = $covered,
+                        cl.gap = $gap,
+                        cl.source = 'verifier'
                     MERGE (r)-[:HAS_CLAIM {order: $ord}]->(cl)
                     """,
-                    {"run_id": run_id, "claim_id": claim_id, "text": claim_text, "ord": idx},
+                    {
+                        "run_id": run_id,
+                        "claim_id": claim_id,
+                        "text": cr["text"],
+                        "covered": cr["covered"],
+                        "gap": cr["gap"],
+                        "ord": idx,
+                    },
                 )
 
+            # Policy 노드 저장
             for ref in policy_refs:
                 article = str(ref.get("article") or "").strip()
                 clause = str(ref.get("clause") or "").strip()
@@ -229,16 +264,32 @@ class GraphDBService:
                     },
                 )
 
-            # claim -> policy 연결(단순 전수 연결; 향후 citation map 기반 정밀화 가능)
-            if claims and policy_refs:
-                s.run(
-                    """
-                    MATCH (r:Run {run_id: $run_id})-[:HAS_CLAIM]->(cl:Claim)
-                    MATCH (r)-[:CITES]->(p:Policy)
-                    MERGE (cl)-[:SUPPORTED_BY]->(p)
-                    """,
-                    {"run_id": run_id},
-                )
+            # claim → policy 정밀 연결 (supporting_articles 기반, covered 클레임만)
+            for idx, cr in enumerate(claim_results, start=1):
+                claim_id = f"{run_id}:C{idx}"
+                if cr["covered"] and cr["supporting_articles"]:
+                    for article in cr["supporting_articles"]:
+                        pkey = article_to_policy_key.get(article)
+                        if pkey:
+                            s.run(
+                                """
+                                MATCH (cl:Claim {claim_id: $claim_id})
+                                MATCH (p:Policy {policy_key: $pkey})
+                                MERGE (cl)-[:SUPPORTED_BY]->(p)
+                                """,
+                                {"claim_id": claim_id, "pkey": pkey},
+                            )
+                        else:
+                            # policy_refs에 없지만 article이 명시된 경우: Policy 노드 생성 후 연결
+                            s.run(
+                                """
+                                MATCH (cl:Claim {claim_id: $claim_id})
+                                MERGE (p:Policy {policy_key: $article})
+                                SET p.article = $article
+                                MERGE (cl)-[:SUPPORTED_BY]->(p)
+                                """,
+                                {"claim_id": claim_id, "article": article},
+                            )
 
     def get_explain_path(self, *, voucher_key: str, run_id: str | None = None) -> dict[str, Any]:
         drv = self._driver_or_none()
@@ -273,7 +324,9 @@ class GraphDBService:
             claims = s.run(
                 """
                 MATCH (rn:Run {run_id: $run_id})-[hc:HAS_CLAIM]->(cl:Claim)
-                RETURN cl.claim_id as claim_id, cl.text as text, hc.order as ord
+                RETURN cl.claim_id as claim_id, cl.text as text,
+                       cl.covered as covered, cl.gap as gap,
+                       hc.order as ord
                 ORDER BY hc.order ASC
                 """,
                 {"run_id": r.get("run_id")},
@@ -297,27 +350,33 @@ class GraphDBService:
 
             for cl in claims:
                 cid = cl.get("claim_id")
-                nodes.append({"id": cid, "type": "Claim", "label": cl.get("text"), "props": cl})
+                covered = cl.get("covered")
+                # covered가 None(기존 데이터)이면 True로 가정
+                covered_flag = covered if covered is not None else True
+                nodes.append({
+                    "id": cid,
+                    "type": "Claim",
+                    "label": cl.get("text"),
+                    "props": {**cl, "covered": covered_flag},
+                })
                 edges.append({"from": r.get("run_id"), "to": cid, "type": "HAS_CLAIM", "order": cl.get("ord")})
 
             for p in policies:
                 pid = p.get("policy_key")
                 label = policy_display_label(p.get("article"), p.get("clause"), p.get("title"))
-                nodes.append(
-                    {
-                        "id": pid,
-                        "type": "Policy",
-                        "label": label,
-                        "props": p,
-                    }
-                )
+                nodes.append({"id": pid, "type": "Policy", "label": label, "props": p})
                 edges.append({"from": r.get("run_id"), "to": pid, "type": "CITES"})
 
-            # claim -> policy
-            if claims and policies:
-                for cl in claims:
-                    for p in policies:
-                        edges.append({"from": cl.get("claim_id"), "to": p.get("policy_key"), "type": "SUPPORTED_BY"})
+            # claim → policy: Neo4j의 실제 SUPPORTED_BY 엣지 조회 (정밀 연결)
+            supported_rows = s.run(
+                """
+                MATCH (rn:Run {run_id: $run_id})-[:HAS_CLAIM]->(cl:Claim)-[:SUPPORTED_BY]->(p:Policy)
+                RETURN cl.claim_id as claim_id, p.policy_key as policy_key
+                """,
+                {"run_id": r.get("run_id")},
+            ).data()
+            for row in supported_rows:
+                edges.append({"from": row["claim_id"], "to": row["policy_key"], "type": "SUPPORTED_BY"})
 
             return {
                 "enabled": True,
