@@ -5,9 +5,9 @@ import streamlit as st
 
 # 터미널에서 [HITL_CLOSE]/[RESUME_TRACE] 등 INFO 로그 확인용 (streamlit run 실행 터미널에 출력)
 try:
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s", datefmt="%H:%M:%S", force=True)
+    logging.basicConfig(level=logging.INFO, format="%(message)s", datefmt="%H:%M:%S", force=True)
 except TypeError:
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s", datefmt="%H:%M:%S")
+    logging.basicConfig(level=logging.INFO, format="%(message)s", datefmt="%H:%M:%S")
 
 # 불필요한 라이브러리 로그 억제 (httpx, openai 등이 터미널을 오염하지 않도록)
 for _noisy_logger in ("httpx", "httpcore", "openai", "openai._base_client"):

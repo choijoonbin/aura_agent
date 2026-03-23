@@ -40,6 +40,41 @@ from ui.shared import (
     status_display_name,
 )
 
+STREAM_BUFFER_MAX_CHARS = 120_000
+STREAM_CACHE_MAX_RUNS = 6
+
+
+def _trim_stream_tail(text: str, *, max_chars: int = STREAM_BUFFER_MAX_CHARS) -> str:
+    if len(text) <= max_chars:
+        return text
+    return text[-max_chars:]
+
+
+def _append_stream_chunk_capped(
+    chunks: list[str],
+    *,
+    chunk: str,
+    total_chars: int,
+    max_chars: int = STREAM_BUFFER_MAX_CHARS,
+) -> int:
+    if not chunk:
+        return total_chars
+    chunks.append(chunk)
+    total_chars += len(chunk)
+    while chunks and total_chars > max_chars:
+        total_chars -= len(chunks.pop(0))
+    return total_chars
+
+
+def _persist_stream_cache(run_id: str, chunks: list[str]) -> None:
+    if not run_id:
+        return
+    st.session_state[f"mt_last_stream_content_{run_id}"] = _trim_stream_tail("".join(chunks))
+    cache_keys = [k for k in st.session_state.keys() if str(k).startswith("mt_last_stream_content_")]
+    overflow = len(cache_keys) - STREAM_CACHE_MAX_RUNS
+    for key in cache_keys[: max(0, overflow)]:
+        st.session_state.pop(key, None)
+
 
 def _format_agent_event_line(obj: dict[str, Any]) -> str:
     node = obj.get("node") or "agent"
@@ -300,6 +335,7 @@ def _score_breakdown_stream_block(score: dict[str, Any]) -> str:
 
 def sse_text_stream(stream_url: str, *, run_id: str | None = None) -> Iterator[str]:
     stream_buffer: list[str] = []
+    stream_chars = 0
     with requests.get(stream_url, stream=True, timeout=300) as response:
         response.raise_for_status()
         event = None
@@ -317,7 +353,7 @@ def sse_text_stream(stream_url: str, *, run_id: str | None = None) -> Iterator[s
             payload = line.split(":", 1)[1].strip()
             if payload == "[DONE]":
                 done_line = "\n\n**분석 스트림 종료**\n"
-                stream_buffer.append(done_line)
+                stream_chars = _append_stream_chunk_capped(stream_buffer, chunk=done_line, total_chars=stream_chars)
                 yield done_line
                 break
             try:
@@ -330,20 +366,20 @@ def sse_text_stream(stream_url: str, *, run_id: str | None = None) -> Iterator[s
                         if thinking_node is None:
                             if not first_event:
                                 sep = "\n\n---\n\n"
-                                stream_buffer.append(sep)
+                                stream_chars = _append_stream_chunk_capped(stream_buffer, chunk=sep, total_chars=stream_chars)
                                 yield sep
                             ts = fmt_dt_korea(obj.get("timestamp")) or "-"
                             header = f"💭 **{ts}** · {_stream_node_activity_label(node, '추론')}  \n"
-                            stream_buffer.append(header)
+                            stream_chars = _append_stream_chunk_capped(stream_buffer, chunk=header, total_chars=stream_chars)
                             yield header
                             thinking_node = node
                         if token:
-                            stream_buffer.append(token)
+                            stream_chars = _append_stream_chunk_capped(stream_buffer, chunk=token, total_chars=stream_chars)
                             yield token
                         first_event = False
                     elif ev_type == "THINKING_DONE":
                         done_sep = "  \n\n---  \n\n"
-                        stream_buffer.append(done_sep)
+                        stream_chars = _append_stream_chunk_capped(stream_buffer, chunk=done_sep, total_chars=stream_chars)
                         yield done_sep
                         thinking_node = None
                         first_event = False
@@ -351,19 +387,19 @@ def sse_text_stream(stream_url: str, *, run_id: str | None = None) -> Iterator[s
                         # 재검토 이벤트: 현재 thinking 카드를 닫고, 재검토 안내를 한 줄로 표시한 뒤 다음 토큰을 새 카드로 받는다.
                         if thinking_node is not None:
                             done_sep = "  \n\n---  \n\n"
-                            stream_buffer.append(done_sep)
+                            stream_chars = _append_stream_chunk_capped(stream_buffer, chunk=done_sep, total_chars=stream_chars)
                             yield done_sep
                             thinking_node = None
                         if not first_event:
                             sep = "\n\n---\n\n"
-                            stream_buffer.append(sep)
+                            stream_chars = _append_stream_chunk_capped(stream_buffer, chunk=sep, total_chars=stream_chars)
                             yield sep
                         ts = fmt_dt_korea(obj.get("timestamp")) or "-"
                         node = obj.get("node") or "agent"
                         retry_header = f"🔄 **{ts}** · {_stream_node_activity_label(node, '재검토')}  \n"
                         retry_body = "_판단 결과와 추론 문구 정합성을 다시 맞추는 중..._  \n\n"
-                        stream_buffer.append(retry_header)
-                        stream_buffer.append(retry_body)
+                        stream_chars = _append_stream_chunk_capped(stream_buffer, chunk=retry_header, total_chars=stream_chars)
+                        stream_chars = _append_stream_chunk_capped(stream_buffer, chunk=retry_body, total_chars=stream_chars)
                         yield retry_header
                         yield retry_body
                         first_event = False
@@ -373,15 +409,15 @@ def sse_text_stream(stream_url: str, *, run_id: str | None = None) -> Iterator[s
                             continue
                         if thinking_node is not None:
                             done_sep = "  \n\n---  \n\n"
-                            stream_buffer.append(done_sep)
+                            stream_chars = _append_stream_chunk_capped(stream_buffer, chunk=done_sep, total_chars=stream_chars)
                             yield done_sep
                             thinking_node = None
                         if not first_event:
                             sep = "\n\n---\n\n"
-                            stream_buffer.append(sep)
+                            stream_chars = _append_stream_chunk_capped(stream_buffer, chunk=sep, total_chars=stream_chars)
                             yield sep
                         for chunk in _stream_card_chunks(obj):
-                            stream_buffer.append(chunk)
+                            stream_chars = _append_stream_chunk_capped(stream_buffer, chunk=chunk, total_chars=stream_chars)
                             yield chunk
                         first_event = False
                         if ev_type == "HITL_PAUSE":
@@ -390,13 +426,13 @@ def sse_text_stream(stream_url: str, *, run_id: str | None = None) -> Iterator[s
                                 st.session_state[_hitl_state_key("shown", run_id)] = True
                             reason = (obj.get("metadata") or {}).get("reason") or ""
                             final_line = "\n\n**[최종]** 담당자 검토 입력을 기다립니다." + (f" 사유: {reason}" if reason else "") + "\n"
-                            stream_buffer.append(final_line)
+                            stream_chars = _append_stream_chunk_capped(stream_buffer, chunk=final_line, total_chars=stream_chars)
                             yield final_line
                             break
                 elif event == "confidence":
                     score = obj.get("score_breakdown") or obj
                     block = _score_breakdown_stream_block(score)
-                    stream_buffer.append(block)
+                    stream_chars = _append_stream_chunk_capped(stream_buffer, chunk=block, total_chars=stream_chars)
                     yield block
                 elif event == "completed":
                     final_text = obj.get("reasonText") or obj.get("summary") or "완료"
@@ -406,36 +442,34 @@ def sse_text_stream(stream_url: str, *, run_id: str | None = None) -> Iterator[s
                         st.session_state[_hitl_state_key("dismissed", run_id)] = False
                         st.session_state[_hitl_state_key("shown", run_id)] = True
                         line_out = f"\n\n**[최종]** {final_text}\n"
-                        stream_buffer.append(line_out)
+                        stream_chars = _append_stream_chunk_capped(stream_buffer, chunk=line_out, total_chars=stream_chars)
                         yield line_out
                         break
                     line_out = f"\n\n**[최종]** {final_text}\n"
-                    stream_buffer.append(line_out)
+                    stream_chars = _append_stream_chunk_capped(stream_buffer, chunk=line_out, total_chars=stream_chars)
                     yield line_out
                 elif event == "failed":
                     fail_line = f"\n\n**[실패]** {obj.get('error', 'unknown error')}\n"
-                    stream_buffer.append(fail_line)
+                    stream_chars = _append_stream_chunk_capped(stream_buffer, chunk=fail_line, total_chars=stream_chars)
                     yield fail_line
                 else:
                     detail = obj.get("detail") or obj.get("message") or obj.get("content") or payload
                     other_line = f"[{event}] {detail}\n"
-                    stream_buffer.append(other_line)
+                    stream_chars = _append_stream_chunk_capped(stream_buffer, chunk=other_line, total_chars=stream_chars)
                     yield other_line
             except Exception:
                 raw_line = f"[{event}] {payload}\n"
-                stream_buffer.append(raw_line)
+                stream_chars = _append_stream_chunk_capped(stream_buffer, chunk=raw_line, total_chars=stream_chars)
                 yield raw_line
     if run_id:
-        st.session_state[f"mt_last_stream_content_{run_id}"] = "".join(stream_buffer)
+        _persist_stream_cache(run_id, stream_buffer)
 
 
 def _prefix_with_typed_append(prefix: str, addition: str) -> Iterator[str]:
-    """placeholder.write_stream용: 기존 본문은 즉시, 새 본문은 타이핑."""
-    if prefix:
-        yield prefix
-    for ch in addition:
-        yield ch
-        time.sleep(0.004)
+    """placeholder.write_stream용: 메모리 사용량을 줄이기 위해 전체 교체 텍스트를 1회 전달."""
+    merged = _trim_stream_tail(f"{prefix}{addition}")
+    if merged:
+        yield merged
 
 
 def _render_stream_waiting_indicator(placeholder: Any, status_text: str, node_name: str | None = None) -> None:
@@ -587,6 +621,7 @@ def sse_node_block_generator(stream_url: str, *, run_id: str | None = None) -> I
     - 같은 노드 내 이벤트는 prefix(현재 누적본)+addition(신규) 형태로 전달
     """
     history_buffer: list[str] = []
+    history_chars = 0
     current_block = ""
     current_node: str | None = None
     thinking_open = False
@@ -617,8 +652,8 @@ def sse_node_block_generator(stream_url: str, *, run_id: str | None = None) -> I
                 else:
                     done_line = "\n\n**분석 스트림 종료**\n"
                 prefix = current_block
-                current_block += done_line
-                history_buffer.append(done_line)
+                current_block = _trim_stream_tail(current_block + done_line)
+                history_chars = _append_stream_chunk_capped(history_buffer, chunk=done_line, total_chars=history_chars)
                 yield prefix, done_line
                 break
             try:
@@ -626,8 +661,8 @@ def sse_node_block_generator(stream_url: str, *, run_id: str | None = None) -> I
             except Exception:
                 raw_line = f"[{event_name}] {payload}\n"
                 prefix = current_block
-                current_block += raw_line
-                history_buffer.append(raw_line)
+                current_block = _trim_stream_tail(current_block + raw_line)
+                history_chars = _append_stream_chunk_capped(history_buffer, chunk=raw_line, total_chars=history_chars)
                 yield prefix, raw_line
                 continue
 
@@ -651,7 +686,7 @@ def sse_node_block_generator(stream_url: str, *, run_id: str | None = None) -> I
                         if message.strip():
                             st.session_state[status_key] = message[:220]
                     current_block = addition
-                    history_buffer.append(addition)
+                    history_chars = _append_stream_chunk_capped(history_buffer, chunk=addition, total_chars=history_chars)
                     yield "", addition
                     continue
 
@@ -761,12 +796,12 @@ def sse_node_block_generator(stream_url: str, *, run_id: str | None = None) -> I
                 continue
             addition = _humanize_stream_text(addition)
             prefix = current_block
-            current_block += addition
-            history_buffer.append(addition)
+            current_block = _trim_stream_tail(current_block + addition)
+            history_chars = _append_stream_chunk_capped(history_buffer, chunk=addition, total_chars=history_chars)
             yield prefix, addition
 
     if run_id:
-        st.session_state[f"mt_last_stream_content_{run_id}"] = "".join(history_buffer)
+        _persist_stream_cache(run_id, history_buffer)
 
 
 def fetch_case_bundle(voucher_key: str) -> dict[str, Any]:
@@ -3464,7 +3499,10 @@ def render_workspace_chat_panel(selected: dict[str, Any], latest_bundle: dict[st
             hitl_req = latest_bundle.get("hitl_request") or {}
             why = (hitl_req.get("why_hitl") or hitl_req.get("blocking_reason") or "").strip()
             if why and _need_hitl:
-                banner_text = f"검토 필요: {why[:100]}{'…' if len(why) > 100 else ''} 확인 후 이어서 진행하세요."
+                # 첫 문장만 추출 (마침표 기준), 없으면 45자 절삭 — 2줄 이내 표시
+                _first_sent = why.split(". ")[0].split("。")[0]
+                _why_short = _first_sent[:45] + ("…" if len(_first_sent) > 45 else "")
+                banner_text = f"검토 필요: {_why_short} — 확인 후 이어서 진행하세요."
             else:
                 banner_text = "검토 필요 상태입니다. 확인 후 이어서 진행하세요."
             st.markdown(
@@ -3910,6 +3948,24 @@ def _policy_label_compact(text: str) -> str:
 def _graph_claim_label(claim_text: str, supporting_articles: list[str] | None = None) -> str:
     label = _claim_display_label(claim_text, supporting_articles)
     return label.replace("규정 적용 검증", "규정 검증").strip()
+
+
+_RELATED_REASON_LABELS: dict[str, str] = {
+    "same_merchant": "동일 가맹점(40점)",
+    "same_mcc": "동일 업종 코드(25점)",
+    "same_case_type": "동일 케이스 유형(20점)",
+    "same_hr_status": "동일 근태 상태(15점)",
+}
+
+
+def _format_related_reasons(reasons: list[Any] | None) -> str:
+    labels: list[str] = []
+    for raw in (reasons or []):
+        key = str(raw or "").strip()
+        if not key:
+            continue
+        labels.append(_RELATED_REASON_LABELS.get(key, key))
+    return ", ".join(labels) if labels else "-"
 
 
 def _normalize_unsupported_claims(raw_claims: list[Any]) -> list[dict[str, Any]]:
@@ -4580,38 +4636,37 @@ def render_workspace_graph_insights(selected_key: str | None, latest_bundle: dic
             if len(edges) > 40:
                 st.caption(f"... 외 {len(edges) - 40}건")
 
-    # NOTE:
-    # 하단 "연관 케이스" 영역은 사용자 요청으로 임시 비노출 처리.
-    # 필요 시 아래 블록을 복구하면 기존 동작(related API 조회 + 그래프/리스트 렌더)이 그대로 동작한다.
-    # st.markdown("---")
-    # st.markdown("#### 연관 케이스")
-    # try:
-    #     related = get(f"/api/v1/graph/cases/{selected_key}/related?limit=10") or {}
-    # except Exception as e:
-    #     st.warning(f"연관 케이스 조회 실패: {e}")
-    #     related = {}
-    #
-    # items = related.get("items") or []
-    # if not items:
-    #     render_empty_state("연결 규칙에 매칭되는 연관 케이스가 없습니다.")
-    # else:
-    #     st.metric("연관 케이스 수", str(len(items)))
-    #     _render_related_graph_plotly(
-    #         selected_key,
-    #         items[:10],
-    #         key=f"mt_related_graph_{selected_key}_{run_id or 'none'}",
-    #     )
-    #     for i, row in enumerate(items[:10], start=1):
-    #         st.markdown(
-    #             f"**{i}. {row.get('voucher_key') or '-'}**  \n"
-    #             f"유형: {case_type_display_name(row.get('case_type'))} · "
-    #             f"상태: {status_display_name(row.get('status'))} · "
-    #             f"심각도: {severity_display_name(row.get('severity'))} · "
-    #             f"연결점수: {row.get('link_score') or 0}  \n"
-    #             f"사유: {', '.join(row.get('reasons') or []) or '-'}"
-    #         )
-    #         if i < min(len(items), 10):
-    #             st.markdown("---")
+    st.markdown("---")
+    st.markdown("#### 연관 케이스")
+    try:
+        related = get(f"/api/v1/graph/cases/{selected_key}/related?limit=10") or {}
+    except Exception as e:
+        st.warning(f"연관 케이스 조회 실패: {e}")
+        related = {}
+
+    items = related.get("items") or []
+    if not items:
+        render_empty_state("연결 규칙에 매칭되는 연관 케이스가 없습니다.")
+    else:
+        st.metric("연관 케이스 수", str(len(items)))
+        _render_related_graph_plotly(
+            selected_key,
+            items[:10],
+            key=f"mt_related_graph_{selected_key}_{run_id or 'none'}",
+        )
+        for i, row in enumerate(items[:10], start=1):
+            _sev = severity_display_name(row.get('severity'))
+            _sev_part = f"심각도: {_sev} · " if _sev and _sev != "-" else ""
+            st.markdown(
+                f"**{i}. {row.get('voucher_key') or '-'}**  \n"
+                f"유형: {case_type_display_name(row.get('case_type'))} · "
+                f"상태: {status_display_name(row.get('status'))} · "
+                f"{_sev_part}"
+                f"연결점수: {row.get('link_score') or 0}  \n"
+                f"사유: {_format_related_reasons(row.get('reasons'))}"
+            )
+            if i < min(len(items), 10):
+                st.markdown("---")
 
 
 def render_ai_workspace_page() -> None:
@@ -4975,6 +5030,7 @@ def render_ai_workspace_page() -> None:
                                 render_process_story(timeline, debug_mode=debug_mode, key_prefix="summary")
                     with tabs[1]:
                         render_workspace_evidence_map(latest_bundle, debug_mode)
+                        render_workspace_graph_insights(selected_key, latest_bundle)
                     with tabs[2]:
                         render_workspace_execution_review(latest_bundle, debug_mode)
                     with tabs[3]:
