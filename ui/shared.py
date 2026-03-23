@@ -34,7 +34,7 @@ def stylable_container(key: str, css_styles: str | list[str]):
 
 
 def inject_css() -> None:
-    sidebar_width = "280px"
+    sidebar_width = "224px"
     sidebar_padding_top = "0.4rem"
     css_template = """
         <style>

@@ -7,6 +7,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 import logging
+import re
 from typing import Any, Awaitable, Callable
 
 from langchain_core.tools import StructuredTool
@@ -140,13 +141,32 @@ async def document_evidence_probe(context: dict[str, Any]) -> dict[str, Any]:
 
 def _adoption_reason_for_ref(ref: dict[str, Any], body_evidence: dict[str, Any]) -> str:
     """규칙 + retrieval context 기반 채택 이유 한 줄 (발표용)."""
+    def _case_label(token: str) -> str:
+        return {
+            "HOLIDAY_USAGE": "휴일 사용 의심",
+            "LIMIT_EXCEED": "한도 초과 의심",
+            "PRIVATE_USE_RISK": "사적 사용 의심",
+            "UNUSUAL_PATTERN": "이상 패턴 의심",
+            "NORMAL_BASELINE": "정상 기준 검증",
+        }.get(token, token or "해당 케이스")
+
+    def _best_evidence_phrase(text: str, keywords: list[str]) -> str:
+        src = str(text or "").strip()
+        if not src:
+            return ""
+        # 문장 단위로 쪼개고 키워드가 매칭되는 문장을 우선 사용
+        sentences = [s.strip() for s in re.split(r"[。.!?\n]", src) if s.strip()]
+        for sentence in sentences:
+            if any(k and k in sentence for k in keywords):
+                return sentence[:48]
+        # 키워드 매칭이 없으면 앞부분만 짧게 노출
+        return src[:48]
+
     case_type = str(body_evidence.get("case_type") or body_evidence.get("intended_risk_type") or "").upper()
     article = ref.get("article") or ""
     parent_title = normalize_policy_parent_title(article, ref.get("parent_title"))[:40]
     score_raw = ref.get("retrieval_score")
-    score_part = f"rerank 점수 {float(score_raw):.2f}" if isinstance(score_raw, (int, float)) else ""
-    strategy = str(ref.get("source_strategy") or "").strip()
-    strategy_part = strategy if strategy else ""
+    score_part = f"유사도 {float(score_raw):.2f}" if isinstance(score_raw, (int, float)) else ""
 
     context_tokens: list[str] = []
     if body_evidence.get("isHoliday") is True:
@@ -165,6 +185,7 @@ def _adoption_reason_for_ref(ref: dict[str, Any], body_evidence: dict[str, Any])
         str(v or "")
         for v in [ref.get("chunk_text"), ref.get("parent_title"), ref.get("display_text"), ref.get("article")]
     )
+    evidence_phrase = _best_evidence_phrase(str(ref.get("chunk_text") or ""), context_tokens)
     matched_context: list[str] = []
     seen_context: set[str] = set()
     for tok in context_tokens:
@@ -175,23 +196,25 @@ def _adoption_reason_for_ref(ref: dict[str, Any], body_evidence: dict[str, Any])
             seen_context.add(tok_norm)
             matched_context.append(tok_norm)
 
-    meta_parts = [p for p in [score_part, strategy_part] if p]
+    meta_parts = [p for p in [score_part] if p]
     meta_suffix = f" ({', '.join(meta_parts)})" if meta_parts else ""
-    ctx_suffix = f" [맥락 일치: {', '.join(matched_context[:2])}]" if matched_context else ""
+    ctx_suffix = f" [맥락: {', '.join(matched_context[:2])}]" if matched_context else ""
+    phrase_suffix = f" · 근거문구: '{evidence_phrase}'" if evidence_phrase else ""
+    case_label = _case_label(case_type)
 
     if case_type in {"HOLIDAY_USAGE", "LIMIT_EXCEED", "PRIVATE_USE_RISK", "UNUSUAL_PATTERN"} and article:
         alignment = case_alignment_score(ref, body_evidence)
         if alignment >= 10:
-            return f"{case_type} 핵심 조건과 직접 일치하는 조항({article})이어서 채택{meta_suffix}{ctx_suffix}"
+            return f"{case_label} 핵심 조건과 직접 일치하는 조항({article})이어서 채택{meta_suffix}{ctx_suffix}{phrase_suffix}"
         if alignment <= -20:
-            return f"{case_type} 직접 조항은 아니지만 보조 참고용 조항({article})으로 채택{meta_suffix}{ctx_suffix}"
-        return f"{case_type} 판단 관련 조항({article})으로 채택{meta_suffix}{ctx_suffix}"
+            return f"{case_label} 직접 조항은 아니지만 보조 참고용 조항({article})으로 채택{meta_suffix}{ctx_suffix}{phrase_suffix}"
+        return f"{case_label} 판단 관련 조항({article})으로 채택{meta_suffix}{ctx_suffix}{phrase_suffix}"
     if case_type == "NORMAL_BASELINE":
         base = f"정상 케이스 기준 확인용 조항({article})으로 채택" if article else "정상 케이스 기준 확인용 조항으로 채택"
-        return f"{base}{meta_suffix}{ctx_suffix}"
+        return f"{base}{meta_suffix}{ctx_suffix}{phrase_suffix}"
     if parent_title:
-        return f"규정 '{parent_title}'과 관련되어 채택{meta_suffix}{ctx_suffix}"
-    return f"규정 근거로 채택{meta_suffix}{ctx_suffix}"
+        return f"규정 '{parent_title}'과 관련되어 채택{meta_suffix}{ctx_suffix}{phrase_suffix}"
+    return f"규정 근거로 채택{meta_suffix}{ctx_suffix}{phrase_suffix}"
 
 
 def _article_key(ref: dict[str, Any]) -> str:

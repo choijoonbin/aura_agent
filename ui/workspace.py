@@ -3070,6 +3070,12 @@ def render_workspace_case_queue(items: list[dict[str, Any]], selected_key: str |
     hitl_count = len(
         [item for item in items if str(item.get("case_status") or "").upper() in hitl_wait_statuses]
     )
+    # 워크스페이스 진입 기본값:
+    # - 검토 필요가 1건 이상이면 "검토 필요" 기본 선택
+    # - 검토 필요가 0건이면 "전체" 기본 선택
+    if "mt_case_filter" not in st.session_state:
+        st.session_state["mt_case_filter"] = "검토 필요" if review_count > 0 else "전체"
+
     # 상단 KPI(클릭) → 목록 필터 상태
     grouped = {
         "전체": items,
@@ -3080,17 +3086,11 @@ def render_workspace_case_queue(items: list[dict[str, Any]], selected_key: str |
     active_filter = str(st.session_state.get("mt_case_filter") or "전체")
     if active_filter not in grouped:
         active_filter = "전체"
-    # 선택 전표가 상태 변경으로 다른 버킷으로 이동한 경우,
-    # 좌측 카운트/목록 포커스도 해당 버킷으로 자동 동기화한다.
-    if selected_key and active_filter != "전체":
-        selected_bucket = None
-        for bucket_name in ("검토 필요", "완료", "HITL 대기"):
-            if any(str(item.get("voucher_key") or "") == str(selected_key) for item in grouped.get(bucket_name) or []):
-                selected_bucket = bucket_name
-                break
-        if selected_bucket and selected_bucket != active_filter:
-            active_filter = selected_bucket
-            st.session_state["mt_case_filter"] = selected_bucket
+        st.session_state["mt_case_filter"] = "전체"
+    # 검토 필요 건수가 0인데 필터가 검토 필요로 고정되어 있으면 전체로 자동 복귀
+    if active_filter == "검토 필요" and review_count == 0:
+        active_filter = "전체"
+        st.session_state["mt_case_filter"] = "전체"
 
     st.markdown(
         """
