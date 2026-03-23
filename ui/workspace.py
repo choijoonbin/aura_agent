@@ -4295,7 +4295,7 @@ def render_workspace_evidence_map(latest_bundle: dict[str, Any], debug_mode: boo
         # 예) "제39조 / 제39조 (주말·공휴일 제약)" → "C1. 제39조 (주말·공휴일 제약)"
         _display_title = normalize_policy_parent_title(_article, _parent_title) or _parent_title
         title = f"C{idx}. {_display_title}"
-        with st.expander(title, expanded=(idx == 1)):
+        with st.expander(title, expanded=False):
             with stylable_container(
                 key=f"process_story_evidence_ref_{latest_bundle.get('run_id') or 'none'}_{idx}",
                 css_styles="""{
@@ -4357,7 +4357,7 @@ def render_workspace_evidence_map(latest_bundle: dict[str, Any], debug_mode: boo
             gap = (item.get("gap") or "").strip()
             icon = "✅" if is_covered else "❌"
             claim_label = _claim_display_label(claim_text, supporting)
-            with st.expander(f"**{icon} 주장 {i}** — {claim_label}", expanded=(i == 1)):
+            with st.expander(f"**{icon} 주장 {i}** — {claim_label}", expanded=False):
                 with stylable_container(
                     key=f"process_story_evidence_claim_{latest_bundle.get('run_id') or 'none'}_{i}",
                     css_styles="""{

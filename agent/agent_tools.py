@@ -143,17 +143,55 @@ def _adoption_reason_for_ref(ref: dict[str, Any], body_evidence: dict[str, Any])
     case_type = str(body_evidence.get("case_type") or body_evidence.get("intended_risk_type") or "").upper()
     article = ref.get("article") or ""
     parent_title = normalize_policy_parent_title(article, ref.get("parent_title"))[:40]
+    score_raw = ref.get("retrieval_score")
+    score_part = f"rerank 점수 {float(score_raw):.2f}" if isinstance(score_raw, (int, float)) else ""
+    strategy = str(ref.get("source_strategy") or "").strip()
+    strategy_part = strategy if strategy else ""
+
+    context_tokens: list[str] = []
+    if body_evidence.get("isHoliday") is True:
+        context_tokens.extend(["휴일", "주말", "공휴일"])
+    expense_type = str(body_evidence.get("expenseTypeName") or "").strip()
+    if expense_type:
+        context_tokens.append(expense_type)
+    merchant = str(body_evidence.get("merchantName") or "").strip()
+    if merchant:
+        context_tokens.append(merchant[:4])
+    occurred_at = str(body_evidence.get("occurredAt") or "").strip()
+    if occurred_at and ("T23:" in occurred_at or "T00:" in occurred_at or "T01:" in occurred_at or "T02:" in occurred_at or "T03:" in occurred_at or "T04:" in occurred_at or "T05:" in occurred_at):
+        context_tokens.extend(["심야", "23:00", "06:00"])
+
+    ref_text = " ".join(
+        str(v or "")
+        for v in [ref.get("chunk_text"), ref.get("parent_title"), ref.get("display_text"), ref.get("article")]
+    )
+    matched_context: list[str] = []
+    seen_context: set[str] = set()
+    for tok in context_tokens:
+        tok_norm = tok.strip()
+        if not tok_norm or tok_norm in seen_context:
+            continue
+        if tok_norm in ref_text:
+            seen_context.add(tok_norm)
+            matched_context.append(tok_norm)
+
+    meta_parts = [p for p in [score_part, strategy_part] if p]
+    meta_suffix = f" ({', '.join(meta_parts)})" if meta_parts else ""
+    ctx_suffix = f" [맥락 일치: {', '.join(matched_context[:2])}]" if matched_context else ""
+
     if case_type in {"HOLIDAY_USAGE", "LIMIT_EXCEED", "PRIVATE_USE_RISK", "UNUSUAL_PATTERN"} and article:
         alignment = case_alignment_score(ref, body_evidence)
         if alignment >= 10:
-            return f"{case_type} 핵심 조건과 직접 일치하는 조항({article})이어서 채택"
+            return f"{case_type} 핵심 조건과 직접 일치하는 조항({article})이어서 채택{meta_suffix}{ctx_suffix}"
         if alignment <= -20:
-            return f"{case_type} 직접 조항은 아니지만 보조 참고용 조항({article})으로 채택"
-    if case_type == "NORMAL_BASELINE" and article:
-        return f"정상 케이스 검증에 필요한 기본 조항({article})이어서 채택"
+            return f"{case_type} 직접 조항은 아니지만 보조 참고용 조항({article})으로 채택{meta_suffix}{ctx_suffix}"
+        return f"{case_type} 판단 관련 조항({article})으로 채택{meta_suffix}{ctx_suffix}"
+    if case_type == "NORMAL_BASELINE":
+        base = f"정상 케이스 기준 확인용 조항({article})으로 채택" if article else "정상 케이스 기준 확인용 조항으로 채택"
+        return f"{base}{meta_suffix}{ctx_suffix}"
     if parent_title:
-        return f"규정 '{parent_title}'과 관련되어 채택"
-    return "규정 근거로 채택"
+        return f"규정 '{parent_title}'과 관련되어 채택{meta_suffix}{ctx_suffix}"
+    return f"규정 근거로 채택{meta_suffix}{ctx_suffix}"
 
 
 def _article_key(ref: dict[str, Any]) -> str:
