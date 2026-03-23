@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import html
+import hashlib
 import json
 import logging
 import math
@@ -3996,6 +3997,86 @@ def _graph_claim_label(claim_text: str, supporting_articles: list[str] | None = 
     return label.replace("규정 적용 검증", "규정 검증").strip()
 
 
+def _merge_policy_adoption_claim_nodes(
+    nodes: list[dict[str, Any]],
+    edges: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """
+    UI 표시용 병합:
+    policy_rulebook_probe 채택 조항 Claim(C3/C4 등)이 조항별로 분리되어도
+    사용자 관점에서는 하나의 '채택 조항 검증' 주장으로 보이도록 통합한다.
+    """
+    claim_nodes = [n for n in nodes if str(n.get("type") or "") == "Claim"]
+    target_ids = [
+        str(n.get("id") or "")
+        for n in claim_nodes
+        if "policy_rulebook_probe 채택 조항" in str(n.get("label") or "")
+    ]
+    target_ids = [x for x in target_ids if x]
+    if len(target_ids) <= 1:
+        return nodes, edges
+
+    rep_id = target_ids[0]
+    drop_ids = set(target_ids[1:])
+    id_to_node = {str(n.get("id") or ""): n for n in nodes}
+    rep_node = id_to_node.get(rep_id)
+    if not rep_node:
+        return nodes, edges
+
+    # 병합 대상 클레임의 조항 토큰을 하나로 합쳐 대표 라벨을 갱신
+    merged_articles: list[str] = []
+    seen_articles: set[str] = set()
+    for e in edges:
+        if str(e.get("type") or "") != "SUPPORTED_BY":
+            continue
+        frm = str(e.get("from") or "")
+        to = str(e.get("to") or "")
+        if frm not in set(target_ids):
+            continue
+        pnode = id_to_node.get(to) or {}
+        token = _extract_article_token(str(pnode.get("label") or ""))
+        if token and token not in seen_articles:
+            seen_articles.add(token)
+            merged_articles.append(token)
+    if merged_articles:
+        rep_node["label"] = f"policy_rulebook_probe 채택 조항 검증 ({', '.join(merged_articles)})"
+
+    merged_nodes: list[dict[str, Any]] = []
+    for n in nodes:
+        nid = str(n.get("id") or "")
+        if nid in drop_ids:
+            continue
+        merged_nodes.append(n)
+
+    merged_edges: list[dict[str, Any]] = []
+    seen_edge: set[str] = set()
+    for e in edges:
+        frm = str(e.get("from") or "")
+        to = str(e.get("to") or "")
+        et = str(e.get("type") or "")
+        if frm in drop_ids:
+            frm = rep_id
+        if to in drop_ids:
+            to = rep_id
+        # 자기 자신으로 수렴한 간선은 제거
+        if frm == to:
+            continue
+        # 병합 후 HAS_CLAIM은 동일 from/to/type 기준으로 1개만 유지
+        if et == "HAS_CLAIM":
+            key = f"{frm}|{et}|{to}"
+        else:
+            key = f"{frm}|{et}|{to}|{str(e.get('order') or '')}"
+        if key in seen_edge:
+            continue
+        seen_edge.add(key)
+        new_e = dict(e)
+        new_e["from"] = frm
+        new_e["to"] = to
+        merged_edges.append(new_e)
+
+    return merged_nodes, merged_edges
+
+
 _RELATED_REASON_LABELS: dict[str, str] = {
     "same_merchant": "동일 가맹점(40점)",
     "same_mcc": "동일 업종 코드(25점)",
@@ -4583,14 +4664,12 @@ def render_workspace_graph_insights(selected_key: str | None, latest_bundle: dic
 
     st.markdown("#### 근거 경로")
     try:
-        _explain_cache_key = f"mt_graph_explain_{selected_key}_{run_id}"
-        explain = st.session_state.get(_explain_cache_key)
-        if explain is None:
-            path = f"/api/v1/graph/cases/{selected_key}/explain"
-            if run_id:
-                path = f"{path}?run_id={run_id}"
-            explain = get(path) or {}
-            st.session_state[_explain_cache_key] = explain
+        # 그래프 인사이트는 데이터 신선도가 중요하므로 session 캐시를 사용하지 않는다.
+        # (전체삭제/재생성, 같은 run_id 재동기화 시 이전 그림 잔상 방지)
+        path = f"/api/v1/graph/cases/{selected_key}/explain"
+        if run_id:
+            path = f"{path}?run_id={run_id}"
+        explain = get(path) or {}
     except Exception as e:
         st.warning(f"근거 경로 조회 실패: {e}")
         explain = {}
@@ -4598,6 +4677,7 @@ def render_workspace_graph_insights(selected_key: str | None, latest_bundle: dic
     summary = explain.get("summary") or {}
     nodes = explain.get("nodes") or []
     edges = explain.get("edges") or []
+    nodes, edges = _merge_policy_adoption_claim_nodes(nodes, edges)
     if not nodes:
         render_empty_state("아직 그래프 데이터가 없습니다. 분석을 1회 실행해 주세요.")
     else:
@@ -4674,10 +4754,13 @@ def render_workspace_graph_insights(selected_key: str | None, latest_bundle: dic
                         unsafe_allow_html=True,
                     )
 
+        node_ids = ",".join(sorted(str(n.get("id") or "") for n in nodes))
+        edge_ids = ",".join(sorted(f"{e.get('from')}|{e.get('type')}|{e.get('to')}" for e in edges))
+        graph_sig = hashlib.md5(f"{node_ids}::{edge_ids}".encode("utf-8")).hexdigest()[:10]
         _render_explain_graph_plotly(
             nodes,
             edges,
-            key=f"mt_explain_graph_{selected_key}_{summary.get('run_id') or 'none'}",
+            key=f"mt_explain_graph_{selected_key}_{summary.get('run_id') or 'none'}_{graph_sig}",
         )
 
         with st.expander("근거 경로 상세(노드/관계)", expanded=False):

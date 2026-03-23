@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Iterable
 
 from services.policy_ref_normalizer import normalize_policy_parent_title, policy_display_label
 from utils.config import settings
@@ -89,6 +90,20 @@ def _extract_claim_results(result: dict[str, Any]) -> list[dict[str, Any]]:
                     out.append({"text": p, "covered": True, "supporting_articles": [], "gap": ""})
 
     return out[:8]
+
+
+def _extract_articles_from_text(text: str) -> list[str]:
+    """Claim 문장에서 조문 토큰(예: 제23조, 제39조)을 추출한다."""
+    raw = str(text or "")
+    hits = re.findall(r"(제\s*\d+\s*조)", raw)
+    out: list[str] = []
+    seen: set[str] = set()
+    for h in hits:
+        normalized = re.sub(r"\s+", "", h)
+        if normalized and normalized not in seen:
+            seen.add(normalized)
+            out.append(normalized)
+    return out
 
 
 class GraphDBService:
@@ -267,29 +282,57 @@ class GraphDBService:
             # claim → policy 정밀 연결 (supporting_articles 기반, covered 클레임만)
             for idx, cr in enumerate(claim_results, start=1):
                 claim_id = f"{run_id}:C{idx}"
-                if cr["covered"] and cr["supporting_articles"]:
-                    for article in cr["supporting_articles"]:
-                        pkey = article_to_policy_key.get(article)
-                        if pkey:
-                            s.run(
-                                """
-                                MATCH (cl:Claim {claim_id: $claim_id})
-                                MATCH (p:Policy {policy_key: $pkey})
-                                MERGE (cl)-[:SUPPORTED_BY]->(p)
-                                """,
-                                {"claim_id": claim_id, "pkey": pkey},
-                            )
-                        else:
-                            # policy_refs에 없지만 article이 명시된 경우: Policy 노드 생성 후 연결
-                            s.run(
-                                """
-                                MATCH (cl:Claim {claim_id: $claim_id})
-                                MERGE (p:Policy {policy_key: $article})
-                                SET p.article = $article
-                                MERGE (cl)-[:SUPPORTED_BY]->(p)
-                                """,
-                                {"claim_id": claim_id, "article": article},
-                            )
+                if not cr["covered"]:
+                    continue
+                articles = [str(a).strip() for a in (cr.get("supporting_articles") or []) if str(a).strip()]
+                if not articles:
+                    # fallback: supporting_articles 누락 시 claim 텍스트에서 조문을 추출해 연결한다.
+                    articles = _extract_articles_from_text(cr.get("text") or "")
+                for article in articles:
+                    pkey = article_to_policy_key.get(article)
+                    if pkey:
+                        s.run(
+                            """
+                            MATCH (cl:Claim {claim_id: $claim_id})
+                            MATCH (p:Policy {policy_key: $pkey})
+                            MERGE (cl)-[:SUPPORTED_BY]->(p)
+                            """,
+                            {"claim_id": claim_id, "pkey": pkey},
+                        )
+                        continue
+
+                    # article은 있으나 policy_key 매핑이 없으면 같은 run의 CITES Policy(article 일치)를 우선 연결
+                    row = s.run(
+                        """
+                        MATCH (r:Run {run_id: $run_id})-[:CITES]->(p:Policy)
+                        WHERE p.article = $article
+                        RETURN p.policy_key as policy_key
+                        LIMIT 1
+                        """,
+                        {"run_id": run_id, "article": article},
+                    ).single()
+                    if row and row.get("policy_key"):
+                        s.run(
+                            """
+                            MATCH (cl:Claim {claim_id: $claim_id})
+                            MATCH (p:Policy {policy_key: $pkey})
+                            MERGE (cl)-[:SUPPORTED_BY]->(p)
+                            """,
+                            {"claim_id": claim_id, "pkey": row.get("policy_key")},
+                        )
+                    else:
+                        # policy_refs에도 없고 run 내 CITES도 없으면 최소 Policy 노드를 생성해 연결
+                        s.run(
+                            """
+                            MATCH (r:Run {run_id: $run_id})
+                            MATCH (cl:Claim {claim_id: $claim_id})
+                            MERGE (p:Policy {policy_key: $article})
+                            SET p.article = $article
+                            MERGE (r)-[:CITES]->(p)
+                            MERGE (cl)-[:SUPPORTED_BY]->(p)
+                            """,
+                            {"run_id": run_id, "claim_id": claim_id, "article": article},
+                        )
 
     def get_explain_path(self, *, voucher_key: str, run_id: str | None = None) -> dict[str, Any]:
         drv = self._driver_or_none()
@@ -430,6 +473,53 @@ class GraphDBService:
 
         return {"enabled": True, "items": rows}
 
+    def purge_demo_data(self, *, voucher_keys: Iterable[str], run_ids: Iterable[str]) -> dict[str, Any]:
+        """시연 데이터 삭제 시 Neo4j의 Case/Run/Claim 흔적을 함께 정리한다."""
+        drv = self._driver_or_none()
+        if drv is None:
+            return {"enabled": False, "run_ids": 0, "voucher_keys": 0}
+
+        run_list = [str(x).strip() for x in run_ids if str(x).strip()]
+        voucher_list = [str(x).strip() for x in voucher_keys if str(x).strip()]
+        if not run_list and not voucher_list:
+            return {"enabled": True, "run_ids": 0, "voucher_keys": 0}
+
+        with drv.session(database=settings.neo4j_database) as s:
+            if run_list:
+                # Run에 매달린 Claim부터 제거 후 Run 제거
+                s.run(
+                    """
+                    UNWIND $run_ids AS rid
+                    OPTIONAL MATCH (:Run {run_id: rid})-[:HAS_CLAIM]->(cl:Claim)
+                    DETACH DELETE cl
+                    """,
+                    {"run_ids": run_list},
+                )
+                s.run(
+                    """
+                    UNWIND $run_ids AS rid
+                    OPTIONAL MATCH (r:Run {run_id: rid})
+                    DETACH DELETE r
+                    """,
+                    {"run_ids": run_list},
+                )
+
+            if voucher_list:
+                s.run(
+                    """
+                    UNWIND $voucher_keys AS vk
+                    OPTIONAL MATCH (c:Case {voucher_key: vk})
+                    DETACH DELETE c
+                    """,
+                    {"voucher_keys": voucher_list},
+                )
+
+            # 고아 노드 정리
+            s.run("MATCH (cl:Claim) WHERE NOT (cl)--() DELETE cl")
+            s.run("MATCH (p:Policy) WHERE NOT (p)--() DELETE p")
+
+        return {"enabled": True, "run_ids": len(run_list), "voucher_keys": len(voucher_list)}
+
 
 _graph_service = GraphDBService()
 
@@ -471,3 +561,7 @@ def get_case_explain_graph(*, voucher_key: str, run_id: str | None = None) -> di
 
 def get_related_cases_graph(*, voucher_key: str, limit: int = 10) -> dict[str, Any]:
     return _graph_service.get_related_cases(voucher_key=voucher_key, limit=limit)
+
+
+def purge_demo_graph_data(*, voucher_keys: Iterable[str], run_ids: Iterable[str]) -> dict[str, Any]:
+    return _graph_service.purge_demo_data(voucher_keys=voucher_keys, run_ids=run_ids)

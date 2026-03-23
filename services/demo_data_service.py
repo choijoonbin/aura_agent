@@ -14,6 +14,7 @@ from sqlalchemy import and_, delete, func, or_, select, text
 from sqlalchemy.orm import Session
 
 from db.models import AgentCase, FiDocHeader, FiDocItem
+from services.graph_db_service import purge_demo_graph_data
 from services.stream_runtime import runtime
 from utils.config import settings
 
@@ -1110,9 +1111,15 @@ def clear_demo_data(db: Session) -> dict[str, Any]:
     # DB 삭제와 함께 메모리 런타임 상태도 정리해 동일 case_id 재사용 시 과거 run 잔상이 보이지 않게 한다.
     runtime.purge_cases(case_ids_str)
     evidence_upload_deleted = _purge_beta_evidence_uploads(set(voucher_keys))
+    graph_purge = {"enabled": False, "run_ids": 0, "voucher_keys": 0}
+    try:
+        graph_purge = purge_demo_graph_data(voucher_keys=voucher_keys, run_ids=run_ids)
+    except Exception as e:
+        logger.warning("clear_demo_data: graph purge failed: %s", e)
     return {
         "deleted": deleted["fi_doc_header_deleted"],
         "run_count": len(run_ids),
         "evidence_upload_deleted": evidence_upload_deleted,
+        "graph_purge": graph_purge,
         **deleted,
     }
