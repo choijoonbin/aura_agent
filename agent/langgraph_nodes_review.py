@@ -242,6 +242,7 @@ def _filter_questions_by_context(
     *,
     preapproval_attached: bool,
     attendees_confirmed: bool,
+    evidence_attached: bool,
 ) -> list[str]:
     if not questions:
         return []
@@ -252,6 +253,59 @@ def _filter_questions_by_context(
         if preapproval_attached and any(k in compact for k in ("사전승인", "승인", "품의서", "전자결재", "전자결재")):
             continue
         if attendees_confirmed and any(k in compact for k in ("참석자", "참석인원", "동석", "내부외부")):
+            continue
+        if evidence_attached and any(
+            k in compact
+            for k in (
+                "증빙미비",
+                "증빙누락",
+                "필수증빙미비",
+                "필수증빙누락",
+                "추가제출",
+                "추가자료제출",
+                "추가자료",
+                "보완자료",
+            )
+        ):
+            continue
+        out.append(text)
+    return out
+
+
+def _is_low_quality_review_question(question: str, *, case_type: str) -> bool:
+    text = str(question or "").strip()
+    if not text:
+        return True
+    lowered = text.lower()
+    compact = re.sub(r"\s+", "", lowered)
+
+    # 케이스 맥락이 없는 추상 일반론 질문을 차단
+    generic_markers = (
+        "단일문헌", "단일 문헌", "추가자료", "추가 자료", "보완자료", "보완 자료",
+        "근거자료", "근거 자료", "자료가있는가", "자료가 있는가",
+    )
+    has_generic = any(m in compact or m in lowered for m in generic_markers)
+
+    # 질문에 케이스 특이 토큰이 있는지 확인
+    case_tokens = {"제23조", "제39조", "승인", "사전승인", "근태", "휴일", "주말", "공휴일", "심야", "23:00", "06:00", "가맹점", "식대"}
+    if str(case_type or "").upper() == "LIMIT_EXCEED":
+        case_tokens.update({"한도", "예산", "초과"})
+    elif str(case_type or "").upper() == "PRIVATE_USE_RISK":
+        case_tokens.update({"사적", "업무목적"})
+    elif str(case_type or "").upper() == "UNUSUAL_PATTERN":
+        case_tokens.update({"이상", "패턴"})
+
+    has_case_token = any(tok.lower() in lowered for tok in case_tokens)
+    return has_generic and not has_case_token
+
+
+def _filter_low_quality_questions(questions: list[str], *, case_type: str) -> list[str]:
+    out: list[str] = []
+    for q in (questions or []):
+        text = str(q or "").strip()
+        if not text:
+            continue
+        if _is_low_quality_review_question(text, case_type=case_type):
             continue
         out.append(text)
     return out
@@ -1184,7 +1238,27 @@ async def verify_node_impl(
             final_questions,
             preapproval_attached=checks["preapproval_attached"],
             attendees_confirmed=checks["attendees_confirmed"],
+            evidence_attached=checks["evidence_attached"],
         )
+        pre_quality_count = len(final_questions)
+        final_questions = _filter_low_quality_questions(final_questions, case_type=str(screening_case_type or ""))
+        if pre_quality_count and not final_questions:
+            retry_result = await retry_fill_hitl_review_when_empty(
+                hitl_request,
+                verification_summary,
+                claim_results_dicts,
+                reasoning_text,
+                empty_reasons=False,
+                empty_questions=True,
+            )
+            regenerated = [str(x).strip() for x in (retry_result.get("review_questions") or []) if str(x).strip()]
+            regenerated = _filter_questions_by_context(
+                regenerated,
+                preapproval_attached=checks["preapproval_attached"],
+                attendees_confirmed=checks["attendees_confirmed"],
+                evidence_attached=checks["evidence_attached"],
+            )
+            final_questions = _filter_low_quality_questions(regenerated, case_type=str(screening_case_type or ""))
         hitl_request["unresolved_claims"] = final_reasons[:5]
         hitl_request["review_questions"] = final_questions[:MAX_HITL_QUESTIONS]
         hitl_request["questions"] = final_questions[:MAX_HITL_QUESTIONS]

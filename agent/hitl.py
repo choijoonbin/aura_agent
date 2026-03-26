@@ -200,6 +200,16 @@ def build_hitl_request(
         evidence_snapshot.append({"type": "hr_status", "label": "근태 상태", "value": _label_hr_status(body_evidence.get("hrStatus"))})
     if document_facts.get("lineItemCount") is not None:
         evidence_snapshot.append({"type": "doc_fact", "label": "전표 라인", "value": f"{document_facts.get('lineItemCount')}건"})
+    pre_doc = body_evidence.get("preApprovalDoc") if isinstance(body_evidence.get("preApprovalDoc"), dict) else {}
+    pre_title = str(pre_doc.get("title") or "").strip()
+    pre_content = str(pre_doc.get("content") or "").strip()
+    if pre_title or pre_content:
+        evidence_snapshot.append({"type": "preapproval", "label": "품의서", "value": pre_title or "첨부됨"})
+        if pre_content:
+            pre_snippet = pre_content.replace("\n", " ").strip()
+            if len(pre_snippet) > 120:
+                pre_snippet = pre_snippet[:120] + "…"
+            evidence_snapshot.append({"type": "preapproval_excerpt", "label": "품의서 요약", "value": pre_snippet})
     for ref in policy_refs[:3]:
         article = ref.get("article") or "-"
         parent_title = ref.get("parent_title") or ref.get("title") or "-"

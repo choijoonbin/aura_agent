@@ -1972,14 +1972,12 @@ def _prime_hitl_form_state(run_id: str, latest_bundle: dict[str, Any]) -> dict[s
         or (prev_req.get("required_inputs") or [])
     )
     defaults = {
-        "reviewer": draft.get("reviewer") or "FINANCE_REVIEWER",
         "business_purpose": draft.get("business_purpose") or "",
         "attendees": ", ".join(draft.get("attendees") or []),
         "comment": draft.get("comment") or "",
         "decision": "승인 가능" if draft.get("approved") is True else "보류/추가 검토",
     }
     state_keys = {
-        "reviewer": _hitl_state_key("reviewer", run_id),
         "business_purpose": _hitl_state_key("business_purpose", run_id),
         "attendees": _hitl_state_key("attendees", run_id),
         "comment": _hitl_state_key("comment", run_id),
@@ -2077,7 +2075,68 @@ def _build_hitl_summary_sections(latest_bundle: dict[str, Any]) -> dict[str, lis
     preapproval_attached = bool(context_checks.get("preapproval_attached"))
     check_title = "검토자가 확인해야 할 내용" if not (evidence_attached and preapproval_attached) else "검토 참고 사항"
 
-    check_items = [str(x) for x in (hitl_request.get("review_questions") or hitl_request.get("questions") or []) if str(x).strip()]
+    def _normalize_review_question_text(question: str) -> str:
+        text = str(question or "").strip()
+        if not text:
+            return text
+        compact = re.sub(r"\s+", "", text.lower())
+        # "선택하세요/선택해주세요" 류는 담당자 입력 행동이 불명확해, 검토의견 기재 지시형으로 명확화
+        if (
+            "선택해주세요" in compact
+            or "선택해 주세요" in text
+            or "선택하세요" in compact
+            or "선택해 주세요." in text
+        ):
+            if "심야" in text or "23:00" in text or "06:00" in text:
+                return "해당 지출이 심야 시간(23:00~06:00)에 해당하는지 확인하고, 검토의견에 '해당/비해당'으로 기재해 주세요."
+            if "휴일" in text or "주말" in text or "공휴일" in text:
+                return "해당 지출이 휴일/주말/공휴일 사용인지 확인하고, 검토의견에 '해당/비해당'으로 기재해 주세요."
+            if "지출 항목" in text:
+                return "전표의 지출 항목 분류가 적정한지 확인하고, 검토의견에 판단 근거를 기재해 주세요."
+            if "승인" in text or "품의" in text:
+                return "사전 승인(품의) 여부를 확인하고, 검토의견에 승인 번호/근거와 함께 기재해 주세요."
+            return "해당 항목의 사실 여부를 확인하고, 검토의견에 판단 근거와 함께 기재해 주세요."
+        return text
+
+    def _is_evidence_missing_style_question(text: str) -> bool:
+        t = str(text or "").strip().lower()
+        c = re.sub(r"\s+", "", t)
+        return any(
+            token in c
+            for token in (
+                "증빙미비",
+                "증빙누락",
+                "필수증빙미비",
+                "필수증빙누락",
+                "추가제출",
+                "추가자료",
+                "보완자료",
+            )
+        )
+
+    def _normalize_required_input_for_reviewer(text: str) -> str:
+        q = str(text or "").strip()
+        if not q:
+            return q
+        compact = re.sub(r"\s+", "", q.lower())
+        # 입력자용 가이드 문구를 검토자 확인형 문장으로 치환
+        if "입력하세요" in compact or "입력해 주세요" in q:
+            if "주말" in q or "공휴일" in q or "휴일" in q:
+                return "주말/공휴일 식대 금액이 전표·증빙과 일치하는지 확인하고, 검토의견에 근거와 함께 기재해 주세요."
+            return q.replace("입력하세요", "입력되어 있는지 확인해 주세요.").replace("입력해 주세요", "입력되어 있는지 확인해 주세요.")
+        if "첨부하세요" in compact or "첨부해 주세요" in q:
+            return q.replace("첨부하세요", "첨부되어 있는지 확인해 주세요.").replace("첨부해 주세요", "첨부되어 있는지 확인해 주세요.")
+        if "작성하세요" in compact or "작성해 주세요" in q:
+            return q.replace("작성하세요", "작성되어 있는지 확인해 주세요.").replace("작성해 주세요", "작성되어 있는지 확인해 주세요.")
+        return q
+
+    check_items = [
+        _normalize_review_question_text(str(x))
+        for x in (hitl_request.get("review_questions") or hitl_request.get("questions") or [])
+        if str(x).strip()
+    ]
+    if evidence_attached:
+        check_items = [q for q in check_items if not _is_evidence_missing_style_question(q)]
     if not check_items:
         req_checks: list[str] = []
         for req in (hitl_request.get("required_inputs") or []):
@@ -2085,7 +2144,7 @@ def _build_hitl_summary_sections(latest_bundle: dict[str, Any]) -> dict[str, lis
                 continue
             q = str(req.get("guide") or req.get("reason") or "").strip()
             if q:
-                req_checks.append(q)
+                req_checks.append(_normalize_required_input_for_reviewer(q))
         seen_q: set[str] = set()
         dedup_req: list[str] = []
         for q in req_checks:
@@ -2111,6 +2170,8 @@ def _build_hitl_summary_sections(latest_bundle: dict[str, Any]) -> dict[str, lis
         label = item.get("label")
         value = item.get("value")
         if label and value:
+            if str(label).strip() in {"품의서", "품의서 요약"}:
+                continue
             evidence_lines.append(f"{label}: {value}")
     if not evidence_lines:
         case_type = screening_meta.get("caseType") or screening_meta.get("case_type") or result.get("case_type")
@@ -2899,10 +2960,39 @@ def render_hitl_panel(latest_bundle: dict[str, Any], *, vkey: str | None = None)
                 else:
                     st.caption("- 이전 제출 답변 없음")
 
-        st.text_input("검토자", key=form_keys["reviewer"])
+        pre_doc_title = ""
+        pre_doc_summary = ""
+        for snap in (hitl_request.get("evidence_snapshot") or []):
+            if not isinstance(snap, dict):
+                continue
+            lbl = str(snap.get("label") or "").strip()
+            val = str(snap.get("value") or "").strip()
+            if not val:
+                continue
+            if lbl == "품의서":
+                pre_doc_title = val
+            elif lbl == "품의서 요약":
+                pre_doc_summary = val
+
+        reviewer_col, pre_doc_col = st.columns([0.45, 0.55])
+        with reviewer_col:
+            st.text_input(
+                "품의서",
+                value=pre_doc_title or "첨부되지 않음",
+                disabled=True,
+                key=f"hitl_pre_doc_title_{run_id}",
+            )
+        with pre_doc_col:
+            st.text_input(
+                "품의서 요약",
+                value=pre_doc_summary or "-",
+                disabled=True,
+                key=f"hitl_pre_doc_summary_{run_id}",
+            )
+
         comment_placeholder = "표시된 확인사항과 근거요약을 참고해 승인/보류 판단 근거를 작성하세요."
         st.text_area(
-            "검토 의견",
+            "검토 의견(FINANCE 담당자)",
             height=96,
             key=form_keys["comment"],
             placeholder=comment_placeholder,
@@ -2919,7 +3009,6 @@ def render_hitl_panel(latest_bundle: dict[str, Any], *, vkey: str | None = None)
 
         # 통합 제출: 버튼은 상단(담당자 검토 라인 우측)에 있음
         if submit_clicked:
-            reviewer = str(st.session_state.get(form_keys["reviewer"], "") or "").strip()
             comment = str(st.session_state.get(form_keys["comment"], "") or "").strip()
             # 위 st.radio() 반환값 사용 — session_state 기본값으로 인한 approved=False 오류 방지
             approved = decision_val == "승인 가능"
@@ -2929,7 +3018,7 @@ def render_hitl_panel(latest_bundle: dict[str, Any], *, vkey: str | None = None)
                 approved,
             )
             hitl_response = {
-                "reviewer": reviewer or "FINANCE_REVIEWER",
+                "reviewer": "FINANCE_REVIEWER",
                 "comment": comment or None,
                 "approved": approved,
             }
@@ -4868,11 +4957,7 @@ def render_workspace_graph_insights(selected_key: str | None, latest_bundle: dic
     st.markdown("---")
     st.markdown("#### 연관 케이스")
     try:
-        _related_cache_key = f"mt_graph_related_{selected_key}"
-        related = st.session_state.get(_related_cache_key)
-        if related is None:
-            related = get(f"/api/v1/graph/cases/{selected_key}/related?limit=10") or {}
-            st.session_state[_related_cache_key] = related
+        related = get(f"/api/v1/graph/cases/{selected_key}/related?limit=10") or {}
     except Exception as e:
         st.warning(f"연관 케이스 조회 실패: {e}")
         related = {}

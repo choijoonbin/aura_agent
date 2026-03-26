@@ -85,9 +85,9 @@ class Settings:
     # Hybrid scoring/judge
     llm_judge_enabled: bool = os.getenv("LLM_JUDGE_ENABLED", "false").lower() == "true"
     llm_judge_model: str = os.getenv("LLM_JUDGE_MODEL", "gpt-4o-mini")
-    llm_judge_timeout_ms: int = int(os.getenv("LLM_JUDGE_TIMEOUT_MS", "3000"))
-    llm_judge_slo_p95_ms: int = int(os.getenv("LLM_JUDGE_SLO_P95_MS", "3000"))
-    llm_judge_max_retries: int = int(os.getenv("LLM_JUDGE_MAX_RETRIES", "2"))
+    llm_judge_timeout_ms: int = int(os.getenv("LLM_JUDGE_TIMEOUT_MS", "15000"))  # TODO: 원복 3000
+    llm_judge_slo_p95_ms: int = int(os.getenv("LLM_JUDGE_SLO_P95_MS", "15000"))  # TODO: 원복 3000
+    llm_judge_max_retries: int = int(os.getenv("LLM_JUDGE_MAX_RETRIES", "1"))  # TODO: 원복 2
     llm_judge_conflict_threshold: int = int(os.getenv("LLM_JUDGE_CONFLICT_THRESHOLD", "20"))
     llm_judge_circuit_window: int = int(os.getenv("LLM_JUDGE_CIRCUIT_WINDOW", "10"))
     llm_judge_circuit_failure_threshold: float = float(os.getenv("LLM_JUDGE_CIRCUIT_FAILURE_THRESHOLD", "0.5"))
