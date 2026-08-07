@@ -1,52 +1,21 @@
-# Environment variables
 .env
 .env.local
 .env.*.local
 
-# Python
 __pycache__/
 *.py[cod]
-*$py.class
-*.so
-.Python
+.pytest_cache/
+.coverage
+htmlcov/
 build/
 dist/
 *.egg-info/
-.eggs/
-*.egg
 
-# Virtual environments
-venv/
 .venv/
-env/
-ENV/
+.venv*/
+venv/
 
-# IDE
 .idea/
 .vscode/
-*.swp
-*.swo
-
-# OS
 .DS_Store
-Thumbs.db
-
-# Logs
 *.log
-logs/
-
-# Test artifacts
-.pytest_cache/
-htmlcov/
-.coverage
-
-# Streamlit
-.streamlit/secrets.toml
-
-# Local docs (keep local only)
-/docs/
-/규정집/
-
-# Local runtime artifacts
-/data/evidence_uploads/
-/.claude/
