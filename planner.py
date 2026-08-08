@@ -17,22 +17,29 @@ def build_reference_plan(
     *,
     tenant_id: str,
     user_id: str,
+    roles: list[str],
+    correlation_id: str,
 ) -> PlanPreviewResponse:
+    normalized_roles = sorted({role.strip() for role in roles if role.strip()})
     canonical_request = dumps(
         {
             "tenantId": tenant_id,
             "userId": user_id,
+            "roles": normalized_roles,
             **request.model_dump(mode="json", by_alias=True),
         },
         ensure_ascii=True,
         separators=(",", ":"),
         sort_keys=True,
     )
-    digest = sha256(canonical_request.encode("utf-8")).hexdigest()[:16]
+    plan_hash = sha256(canonical_request.encode("utf-8")).hexdigest()
+    digest = plan_hash[:16]
 
     return PlanPreviewResponse(
         run_id=f"run-ref-{digest}",
         audit_id=f"AUD-REF-{digest.upper()}",
+        plan_hash=plan_hash,
+        correlation_id=correlation_id,
         state=PlanState.REVIEW,
         risk_tier=RiskTier.L2,
         approval_required=True,

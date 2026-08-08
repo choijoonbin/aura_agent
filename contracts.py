@@ -47,6 +47,8 @@ class PlanStep(ContractModel):
 class PlanPreviewResponse(ContractModel):
     run_id: str
     audit_id: str
+    plan_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
+    correlation_id: str = Field(min_length=1, max_length=128)
     state: PlanState
     risk_tier: RiskTier
     approval_required: bool
