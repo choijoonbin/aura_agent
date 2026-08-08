@@ -4,6 +4,7 @@ from hashlib import sha256
 from json import dumps
 
 from contracts import (
+    AgentRegistryResolution,
     PlanPreviewRequest,
     PlanPreviewResponse,
     PlanState,
@@ -19,6 +20,7 @@ def build_reference_plan(
     user_id: str,
     roles: list[str],
     correlation_id: str,
+    agent_registry: AgentRegistryResolution,
 ) -> PlanPreviewResponse:
     normalized_roles = sorted({role.strip() for role in roles if role.strip()})
     canonical_request = dumps(
@@ -26,6 +28,7 @@ def build_reference_plan(
             "tenantId": tenant_id,
             "userId": user_id,
             "roles": normalized_roles,
+            "agentRegistry": agent_registry.model_dump(mode="json", by_alias=True),
             **request.model_dump(mode="json", by_alias=True),
         },
         ensure_ascii=True,
@@ -67,4 +70,5 @@ def build_reference_plan(
         ],
         source_references=list(request.source_references),
         reference_mode=True,
+        agent_registry=agent_registry,
     )

@@ -3,11 +3,12 @@ from __future__ import annotations
 import os
 from typing import Annotated
 
-from fastapi import Depends, FastAPI, Header
+from fastapi import Depends, FastAPI, Header, HTTPException, status
 
 from audit import record_plan_preview
 from contracts import PlanPreviewEnvelope, PlanPreviewRequest
 from planner import build_reference_plan
+from registry import RegistryResolutionError, resolve_agent
 from security import require_gateway_service
 
 
@@ -50,12 +51,25 @@ def preview_plan(
     roles: Annotated[str | None, Header(alias="X-DWP-Roles")] = None,
 ) -> PlanPreviewEnvelope:
     verified_roles = [] if roles is None else roles.split(",")
+    try:
+        agent_registry = resolve_agent(
+            request.agent_key,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            correlation_id=correlation_id,
+        )
+    except RegistryResolutionError as error:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="An active Agent registry contract is required.",
+        ) from error
     plan = build_reference_plan(
         request,
         tenant_id=tenant_id,
         user_id=user_id,
         roles=verified_roles,
         correlation_id=correlation_id,
+        agent_registry=agent_registry,
     )
     record_plan_preview(
         plan,

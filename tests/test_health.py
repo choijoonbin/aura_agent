@@ -3,9 +3,11 @@ import json
 import logging
 
 import pytest
+import httpx
 from httpx import ASGITransport, AsyncClient
 
 from main import app
+from registry import resolve_agent
 
 
 SERVICE_TOKEN = "test-gateway-service-token"
@@ -14,6 +16,9 @@ SERVICE_TOKEN = "test-gateway-service-token"
 @pytest.fixture(autouse=True)
 def configured_service_identity(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DWP_AGENT_SERVICE_TOKEN", SERVICE_TOKEN)
+    monkeypatch.setenv("DWP_AGENT_REGISTRY_MODE", "optional")
+    monkeypatch.delenv("SERVICE_PLATFORM_URL", raising=False)
+    monkeypatch.delenv("DWP_PLATFORM_RUNTIME_SERVICE_TOKEN", raising=False)
 
 
 async def get(path: str):
@@ -95,6 +100,13 @@ def test_plan_preview_is_deterministic_and_never_mutates() -> None:
     assert plan["approvalRequired"] is True
     assert plan["mutationAllowed"] is False
     assert plan["referenceMode"] is True
+    assert plan["agentRegistry"] == {
+        "entryKey": "REFERENCE_PLANNER",
+        "revision": 0,
+        "artifactVersion": "reference",
+        "riskTier": "MEDIUM",
+        "resolution": "REFERENCE_FALLBACK",
+    }
     assert [step["tool"] for step in plan["steps"]] == [
         "policy.check",
         "tool.preview",
@@ -232,3 +244,71 @@ def test_audit_event_excludes_raw_intent_sources_and_service_token(
     assert intent not in caplog.text
     assert source not in caplog.text
     assert SERVICE_TOKEN not in caplog.text
+
+
+def test_agent_registry_resolves_active_tenant_revision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SERVICE_PLATFORM_URL", "http://platform.local")
+    monkeypatch.setenv("DWP_PLATFORM_RUNTIME_SERVICE_TOKEN", "platform-token")
+
+    def get_registry(url: str, **kwargs) -> httpx.Response:
+        assert url.endswith("/v1/catalog/registry-entries/AGENT/REFERENCE_PLANNER")
+        assert kwargs["headers"]["X-DWP-Service-Token"] == "platform-token"
+        assert kwargs["headers"]["X-DWP-Tenant-ID"] == "7"
+        return httpx.Response(
+            200,
+            json={
+                "data": {
+                    "registryType": "AGENT",
+                    "entryKey": "REFERENCE_PLANNER",
+                    "revision": 3,
+                    "artifactVersion": "2.1.0",
+                    "riskTier": "HIGH",
+                }
+            },
+        )
+
+    monkeypatch.setattr("registry.httpx.get", get_registry)
+
+    resolution = resolve_agent(
+        "reference_planner",
+        tenant_id="7",
+        user_id="11",
+        correlation_id="corr-registry",
+    )
+
+    assert resolution.model_dump(mode="json", by_alias=True) == {
+        "entryKey": "REFERENCE_PLANNER",
+        "revision": 3,
+        "artifactVersion": "2.1.0",
+        "riskTier": "HIGH",
+        "resolution": "ACTIVE",
+    }
+
+
+def test_enforced_registry_mode_fails_closed_when_unconfigured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DWP_AGENT_REGISTRY_MODE", "enforced")
+
+    response = asyncio.run(
+        post(
+            "/v1/plans/preview",
+            json={
+                "requestId": "request-registry",
+                "intent": "Preview a request",
+                "action": "request",
+                "target": "service/request",
+                "agentKey": "REFERENCE_PLANNER",
+            },
+            headers={
+                "X-DWP-Service-Token": SERVICE_TOKEN,
+                "X-DWP-User-ID": "1",
+                "X-DWP-Tenant-ID": "1",
+                "X-Correlation-ID": "correlation-registry",
+            },
+        )
+    )
+
+    assert response.status_code == 503

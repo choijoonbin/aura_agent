@@ -29,12 +29,36 @@ class PlanState(StrEnum):
     REVIEW = "REVIEW"
 
 
+class RegistryRiskTier(StrEnum):
+    LOW = "LOW"
+    MEDIUM = "MEDIUM"
+    HIGH = "HIGH"
+    CRITICAL = "CRITICAL"
+
+
+class RegistryResolutionStatus(StrEnum):
+    ACTIVE = "ACTIVE"
+    REFERENCE_FALLBACK = "REFERENCE_FALLBACK"
+
+
+class AgentRegistryResolution(ContractModel):
+    entry_key: str = Field(pattern=r"^[A-Z][A-Z0-9_.-]{0,99}$")
+    revision: int = Field(ge=0)
+    artifact_version: str = Field(min_length=1, max_length=64)
+    risk_tier: RegistryRiskTier
+    resolution: RegistryResolutionStatus
+
+
 class PlanPreviewRequest(ContractModel):
     request_id: str = Field(min_length=1, max_length=128)
     intent: str = Field(min_length=1, max_length=2_000)
     action: str = Field(min_length=1, max_length=128)
     target: str = Field(min_length=1, max_length=256)
     source_references: list[str] = Field(default_factory=list, max_length=20)
+    agent_key: str = Field(
+        default="REFERENCE_PLANNER",
+        pattern=r"^[A-Za-z][A-Za-z0-9_.-]{0,99}$",
+    )
 
 
 class PlanStep(ContractModel):
@@ -57,6 +81,7 @@ class PlanPreviewResponse(ContractModel):
     steps: list[PlanStep]
     source_references: list[str]
     reference_mode: bool
+    agent_registry: AgentRegistryResolution
 
 
 class PlanPreviewEnvelope(ContractModel):
