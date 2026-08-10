@@ -9,6 +9,7 @@ from audit import record_plan_preview
 from contracts import PlanPreviewEnvelope, PlanPreviewRequest
 from planner import build_reference_plan
 from registry import RegistryResolutionError, resolve_agent
+from observability import install_api_history
 from security import require_gateway_service
 
 
@@ -16,6 +17,7 @@ SERVICE_NAME = os.getenv("APP_NAME", "DWP Agent Runtime")
 SERVICE_VERSION = os.getenv("APP_VERSION", "0.2.0")
 
 app = FastAPI(title=SERVICE_NAME, version=SERVICE_VERSION)
+install_api_history(app)
 
 
 @app.get("/", include_in_schema=False)
