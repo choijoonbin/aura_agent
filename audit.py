@@ -39,6 +39,15 @@ def record_plan_preview(
             "agentKey": plan.agent_registry.entry_key,
             "agentRevision": plan.agent_registry.revision,
             "registryResolution": plan.agent_registry.resolution,
+            "adminCommandKey": (
+                plan.admin_command.command_key if plan.admin_command is not None else None
+            ),
+            "adminCommandRevision": (
+                plan.admin_command.catalog_revision if plan.admin_command is not None else None
+            ),
+            "targetService": (
+                plan.admin_command.target_service if plan.admin_command is not None else None
+            ),
             "roleCount": role_count,
             "sourceCount": len(plan.source_references),
         },

@@ -3,7 +3,9 @@ from __future__ import annotations
 from hashlib import sha256
 from json import dumps
 
+from admin_commands import resolve_admin_command
 from contracts import (
+    AdminCommandResolution,
     AgentRegistryResolution,
     PlanPreviewRequest,
     PlanPreviewResponse,
@@ -23,12 +25,39 @@ def build_reference_plan(
     agent_registry: AgentRegistryResolution,
 ) -> PlanPreviewResponse:
     normalized_roles = sorted({role.strip() for role in roles if role.strip()})
+    admin_change = request.admin_change
+    command_definition = (
+        resolve_admin_command(
+            admin_change.command_key,
+            admin_change.target_type,
+            admin_change.parameters,
+        )
+        if admin_change is not None
+        else None
+    )
+    command_resolution = (
+        AdminCommandResolution(
+            command_key=command_definition.command_key,
+            catalog_revision=command_definition.catalog_revision,
+            target_service=command_definition.target_service,
+            http_method=command_definition.http_method,
+            endpoint_template=command_definition.endpoint_template,
+            required_permission=command_definition.required_permission,
+        )
+        if command_definition is not None
+        else None
+    )
     canonical_request = dumps(
         {
             "tenantId": tenant_id,
             "userId": user_id,
             "roles": normalized_roles,
             "agentRegistry": agent_registry.model_dump(mode="json", by_alias=True),
+            "adminCommandResolution": (
+                command_resolution.model_dump(mode="json", by_alias=True)
+                if command_resolution is not None
+                else None
+            ),
             **request.model_dump(mode="json", by_alias=True),
         },
         ensure_ascii=True,
@@ -37,8 +66,6 @@ def build_reference_plan(
     )
     plan_hash = sha256(canonical_request.encode("utf-8")).hexdigest()
     digest = plan_hash[:16]
-    admin_change = request.admin_change
-
     steps = [
         PlanStep(
             id="verify-sources",
@@ -52,10 +79,11 @@ def build_reference_plan(
             PlanStep(
                 id="validate-admin-command",
                 title="Validate scope, authority, and target revision",
-                tool="admin.command.validate",
+                tool="admin.command.resolve",
                 description=(
-                    "Resolve effective permission and separation-of-duty policy, then stop on "
-                    "tenant scope or expected-version mismatch."
+                    f"Require {command_definition.required_permission} and resolve the versioned "
+                    f"{command_definition.target_service} service contract. Stop on tenant scope, "
+                    "separation-of-duty, or expected-version mismatch."
                 ),
             )
         )
@@ -64,8 +92,17 @@ def build_reference_plan(
             PlanStep(
                 id="prepare-preview",
                 title=f"Prepare the {request.action} preview",
-                tool="tool.preview",
-                description="Build a reversible preview without changing the source system.",
+                tool=(
+                    f"{command_definition.target_service}.preview"
+                    if command_definition is not None
+                    else "tool.preview"
+                ),
+                description=(
+                    f"Prepare {command_definition.http_method} "
+                    f"{command_definition.endpoint_template} without invoking the mutation."
+                    if command_definition is not None
+                    else "Build a reversible preview without changing the source system."
+                ),
             ),
             PlanStep(
                 id="human-gate",
@@ -94,4 +131,5 @@ def build_reference_plan(
         source_references=list(request.source_references),
         reference_mode=True,
         agent_registry=agent_registry,
+        admin_command=command_resolution,
     )

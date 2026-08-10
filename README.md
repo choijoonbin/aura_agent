@@ -60,8 +60,14 @@ cd ../dwp-backend
 
 관리자 자동화는 요청의 선택적 `adminChange` 계약으로만 표현합니다. 이 계약은
 `commandKey`, 대상 종류·ID, `expectedVersion`, 구조화 파라미터와 사유를 요구하며
-항상 L3로 분류됩니다. 현재 단계에서는 권한·테넌트 범위·직무분리·버전 충돌을
-검사하는 Preview와 사람 승인 단계만 만들고 실제 변경 Endpoint는 제공하지 않습니다.
+항상 L3로 분류됩니다. 허용 명령은 `admin_commands.py`의 버전형 카탈로그에 등록되며,
+명령별 대상 유형·파라미터 스키마·필수 권한·담당 서비스·HTTP 계약이 일치하지 않으면
+요청 단계에서 Fail Closed 됩니다. 현재 카탈로그는 Access, Navigation, HRIS, SCIM,
+Provider Tenant 작업만 허용합니다. 해석한 카탈로그 Revision과 서비스 계약은
+`planHash`, 응답, 구조화 감사 Event에 포함됩니다.
+
+현재 단계에서는 권한·테넌트 범위·직무분리·버전 충돌을 검사하는 Preview와 사람 승인
+단계만 만들고 실제 변경 Endpoint를 호출하지 않습니다.
 향후 실행기는 승인된 `planHash`와 Typed Command만 받아 Backend API를 호출하며,
 Agent가 데이터베이스를 직접 변경하는 방식은 허용하지 않습니다.
 

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from enum import StrEnum
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
 
 
 def to_camel(value: str) -> str:
@@ -57,6 +57,22 @@ class AdminChangeIntent(ContractModel):
     parameters: dict[str, JsonValue] = Field(default_factory=dict, max_length=50)
     justification: str = Field(min_length=3, max_length=1_000)
 
+    @model_validator(mode="after")
+    def validate_registered_command(self) -> "AdminChangeIntent":
+        from admin_commands import resolve_admin_command
+
+        resolve_admin_command(self.command_key, self.target_type, self.parameters)
+        return self
+
+
+class AdminCommandResolution(ContractModel):
+    command_key: str
+    catalog_revision: int = Field(ge=1)
+    target_service: str
+    http_method: str
+    endpoint_template: str
+    required_permission: str
+
 
 class PlanPreviewRequest(ContractModel):
     request_id: str = Field(min_length=1, max_length=128)
@@ -92,6 +108,7 @@ class PlanPreviewResponse(ContractModel):
     source_references: list[str]
     reference_mode: bool
     agent_registry: AgentRegistryResolution
+    admin_command: AdminCommandResolution | None = None
 
 
 class PlanPreviewEnvelope(ContractModel):

@@ -43,9 +43,15 @@ def admin_change_payload(expected_version: int = 4) -> dict:
         "adminChange": {
             "commandKey": "ACCESS.GROUP_ROLE.ASSIGN",
             "targetType": "GROUP",
-            "targetId": "operations",
+            "targetId": "84",
             "expectedVersion": expected_version,
-            "parameters": {"roleCode": "HELP_DESK", "effectiveFrom": "2026-08-10"},
+            "parameters": {
+                "groupId": 84,
+                "roleId": 12,
+                "assignmentType": "ACTIVE",
+                "scopeType": "TENANT",
+                "validFrom": "2026-08-10T00:00:00Z",
+            },
             "justification": "Operations staff require governed help desk access.",
         },
     }
@@ -60,10 +66,18 @@ def test_admin_change_is_high_risk_preview_only() -> None:
     assert plan["approvalRequired"] is True
     assert plan["mutationAllowed"] is False
     assert "ACCESS.GROUP_ROLE.ASSIGN" in plan["summary"]
+    assert plan["adminCommand"] == {
+        "commandKey": "ACCESS.GROUP_ROLE.ASSIGN",
+        "catalogRevision": 1,
+        "targetService": "auth",
+        "httpMethod": "POST",
+        "endpointTemplate": "/auth/admin/access/governance/group-role-assignments",
+        "requiredPermission": "access:group-role:assign",
+    }
     assert [step["tool"] for step in plan["steps"]] == [
         "policy.check",
-        "admin.command.validate",
-        "tool.preview",
+        "admin.command.resolve",
+        "auth.preview",
         "workflow.human-approval",
     ]
 
@@ -87,19 +101,25 @@ def test_admin_change_hash_binds_tenant_and_expected_version() -> None:
     "admin_change",
     [
         {
-            "commandKey": "assign role",
+            "commandKey": "ACCESS.UNREGISTERED.COMMAND",
             "targetType": "GROUP",
             "targetId": "operations",
             "expectedVersion": 1,
-            "justification": "Invalid free-form command key.",
+            "justification": "Unregistered commands must fail closed.",
         },
         {
             "commandKey": "ACCESS.GROUP_ROLE.ASSIGN",
             "targetType": "GROUP",
             "targetId": "operations",
             "expectedVersion": 1,
+            "parameters": {
+                "groupId": 84,
+                "roleId": 12,
+                "assignmentType": "ACTIVE",
+                "scopeType": "TENANT",
+                "rawSql": "update roles set code = 'ADMIN'",
+            },
             "justification": "Unknown fields must fail closed.",
-            "rawSql": "update roles set code = 'ADMIN'",
         },
     ],
 )
@@ -107,5 +127,120 @@ def test_admin_change_rejects_untyped_or_unknown_commands(admin_change: dict) ->
     response = asyncio.run(
         post_preview({**admin_change_payload(), "adminChange": admin_change})
     )
+
+    assert response.status_code == 422
+
+
+@pytest.mark.parametrize(
+    ("command_key", "target_type", "parameters", "target_service"),
+    [
+        (
+            "ACCESS.GROUP_ROLE.ASSIGN",
+            "GROUP",
+            {
+                "groupId": 10,
+                "roleId": 20,
+                "assignmentType": "ELIGIBLE",
+                "scopeType": "RESOURCE",
+                "scopeRef": "app:people",
+            },
+            "auth",
+        ),
+        ("ACCESS.GROUP_ROLE.REVOKE", "GROUP_ROLE_ASSIGNMENT", {}, "auth"),
+        (
+            "ACCESS.ROLE.PERMISSION.REPLACE",
+            "ROLE",
+            {
+                "permissions": [
+                    {
+                        "resourceId": 12,
+                        "permissionCode": "READ",
+                        "effect": "ALLOW",
+                    }
+                ]
+            },
+            "auth",
+        ),
+        ("NAVIGATION.ITEM.PUBLISH", "NAVIGATION_ITEM", {}, "platform"),
+        (
+            "NAVIGATION.ORDER.UPDATE",
+            "NAVIGATION_TREE",
+            {
+                "items": [
+                    {
+                        "navigationItemId": 7,
+                        "parentNavigationItemId": None,
+                        "sortOrder": 10,
+                        "version": 3,
+                    }
+                ]
+            },
+            "platform",
+        ),
+        (
+            "PEOPLE.HRIS.SYNC.PREVIEW",
+            "HRIS_MAPPING_PROFILE",
+            {"idempotencyKey": "sample-sync-1042"},
+            "people",
+        ),
+        ("PEOPLE.HRIS.CONNECTOR.CHECK", "HRIS_CONNECTOR", {}, "people"),
+        ("SCIM.CONNECTOR.ROTATE", "SCIM_CONNECTOR", {}, "auth"),
+        (
+            "PROVIDER.TENANT.ONBOARD.PREVIEW",
+            "TENANT_DRAFT",
+            {
+                "tenantKey": "seoul-telecom",
+                "displayName": "Seoul Telecom",
+                "serviceTier": "REGULATED",
+                "dataRegion": "ap-northeast-2",
+                "isolationModel": "BRIDGE",
+                "entitlementKeys": ["people.core", "agent.governed"],
+            },
+            "provider",
+        ),
+        (
+            "PROVIDER.TENANT.ENTITLEMENT.REPLACE",
+            "TENANT",
+            {"entitlementKeys": ["people.core"]},
+            "provider",
+        ),
+    ],
+)
+def test_registered_admin_command_catalog_resolves(
+    command_key: str,
+    target_type: str,
+    parameters: dict,
+    target_service: str,
+) -> None:
+    payload = admin_change_payload()
+    payload["adminChange"] = {
+        "commandKey": command_key,
+        "targetType": target_type,
+        "targetId": "4d36e968-e325-4cf7-9423-2286d83cae7a",
+        "expectedVersion": 2,
+        "parameters": parameters,
+        "justification": "A governed administration preview is required.",
+    }
+
+    response = asyncio.run(post_preview(payload))
+
+    assert response.status_code == 200, response.text
+    plan = response.json()["data"]
+    assert plan["adminCommand"]["commandKey"] == command_key
+    assert plan["adminCommand"]["targetService"] == target_service
+    assert plan["mutationAllowed"] is False
+
+
+def test_group_role_assignment_requires_scope_reference_and_valid_period() -> None:
+    payload = admin_change_payload()
+    payload["adminChange"]["parameters"].update(
+        {
+            "scopeType": "ORG_UNIT",
+            "validFrom": "2026-09-01T00:00:00Z",
+            "validTo": "2026-08-01T00:00:00Z",
+        }
+    )
+
+    response = asyncio.run(post_preview(payload))
 
     assert response.status_code == 422
