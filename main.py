@@ -78,5 +78,6 @@ def preview_plan(
         tenant_id=tenant_id,
         user_id=user_id,
         role_count=len({role.strip() for role in verified_roles if role.strip()}),
+        roles=verified_roles,
     )
     return PlanPreviewEnvelope(data=plan)
