@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from enum import StrEnum
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
 
 def to_camel(value: str) -> str:
@@ -49,6 +49,15 @@ class AgentRegistryResolution(ContractModel):
     resolution: RegistryResolutionStatus
 
 
+class AdminChangeIntent(ContractModel):
+    command_key: str = Field(pattern=r"^[A-Z][A-Z0-9_.-]{2,127}$")
+    target_type: str = Field(pattern=r"^[A-Z][A-Z0-9_.-]{1,63}$")
+    target_id: str = Field(min_length=1, max_length=256)
+    expected_version: int = Field(ge=0)
+    parameters: dict[str, JsonValue] = Field(default_factory=dict, max_length=50)
+    justification: str = Field(min_length=3, max_length=1_000)
+
+
 class PlanPreviewRequest(ContractModel):
     request_id: str = Field(min_length=1, max_length=128)
     intent: str = Field(min_length=1, max_length=2_000)
@@ -59,6 +68,7 @@ class PlanPreviewRequest(ContractModel):
         default="REFERENCE_PLANNER",
         pattern=r"^[A-Za-z][A-Za-z0-9_.-]{0,99}$",
     )
+    admin_change: AdminChangeIntent | None = None
 
 
 class PlanStep(ContractModel):

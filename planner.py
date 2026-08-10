@@ -37,24 +37,30 @@ def build_reference_plan(
     )
     plan_hash = sha256(canonical_request.encode("utf-8")).hexdigest()
     digest = plan_hash[:16]
+    admin_change = request.admin_change
 
-    return PlanPreviewResponse(
-        run_id=f"run-ref-{digest}",
-        audit_id=f"AUD-REF-{digest.upper()}",
-        plan_hash=plan_hash,
-        correlation_id=correlation_id,
-        state=PlanState.REVIEW,
-        risk_tier=RiskTier.L2,
-        approval_required=True,
-        mutation_allowed=False,
-        summary=f"Prepare a governed {request.action} preview.",
-        steps=[
+    steps = [
+        PlanStep(
+            id="verify-sources",
+            title="Verify source permissions and freshness",
+            tool="policy.check",
+            description="Stop if a source is missing, stale, or outside the user scope.",
+        )
+    ]
+    if admin_change is not None:
+        steps.append(
             PlanStep(
-                id="verify-sources",
-                title="Verify source permissions and freshness",
-                tool="policy.check",
-                description="Stop if a source is missing, stale, or outside the user scope.",
-            ),
+                id="validate-admin-command",
+                title="Validate scope, authority, and target revision",
+                tool="admin.command.validate",
+                description=(
+                    "Resolve effective permission and separation-of-duty policy, then stop on "
+                    "tenant scope or expected-version mismatch."
+                ),
+            )
+        )
+    steps.extend(
+        [
             PlanStep(
                 id="prepare-preview",
                 title=f"Prepare the {request.action} preview",
@@ -67,7 +73,24 @@ def build_reference_plan(
                 tool="workflow.human-approval",
                 description="A separate approved command is required before any mutation.",
             ),
-        ],
+        ]
+    )
+
+    return PlanPreviewResponse(
+        run_id=f"run-ref-{digest}",
+        audit_id=f"AUD-REF-{digest.upper()}",
+        plan_hash=plan_hash,
+        correlation_id=correlation_id,
+        state=PlanState.REVIEW,
+        risk_tier=RiskTier.L3 if admin_change is not None else RiskTier.L2,
+        approval_required=True,
+        mutation_allowed=False,
+        summary=(
+            f"Prepare a governed {admin_change.command_key} administration preview."
+            if admin_change is not None
+            else f"Prepare a governed {request.action} preview."
+        ),
+        steps=steps,
         source_references=list(request.source_references),
         reference_mode=True,
         agent_registry=agent_registry,

@@ -57,5 +57,13 @@ cd ../dwp-backend
 응답의 `planHash`는 사용자·역할·요청·Agent Registry Revision을 결합한 SHA-256이고,
 구조화 감사 Event에는
 질문 원문·Source ID·Service Token을 기록하지 않습니다.
+
+관리자 자동화는 요청의 선택적 `adminChange` 계약으로만 표현합니다. 이 계약은
+`commandKey`, 대상 종류·ID, `expectedVersion`, 구조화 파라미터와 사유를 요구하며
+항상 L3로 분류됩니다. 현재 단계에서는 권한·테넌트 범위·직무분리·버전 충돌을
+검사하는 Preview와 사람 승인 단계만 만들고 실제 변경 Endpoint는 제공하지 않습니다.
+향후 실행기는 승인된 `planHash`와 Typed Command만 받아 Backend API를 호출하며,
+Agent가 데이터베이스를 직접 변경하는 방식은 허용하지 않습니다.
+
 Model Gateway, Retrieval, Tool 실행과 저장 구조는 실제 프로젝트 요구사항과 보안
 승인이 정해진 뒤 별도 모듈로 추가합니다.
