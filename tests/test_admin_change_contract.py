@@ -178,12 +178,12 @@ def test_admin_change_rejects_untyped_or_unknown_commands(admin_change: dict) ->
             "platform",
         ),
         (
-            "PEOPLE.HRIS.SYNC.PREVIEW",
+            "WORKFORCE.HRIS.SYNC.PREVIEW",
             "HRIS_MAPPING_PROFILE",
             {"idempotencyKey": "sample-sync-1042"},
             "people",
         ),
-        ("PEOPLE.HRIS.CONNECTOR.CHECK", "HRIS_CONNECTOR", {}, "people"),
+        ("WORKFORCE.HRIS.CONNECTOR.CHECK", "HRIS_CONNECTOR", {}, "people"),
         ("SCIM.CONNECTOR.ROTATE", "SCIM_CONNECTOR", {}, "auth"),
         (
             "PROVIDER.TENANT.ONBOARD.PREVIEW",

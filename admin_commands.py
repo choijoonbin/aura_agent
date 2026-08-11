@@ -164,24 +164,24 @@ ADMIN_COMMAND_CATALOG: dict[str, AdminCommandDefinition] = {
         required_permission="navigation:order:update",
         parameters={"items": _list(dict, required=True, min_items=1)},
     ),
-    "PEOPLE.HRIS.SYNC.PREVIEW": AdminCommandDefinition(
-        command_key="PEOPLE.HRIS.SYNC.PREVIEW",
+    "WORKFORCE.HRIS.SYNC.PREVIEW": AdminCommandDefinition(
+        command_key="WORKFORCE.HRIS.SYNC.PREVIEW",
         target_types=frozenset({"HRIS_MAPPING_PROFILE"}),
         target_service="people",
         http_method="POST",
-        endpoint_template="/v1/admin/integrations/hris/sample-import",
-        required_permission="people:hris-sync:preview",
+        endpoint_template="/v1/workforce/data-operations/hris/sample-import",
+        required_permission="workforce:hris-sync:preview",
         parameters={"idempotencyKey": _string(required=True, pattern=IDENTIFIER)},
     ),
-    "PEOPLE.HRIS.CONNECTOR.CHECK": AdminCommandDefinition(
-        command_key="PEOPLE.HRIS.CONNECTOR.CHECK",
+    "WORKFORCE.HRIS.CONNECTOR.CHECK": AdminCommandDefinition(
+        command_key="WORKFORCE.HRIS.CONNECTOR.CHECK",
         target_types=frozenset({"HRIS_CONNECTOR"}),
         target_service="people",
         http_method="POST",
         endpoint_template=(
-            "/v1/admin/integrations/hris/connectors/{targetId}/configuration-check"
+            "/v1/workforce/data-operations/hris/connectors/{targetId}/configuration-check"
         ),
-        required_permission="people:hris-connector:check",
+        required_permission="workforce:hris-connector:check",
         parameters={},
     ),
     "SCIM.CONNECTOR.ROTATE": AdminCommandDefinition(
