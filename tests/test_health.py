@@ -41,6 +41,7 @@ def test_health() -> None:
         "status": "ok",
         "service": "DWP Agent Runtime",
         "version": "0.2.0",
+        "components": {"database": "DISABLED"},
     }
 
 
@@ -48,7 +49,7 @@ def test_openapi_contains_system_and_plan_preview_api() -> None:
     response = asyncio.run(get("/openapi.json"))
 
     assert response.status_code == 200
-    assert set(response.json()["paths"]) == {"/health", "/v1/plans/preview"}
+    assert set(response.json()["paths"]) == {"/health", "/v1/ask", "/v1/plans/preview"}
     parameters = response.json()["paths"]["/v1/plans/preview"]["post"]["parameters"]
     assert "X-DWP-Service-Token" not in {parameter["name"] for parameter in parameters}
 

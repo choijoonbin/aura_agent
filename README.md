@@ -1,8 +1,8 @@
 # DWP Agent Starter
 
 새 DWP 프로젝트의 에이전트 기능을 추가하기 위한 최소 FastAPI 런타임입니다.
-기존 업무 구현과 데이터베이스 모델은 포함하지 않습니다. R0 Contract Spike는
-외부 Model이나 Tool을 호출하지 않는 결정적 Plan Preview만 제공합니다.
+기존 업무 시스템의 원장을 직접 소유하지 않습니다. 결정적 Plan Preview와 함께,
+권한 범위의 워크스페이스 근거만 사용하는 읽기 전용 Ask Runtime을 제공합니다.
 
 ## Setup
 
@@ -21,6 +21,7 @@ DWP_AGENT_SERVICE_TOKEN=<local-secret> \
 
 - Health: `GET /health`
 - Governed plan contract: `POST /v1/plans/preview`
+- Grounded Ask Runtime: `POST /v1/ask`
 - OpenAPI: `GET /docs`
 
 Plan Preview는 Gateway가 검증해 전달한 `X-DWP-User-ID`, `X-DWP-Tenant-ID`,
@@ -53,7 +54,7 @@ cd ../dwp-backend
 .venv/bin/python -m pytest
 ```
 
-현재 Preview는 항상 `mutationAllowed=false`이며 L2 Plan에는 사람 승인을 요구합니다.
+Preview는 항상 `mutationAllowed=false`이며 L2 Plan에는 사람 승인을 요구합니다.
 응답의 `planHash`는 사용자·역할·요청·Agent Registry Revision을 결합한 SHA-256이고,
 구조화 감사 Event에는
 질문 원문·Source ID·Service Token을 기록하지 않습니다.
@@ -66,10 +67,31 @@ cd ../dwp-backend
 Provider Tenant 작업만 허용합니다. 해석한 카탈로그 Revision과 서비스 계약은
 `planHash`, 응답, 구조화 감사 Event에 포함됩니다.
 
+Ask Runtime은 서버에서 `APP.ASK:VIEW` 권한과 위험도를 판정하고, 사용자의
+`APP.WORK:VIEW`, `APP.MAIL_CALENDAR:VIEW` 범위로 Platform의 읽기 API만 호출합니다.
+컨텍스트 안의 명령은 신뢰하지 않으며 모델이 반환한 Citation ID가 실제 조회한 Source
+집합에 속하는지 다시 검증합니다. 출처가 없거나 Citation이 잘못되면 답변을 보류합니다.
+
+실행 이력은 전용 `dwp_agent` 데이터베이스에 저장합니다. 질문은 Keyed HMAC만,
+Citation은 Hash만 저장하며, 재시도용 응답은 `DWP_AGENT_DATA_KEY`로 AES-256-GCM
+암호화합니다. 질문·답변·출처 제목은 평문 이력과 감사 이벤트에 기록하지 않습니다.
+운영에서는 이 키를 KMS/Secret Manager로 주입하고 정기 회전해야 합니다.
+
+Model Route는 OpenAI Responses API의 Structured Outputs를 사용하고 `store=false`,
+출력 Token 상한, Privacy-preserving Safety Identifier를 적용합니다. 설정 예시는 다음과
+같으며 Key가 없으면 성공 응답을 꾸미지 않고 `CONFIGURATION_REQUIRED`로 반환합니다.
+
+```bash
+OPENAI_API_KEY=<managed-secret>
+DWP_OPENAI_MODEL=<approved-model-snapshot>
+DWP_OPENAI_BASE_URL=https://api.openai.com/v1
+```
+
 현재 단계에서는 권한·테넌트 범위·직무분리·버전 충돌을 검사하는 Preview와 사람 승인
 단계만 만들고 실제 변경 Endpoint를 호출하지 않습니다.
 향후 실행기는 승인된 `planHash`와 Typed Command만 받아 Backend API를 호출하며,
 Agent가 데이터베이스를 직접 변경하는 방식은 허용하지 않습니다.
 
-Model Gateway, Retrieval, Tool 실행과 저장 구조는 실제 프로젝트 요구사항과 보안
-승인이 정해진 뒤 별도 모듈로 추가합니다.
+관리 작업은 승인된 `planHash`와 Typed Command를 별도 실행기가 검증한 뒤 Backend
+API로만 수행해야 하며 Agent가 업무 데이터베이스를 직접 변경하는 방식은 허용하지
+않습니다.
