@@ -89,6 +89,7 @@ class AdminCommandDefinition:
 IDENTIFIER = r"[A-Za-z][A-Za-z0-9:._/-]{0,254}"
 ISO_DATE_TIME = r"\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z)?"
 UUID = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}"
+PRINCIPAL_REF = r"[A-Za-z0-9][A-Za-z0-9:._/-]{0,254}"
 
 
 def _string(*, required: bool = False, pattern: str | None = None) -> ParameterRule:
@@ -145,6 +146,58 @@ ADMIN_COMMAND_CATALOG: dict[str, AdminCommandDefinition] = {
         endpoint_template="/auth/admin/access/governance/roles/{targetId}/permissions",
         required_permission="access:role-permission:replace",
         parameters={"permissions": _list(dict, required=True)},
+    ),
+    "ACCESS.APP_RESPONSIBILITY.REQUEST": AdminCommandDefinition(
+        command_key="ACCESS.APP_RESPONSIBILITY.REQUEST",
+        target_types=frozenset({"APP_RESOURCE_SET"}),
+        target_service="auth",
+        http_method="POST",
+        endpoint_template="/auth/admin/access/app-governance/assignments",
+        required_permission="access:app-responsibility:request",
+        parameters={
+            "principalType": _enum("USER", "GROUP", required=True),
+            "principalRef": _string(required=True, pattern=PRINCIPAL_REF),
+            "responsibilityCode": _enum(
+                "APP_OWNER",
+                "APP_CONFIG_ADMIN",
+                "APP_ACCESS_MANAGER",
+                "APP_ACCESS_APPROVER",
+                "APP_ACCESS_REVIEWER",
+                required=True,
+            ),
+            "resourceSetId": _string(required=True, pattern=UUID),
+            "validTo": _string(pattern=ISO_DATE_TIME),
+            "justification": _string(required=True),
+        },
+    ),
+    "ACCESS.APP_RESPONSIBILITY.DECIDE": AdminCommandDefinition(
+        command_key="ACCESS.APP_RESPONSIBILITY.DECIDE",
+        target_types=frozenset({"APP_ADMIN_ASSIGNMENT"}),
+        target_service="auth",
+        http_method="POST",
+        endpoint_template=(
+            "/auth/admin/access/app-governance/assignments/{targetId}/decision"
+        ),
+        required_permission="access:app-responsibility:decide",
+        parameters={
+            "decision": _enum("APPROVED", "DENIED", required=True),
+            "reason": _string(required=True),
+            "version": ParameterRule((int,), required=True),
+        },
+    ),
+    "ACCESS.APP_RESPONSIBILITY.REVOKE": AdminCommandDefinition(
+        command_key="ACCESS.APP_RESPONSIBILITY.REVOKE",
+        target_types=frozenset({"APP_ADMIN_ASSIGNMENT"}),
+        target_service="auth",
+        http_method="PATCH",
+        endpoint_template=(
+            "/auth/admin/access/app-governance/assignments/{targetId}/revoke"
+        ),
+        required_permission="access:app-responsibility:revoke",
+        parameters={
+            "reason": _string(required=True),
+            "version": ParameterRule((int,), required=True),
+        },
     ),
     "NAVIGATION.ITEM.PUBLISH": AdminCommandDefinition(
         command_key="NAVIGATION.ITEM.PUBLISH",

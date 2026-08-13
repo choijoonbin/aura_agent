@@ -161,6 +161,31 @@ def test_admin_change_rejects_untyped_or_unknown_commands(admin_change: dict) ->
             },
             "auth",
         ),
+        (
+            "ACCESS.APP_RESPONSIBILITY.REQUEST",
+            "APP_RESOURCE_SET",
+            {
+                "principalType": "USER",
+                "principalRef": "42",
+                "responsibilityCode": "APP_ACCESS_APPROVER",
+                "resourceSetId": "4d36e968-e325-4cf7-9423-2286d83cae7a",
+                "validTo": "2026-12-31T00:00:00Z",
+                "justification": "Approves access for the mail application.",
+            },
+            "auth",
+        ),
+        (
+            "ACCESS.APP_RESPONSIBILITY.DECIDE",
+            "APP_ADMIN_ASSIGNMENT",
+            {"decision": "APPROVED", "reason": "Approved by the tenant owner.", "version": 1},
+            "auth",
+        ),
+        (
+            "ACCESS.APP_RESPONSIBILITY.REVOKE",
+            "APP_ADMIN_ASSIGNMENT",
+            {"reason": "Responsibility is no longer required.", "version": 2},
+            "auth",
+        ),
         ("NAVIGATION.ITEM.PUBLISH", "NAVIGATION_ITEM", {}, "platform"),
         (
             "NAVIGATION.ORDER.UPDATE",
