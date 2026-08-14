@@ -17,7 +17,7 @@ Python 3.14이며 전환 기간에는 Python 3.11~3.14를 지원합니다.
 
 ```bash
 DWP_AGENT_SERVICE_TOKEN=<local-secret> \
-  uv run uvicorn main:app --host 127.0.0.1 --port 8010 --reload
+  uv run uvicorn --app-dir src dwp_agent.main:app --host 127.0.0.1 --port 8010 --reload
 ```
 
 - Health: `GET /health`
@@ -62,7 +62,7 @@ Preview는 항상 `mutationAllowed=false`이며 L2 Plan에는 사람 승인을 �
 
 관리자 자동화는 요청의 선택적 `adminChange` 계약으로만 표현합니다. 이 계약은
 `commandKey`, 대상 종류·ID, `expectedVersion`, 구조화 파라미터와 사유를 요구하며
-항상 L3로 분류됩니다. 허용 명령은 `admin_commands.py`의 버전형 카탈로그에 등록되며,
+항상 L3로 분류됩니다. 허용 명령은 `src/dwp_agent/admin_commands.py`의 버전형 카탈로그에 등록되며,
 명령별 대상 유형·파라미터 스키마·필수 권한·담당 서비스·HTTP 계약이 일치하지 않으면
 요청 단계에서 Fail Closed 됩니다. 현재 카탈로그는 Access, Navigation, HRIS, SCIM,
 Provider Tenant 작업만 허용합니다. 해석한 카탈로그 Revision과 서비스 계약은

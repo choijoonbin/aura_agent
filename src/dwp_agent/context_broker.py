@@ -9,8 +9,8 @@ from typing import Any
 
 import httpx
 
-from contracts import AskCitation, CitationSourceType
-from policy import AskIdentity, contains_privileged_data
+from .contracts import AskCitation, CitationSourceType
+from .policy import AskIdentity, contains_privileged_data
 
 
 MAX_SOURCES = 12

@@ -14,7 +14,7 @@ from uuid import UUID
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from psycopg import connect
 
-from contracts import AskResponse
+from .contracts import AskResponse
 
 
 class RunInProgress(RuntimeError):

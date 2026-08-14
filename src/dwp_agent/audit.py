@@ -6,8 +6,8 @@ from datetime import datetime, timezone
 from json import dumps
 from uuid import NAMESPACE_URL, uuid5
 
-from contracts import AskResponse, PlanPreviewResponse
-from audit_delivery import AUDIT_PUBLISHER
+from .contracts import AskResponse, PlanPreviewResponse
+from .audit_delivery import AUDIT_PUBLISHER
 
 
 AUDIT_LOGGER = logging.getLogger("uvicorn.error.dwp.audit")

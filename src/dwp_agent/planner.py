@@ -3,8 +3,8 @@ from __future__ import annotations
 from hashlib import sha256
 from json import dumps
 
-from admin_commands import resolve_admin_command
-from contracts import (
+from .admin_commands import resolve_admin_command
+from .contracts import (
     AdminCommandResolution,
     AgentRegistryResolution,
     PlanPreviewRequest,

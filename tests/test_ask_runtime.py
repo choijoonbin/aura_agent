@@ -8,10 +8,10 @@ from datetime import datetime, timezone
 import httpx
 import pytest
 
-import ask_runtime as ask_runtime_module
-from ask_runtime import AskRuntime
-from context_broker import GroundedContext, GroundedSource, WorkspaceContextBroker
-from contracts import (
+from dwp_agent import ask_runtime as ask_runtime_module
+from dwp_agent.ask_runtime import AskRuntime
+from dwp_agent.context_broker import GroundedContext, GroundedSource, WorkspaceContextBroker
+from dwp_agent.contracts import (
     AgentRegistryResolution,
     AnswerConfidence,
     AskCitation,
@@ -20,9 +20,9 @@ from contracts import (
     RegistryResolutionStatus,
     RegistryRiskTier,
 )
-from model_gateway import GroundingViolation, ModelAnswer, OpenAIResponsesGateway
-from policy import AskIdentity
-from run_store import (
+from dwp_agent.model_gateway import GroundingViolation, ModelAnswer, OpenAIResponsesGateway
+from dwp_agent.policy import AskIdentity
+from dwp_agent.run_store import (
     InMemoryRunStore,
     PayloadCipher,
     RequestIdConflict,

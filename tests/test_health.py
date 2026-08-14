@@ -6,8 +6,8 @@ import pytest
 import httpx
 from httpx import ASGITransport, AsyncClient
 
-from main import app
-from registry import resolve_agent
+from dwp_agent.main import app
+from dwp_agent.registry import resolve_agent
 
 
 SERVICE_TOKEN = "test-gateway-service-token"
@@ -270,7 +270,7 @@ def test_agent_registry_resolves_active_tenant_revision(
             },
         )
 
-    monkeypatch.setattr("registry.httpx.get", get_registry)
+    monkeypatch.setattr("dwp_agent.registry.httpx.get", get_registry)
 
     resolution = resolve_agent(
         "reference_planner",

@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from audit_delivery import DurableAuditPublisher
+from dwp_agent.audit_delivery import DurableAuditPublisher
 
 
 def test_audit_publisher_spools_atomically(monkeypatch, tmp_path: Path) -> None:

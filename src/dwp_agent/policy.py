@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from contracts import AskPolicyDecision, PolicyOutcome, RiskTier
+from .contracts import AskPolicyDecision, PolicyOutcome, RiskTier
 
 
 PRIVILEGED_PATTERNS = (

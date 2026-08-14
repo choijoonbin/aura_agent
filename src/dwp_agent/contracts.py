@@ -91,7 +91,7 @@ class AdminChangeIntent(ContractModel):
 
     @model_validator(mode="after")
     def validate_registered_command(self) -> "AdminChangeIntent":
-        from admin_commands import resolve_admin_command
+        from .admin_commands import resolve_admin_command
 
         resolve_admin_command(self.command_key, self.target_type, self.parameters)
         return self

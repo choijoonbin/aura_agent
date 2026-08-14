@@ -4,7 +4,7 @@ import os
 
 import httpx
 
-from contracts import (
+from .contracts import (
     AgentRegistryResolution,
     RegistryResolutionStatus,
     RegistryRiskTier,

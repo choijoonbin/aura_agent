@@ -6,9 +6,9 @@ import os
 from datetime import datetime, timezone
 from uuid import uuid4
 
-from audit import record_ask_run
-from context_broker import ContextBrokerUnavailable, WorkspaceContextBroker
-from contracts import (
+from .audit import record_ask_run
+from .context_broker import ContextBrokerUnavailable, WorkspaceContextBroker
+from .contracts import (
     AgentRegistryResolution,
     AnswerConfidence,
     AskCitation,
@@ -21,16 +21,16 @@ from contracts import (
     PolicyOutcome,
     RegistryResolutionStatus,
 )
-from model_gateway import (
+from .model_gateway import (
     GroundingViolation,
     ModelCallFailed,
     ModelConfigurationRequired,
     ModelRefused,
     OpenAIResponsesGateway,
 )
-from policy import AskIdentity, evaluate_ask_policy
-from registry import resolve_agent
-from run_store import RunInProgress, RunStart, RunStore, get_run_store, privacy_hash
+from .policy import AskIdentity, evaluate_ask_policy
+from .registry import resolve_agent
+from .run_store import RunInProgress, RunStart, RunStore, get_run_store, privacy_hash
 
 
 class AskRuntime:

@@ -1,7 +1,7 @@
 from fastapi.testclient import TestClient
 
-import observability
-from main import app
+from dwp_agent import observability
+from dwp_agent.main import app
 
 
 def test_agent_history_is_trace_linked_and_privacy_minimized(monkeypatch) -> None:

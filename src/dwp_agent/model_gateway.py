@@ -10,8 +10,8 @@ from urllib.parse import urlparse
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from contracts import AnswerConfidence
-from context_broker import GroundedContext
+from .contracts import AnswerConfidence
+from .context_broker import GroundedContext
 
 
 ANSWER_SCHEMA = {

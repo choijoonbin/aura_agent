@@ -3,7 +3,7 @@ import asyncio
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from main import app
+from dwp_agent.main import app
 
 
 SERVICE_TOKEN = "test-gateway-service-token"
