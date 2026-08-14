@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=80"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dwp-agent"
+version = "0.1.0"
+description = "Governed planning and grounded ask runtime for Digital Workplace"
+readme = "README.md"
+requires-python = ">=3.11,<3.15"
+dependencies = [
+  "cryptography>=46.0.7,<47",
+  "fastapi>=0.141.1,<0.142",
+  "httpx>=0.28.1,<0.29",
+  "psycopg[binary]>=3.3.4,<4",
+  "uvicorn>=0.52.1,<0.53",
+]
+
+[dependency-groups]
+dev = [
+  "httpx2>=2.10,<3",
+  "pytest>=9.1.1,<10",
+]
+
+[tool.setuptools]
+py-modules = [
+  "admin_commands",
+  "ask_runtime",
+  "audit",
+  "audit_delivery",
+  "context_broker",
+  "contracts",
+  "main",
+  "model_gateway",
+  "observability",
+  "planner",
+  "policy",
+  "registry",
+  "run_store",
+  "security",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

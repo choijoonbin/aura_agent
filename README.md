@@ -7,16 +7,17 @@
 ## Setup
 
 ```bash
-python3.11 -m venv .venv
-.venv/bin/python -m pip install --upgrade pip
-.venv/bin/python -m pip install -r requirements.txt
+uv sync --frozen
 ```
+
+`pyproject.toml`과 `uv.lock`이 의존성의 단일 원장입니다. 기본 개발 런타임은
+Python 3.14이며 전환 기간에는 Python 3.11~3.14를 지원합니다.
 
 ## Run
 
 ```bash
 DWP_AGENT_SERVICE_TOKEN=<local-secret> \
-  .venv/bin/python -m uvicorn main:app --host 127.0.0.1 --port 8010 --reload
+  uv run uvicorn main:app --host 127.0.0.1 --port 8010 --reload
 ```
 
 - Health: `GET /health`
@@ -51,7 +52,7 @@ cd ../dwp-backend
 ## Test
 
 ```bash
-.venv/bin/python -m pytest
+uv run pytest
 ```
 
 Preview는 항상 `mutationAllowed=false`이며 L2 Plan에는 사람 승인을 요구합니다.
