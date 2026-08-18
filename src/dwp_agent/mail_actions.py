@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
 from enum import StrEnum
 from types import MappingProxyType
 from typing import Literal
 from uuid import UUID
 
-from pydantic import Field, JsonValue, model_validator
+from pydantic import AwareDatetime, Field, JsonValue, model_validator
 
 from .contracts import ContractModel
 
@@ -31,7 +30,7 @@ MAIL_ACTION_CONTRACT_VERSION = 1
 
 class MailActionEvidence(ContractModel):
     source_message_id: UUID
-    observed_at: datetime
+    observed_at: AwareDatetime
     rationale: str = Field(min_length=3, max_length=500)
     excerpt_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
 
@@ -120,7 +119,7 @@ class MailActionProposal(ContractModel):
     confidence: float = Field(ge=0, le=1)
     risk: MailActionRisk
     target: MailActionTarget
-    expires_at: datetime
+    expires_at: AwareDatetime
     human_confirmation_required: Literal[True] = True
     automatic_execution_allowed: Literal[False] = False
 

@@ -101,3 +101,6 @@ def test_mail_action_rejects_unknown_versions_and_incomplete_payloads() -> None:
                 "requiresConfirmation": False,
             }
         )
+
+    with pytest.raises(ValidationError):
+        calendar_proposal(expires_at=datetime(2030, 8, 19, 9, 0))
