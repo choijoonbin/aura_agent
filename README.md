@@ -69,9 +69,17 @@ Provider Tenant 작업만 허용합니다. 해석한 카탈로그 Revision과 �
 `planHash`, 응답, 구조화 감사 Event에 포함됩니다.
 
 Ask Runtime은 서버에서 `APP.ASK:VIEW` 권한과 위험도를 판정하고, 사용자의
-`APP.WORK:VIEW`, `APP.MAIL_CALENDAR:VIEW` 범위로 Platform의 읽기 API만 호출합니다.
+`APP.WORK:VIEW`, `APP.MAIL:VIEW` 범위로 Platform의 읽기 API만 호출합니다.
 컨텍스트 안의 명령은 신뢰하지 않으며 모델이 반환한 Citation ID가 실제 조회한 Source
 집합에 속하는지 다시 검증합니다. 출처가 없거나 Citation이 잘못되면 답변을 보류합니다.
+
+메일 기반 AI는 `MailActionProposal` 계약으로만 회신 초안, 회의 일정, 휴가 신청, 업무,
+긴급 알림을 제안합니다. 모든 제안은 메시지 근거 Hash, 신뢰도, 위험도, 대상 앱의 리소스와
+필수 권한을 포함하며 `humanConfirmationRequired=true`,
+`automaticExecutionAllowed=false`가 강제됩니다. 제안을 수락해도 Calendar, HCM, Work 등
+대상 앱에서 현재 권한과 최종 입력을 다시 검증하기 전에는 업무 데이터가 변경되지 않습니다.
+계약 버전 1과 액션별 필수 Payload는 Agent와 Platform이 독립적으로 검증하므로 미지원 버전,
+권한 혼동, 불완전한 제안은 사용자에게 노출되기 전에 거부됩니다.
 
 실행 이력은 전용 `dwp_agent` 데이터베이스에 저장합니다. 질문은 Keyed HMAC만,
 Citation은 Hash만 저장하며, 재시도용 응답은 `DWP_AGENT_DATA_KEY`로 AES-256-GCM

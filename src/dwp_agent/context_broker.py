@@ -109,17 +109,17 @@ class WorkspaceContextBroker:
                 except (httpx.HTTPError, ValueError, KeyError, TypeError):
                     unavailable.append("WORK_ITEM")
 
-            if "APP.MAIL_CALENDAR:VIEW" in permissions:
-                attempted.append("PRODUCTIVITY")
+            if "APP.MAIL:VIEW" in permissions:
+                attempted.append("MAIL")
                 try:
                     response = client.get(
-                        f"{self.platform_url}/v1/workspace/productivity/items",
+                        f"{self.platform_url}/v1/mail/threads",
                         headers=headers,
-                        params={"page": 0, "size": 50},
+                        params={"page": 0, "pageSize": 50},
                     )
-                    candidates.extend(self._productivity_items(response))
+                    candidates.extend(self._mail_threads(response))
                 except (httpx.HTTPError, ValueError, KeyError, TypeError):
-                    unavailable.append("PRODUCTIVITY")
+                    unavailable.append("MAIL")
 
         query_tokens = _tokens(query)
         ranked = sorted(
@@ -193,29 +193,30 @@ class WorkspaceContextBroker:
             )
         return result
 
-    def _productivity_items(self, response: httpx.Response) -> list[dict[str, Any]]:
+    def _mail_threads(self, response: httpx.Response) -> list[dict[str, Any]]:
         response.raise_for_status()
-        items = response.json()["data"]["content"]
+        items = response.json()["data"]["items"]
         if not isinstance(items, list):
-            raise ValueError("Productivity item response is invalid.")
+            raise ValueError("Mail thread response is invalid.")
         result: list[dict[str, Any]] = []
         for item in items:
-            title = _clean(item.get("title"), 300)
+            title = _clean(item.get("subject"), 300)
             if not title:
                 continue
-            kind = str(item.get("resourceKind", "MAIL")).upper()
-            source_type = (
-                CitationSourceType.CALENDAR if kind == "CALENDAR" else CitationSourceType.MAIL
-            )
             evidence = _clean(
                 " | ".join(
                     value
                     for value in (
-                        f"kind={kind}",
+                        item.get("preview"),
                         f"importance={item.get('importance')}" if item.get("importance") else None,
-                        f"occurredAt={item.get('occurredAt')}" if item.get("occurredAt") else None,
-                        f"endsAt={item.get('endsAt')}" if item.get("endsAt") else None,
-                        f"read={item.get('read')}" if item.get("read") is not None else None,
+                        f"lane={item.get('triageLane')}" if item.get("triageLane") else None,
+                        f"state={item.get('workflowState')}" if item.get("workflowState") else None,
+                        f"unread={item.get('unread')}" if item.get("unread") is not None else None,
+                        (
+                            f"latestMessageAt={item.get('latestMessageAt')}"
+                            if item.get("latestMessageAt")
+                            else None
+                        ),
                     )
                     if value
                 ),
@@ -225,13 +226,13 @@ class WorkspaceContextBroker:
                 continue
             result.append(
                 {
-                    "sourceType": source_type,
-                    "sourceSystem": "Microsoft 365",
+                    "sourceType": CitationSourceType.MAIL,
+                    "sourceSystem": _clean(item.get("accountName"), 100) or "DWP Mail",
                     "title": title,
                     "evidence": evidence or title,
-                    "route": _safe_route(item.get("sourceUrl")),
-                    "occurredAt": _datetime(item.get("occurredAt")),
-                    "sortTime": item.get("occurredAt") or "",
+                    "route": _mail_route(item.get("threadId")),
+                    "occurredAt": _datetime(item.get("latestMessageAt")),
+                    "sortTime": item.get("latestMessageAt") or "",
                 }
             )
         return result
@@ -261,6 +262,15 @@ def _safe_route(value: Any) -> str | None:
     if route.startswith("/") or route.startswith("https://"):
         return route
     return None
+
+
+def _mail_route(value: Any) -> str | None:
+    if not isinstance(value, str) or not re.fullmatch(
+        r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}",
+        value,
+    ):
+        return None
+    return f"/mail/inbox?thread={value}"
 
 
 def _datetime(value: Any) -> datetime | None:

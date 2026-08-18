@@ -336,6 +336,54 @@ def test_context_broker_preserves_verified_permission_scope() -> None:
     assert grounded.sources[0].citation.source_id == "src-01"
 
 
+def test_context_broker_reads_only_permission_scoped_mail_summaries() -> None:
+    captured: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return httpx.Response(
+            200,
+            json={
+                "data": {
+                    "items": [
+                        {
+                            "threadId": "8a0b5388-8765-4c97-a95c-4037285416d8",
+                            "accountName": "SKAX Mail",
+                            "subject": "Project review scheduling",
+                            "preview": "Could we meet Thursday at 15:00?",
+                            "importance": "HIGH",
+                            "triageLane": "NEEDS_REPLY",
+                            "workflowState": "OPEN",
+                            "unread": True,
+                            "latestMessageAt": "2026-08-18T09:00:00Z",
+                        }
+                    ]
+                }
+            },
+        )
+
+    broker = WorkspaceContextBroker(
+        platform_url="http://platform.test",
+        service_token="runtime-service-token",
+        transport=httpx.MockTransport(handler),
+    )
+
+    grounded = broker.collect(
+        "When is the project review?",
+        identity=identity("APP.ASK:VIEW", "APP.MAIL:VIEW"),
+        locale="en",
+    )
+
+    assert len(captured) == 1
+    assert captured[0].url.path == "/v1/mail/threads"
+    assert captured[0].url.params["pageSize"] == "50"
+    assert grounded.attempted_sources == ("MAIL",)
+    assert grounded.sources[0].citation.source_type == CitationSourceType.MAIL
+    assert grounded.sources[0].citation.route == (
+        "/mail/inbox?thread=8a0b5388-8765-4c97-a95c-4037285416d8"
+    )
+
+
 def test_context_broker_filters_privileged_source_titles_before_model_context() -> None:
     def handler(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(
