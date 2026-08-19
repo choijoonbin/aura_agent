@@ -9,6 +9,7 @@ import httpx
 import pytest
 
 from dwp_agent import ask_runtime as ask_runtime_module
+from dwp_agent.approval_context import approval_tasks
 from dwp_agent.ask_runtime import AskRuntime
 from dwp_agent.context_broker import GroundedContext, GroundedSource, WorkspaceContextBroker
 from dwp_agent.contracts import (
@@ -20,8 +21,13 @@ from dwp_agent.contracts import (
     RegistryResolutionStatus,
     RegistryRiskTier,
 )
-from dwp_agent.model_gateway import GroundingViolation, ModelAnswer, OpenAIResponsesGateway
-from dwp_agent.policy import AskIdentity
+from dwp_agent.model_gateway import (
+    GroundingViolation,
+    ModelAnswer,
+    OpenAIResponsesGateway,
+    _system_instruction,
+)
+from dwp_agent.policy import AskIdentity, evaluate_ask_policy
 from dwp_agent.run_store import (
     InMemoryRunStore,
     PayloadCipher,
@@ -74,9 +80,11 @@ def context() -> GroundedContext:
 class FakeBroker:
     def __init__(self) -> None:
         self.calls = 0
+        self.agent_key: str | None = None
 
     def collect(self, *_args, **_kwargs) -> GroundedContext:
         self.calls += 1
+        self.agent_key = _kwargs.get("agent_key")
         return context()
 
 
@@ -85,9 +93,11 @@ class FakeModel:
 
     def __init__(self) -> None:
         self.calls = 0
+        self.agent_key: str | None = None
 
     def generate(self, *_args, **_kwargs) -> ModelAnswer:
         self.calls += 1
+        self.agent_key = _kwargs.get("agent_key")
         return ModelAnswer(
             answer="The software access approval is blocking a new team member.",
             cited_source_ids=("src-01",),
@@ -136,6 +146,50 @@ def test_grounded_answer_is_idempotent_and_citation_scoped() -> None:
     assert first.model_route.total_tokens == 148
     assert broker.calls == 1
     assert model.calls == 1
+
+
+def test_approval_expert_is_permission_gated_and_forwarded_to_runtime_components(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    expert = ACTIVE_AGENT.model_copy(update={"entry_key": "DWP_APPROVAL_EXPERT"})
+    monkeypatch.setattr(ask_runtime_module, "resolve_agent", lambda *_args, **_kwargs: expert)
+    broker = FakeBroker()
+    model = FakeModel()
+    runtime = AskRuntime(
+        context_broker=broker,
+        model_gateway=model,
+        run_store=InMemoryRunStore(),
+    )
+
+    denied = runtime.answer(
+        AskRequest(
+            request_id="request-approval-expert-denied",
+            query="Explain my pending approvals",
+            locale="en",
+            agent_key="DWP_APPROVAL_EXPERT",
+        ),
+        identity=identity("APP.ASK:VIEW"),
+    )
+    allowed = runtime.answer(
+        AskRequest(
+            request_id="request-approval-expert-allowed",
+            query="Explain my pending approvals",
+            locale="en",
+            agent_key="DWP_APPROVAL_EXPERT",
+        ),
+        identity=identity(
+            "APP.ASK:VIEW",
+            "APP.APPROVALS:VIEW",
+            "ACTION.APPROVAL_TASK:VIEW",
+        ),
+    )
+
+    assert denied.status_code == "APPROVAL_EXPERT_PERMISSION_REQUIRED"
+    assert denied.model_route.state == "NOT_INVOKED"
+    assert allowed.state == "COMPLETED"
+    assert allowed.conversation_id is None
+    assert broker.agent_key == "DWP_APPROVAL_EXPERT"
+    assert model.agent_key == "DWP_APPROVAL_EXPERT"
 
 
 def test_reused_request_id_with_another_query_fails_closed() -> None:
@@ -382,6 +436,150 @@ def test_context_broker_reads_only_permission_scoped_mail_summaries() -> None:
     assert grounded.sources[0].citation.route == (
         "/mail/inbox?thread=8a0b5388-8765-4c97-a95c-4037285416d8"
     )
+
+
+def test_approval_expert_reads_only_permission_scoped_approval_sources() -> None:
+    captured: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        if request.url.path == "/v1/tasks":
+            return httpx.Response(
+                200,
+                json={
+                    "data": [
+                        {
+                            "taskId": "3ee1f7ef-eb34-44d5-a153-237f79bb81cc",
+                            "requestId": "0fd4362f-1a3f-40b9-8f5a-2791e08e02eb",
+                            "requestNumber": "APR-2026-0012",
+                            "title": "Software access approval",
+                            "summary": "Approve access for a new team member.",
+                            "status": "PENDING",
+                            "priority": "HIGH",
+                            "stepName": "Line manager review",
+                            "requesterName": "Mina Kim",
+                            "dataClassification": "INTERNAL",
+                            "submittedAt": "2026-08-19T01:00:00Z",
+                            "dueAt": "2026-08-19T06:00:00Z",
+                        }
+                    ]
+                },
+            )
+        if request.url.path == "/v1/requests":
+            return httpx.Response(
+                200,
+                json={
+                    "data": [
+                        {
+                            "requestId": "0fd4362f-1a3f-40b9-8f5a-2791e08e02eb",
+                            "requestNumber": "APR-2026-0012",
+                            "title": "Software access approval",
+                            "summary": "Waiting for line manager review.",
+                            "status": "IN_REVIEW",
+                            "priority": "HIGH",
+                            "currentStepName": "Line manager review",
+                            "dataClassification": "INTERNAL",
+                            "submittedAt": "2026-08-19T01:00:00Z",
+                        }
+                    ]
+                },
+            )
+        raise AssertionError(f"Unexpected approval path: {request.url.path}")
+
+    broker = WorkspaceContextBroker(
+        approval_url="http://approval.test",
+        approval_service_token="approval-runtime-token",
+        transport=httpx.MockTransport(handler),
+    )
+    grounded = broker.collect(
+        "Which approval needs attention?",
+        identity=identity(
+            "APP.ASK:VIEW",
+            "APP.APPROVALS:VIEW",
+            "ACTION.APPROVAL_TASK:VIEW",
+            "ACTION.APPROVAL_REQUEST:VIEW",
+        ),
+        locale="en",
+        agent_key="DWP_APPROVAL_EXPERT",
+        source_scopes=[
+            CitationSourceType.APPROVAL_TASK,
+            CitationSourceType.APPROVAL_REQUEST,
+        ],
+    )
+
+    assert {request.url.path for request in captured} == {"/v1/tasks", "/v1/requests"}
+    assert all(
+        request.headers["x-dwp-service-token"] == "approval-runtime-token"
+        for request in captured
+    )
+    assert grounded.attempted_sources == ("APPROVAL_TASK", "APPROVAL_REQUEST")
+    assert {source.citation.source_type for source in grounded.sources} == {
+        CitationSourceType.APPROVAL_TASK,
+        CitationSourceType.APPROVAL_REQUEST,
+    }
+    assert all(
+        source.citation.route and source.citation.route.startswith("/approvals/")
+        for source in grounded.sources
+    )
+    request_source = next(
+        source
+        for source in grounded.sources
+        if source.citation.source_type == CitationSourceType.APPROVAL_REQUEST
+    )
+    assert request_source.citation.route == (
+        "/approvals/requests/submitted?request=0fd4362f-1a3f-40b9-8f5a-2791e08e02eb"
+    )
+
+
+def test_approval_expert_excludes_sensitive_or_unclassified_work_items() -> None:
+    response = httpx.Response(
+        200,
+        request=httpx.Request("GET", "http://approval.test/v1/tasks"),
+        json={
+            "data": [
+                {
+                    "taskId": "3ee1f7ef-eb34-44d5-a153-237f79bb81cc",
+                    "title": "Internal purchase request",
+                    "summary": "Review supplier choice.",
+                    "dataClassification": "INTERNAL",
+                },
+                {
+                    "taskId": "0fd4362f-1a3f-40b9-8f5a-2791e08e02eb",
+                    "title": "Restricted personnel matter",
+                    "summary": "Sensitive employee context.",
+                    "dataClassification": "RESTRICTED",
+                },
+                {
+                    "taskId": "de44ba2c-1b37-41c1-b162-e157b68b04bc",
+                    "title": "Legacy item without classification",
+                    "summary": "Classification is missing.",
+                },
+            ]
+        },
+    )
+
+    parsed = approval_tasks(response)
+
+    assert [item["title"] for item in parsed] == ["Internal purchase request"]
+
+
+def test_approval_expert_instruction_keeps_decisions_human_only() -> None:
+    instruction = _system_instruction("ko", "DWP_APPROVAL_EXPERT")
+
+    assert "DWP Approval Expert" in instruction
+    assert "Never approve" in instruction
+    assert "human-only" in instruction
+
+
+def test_approval_expert_policy_requires_both_ask_and_approval_access() -> None:
+    decision = evaluate_ask_policy(
+        "Explain my pending approvals",
+        identity("APP.ASK:VIEW"),
+        agent_key="DWP_APPROVAL_EXPERT",
+    )
+
+    assert decision.outcome == "DENY"
+    assert decision.code == "APPROVAL_EXPERT_PERMISSION_REQUIRED"
 
 
 def test_context_broker_filters_privileged_source_titles_before_model_context() -> None:

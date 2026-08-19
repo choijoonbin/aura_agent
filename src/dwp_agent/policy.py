@@ -30,7 +30,12 @@ class AskIdentity:
     correlation_id: str
 
 
-def evaluate_ask_policy(query: str, identity: AskIdentity) -> AskPolicyDecision:
+def evaluate_ask_policy(
+    query: str,
+    identity: AskIdentity,
+    *,
+    agent_key: str = "DWP_ASSISTANT",
+) -> AskPolicyDecision:
     normalized = " ".join(query.strip().split())
     permission_set = {permission.upper() for permission in identity.permissions}
 
@@ -39,7 +44,16 @@ def evaluate_ask_policy(query: str, identity: AskIdentity) -> AskPolicyDecision:
             outcome=PolicyOutcome.DENY,
             risk_tier=RiskTier.L1,
             code="ASK_PERMISSION_REQUIRED",
-            explanation="Ask DWP access is not present in the verified session scope.",
+            explanation="DWAI·ON access is not present in the verified session scope.",
+            model_allowed=False,
+        )
+
+    if agent_key.strip().upper() == "DWP_APPROVAL_EXPERT" and "APP.APPROVALS:VIEW" not in permission_set:
+        return AskPolicyDecision(
+            outcome=PolicyOutcome.DENY,
+            risk_tier=RiskTier.L1,
+            code="APPROVAL_EXPERT_PERMISSION_REQUIRED",
+            explanation="Approval application access is not present in the verified session scope.",
             model_allowed=False,
         )
 

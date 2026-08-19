@@ -49,7 +49,17 @@ def test_openapi_contains_system_and_plan_preview_api() -> None:
     response = asyncio.run(get("/openapi.json"))
 
     assert response.status_code == 200
-    assert set(response.json()["paths"]) == {"/health", "/v1/ask", "/v1/plans/preview"}
+    assert set(response.json()["paths"]) == {
+        "/health",
+        "/v1/ask",
+        "/v1/ask/stream",
+        "/v1/plans/preview",
+        "/v1/conversations",
+        "/v1/conversations/{conversation_id}",
+        "/v1/runs/{run_id}/feedback",
+        "/v1/actions",
+        "/v1/actions/{action_key}/preview",
+    }
     parameters = response.json()["paths"]["/v1/plans/preview"]["post"]["parameters"]
     assert "X-DWP-Service-Token" not in {parameter["name"] for parameter in parameters}
 

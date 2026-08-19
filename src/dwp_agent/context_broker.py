@@ -4,12 +4,13 @@ import json
 import os
 import re
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import httpx
 
-from .contracts import AskCitation, CitationSourceType
+from .approval_context import collect_approval_context
+from .contracts import AskCitation, AskPageContext, CitationSourceType
 from .policy import AskIdentity, contains_privileged_data
 
 
@@ -60,6 +61,8 @@ class WorkspaceContextBroker:
         *,
         platform_url: str | None = None,
         service_token: str | None = None,
+        approval_url: str | None = None,
+        approval_service_token: str | None = None,
         transport: httpx.BaseTransport | None = None,
     ) -> None:
         self.platform_url = (
@@ -70,6 +73,14 @@ class WorkspaceContextBroker:
             if service_token is not None
             else os.getenv("DWP_PLATFORM_RUNTIME_SERVICE_TOKEN", "")
         ).strip()
+        self.approval_url = (
+            approval_url if approval_url is not None else os.getenv("SERVICE_APPROVAL_URL", "")
+        ).strip().rstrip("/")
+        self.approval_service_token = (
+            approval_service_token
+            if approval_service_token is not None
+            else os.getenv("DWP_APPROVAL_SERVICE_TOKEN", "")
+        ).strip()
         self.transport = transport
 
     def collect(
@@ -78,16 +89,23 @@ class WorkspaceContextBroker:
         *,
         identity: AskIdentity,
         locale: str,
+        agent_key: str = "DWP_ASSISTANT",
+        source_scopes: tuple[CitationSourceType, ...] | list[CitationSourceType] | None = None,
+        page_context: AskPageContext | None = None,
     ) -> GroundedContext:
-        if not self.platform_url or not self.service_token:
+        approval_expert = agent_key.strip().upper() == "DWP_APPROVAL_EXPERT"
+        if approval_expert:
+            if not self.approval_url or not self.approval_service_token:
+                raise ContextBrokerUnavailable("Approval context service is not configured.")
+        elif not self.platform_url or not self.service_token:
             raise ContextBrokerUnavailable("Workspace context service is not configured.")
 
         permissions = {permission.upper() for permission in identity.permissions}
+        requested_scopes = set(source_scopes or tuple(CitationSourceType))
         candidates: list[dict[str, Any]] = []
         attempted: list[str] = []
         unavailable: list[str] = []
-        headers = {
-            "X-DWP-Service-Token": self.service_token,
+        identity_headers = {
             "X-DWP-User-ID": identity.user_id,
             "X-DWP-Tenant-ID": identity.tenant_id,
             "X-DWP-Roles": ",".join(identity.roles),
@@ -98,34 +116,79 @@ class WorkspaceContextBroker:
         }
 
         with httpx.Client(transport=self.transport, timeout=3.0) as client:
-            if "APP.WORK:VIEW" in permissions:
+            if approval_expert:
+                approval_candidates, approval_attempted, approval_unavailable = collect_approval_context(
+                    client,
+                    approval_url=self.approval_url,
+                    permissions=permissions,
+                    requested_scopes=requested_scopes,
+                    headers={
+                        **identity_headers,
+                        "X-DWP-Service-Token": self.approval_service_token,
+                    },
+                    locale=locale,
+                )
+                candidates.extend(approval_candidates)
+                attempted.extend(approval_attempted)
+                unavailable.extend(approval_unavailable)
+            elif (
+                CitationSourceType.WORK_ITEM in requested_scopes
+                and "APP.WORK:VIEW" in permissions
+            ):
                 attempted.append("WORK_ITEM")
                 try:
                     response = client.get(
                         f"{self.platform_url}/v1/workspace/work-items",
-                        headers=headers,
+                        headers={**identity_headers, "X-DWP-Service-Token": self.service_token},
                     )
                     candidates.extend(self._work_items(response))
                 except (httpx.HTTPError, ValueError, KeyError, TypeError):
                     unavailable.append("WORK_ITEM")
 
-            if "APP.MAIL:VIEW" in permissions:
+            if (
+                not approval_expert
+                and CitationSourceType.MAIL in requested_scopes
+                and "APP.MAIL:VIEW" in permissions
+            ):
                 attempted.append("MAIL")
                 try:
                     response = client.get(
                         f"{self.platform_url}/v1/mail/threads",
-                        headers=headers,
+                        headers={**identity_headers, "X-DWP-Service-Token": self.service_token},
                         params={"page": 0, "pageSize": 50},
                     )
                     candidates.extend(self._mail_threads(response))
                 except (httpx.HTTPError, ValueError, KeyError, TypeError):
                     unavailable.append("MAIL")
 
+            if (
+                not approval_expert
+                and CitationSourceType.CALENDAR in requested_scopes
+                and "APP.CALENDAR:VIEW" in permissions
+            ):
+                attempted.append("CALENDAR")
+                try:
+                    now = datetime.now(timezone.utc)
+                    response = client.get(
+                        f"{self.platform_url}/v1/calendar/events",
+                        headers={**identity_headers, "X-DWP-Service-Token": self.service_token},
+                        params={
+                            "from": now.isoformat(),
+                            "to": (now + timedelta(days=30)).isoformat(),
+                        },
+                    )
+                    candidates.extend(self._calendar_events(response))
+                except (httpx.HTTPError, ValueError, KeyError, TypeError):
+                    unavailable.append("CALENDAR")
+
         query_tokens = _tokens(query)
         ranked = sorted(
             candidates,
             key=lambda item: (
-                -_relevance(query_tokens, item["title"], item["evidence"]),
+                -(
+                    _relevance(query_tokens, item["title"], item["evidence"])
+                    + _page_context_bonus(item, page_context)
+                ),
                 item.get("sortTime") or "",
                 item["title"],
             ),
@@ -140,6 +203,7 @@ class WorkspaceContextBroker:
                     source_system=item["sourceSystem"],
                     route=item.get("route"),
                     occurred_at=item.get("occurredAt"),
+                    excerpt=item["evidence"][:500],
                 ),
                 evidence=item["evidence"],
                 rank=index,
@@ -237,6 +301,47 @@ class WorkspaceContextBroker:
             )
         return result
 
+    def _calendar_events(self, response: httpx.Response) -> list[dict[str, Any]]:
+        response.raise_for_status()
+        items = response.json()["data"]
+        if not isinstance(items, list):
+            raise ValueError("Calendar event response is invalid.")
+        result: list[dict[str, Any]] = []
+        for item in items:
+            title = _clean(item.get("title"), 300)
+            if not title:
+                continue
+            evidence = _clean(
+                " | ".join(
+                    value
+                    for value in (
+                        item.get("description"),
+                        f"startsAt={item.get('startsAt')}" if item.get("startsAt") else None,
+                        f"endsAt={item.get('endsAt')}" if item.get("endsAt") else None,
+                        f"location={item.get('location')}" if item.get("location") else None,
+                        f"status={item.get('status')}" if item.get("status") else None,
+                        f"response={item.get('myResponse')}" if item.get("myResponse") else None,
+                        f"conflict={item.get('conflict')}",
+                    )
+                    if value
+                ),
+                MAX_EVIDENCE_TEXT,
+            )
+            if contains_privileged_data(f"{title} {evidence}"):
+                continue
+            result.append(
+                {
+                    "sourceType": CitationSourceType.CALENDAR,
+                    "sourceSystem": _clean(item.get("calendarName"), 100) or "DWP Calendar",
+                    "title": title,
+                    "evidence": evidence or title,
+                    "route": _calendar_route(item.get("eventId")),
+                    "occurredAt": _datetime(item.get("startsAt")),
+                    "sortTime": item.get("startsAt") or "",
+                }
+            )
+        return result
+
 
 def _tokens(value: str) -> set[str]:
     return {token.lower() for token in TOKEN_PATTERN.findall(value)}
@@ -245,6 +350,14 @@ def _tokens(value: str) -> set[str]:
 def _relevance(query_tokens: set[str], title: str, evidence: str) -> int:
     candidate_tokens = _tokens(f"{title} {evidence}")
     return len(query_tokens & candidate_tokens) * 10 + min(len(candidate_tokens), 20)
+
+
+def _page_context_bonus(item: dict[str, Any], page_context: AskPageContext | None) -> int:
+    if page_context is None:
+        return 0
+    route = str(item.get("route") or "")
+    app_segment = page_context.route.strip("/").split("/", 1)[0]
+    return 8 if app_segment and route.startswith(f"/{app_segment}") else 0
 
 
 def _clean(value: Any, limit: int) -> str:
@@ -271,6 +384,15 @@ def _mail_route(value: Any) -> str | None:
     ):
         return None
     return f"/mail/inbox?thread={value}"
+
+
+def _calendar_route(value: Any) -> str | None:
+    if not isinstance(value, str) or not re.fullmatch(
+        r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}",
+        value,
+    ):
+        return None
+    return f"/calendar/schedule?event={value}"
 
 
 def _datetime(value: Any) -> datetime | None:

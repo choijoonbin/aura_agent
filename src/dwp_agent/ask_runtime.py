@@ -2,12 +2,19 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import json
 import os
 from datetime import datetime, timezone
+from typing import Callable
 from uuid import uuid4
 
 from .audit import record_ask_run
 from .context_broker import ContextBrokerUnavailable, WorkspaceContextBroker
+from .conversation_store import (
+    ConversationStore,
+    ConversationTurn,
+    get_conversation_store,
+)
 from .contracts import (
     AgentRegistryResolution,
     AnswerConfidence,
@@ -40,13 +47,29 @@ class AskRuntime:
         context_broker: WorkspaceContextBroker | None = None,
         model_gateway: OpenAIResponsesGateway | None = None,
         run_store: RunStore | None = None,
+        conversation_store: ConversationStore | None = None,
     ) -> None:
         self.context_broker = context_broker or WorkspaceContextBroker()
         self.model_gateway = model_gateway or OpenAIResponsesGateway()
         self.run_store = run_store or get_run_store()
+        self.conversation_store = conversation_store or get_conversation_store()
 
-    def answer(self, request: AskRequest, *, identity: AskIdentity) -> AskResponse:
-        query_hash = privacy_hash(request.query)
+    def answer(
+        self,
+        request: AskRequest,
+        *,
+        identity: AskIdentity,
+        on_progress: Callable[[str], None] | None = None,
+    ) -> AskResponse:
+        _progress(on_progress, "AUTHORIZING")
+        query_hash = privacy_hash(
+            json.dumps(
+                request.model_dump(mode="json", by_alias=True, exclude={"request_id"}),
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+        )
         existing = self.run_store.load(
             identity.tenant_id,
             identity.user_id,
@@ -54,12 +77,35 @@ class AskRuntime:
             query_hash,
         )
         if existing is not None:
+            _progress(on_progress, "COMPLETED")
             return existing
 
         run_id = str(uuid4())
         audit_id = str(uuid4())
         registry = self._resolve_registry(request, identity)
-        policy = evaluate_ask_policy(request.query, identity)
+        policy = evaluate_ask_policy(
+            request.query,
+            identity,
+            agent_key=registry.entry_key,
+        )
+        conversation_id = None
+        conversation_history: tuple[ConversationTurn, ...] = ()
+        if (
+            registry.entry_key == "DWP_ASSISTANT"
+            and "APP.ASK:VIEW" in {permission.upper() for permission in identity.permissions}
+        ):
+            conversation_id = self.conversation_store.ensure(
+                tenant_id=identity.tenant_id,
+                user_id=identity.user_id,
+                conversation_id=request.conversation_id,
+                locale=request.locale,
+                initial_query=request.query,
+            )
+            conversation_history = self.conversation_store.recent_history(
+                tenant_id=identity.tenant_id,
+                user_id=identity.user_id,
+                conversation_id=conversation_id,
+            )
         started = RunStart(
             run_id=run_id,
             tenant_id=identity.tenant_id,
@@ -120,8 +166,27 @@ class AskRuntime:
                     audit_id=audit_id,
                     registry=registry,
                     policy=policy,
+                    conversation_history=conversation_history,
+                    on_progress=on_progress,
                 )
 
+            _progress(on_progress, "PERSISTING")
+            if conversation_id is not None:
+                user_message_id, assistant_message_id = self.conversation_store.append_exchange(
+                    tenant_id=identity.tenant_id,
+                    user_id=identity.user_id,
+                    conversation_id=conversation_id,
+                    request_id=request.request_id,
+                    query=request.query,
+                    response=response,
+                )
+                response = response.model_copy(
+                    update={
+                        "conversation_id": conversation_id,
+                        "user_message_id": user_message_id,
+                        "assistant_message_id": assistant_message_id,
+                    }
+                )
             self.run_store.complete(
                 response,
                 tenant_id=identity.tenant_id,
@@ -134,6 +199,7 @@ class AskRuntime:
                 user_id=identity.user_id,
                 roles=list(identity.roles),
             )
+            _progress(on_progress, "COMPLETED")
             return response
         except Exception:
             self.run_store.fail(run_id, "ASK_RUNTIME_FAILED")
@@ -148,12 +214,18 @@ class AskRuntime:
         audit_id: str,
         registry: AgentRegistryResolution,
         policy: AskPolicyDecision,
+        conversation_history: tuple[ConversationTurn, ...],
+        on_progress: Callable[[str], None] | None,
     ) -> tuple[AskResponse, str | None]:
+        _progress(on_progress, "RETRIEVING")
         try:
             context = self.context_broker.collect(
                 request.query,
                 identity=identity,
                 locale=request.locale,
+                agent_key=registry.entry_key,
+                source_scopes=request.source_scopes,
+                page_context=request.page_context,
             )
         except ContextBrokerUnavailable:
             return (
@@ -192,6 +264,7 @@ class AskRuntime:
                 None,
             )
 
+        _progress(on_progress, "REASONING")
         try:
             model_answer = self.model_gateway.generate(
                 request.query,
@@ -199,6 +272,9 @@ class AskRuntime:
                 locale=request.locale,
                 run_id=run_id,
                 safety_identifier=_safety_identifier(identity),
+                conversation_history=conversation_history,
+                page_context=request.page_context,
+                agent_key=registry.entry_key,
             )
         except ModelConfigurationRequired:
             return (
@@ -261,6 +337,7 @@ class AskRuntime:
                 None,
             )
 
+        _progress(on_progress, "VERIFYING")
         citations_by_id = {
             source.citation.source_id: source.citation for source in context.sources
         }
@@ -367,3 +444,8 @@ def _safe_status_code(error: Exception) -> str:
     value = str(error).strip().upper() or type(error).__name__.upper()
     safe = "".join(character if character.isalnum() or character in "_.-" else "_" for character in value)
     return safe[:120]
+
+
+def _progress(callback: Callable[[str], None] | None, stage: str) -> None:
+    if callback is not None:
+        callback(stage)

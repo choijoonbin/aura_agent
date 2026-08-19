@@ -23,6 +23,10 @@ DWP_AGENT_SERVICE_TOKEN=<local-secret> \
 - Health: `GET /health`
 - Governed plan contract: `POST /v1/plans/preview`
 - Grounded Ask Runtime: `POST /v1/ask`
+- Grounded Ask progress stream: `POST /v1/ask/stream`
+- Conversation history: `GET /v1/conversations`, `GET/PATCH/DELETE /v1/conversations/{id}`
+- Answer feedback: `PUT /v1/runs/{runId}/feedback`
+- Governed work handoff: `GET /v1/actions`, `POST /v1/actions/{actionKey}/preview`
 - OpenAPI: `GET /docs`
 
 Plan Preview는 Gateway가 검증해 전달한 `X-DWP-User-ID`, `X-DWP-Tenant-ID`,
@@ -39,6 +43,8 @@ Plan Preview는 Gateway가 검증해 전달한 `X-DWP-User-ID`, `X-DWP-Tenant-ID
 ```bash
 SERVICE_PLATFORM_URL=http://localhost:8002
 DWP_PLATFORM_RUNTIME_SERVICE_TOKEN=<managed-runtime-read-secret>
+SERVICE_APPROVAL_URL=http://localhost:8005
+DWP_APPROVAL_SERVICE_TOKEN=<managed-approval-read-secret>
 DWP_AGENT_REGISTRY_MODE=enforced
 ```
 
@@ -81,10 +87,11 @@ Ask Runtime은 서버에서 `APP.ASK:VIEW` 권한과 위험도를 판정하고, 
 계약 버전 1과 액션별 필수 Payload는 Agent와 Platform이 독립적으로 검증하므로 미지원 버전,
 권한 혼동, 불완전한 제안은 사용자에게 노출되기 전에 거부됩니다.
 
-실행 이력은 전용 `dwp_agent` 데이터베이스에 저장합니다. 질문은 Keyed HMAC만,
-Citation은 Hash만 저장하며, 재시도용 응답은 `DWP_AGENT_DATA_KEY`로 AES-256-GCM
-암호화합니다. 질문·답변·출처 제목은 평문 이력과 감사 이벤트에 기록하지 않습니다.
-운영에서는 이 키를 KMS/Secret Manager로 주입하고 정기 회전해야 합니다.
+실행 이력과 사용자 소유 Conversation은 전용 `dwp_agent` 데이터베이스에 저장합니다.
+실행 원장의 질문은 Keyed HMAC만, Citation은 Hash만 저장하며 재시도 응답과 대화의 제목,
+질문, 답변, 인용, 선택적 피드백 의견은 `DWP_AGENT_DATA_KEY`로 AES-256-GCM 암호화합니다.
+대화는 기본 90일 보존 후 조회에서 제외되고 정리됩니다. 운영에서는 이 키를
+KMS/Secret Manager로 주입하고 Tenant 보존·Legal Hold 정책과 함께 정기 회전해야 합니다.
 
 Model Route는 OpenAI Responses API의 Structured Outputs를 사용하고 `store=false`,
 출력 Token 상한, Privacy-preserving Safety Identifier를 적용합니다. 설정 예시는 다음과

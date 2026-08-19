@@ -135,13 +135,18 @@ class PayloadCipher:
         self._cipher = AESGCM(key)
 
     def encrypt(self, response: AskResponse, aad: bytes) -> tuple[bytes, bytes]:
-        nonce = os.urandom(12)
-        payload = response.model_dump_json(by_alias=True).encode("utf-8")
-        return nonce, self._cipher.encrypt(nonce, payload, aad)
+        return self.encrypt_bytes(response.model_dump_json(by_alias=True).encode("utf-8"), aad)
 
     def decrypt(self, nonce: bytes, ciphertext: bytes, aad: bytes) -> AskResponse:
-        payload = self._cipher.decrypt(nonce, ciphertext, aad)
+        payload = self.decrypt_bytes(nonce, ciphertext, aad)
         return AskResponse.model_validate_json(payload)
+
+    def encrypt_bytes(self, payload: bytes, aad: bytes) -> tuple[bytes, bytes]:
+        nonce = os.urandom(12)
+        return nonce, self._cipher.encrypt(nonce, payload, aad)
+
+    def decrypt_bytes(self, nonce: bytes, ciphertext: bytes, aad: bytes) -> bytes:
+        return self._cipher.decrypt(nonce, ciphertext, aad)
 
 
 class PostgresRunStore:

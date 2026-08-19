@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import StrEnum
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
 
@@ -59,6 +60,25 @@ class CitationSourceType(StrEnum):
     WORK_ITEM = "WORK_ITEM"
     MAIL = "MAIL"
     CALENDAR = "CALENDAR"
+    APPROVAL_TASK = "APPROVAL_TASK"
+    APPROVAL_REQUEST = "APPROVAL_REQUEST"
+    APPROVAL_FORM = "APPROVAL_FORM"
+    APPROVAL_OPERATION = "APPROVAL_OPERATION"
+
+
+class ConversationRole(StrEnum):
+    USER = "USER"
+    ASSISTANT = "ASSISTANT"
+
+
+class AnswerFeedbackRating(StrEnum):
+    UP = "UP"
+    DOWN = "DOWN"
+
+
+class WorkplaceActionMode(StrEnum):
+    REDIRECT = "REDIRECT"
+    APPROVAL_HANDOFF = "APPROVAL_HANDOFF"
 
 
 class RegistryRiskTier(StrEnum):
@@ -158,6 +178,26 @@ class AskRequest(ContractModel):
         default="DWP_ASSISTANT",
         pattern=r"^[A-Za-z][A-Za-z0-9_.-]{0,99}$",
     )
+    conversation_id: UUID | None = None
+    source_scopes: list[CitationSourceType] = Field(
+        default_factory=lambda: list(CitationSourceType),
+        min_length=1,
+        max_length=7,
+    )
+    page_context: "AskPageContext | None" = None
+
+    @model_validator(mode="after")
+    def normalize_source_scopes(self) -> "AskRequest":
+        self.source_scopes = list(dict.fromkeys(self.source_scopes))
+        return self
+
+
+class AskPageContext(ContractModel):
+    route: str = Field(min_length=1, max_length=500, pattern=r"^/")
+    app_key: str = Field(pattern=r"^[A-Z][A-Z0-9_.-]{1,99}$")
+    surface: str | None = Field(default=None, max_length=100)
+    entity_type: str | None = Field(default=None, max_length=80)
+    entity_ref: str | None = Field(default=None, max_length=256)
 
 
 class AskPolicyDecision(ContractModel):
@@ -184,6 +224,7 @@ class AskCitation(ContractModel):
     source_system: str = Field(min_length=1, max_length=100)
     route: str | None = Field(default=None, max_length=1_000)
     occurred_at: datetime | None = None
+    excerpt: str | None = Field(default=None, max_length=500)
 
 
 class AskModelRoute(ContractModel):
@@ -230,6 +271,9 @@ class AskResponse(ContractModel):
     agent_registry: AgentRegistryResolution
     status_code: str = Field(pattern=r"^[A-Z][A-Z0-9_.-]{2,127}$")
     completed_at: datetime
+    conversation_id: UUID | None = None
+    user_message_id: UUID | None = None
+    assistant_message_id: UUID | None = None
 
     @model_validator(mode="after")
     def validate_answer_state(self) -> "AskResponse":
@@ -256,3 +300,122 @@ class AskEnvelope(ContractModel):
     message: str = "Ask request evaluated."
     success: bool = True
     data: AskResponse
+
+
+class ConversationSummary(ContractModel):
+    conversation_id: UUID
+    title: str = Field(min_length=1, max_length=160)
+    locale: str = Field(pattern=r"^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$")
+    message_count: int = Field(ge=0)
+    created_at: datetime
+    updated_at: datetime
+    last_message_at: datetime
+
+
+class ConversationMessage(ContractModel):
+    message_id: UUID
+    role: ConversationRole
+    content: str = Field(min_length=1, max_length=8_000)
+    run_id: UUID | None = None
+    status_code: str | None = Field(
+        default=None,
+        pattern=r"^[A-Z][A-Z0-9_.-]{2,127}$",
+    )
+    citations: list[AskCitation] = Field(default_factory=list, max_length=20)
+    created_at: datetime
+
+
+class ConversationDetail(ContractModel):
+    summary: ConversationSummary
+    messages: list[ConversationMessage] = Field(default_factory=list, max_length=200)
+
+
+class ConversationListEnvelope(ContractModel):
+    status: str = "SUCCESS"
+    message: str = "Conversations loaded."
+    success: bool = True
+    data: list[ConversationSummary]
+
+
+class ConversationEnvelope(ContractModel):
+    status: str = "SUCCESS"
+    message: str = "Conversation loaded."
+    success: bool = True
+    data: ConversationDetail
+
+
+class RenameConversationRequest(ContractModel):
+    title: str = Field(min_length=1, max_length=160)
+
+
+class AnswerFeedbackRequest(ContractModel):
+    rating: AnswerFeedbackRating
+    reason_codes: list[str] = Field(default_factory=list, max_length=8)
+    comment: str | None = Field(default=None, max_length=1_000)
+
+    @model_validator(mode="after")
+    def validate_reason_codes(self) -> "AnswerFeedbackRequest":
+        normalized: list[str] = []
+        for code in self.reason_codes:
+            candidate = code.strip().upper()
+            if not candidate or len(candidate) > 64 or not all(
+                character.isalnum() or character in "_.-" for character in candidate
+            ):
+                raise ValueError("Feedback reason codes must use safe catalog identifiers.")
+            if candidate not in normalized:
+                normalized.append(candidate)
+        self.reason_codes = normalized
+        self.comment = self.comment.strip() if self.comment else None
+        return self
+
+
+class FeedbackReceipt(ContractModel):
+    run_id: UUID
+    rating: AnswerFeedbackRating
+    recorded_at: datetime
+
+
+class FeedbackEnvelope(ContractModel):
+    status: str = "SUCCESS"
+    message: str = "Feedback recorded."
+    success: bool = True
+    data: FeedbackReceipt
+
+
+class WorkplaceAction(ContractModel):
+    action_key: str = Field(pattern=r"^[A-Z][A-Z0-9_.-]{2,127}$")
+    title: str = Field(min_length=1, max_length=120)
+    description: str = Field(min_length=1, max_length=300)
+    mode: WorkplaceActionMode
+    risk_tier: RiskTier
+    required_permission: str = Field(
+        pattern=r"^[A-Z][A-Z0-9_.-]{1,99}:[A-Z][A-Z0-9_.-]{1,63}$"
+    )
+    target_route: str = Field(min_length=1, max_length=500, pattern=r"^/")
+    confirmation_required: bool = True
+    input_fields: list[str] = Field(default_factory=list, max_length=20)
+
+
+class WorkplaceActionListEnvelope(ContractModel):
+    status: str = "SUCCESS"
+    message: str = "Available actions loaded."
+    success: bool = True
+    data: list[WorkplaceAction]
+
+
+class WorkplaceActionPreviewRequest(ContractModel):
+    request_id: str = Field(min_length=1, max_length=128)
+    inputs: dict[str, JsonValue] = Field(default_factory=dict, max_length=20)
+    source_references: list[str] = Field(default_factory=list, max_length=20)
+
+
+class WorkplaceActionPreview(ContractModel):
+    action: WorkplaceAction
+    plan: PlanPreviewResponse
+
+
+class WorkplaceActionPreviewEnvelope(ContractModel):
+    status: str = "SUCCESS"
+    message: str = "Action handoff preview prepared."
+    success: bool = True
+    data: WorkplaceActionPreview
