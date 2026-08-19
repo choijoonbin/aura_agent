@@ -10,6 +10,7 @@ def test_runtime_uses_installable_src_package() -> None:
     assert not list(ROOT.glob("*.py"))
     assert (PACKAGE_ROOT / "migrations" / "V1__create_agent_runtime_control_plane.sql").is_file()
     assert (PACKAGE_ROOT / "migrations" / "V2__create_dwaion_conversations_and_feedback.sql").is_file()
+    assert (PACKAGE_ROOT / "migrations" / "V4__govern_retention_and_encryption_key_versions.sql").is_file()
 
 
 def test_runtime_modules_stay_within_reviewable_size() -> None:

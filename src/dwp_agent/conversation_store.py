@@ -23,6 +23,10 @@ class ConversationNotFound(RuntimeError):
     pass
 
 
+class ConversationRetentionLocked(RuntimeError):
+    pass
+
+
 @dataclass(frozen=True)
 class ConversationTurn:
     role: ConversationRole
@@ -244,11 +248,13 @@ def get_conversation_store() -> ConversationStore:
         database_url = os.getenv("DWP_AGENT_DATABASE_URL", "").strip()
         if database_url:
             from .postgres_conversation_store import PostgresConversationStore
+            from .run_store import load_payload_keyring
 
-            data_key = os.getenv("DWP_AGENT_DATA_KEY", "").strip()
-            if not data_key:
-                raise RunStoreUnavailable("Agent conversation encryption key is required.")
-            _STORE = PostgresConversationStore(database_url, data_key)
+            _STORE = PostgresConversationStore(
+                database_url,
+                load_payload_keyring(),
+                _retention_days(os.getenv("DWP_AGENT_CONVERSATION_RETENTION_DAYS", "90")),
+            )
         else:
             _STORE = InMemoryConversationStore()
         return _STORE
@@ -264,3 +270,12 @@ def _title(value: str) -> str:
     normalized = " ".join(value.split()).strip()
     return (normalized or "New DWAI·ON conversation")[:160]
 
+
+def _retention_days(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as error:
+        raise RunStoreUnavailable("Agent conversation retention days must be an integer.") from error
+    if parsed < 30 or parsed > 3650:
+        raise RunStoreUnavailable("Agent conversation retention days must be between 30 and 3650.")
+    return parsed

@@ -19,6 +19,13 @@ PERSONAL_SCOPE_PATTERNS = (
     r"\b(?:my|mine|me|i am|i'm)\b",
     r"(?:내\s|나의|제가|나는|내가)",
 )
+PROMPT_INJECTION_PATTERNS = (
+    r"\bignore\s+(?:all\s+)?(?:(?:previous|prior)\s+)?(?:system\s+|developer\s+)?instructions?\b",
+    r"\b(?:reveal|show|print|leak)\b.{0,40}\b(?:system|developer)\s+prompt\b",
+    r"\b(?:bypass|override|disable)\b.{0,40}\b(?:policy|guardrail|access control)\b",
+    r"(?:이전|기존|시스템|개발자).{0,20}(?:지시|명령|프롬프트).{0,20}(?:무시|공개|출력|우회)",
+    r"(?:보안|접근|권한).{0,20}(?:정책|통제).{0,20}(?:무시|해제|우회)",
+)
 
 
 @dataclass(frozen=True)
@@ -28,6 +35,8 @@ class AskIdentity:
     roles: tuple[str, ...]
     permissions: tuple[str, ...]
     correlation_id: str
+    person_public_id: str | None = None
+    display_name_b64: str | None = None
 
 
 def evaluate_ask_policy(
@@ -45,6 +54,15 @@ def evaluate_ask_policy(
             risk_tier=RiskTier.L1,
             code="ASK_PERMISSION_REQUIRED",
             explanation="DWAI·ON access is not present in the verified session scope.",
+            model_allowed=False,
+        )
+
+    if contains_prompt_injection(normalized):
+        return AskPolicyDecision(
+            outcome=PolicyOutcome.DENY,
+            risk_tier=RiskTier.L2,
+            code="PROMPT_INJECTION_BLOCKED",
+            explanation="The request contains an instruction pattern that cannot enter the model route.",
             model_allowed=False,
         )
 
@@ -92,3 +110,8 @@ def _matches(patterns: tuple[str, ...], value: str) -> bool:
 def contains_privileged_data(value: str) -> bool:
     normalized = " ".join(value.strip().split())
     return _matches(PRIVILEGED_PATTERNS, normalized)
+
+
+def contains_prompt_injection(value: str) -> bool:
+    normalized = " ".join(value.strip().split())
+    return _matches(PROMPT_INJECTION_PATTERNS, normalized)

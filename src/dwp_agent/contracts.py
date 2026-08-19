@@ -132,6 +132,7 @@ class PlanPreviewRequest(ContractModel):
     action: str = Field(min_length=1, max_length=128)
     target: str = Field(min_length=1, max_length=256)
     source_references: list[str] = Field(default_factory=list, max_length=20)
+    inputs: dict[str, JsonValue] = Field(default_factory=dict, max_length=20)
     agent_key: str = Field(
         default="REFERENCE_PLANNER",
         pattern=r"^[A-Za-z][A-Za-z0-9_.-]{0,99}$",
@@ -411,6 +412,7 @@ class WorkplaceActionPreviewRequest(ContractModel):
 
 class WorkplaceActionPreview(ContractModel):
     action: WorkplaceAction
+    reviewed_inputs: dict[str, JsonValue] = Field(default_factory=dict, max_length=20)
     plan: PlanPreviewResponse
 
 

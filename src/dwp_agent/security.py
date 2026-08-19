@@ -6,6 +6,8 @@ from typing import Annotated
 
 from fastapi import Header, HTTPException, status
 
+from .policy import AskIdentity
+
 
 SERVICE_TOKEN_HEADER = "X-DWP-Service-Token"
 
@@ -27,3 +29,35 @@ def require_gateway_service(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid Agent service identity.",
         )
+
+
+def verified_ask_identity(
+    user_id: Annotated[str, Header(alias="X-DWP-User-ID", min_length=1)],
+    tenant_id: Annotated[str, Header(alias="X-DWP-Tenant-ID", min_length=1)],
+    correlation_id: Annotated[str, Header(alias="X-Correlation-ID", min_length=1)],
+    roles: Annotated[str | None, Header(alias="X-DWP-Roles")] = None,
+    permissions: Annotated[str | None, Header(alias="X-DWP-Permissions")] = None,
+    person_public_id: Annotated[
+        str | None, Header(alias="X-DWP-Person-Public-ID", max_length=36)
+    ] = None,
+    display_name_b64: Annotated[
+        str | None, Header(alias="X-DWP-Display-Name-B64", max_length=400)
+    ] = None,
+) -> AskIdentity:
+    return AskIdentity(
+        tenant_id=tenant_id,
+        user_id=user_id,
+        roles=header_values(roles),
+        permissions=header_values(permissions),
+        correlation_id=correlation_id,
+        person_public_id=person_public_id,
+        display_name_b64=display_name_b64,
+    )
+
+
+def header_values(value: str | None) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    return tuple(
+        sorted({item.strip().upper() for item in value.split(",") if item.strip()})
+    )

@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import base64
-import binascii
 import hashlib
 import hmac
 import os
@@ -11,10 +9,15 @@ from pathlib import Path
 from typing import Protocol
 from uuid import UUID
 
-from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from psycopg import connect
 
 from .contracts import AskResponse
+from .crypto import (
+    DataKeyConfigurationError,
+    PayloadCipher as _PayloadCipher,
+    PayloadCipherKeyring,
+    load_payload_keyring as _load_payload_keyring,
+)
 
 
 class RunInProgress(RuntimeError):
@@ -27,6 +30,14 @@ class RequestIdConflict(RuntimeError):
 
 class RunStoreUnavailable(RuntimeError):
     pass
+
+
+class PayloadCipher(_PayloadCipher):
+    def __init__(self, encoded_key: str) -> None:
+        try:
+            super().__init__(encoded_key)
+        except DataKeyConfigurationError as error:
+            raise RunStoreUnavailable(str(error)) from error
 
 
 @dataclass(frozen=True)
@@ -124,35 +135,17 @@ class InMemoryRunStore:
                 self._pending.discard(key)
 
 
-class PayloadCipher:
-    def __init__(self, encoded_key: str) -> None:
-        try:
-            key = base64.b64decode(encoded_key, validate=True)
-        except (ValueError, binascii.Error) as error:
-            raise RunStoreUnavailable("Agent data key is not valid base64.") from error
-        if len(key) != 32:
-            raise RunStoreUnavailable("Agent data key must contain 32 bytes.")
-        self._cipher = AESGCM(key)
-
-    def encrypt(self, response: AskResponse, aad: bytes) -> tuple[bytes, bytes]:
-        return self.encrypt_bytes(response.model_dump_json(by_alias=True).encode("utf-8"), aad)
-
-    def decrypt(self, nonce: bytes, ciphertext: bytes, aad: bytes) -> AskResponse:
-        payload = self.decrypt_bytes(nonce, ciphertext, aad)
-        return AskResponse.model_validate_json(payload)
-
-    def encrypt_bytes(self, payload: bytes, aad: bytes) -> tuple[bytes, bytes]:
-        nonce = os.urandom(12)
-        return nonce, self._cipher.encrypt(nonce, payload, aad)
-
-    def decrypt_bytes(self, nonce: bytes, ciphertext: bytes, aad: bytes) -> bytes:
-        return self._cipher.decrypt(nonce, ciphertext, aad)
+def load_payload_keyring() -> PayloadCipherKeyring:
+    try:
+        return _load_payload_keyring()
+    except DataKeyConfigurationError as error:
+        raise RunStoreUnavailable(str(error)) from error
 
 
 class PostgresRunStore:
-    def __init__(self, database_url: str, data_key: str) -> None:
+    def __init__(self, database_url: str, keyring: PayloadCipherKeyring) -> None:
         self.database_url = database_url
-        self.cipher = PayloadCipher(data_key)
+        self.keyring = keyring
 
     def load(
         self,
@@ -164,7 +157,8 @@ class PostgresRunStore:
         with connect(self.database_url) as connection:
             row = connection.execute(
                 """
-                SELECT run_id, response_nonce, response_ciphertext, run_state, query_hash
+                SELECT run_id, response_nonce, response_ciphertext, run_state, query_hash,
+                       response_key_version
                   FROM ai_agent_runs
                  WHERE tenant_id = %s AND user_id = %s AND request_id = %s
                 """,
@@ -178,7 +172,8 @@ class PostgresRunStore:
             raise RunInProgress("An Ask request with this request ID is already running.")
         if row[1] is None or row[2] is None:
             return None
-        return self.cipher.decrypt(
+        return self.keyring.decrypt_response(
+            str(row[5]),
             bytes(row[1]),
             bytes(row[2]),
             _aad(tenant_id, user_id, request_id, str(row[0])),
@@ -266,7 +261,7 @@ class PostgresRunStore:
         user_id: str,
         provider_request_hash: str | None = None,
     ) -> None:
-        nonce, ciphertext = self.cipher.encrypt(
+        key_version, nonce, ciphertext = self.keyring.encrypt_response(
             response,
             _aad(tenant_id, user_id, response.request_id, response.run_id),
         )
@@ -285,6 +280,7 @@ class PostgresRunStore:
                        total_tokens = %s,
                        latency_ms = %s,
                        source_count = %s,
+                       response_key_version = %s,
                        response_nonce = %s,
                        response_ciphertext = %s,
                        completed_at = %s
@@ -301,6 +297,7 @@ class PostgresRunStore:
                     route.total_tokens,
                     route.latency_ms,
                     response.source_count,
+                    key_version,
                     nonce,
                     ciphertext,
                     response.completed_at,
@@ -390,10 +387,7 @@ def get_run_store() -> RunStore:
             return _STORE
         database_url = os.getenv("DWP_AGENT_DATABASE_URL", "").strip()
         if database_url:
-            data_key = os.getenv("DWP_AGENT_DATA_KEY", "").strip()
-            if not data_key:
-                raise RunStoreUnavailable("Agent response encryption key is required.")
-            _STORE = PostgresRunStore(database_url, data_key)
+            _STORE = PostgresRunStore(database_url, load_payload_keyring())
         else:
             _STORE = InMemoryRunStore()
         return _STORE

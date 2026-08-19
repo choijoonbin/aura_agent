@@ -25,7 +25,11 @@ from .contracts import (
     WorkplaceActionPreviewEnvelope,
     WorkplaceActionPreviewRequest,
 )
-from .conversation_store import ConversationNotFound, get_conversation_store
+from .conversation_store import (
+    ConversationNotFound,
+    ConversationRetentionLocked,
+    get_conversation_store,
+)
 from .policy import AskIdentity
 from .planner import build_reference_plan
 from .registry import RegistryResolutionError, resolve_agent
@@ -37,11 +41,13 @@ from .run_store import (
     database_status,
     initialize_database,
 )
-from .security import require_gateway_service
+from .security import header_values, require_gateway_service, verified_ask_identity
 from .workplace_actions import (
     WorkplaceActionForbidden,
+    WorkplaceActionInputInvalid,
     WorkplaceActionNotFound,
     available_workplace_actions,
+    review_workplace_action_inputs,
     resolve_workplace_action,
 )
 
@@ -85,7 +91,7 @@ def get_ask_runtime() -> AskRuntime:
 def require_ask_access(
     permissions: Annotated[str | None, Header(alias="X-DWP-Permissions")] = None,
 ) -> None:
-    if "APP.ASK:VIEW" not in _header_values(permissions):
+    if "APP.ASK:VIEW" not in header_values(permissions):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="DWAI-ON access is required.",
@@ -101,14 +107,9 @@ def require_ask_access(
 )
 def ask(
     request: AskRequest,
-    user_id: Annotated[str, Header(alias="X-DWP-User-ID", min_length=1)],
-    tenant_id: Annotated[str, Header(alias="X-DWP-Tenant-ID", min_length=1)],
-    correlation_id: Annotated[str, Header(alias="X-Correlation-ID", min_length=1)],
-    roles: Annotated[str | None, Header(alias="X-DWP-Roles")] = None,
-    permissions: Annotated[str | None, Header(alias="X-DWP-Permissions")] = None,
+    identity: Annotated[AskIdentity, Depends(verified_ask_identity)],
     runtime: AskRuntime = Depends(get_ask_runtime),
 ) -> AskEnvelope:
-    identity = _identity(user_id, tenant_id, correlation_id, roles, permissions)
     try:
         return AskEnvelope(data=runtime.answer(request, identity=identity))
     except RegistryResolutionError as error:
@@ -142,15 +143,9 @@ def ask(
 )
 def ask_stream(
     request: AskRequest,
-    user_id: Annotated[str, Header(alias="X-DWP-User-ID", min_length=1)],
-    tenant_id: Annotated[str, Header(alias="X-DWP-Tenant-ID", min_length=1)],
-    correlation_id: Annotated[str, Header(alias="X-Correlation-ID", min_length=1)],
-    roles: Annotated[str | None, Header(alias="X-DWP-Roles")] = None,
-    permissions: Annotated[str | None, Header(alias="X-DWP-Permissions")] = None,
+    identity: Annotated[AskIdentity, Depends(verified_ask_identity)],
     runtime: AskRuntime = Depends(get_ask_runtime),
 ) -> StreamingResponse:
-    identity = _identity(user_id, tenant_id, correlation_id, roles, permissions)
-
     def stream():
         events: Queue[tuple[str, dict[str, object] | None]] = Queue()
 
@@ -273,6 +268,8 @@ def delete_conversation(
         return Response(status_code=status.HTTP_204_NO_CONTENT)
     except ConversationNotFound as error:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(error)) from error
+    except ConversationRetentionLocked as error:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
 
 
 @app.put(
@@ -308,7 +305,7 @@ def list_actions(
     permissions: Annotated[str | None, Header(alias="X-DWP-Permissions")] = None,
 ) -> WorkplaceActionListEnvelope:
     return WorkplaceActionListEnvelope(
-        data=available_workplace_actions(_header_values(permissions))
+        data=available_workplace_actions(header_values(permissions))
     )
 
 
@@ -329,11 +326,17 @@ def preview_action(
     permissions: Annotated[str | None, Header(alias="X-DWP-Permissions")] = None,
 ) -> WorkplaceActionPreviewEnvelope:
     try:
-        action = resolve_workplace_action(action_key, _header_values(permissions))
+        action = resolve_workplace_action(action_key, header_values(permissions))
     except WorkplaceActionNotFound as error:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(error)) from error
     except WorkplaceActionForbidden as error:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(error)) from error
+    try:
+        reviewed_inputs = review_workplace_action_inputs(action, request.inputs)
+    except WorkplaceActionInputInvalid as error:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(error)
+        ) from error
     try:
         registry = resolve_agent(
             "REFERENCE_PLANNER",
@@ -353,16 +356,26 @@ def preview_action(
             action=action.action_key,
             target=action.target_route,
             source_references=request.source_references,
+            inputs=reviewed_inputs,
             agent_key="REFERENCE_PLANNER",
         ),
         tenant_id=tenant_id,
         user_id=user_id,
-        roles=list(_header_values(roles)),
+        roles=list(header_values(roles)),
         correlation_id=correlation_id,
         agent_registry=registry,
     ).model_copy(update={"risk_tier": action.risk_tier})
+    record_plan_preview(
+        plan,
+        tenant_id=tenant_id,
+        user_id=user_id,
+        role_count=len(set(header_values(roles))),
+        roles=list(header_values(roles)),
+    )
     return WorkplaceActionPreviewEnvelope(
-        data=WorkplaceActionPreview(action=action, plan=plan)
+        data=WorkplaceActionPreview(
+            action=action, reviewed_inputs=reviewed_inputs, plan=plan
+        )
     )
 
 
@@ -409,30 +422,6 @@ def preview_plan(
         roles=verified_roles,
     )
     return PlanPreviewEnvelope(data=plan)
-
-
-def _header_values(value: str | None) -> tuple[str, ...]:
-    if value is None:
-        return ()
-    return tuple(
-        sorted({item.strip().upper() for item in value.split(",") if item.strip()})
-    )
-
-
-def _identity(
-    user_id: str,
-    tenant_id: str,
-    correlation_id: str,
-    roles: str | None,
-    permissions: str | None,
-) -> AskIdentity:
-    return AskIdentity(
-        tenant_id=tenant_id,
-        user_id=user_id,
-        roles=_header_values(roles),
-        permissions=_header_values(permissions),
-        correlation_id=correlation_id,
-    )
 
 
 def _sse(event: str, payload: dict[str, object]) -> str:

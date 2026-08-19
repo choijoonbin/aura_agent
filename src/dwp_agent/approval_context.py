@@ -7,7 +7,7 @@ from typing import Any, Callable
 import httpx
 
 from .contracts import CitationSourceType
-from .policy import contains_privileged_data
+from .policy import contains_privileged_data, contains_prompt_injection
 
 
 MAX_EVIDENCE_TEXT = 1_200
@@ -136,6 +136,8 @@ def _approval_work_items(
         )
         if contains_privileged_data(f"{title} {evidence}"):
             continue
+        if contains_prompt_injection(f"{title} {evidence}"):
+            continue
         identifier = item.get(identifier_key)
         route = (
             f"/approvals/inbox?task={identifier}"
@@ -185,6 +187,8 @@ def approval_forms(response: httpx.Response) -> list[dict[str, Any]]:
             ),
             MAX_EVIDENCE_TEXT,
         )
+        if contains_prompt_injection(f"{title} {evidence}"):
+            continue
         result.append(
             {
                 "sourceType": CitationSourceType.APPROVAL_FORM,
@@ -229,6 +233,10 @@ def approval_operations(
         }
         for signal in signals
         if isinstance(signal, dict)
+        and not contains_prompt_injection(
+            f"{signal.get('titleKo')} {signal.get('titleEn')} "
+            f"{signal.get('detailKo')} {signal.get('detailEn')}"
+        )
     ]
 
 

@@ -44,7 +44,7 @@ Plan Preview는 Gateway가 검증해 전달한 `X-DWP-User-ID`, `X-DWP-Tenant-ID
 SERVICE_PLATFORM_URL=http://localhost:8002
 DWP_PLATFORM_RUNTIME_SERVICE_TOKEN=<managed-runtime-read-secret>
 SERVICE_APPROVAL_URL=http://localhost:8005
-DWP_APPROVAL_SERVICE_TOKEN=<managed-approval-read-secret>
+DWP_APPROVAL_RUNTIME_SERVICE_TOKEN=<managed-approval-runtime-read-secret>
 DWP_AGENT_REGISTRY_MODE=enforced
 ```
 
@@ -90,8 +90,11 @@ Ask Runtime은 서버에서 `APP.ASK:VIEW` 권한과 위험도를 판정하고, 
 실행 이력과 사용자 소유 Conversation은 전용 `dwp_agent` 데이터베이스에 저장합니다.
 실행 원장의 질문은 Keyed HMAC만, Citation은 Hash만 저장하며 재시도 응답과 대화의 제목,
 질문, 답변, 인용, 선택적 피드백 의견은 `DWP_AGENT_DATA_KEY`로 AES-256-GCM 암호화합니다.
-대화는 기본 90일 보존 후 조회에서 제외되고 정리됩니다. 운영에서는 이 키를
-KMS/Secret Manager로 주입하고 Tenant 보존·Legal Hold 정책과 함께 정기 회전해야 합니다.
+대화는 Tenant별 `ai_conversation_retention_policies`에 따라 기본 90일 보존 후 정리됩니다.
+Legal Hold가 활성화되면 만료 정리와 사용자 삭제가 모두 차단됩니다. 암호문마다
+`encryption_key_version`을 기록하며 새 암호화에는 `DWP_AGENT_DATA_KEY_VERSION`, 과거 복호화에는
+`DWP_AGENT_PREVIOUS_DATA_KEYS`를 사용합니다. 운영 Key는 KMS/Secret Manager에서 주입하고
+이전 버전은 해당 암호문이 모두 재암호화되거나 보존 만료될 때까지 유지해야 합니다.
 
 Model Route는 OpenAI Responses API의 Structured Outputs를 사용하고 `store=false`,
 출력 Token 상한, Privacy-preserving Safety Identifier를 적용합니다. 설정 예시는 다음과

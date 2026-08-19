@@ -11,7 +11,7 @@ import httpx
 
 from .approval_context import collect_approval_context
 from .contracts import AskCitation, AskPageContext, CitationSourceType
-from .policy import AskIdentity, contains_privileged_data
+from .policy import AskIdentity, contains_privileged_data, contains_prompt_injection
 
 
 MAX_SOURCES = 12
@@ -79,7 +79,7 @@ class WorkspaceContextBroker:
         self.approval_service_token = (
             approval_service_token
             if approval_service_token is not None
-            else os.getenv("DWP_APPROVAL_SERVICE_TOKEN", "")
+            else os.getenv("DWP_APPROVAL_RUNTIME_SERVICE_TOKEN", "")
         ).strip()
         self.transport = transport
 
@@ -114,6 +114,10 @@ class WorkspaceContextBroker:
             "Accept-Language": locale,
             "Accept": "application/json",
         }
+        if identity.person_public_id:
+            identity_headers["X-DWP-Person-Public-ID"] = identity.person_public_id
+        if identity.display_name_b64:
+            identity_headers["X-DWP-Display-Name-B64"] = identity.display_name_b64
 
         with httpx.Client(transport=self.transport, timeout=3.0) as client:
             if approval_expert:
@@ -244,6 +248,8 @@ class WorkspaceContextBroker:
             )
             if contains_privileged_data(f"{title} {evidence}"):
                 continue
+            if _restricted_source(item) or contains_prompt_injection(f"{title} {evidence}"):
+                continue
             result.append(
                 {
                     "sourceType": CitationSourceType.WORK_ITEM,
@@ -288,6 +294,8 @@ class WorkspaceContextBroker:
             )
             if contains_privileged_data(f"{title} {evidence}"):
                 continue
+            if _restricted_source(item) or contains_prompt_injection(f"{title} {evidence}"):
+                continue
             result.append(
                 {
                     "sourceType": CitationSourceType.MAIL,
@@ -329,6 +337,8 @@ class WorkspaceContextBroker:
             )
             if contains_privileged_data(f"{title} {evidence}"):
                 continue
+            if _restricted_source(item) or contains_prompt_injection(f"{title} {evidence}"):
+                continue
             result.append(
                 {
                     "sourceType": CitationSourceType.CALENDAR,
@@ -345,6 +355,14 @@ class WorkspaceContextBroker:
 
 def _tokens(value: str) -> set[str]:
     return {token.lower() for token in TOKEN_PATTERN.findall(value)}
+
+
+def _restricted_source(item: dict[str, Any]) -> bool:
+    values = {
+        str(item.get(key) or "").strip().upper()
+        for key in ("dataClassification", "sensitivity", "visibility")
+    }
+    return bool(values & {"PRIVATE", "RESTRICTED", "HIGHLY_RESTRICTED", "SECRET", "PRIVILEGED"})
 
 
 def _relevance(query_tokens: set[str], title: str, evidence: str) -> int:
