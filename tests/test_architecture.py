@@ -17,6 +17,10 @@ APPLIED_MIGRATION_CHECKSUMS = {
         "4319840a4dcec6260da711506e6d633ca5978f4a92663e10636df5fb74f6a490",
     "V6__govern_sources_actions_safety_evaluation_and_audit.sql":
         "ceae76cf2c3a36cf9563caaf22ab48c9ea37259321c2cc2ae468f3271ab97758",
+    "V7__expand_default_safety_source_scopes.sql":
+        "5e21c2bcecd0ff4e937b769f62dde5cc0ee737282251b496642fa709ed921ee4",
+    "V8__govern_evaluation_run_leases.sql":
+        "4460e14e5f79fb2d9465298e62f442bb9612d8b8c2929fe2a87fd60ee4420b8e",
 }
 
 
@@ -29,6 +33,7 @@ def test_runtime_uses_installable_src_package() -> None:
     assert (PACKAGE_ROOT / "migrations" / "V5__audit_retention_policy_changes.sql").is_file()
     assert (PACKAGE_ROOT / "migrations" / "V6__govern_sources_actions_safety_evaluation_and_audit.sql").is_file()
     assert (PACKAGE_ROOT / "migrations" / "V7__expand_default_safety_source_scopes.sql").is_file()
+    assert (PACKAGE_ROOT / "migrations" / "V8__govern_evaluation_run_leases.sql").is_file()
 
 
 def test_applied_migrations_are_immutable() -> None:

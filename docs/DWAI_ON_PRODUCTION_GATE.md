@@ -40,6 +40,8 @@ uv run python -m compileall -q src
    확인합니다.
 6. 과거 Key가 누락되면 암호문을 평문이나 빈 값으로 대체하지 않고 실패 차단하는지
    확인합니다.
+7. 동일 평가 세트의 최신 실행과 직전 실행을 비교하고, 통과율 또는 사례별 회귀가 있으면
+   릴리스 승인자가 결과를 검토하는지 확인합니다.
 
 운영 모델 또는 Prompt가 바뀌면 고정 회귀 세트 외에 승인된 평가 환경에서 간접
 인젝션, 데이터 유출, Citation 정확도, 무응답 적합성, 한국어·영어 동등성을 다시
@@ -50,14 +52,17 @@ uv run python -m compileall -q src
 - `/v1/admin/overview`는 `ADMIN.DWAION_OPERATIONS:VIEW`가 있는 Gateway 호출만
   허용합니다. 실행 수, 정책 판정, 답변 상태, 지연, Token, 활성 사용자 수, 대화 수와
   피드백의 Tenant 집계만 반환합니다.
-- `/v1/admin/governance/sources`, `/actions`, `/safety`는 각각
+- `/v1/admin/sources`, `/actions`, `/safety`는 각각
   `ADMIN.DWAION_SOURCES`, `ADMIN.DWAION_ACTIONS`, `ADMIN.DWAION_SAFETY` 권한을
   독립적으로 요구합니다. 조회와 변경 권한을 합치지 않으며 모든 변경은 버전·사유·상관관계
   ID를 검증합니다.
 - 평가셋 작성·상태 전이·실행은 `ADMIN.DWAION_EVALUATION`의
   `CREATE|UPDATE|EXECUTE|MANAGE`를 동작별로 요구합니다. 평가 질문과 기대 결과는 대화와
-  동일한 Data Key 계약으로 암호화하고, 실행 결과는 재현 가능한 Agent Revision과 정책
-  버전을 함께 기록합니다.
+  동일한 Data Key 계약으로 암호화합니다. 실행 이력은 모델 참조, 사례별 판정, 근거 여부,
+  기대 용어 충족 수와 지연 시간만 기록하며 질문이나 응답 원문을 결과 증적에 복제하지 않습니다.
+- 실행 이력·상세 조회는 `VIEW`, 메트릭 전용 CSV 내보내기는 `EXPORT`를 요구합니다.
+  동일 세트에는 하나의 실행만 허용하며 30분 실행 임대가 만료된 중단 실행은 `FAILED`로
+  회수한 뒤 새 실행을 허용합니다. 임대를 잃은 이전 실행의 지연 결과는 저장하지 않습니다.
 - 거버넌스 감사 조회·내보내기는 `ADMIN.DWAION_AUDIT:VIEW|EXPORT`로 분리하며,
   변경 권한을 가진 운영자에게 감사 삭제나 수정 경로를 제공하지 않습니다.
 - 운영 조회는 질문, 답변, 대화 제목, 인용 원문이나 사용자 식별자를 선택하거나
@@ -93,9 +98,10 @@ Key Material과 원문 질문·답변·Source ID·Service Token은 로그에 남
 
 ## 6. 검증 증적
 
-- 2026-08-20: 전체 Agent 테스트 91개 통과(적용된 migration checksum 불변성 포함)
-- 2026-08-20: DB migration `V5`~`V7` 적용 및 보존·Source·Action·Safety·Evaluation·감사
+- 2026-08-20: 전체 Agent 테스트 96개 통과(적용된 migration checksum 불변성 포함)
+- 2026-08-20: DB migration `V5`~`V8` 적용 및 보존·Source·Action·Safety·Evaluation·감사
   스키마 확인. 적용된 migration의 checksum 불변성도 재기동으로 검증
+- 2026-08-20: 평가 실행 이력·상세·직전 실행 비교·메트릭 전용 CSV와 동시 실행 차단 확인
 - 2026-08-20: SKAX 위임 운영자에게 실제 집계 지표와 보존 정책 조회, 일반 Tenant
   관리자에게 메뉴 비노출과 Gateway 차단 확인
 
@@ -108,3 +114,7 @@ Key Material과 원문 질문·답변·Source ID·Service Token은 로그에 남
 - [OpenTelemetry GenAI semantic conventions](https://opentelemetry.io/docs/specs/semconv/registry/attributes/gen-ai/)
 - [OpenAI API Data Controls](https://platform.openai.com/docs/models/default-usage-policies-by-endpoint)
 - [AWS KMS Key Rotation](https://docs.aws.amazon.com/kms/latest/developerguide/rotate-keys.html)
+
+OpenTelemetry GenAI 규격은 전용 저장소로 이전 중이며 Schema URL이 아직 확정되지 않았습니다.
+따라서 현재 릴리스는 표준 `X-Correlation-ID`와 기존 관측성 계약을 유지하고, 안정 버전과
+마이그레이션 지침이 공개된 뒤 Semantic Convention 버전을 고정합니다.

@@ -8,6 +8,9 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Response, status
 from .contracts import CitationSourceType
 from .evaluation_runner import run_evaluation
 from .evaluation_store import (
+    EvaluationRunAlreadyActive,
+    EvaluationRunLeaseLost,
+    EvaluationRunNotFound,
     EvaluationSetNotFound,
     EvaluationSetNotRunnable,
     get_evaluation_store,
@@ -20,6 +23,7 @@ from .governance_contracts import (
     DataSourcePolicyEnvelope,
     DataSourcePolicyListEnvelope,
     EvaluationRunEnvelope,
+    EvaluationRunListEnvelope,
     EvaluationSetEnvelope,
     EvaluationSetListEnvelope,
     GovernanceAuditEnvelope,
@@ -330,8 +334,86 @@ def execute_evaluation(
         )
     except EvaluationSetNotFound as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
+    except (EvaluationRunAlreadyActive, EvaluationRunLeaseLost) as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
     except EvaluationSetNotRunnable as error:
         raise HTTPException(status_code=409, detail=str(error)) from error
+
+
+@router.get(
+    "/evaluations/{evaluation_set_id}/runs",
+    response_model=EvaluationRunListEnvelope,
+    response_model_by_alias=True,
+)
+def list_evaluation_runs(
+    evaluation_set_id: UUID,
+    headers: Annotated[tuple[str, str, str, str | None], Depends(_headers)],
+    limit: int = 20,
+):
+    tenant, user, correlation, permissions = headers
+    _context(tenant, user, correlation, permissions, "ADMIN.DWAION_EVALUATION", "VIEW")
+    return EvaluationRunListEnvelope(
+        data=get_evaluation_store().list_runs(
+            tenant_id=tenant,
+            evaluation_set_id=evaluation_set_id,
+            limit=max(1, min(limit, 50)),
+        )
+    )
+
+
+@router.get(
+    "/evaluations/{evaluation_set_id}/runs/{evaluation_run_id}",
+    response_model=EvaluationRunEnvelope,
+    response_model_by_alias=True,
+)
+def get_evaluation_run(
+    evaluation_set_id: UUID,
+    evaluation_run_id: UUID,
+    headers: Annotated[tuple[str, str, str, str | None], Depends(_headers)],
+):
+    tenant, user, correlation, permissions = headers
+    _context(tenant, user, correlation, permissions, "ADMIN.DWAION_EVALUATION", "VIEW")
+    try:
+        return EvaluationRunEnvelope(
+            message="DWAI-ON evaluation run loaded.",
+            data=get_evaluation_store().run_detail(
+                tenant_id=tenant,
+                evaluation_set_id=evaluation_set_id,
+                evaluation_run_id=evaluation_run_id,
+            ),
+        )
+    except EvaluationRunNotFound as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+
+
+@router.get(
+    "/evaluations/{evaluation_set_id}/runs/{evaluation_run_id}/export",
+)
+def export_evaluation_run(
+    evaluation_set_id: UUID,
+    evaluation_run_id: UUID,
+    headers: Annotated[tuple[str, str, str, str | None], Depends(_headers)],
+):
+    tenant, user, correlation, permissions = headers
+    _context(tenant, user, correlation, permissions, "ADMIN.DWAION_EVALUATION", "EXPORT")
+    try:
+        content = get_evaluation_store().run_csv(
+            tenant_id=tenant,
+            evaluation_set_id=evaluation_set_id,
+            evaluation_run_id=evaluation_run_id,
+        )
+    except EvaluationRunNotFound as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    return Response(
+        content=content,
+        media_type="text/csv; charset=utf-8",
+        headers={
+            "Content-Disposition": (
+                f"attachment; filename=dwaion-evaluation-{evaluation_run_id}.csv"
+            ),
+            "X-DWP-Export-Content": "metrics-only",
+        },
+    )
 
 
 @router.get("/audit", response_model=GovernanceAuditEnvelope, response_model_by_alias=True)

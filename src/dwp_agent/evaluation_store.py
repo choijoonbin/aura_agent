@@ -3,12 +3,14 @@ from __future__ import annotations
 import json
 import os
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from uuid import UUID, uuid4
 
 from psycopg import connect
+from psycopg.errors import UniqueViolation
 
 from .crypto import PayloadCipherKeyring, load_payload_keyring
+from .evaluation_evidence_store import EvaluationEvidenceStoreMixin, EvaluationRunNotFound
 from .governance_contracts import (
     CreateEvaluationCaseRequest,
     CreateEvaluationSetRequest,
@@ -33,10 +35,19 @@ class EvaluationSetNotRunnable(RuntimeError):
     pass
 
 
+class EvaluationRunAlreadyActive(RuntimeError):
+    pass
+
+
+class EvaluationRunLeaseLost(RuntimeError):
+    pass
+
+
 MAX_EVALUATION_CASES = 20
+EVALUATION_RUN_LEASE_MINUTES = 30
 
 
-class PostgresEvaluationStore:
+class PostgresEvaluationStore(EvaluationEvidenceStoreMixin):
     def __init__(self, database_url: str, keyring: PayloadCipherKeyring) -> None:
         self.database_url = database_url
         self.keyring = keyring
@@ -216,16 +227,39 @@ class PostgresEvaluationStore:
         if not detail.cases:
             raise EvaluationSetNotRunnable("The evaluation set has no cases.")
         run_id = uuid4()
-        with connect(self.database_url) as connection:
-            connection.execute(
-                """INSERT INTO ai_evaluation_runs (
-                       evaluation_run_id, tenant_id, evaluation_set_id, run_state,
-                       case_count, created_by)
-                   VALUES (%s, %s, %s, 'RUNNING', %s, %s)""",
-                (run_id, int(tenant_id), evaluation_set_id, len(detail.cases), actor_user_id),
-            )
-            self._event(connection, int(tenant_id), "evaluation-run.started", "EVALUATION_RUN",
-                        str(run_id), actor_user_id, correlation_id, None)
+        try:
+            with connect(self.database_url) as connection:
+                connection.execute(
+                    """UPDATE ai_evaluation_runs
+                          SET run_state = 'FAILED', completed_at = CURRENT_TIMESTAMP,
+                              lease_expires_at = NULL
+                        WHERE tenant_id = %s AND evaluation_set_id = %s
+                          AND run_state = 'RUNNING'
+                          AND lease_expires_at <= CURRENT_TIMESTAMP""",
+                    (int(tenant_id), evaluation_set_id),
+                )
+                connection.execute(
+                    """INSERT INTO ai_evaluation_runs (
+                           evaluation_run_id, tenant_id, evaluation_set_id, run_state,
+                           case_count, created_by, lease_expires_at)
+                       VALUES (%s, %s, %s, 'RUNNING', %s, %s, %s)""",
+                    (
+                        run_id,
+                        int(tenant_id),
+                        evaluation_set_id,
+                        len(detail.cases),
+                        actor_user_id,
+                        datetime.now(timezone.utc) + timedelta(
+                            minutes=EVALUATION_RUN_LEASE_MINUTES),
+                    ),
+                )
+                self._event(
+                    connection, int(tenant_id), "evaluation-run.started", "EVALUATION_RUN",
+                    str(run_id), actor_user_id, correlation_id, None)
+        except UniqueViolation as error:
+            raise EvaluationRunAlreadyActive(
+                "An evaluation run is already active for this test set."
+            ) from error
         return run_id, detail
 
     def complete_run(
@@ -256,12 +290,18 @@ class PostgresEvaluationStore:
                 """UPDATE ai_evaluation_runs
                       SET run_state = %s, passed_count = %s, failed_count = %s,
                           configuration_required_count = %s, model_ref = %s,
-                          completed_at = CURRENT_TIMESTAMP
+                          completed_at = CURRENT_TIMESTAMP, lease_expires_at = NULL
                     WHERE tenant_id = %s AND evaluation_run_id = %s
+                      AND run_state = 'RUNNING'
+                      AND lease_expires_at > CURRENT_TIMESTAMP
                 RETURNING created_at, completed_at""",
                 (state.value, passed, failed, configured, model_ref,
                  int(tenant_id), evaluation_run_id),
             ).fetchone()
+            if row is None:
+                raise EvaluationRunLeaseLost(
+                    "The evaluation run lease expired or was already recovered."
+                )
             self._event(connection, int(tenant_id), "evaluation-run.completed", "EVALUATION_RUN",
                         str(evaluation_run_id), actor_user_id, correlation_id, None)
         return EvaluationRun(
@@ -277,7 +317,8 @@ class PostgresEvaluationStore:
         with connect(self.database_url) as connection:
             connection.execute(
                 """UPDATE ai_evaluation_runs
-                      SET run_state = 'FAILED', completed_at = CURRENT_TIMESTAMP
+                      SET run_state = 'FAILED', completed_at = CURRENT_TIMESTAMP,
+                          lease_expires_at = NULL
                     WHERE tenant_id = %s AND evaluation_run_id = %s
                       AND run_state = 'RUNNING'""",
                 (int(tenant_id), evaluation_run_id),

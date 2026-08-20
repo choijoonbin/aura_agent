@@ -71,6 +71,8 @@ def test_openapi_contains_system_and_plan_preview_api() -> None:
         "/v1/admin/evaluations/{evaluation_set_id}/cases",
         "/v1/admin/evaluations/{evaluation_set_id}/lifecycle",
         "/v1/admin/evaluations/{evaluation_set_id}/runs",
+        "/v1/admin/evaluations/{evaluation_set_id}/runs/{evaluation_run_id}",
+        "/v1/admin/evaluations/{evaluation_set_id}/runs/{evaluation_run_id}/export",
         "/v1/admin/audit",
         "/v1/admin/audit/export",
     }

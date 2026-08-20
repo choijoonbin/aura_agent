@@ -241,6 +241,20 @@ class EvaluationRun(ContractModel):
     completed_at: datetime | None = None
 
 
+class EvaluationRunSummary(ContractModel):
+    evaluation_run_id: UUID
+    evaluation_set_id: UUID
+    run_state: EvaluationRunState
+    case_count: int = Field(ge=0)
+    passed_count: int = Field(ge=0)
+    failed_count: int = Field(ge=0)
+    configuration_required_count: int = Field(ge=0)
+    pass_rate: int | None = Field(default=None, ge=0, le=100)
+    model_ref: str | None = None
+    created_at: datetime
+    completed_at: datetime | None = None
+
+
 class GovernanceAuditEvent(ContractModel):
     event_id: UUID
     category: str
@@ -315,6 +329,13 @@ class EvaluationRunEnvelope(ContractModel):
     message: str = "DWAI-ON evaluation completed."
     success: bool = True
     data: EvaluationRun
+
+
+class EvaluationRunListEnvelope(ContractModel):
+    status: str = "SUCCESS"
+    message: str = "DWAI-ON evaluation runs loaded."
+    success: bool = True
+    data: list[EvaluationRunSummary]
 
 
 class GovernanceAuditEnvelope(ContractModel):
