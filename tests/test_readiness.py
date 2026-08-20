@@ -55,6 +55,43 @@ def test_production_runtime_rejects_shared_identity_and_insecure_model_endpoint(
     assert "DWP_OPENAI_BASE_URL=https" in str(captured.value)
 
 
+def test_production_runtime_accepts_approved_azure_openai_configuration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _configure_production(monkeypatch)
+    monkeypatch.setenv("DWP_MODEL_PROVIDER", "azure_openai")
+    monkeypatch.setenv(
+        "AZURE_OPENAI_API_KEY",
+        "azure-openai-key-for-production",
+    )
+    monkeypatch.setenv(
+        "DWP_OPENAI_BASE_URL",
+        "https://dwp-model.openai.azure.com/openai/v1",
+    )
+
+    validate_runtime_configuration()
+
+
+def test_production_runtime_rejects_azure_lookalike_endpoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _configure_production(monkeypatch)
+    monkeypatch.setenv("DWP_MODEL_PROVIDER", "azure_openai")
+    monkeypatch.setenv(
+        "AZURE_OPENAI_API_KEY",
+        "azure-openai-key-for-production",
+    )
+    monkeypatch.setenv(
+        "DWP_OPENAI_BASE_URL",
+        "https://dwp-model.openai.azure.com.evil.example/openai/v1",
+    )
+
+    with pytest.raises(RuntimeConfigurationError) as captured:
+        validate_runtime_configuration()
+
+    assert "DWP_OPENAI_BASE_URL=approved-provider-endpoint" in str(captured.value)
+
+
 def _configure_production(monkeypatch: pytest.MonkeyPatch) -> None:
     for name, value in _PRODUCTION_ENVIRONMENT.items():
         monkeypatch.setenv(name, value)

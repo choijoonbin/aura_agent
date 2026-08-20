@@ -24,6 +24,7 @@ from dwp_agent.contracts import (
 from dwp_agent.model_gateway import (
     GroundingViolation,
     ModelAnswer,
+    ModelCallFailed,
     OpenAIResponsesGateway,
     _system_instruction,
 )
@@ -113,6 +114,14 @@ class FakeModel:
         )
 
 
+class FailingAzureModel:
+    model = "gpt-5"
+    provider_label = "AZURE_OPENAI"
+
+    def generate(self, *_args, **_kwargs) -> ModelAnswer:
+        raise ModelCallFailed("MODEL_PROVIDER_UNAVAILABLE")
+
+
 @pytest.fixture(autouse=True)
 def runtime_secrets(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DWP_AGENT_PRIVACY_HASH_SECRET", "test-privacy-secret")
@@ -146,6 +155,27 @@ def test_grounded_answer_is_idempotent_and_citation_scoped() -> None:
     assert first.model_route.total_tokens == 148
     assert broker.calls == 1
     assert model.calls == 1
+
+
+def test_model_failure_preserves_azure_provider_in_audit_route() -> None:
+    runtime = AskRuntime(
+        context_broker=FakeBroker(),
+        model_gateway=FailingAzureModel(),
+        run_store=InMemoryRunStore(),
+    )
+
+    response = runtime.answer(
+        AskRequest(
+            request_id="request-azure-failure",
+            query="What is blocking my urgent work?",
+            locale="en",
+        ),
+        identity=identity("APP.ASK:VIEW", "APP.WORK:VIEW"),
+    )
+
+    assert response.state == "ABSTAINED"
+    assert response.status_code == "MODEL_PROVIDER_UNAVAILABLE"
+    assert response.model_route.provider == "AZURE_OPENAI"
 
 
 def test_approval_expert_is_permission_gated_and_forwarded_to_runtime_components(
@@ -683,6 +713,64 @@ def test_model_gateway_uses_non_persistent_structured_output_and_rejects_fake_ci
             "schema": captured[0]["text"]["format"]["schema"],
         }
     }
+
+
+def test_azure_model_gateway_uses_v1_endpoint_and_api_key_header() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            200,
+            headers={"apim-request-id": "azure-provider-request-secret"},
+            json={
+                "model": "dwp-gpt-deployment-2026-08-01",
+                "output": [
+                    {
+                        "type": "message",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": json.dumps(
+                                    {
+                                        "answer": "The grounded item is ready [src-01].",
+                                        "citedSourceIds": ["src-01"],
+                                        "confidence": "HIGH",
+                                        "abstainReason": None,
+                                    }
+                                ),
+                            }
+                        ],
+                    }
+                ],
+                "usage": {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15},
+            },
+        )
+
+    gateway = OpenAIResponsesGateway(
+        provider="azure_openai",
+        api_key="azure-test-key",
+        model="dwp-gpt-deployment",
+        base_url="https://dwp-model.openai.azure.com/",
+        transport=httpx.MockTransport(handler),
+    )
+
+    answer = gateway.generate(
+        "What is ready?",
+        context=context(),
+        locale="en",
+        run_id="2ca9b2ac-bdd8-4f62-9e1a-acde76646c98",
+        safety_identifier="dwp_test",
+    )
+
+    assert str(requests[0].url) == (
+        "https://dwp-model.openai.azure.com/openai/v1/responses"
+    )
+    assert requests[0].headers["api-key"] == "azure-test-key"
+    assert "authorization" not in requests[0].headers
+    assert answer.provider == "AZURE_OPENAI"
+    assert answer.provider_request_hash
+    assert "azure-provider-request-secret" not in answer.provider_request_hash
 
 
 def test_model_gateway_rejects_answer_without_confidence(

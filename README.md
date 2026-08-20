@@ -96,15 +96,25 @@ Legal Hold가 활성화되면 만료 정리와 사용자 삭제가 모두 차단
 `DWP_AGENT_PREVIOUS_DATA_KEYS`를 사용합니다. 운영 Key는 KMS/Secret Manager에서 주입하고
 이전 버전은 해당 암호문이 모두 재암호화되거나 보존 만료될 때까지 유지해야 합니다.
 
-Model Route는 OpenAI Responses API의 Structured Outputs를 사용하고 `store=false`,
+Model Route는 OpenAI-compatible Responses API의 Structured Outputs를 사용하고 `store=false`,
 출력 Token 상한, Privacy-preserving Safety Identifier를 적용합니다. 설정 예시는 다음과
 같으며 Key가 없으면 성공 응답을 꾸미지 않고 `CONFIGURATION_REQUIRED`로 반환합니다.
+로컬 개발 비밀은 Git에서 제외된 `.env.local`에만 두고 `chmod 600 .env.local`로
+소유자 읽기 권한만 허용합니다. Backend `./dev` Supervisor는 이 파일의 모델 관련
+허용 변수만 Agent 프로세스에 주입합니다.
 
 ```bash
-OPENAI_API_KEY=<managed-secret>
-DWP_OPENAI_MODEL=<approved-model-snapshot>
-DWP_OPENAI_BASE_URL=https://api.openai.com/v1
+DWP_MODEL_PROVIDER=azure_openai
+AZURE_OPENAI_API_KEY=<managed-secret>
+AZURE_OPENAI_ENDPOINT=https://<resource-name>.openai.azure.com
+DWP_OPENAI_MODEL=<azure-deployment-name>
 ```
+
+Azure 리소스 루트는 런타임에서 GA v1 경로인 `/openai/v1`으로 정규화되며 요청은
+`/responses`와 `api-key` Header를 사용합니다. Public OpenAI는
+`DWP_MODEL_PROVIDER=openai`, `OPENAI_API_KEY`,
+`DWP_OPENAI_BASE_URL=https://api.openai.com/v1` 조합을 사용합니다. 운영에서는 API Key를
+소스나 이미지에 포함하지 않고 Secret Store에서 주입해야 합니다.
 
 현재 단계에서는 권한·테넌트 범위·직무분리·버전 충돌을 검사하는 Preview와 사람 승인
 단계만 만들고 실제 변경 Endpoint를 호출하지 않습니다.

@@ -4,6 +4,11 @@ import os
 from urllib.parse import urlparse
 
 from .crypto import DataKeyConfigurationError, load_payload_keyring
+from .model_provider import (
+    ModelProvider,
+    ProviderConfigurationError,
+    ResponsesProviderConfiguration,
+)
 
 
 class RuntimeConfigurationError(RuntimeError):
@@ -24,7 +29,6 @@ def validate_runtime_configuration() -> None:
         "DWP_AUDIT_INGEST_TOKEN",
         "DWP_API_HISTORY_INGEST_TOKEN",
         "DWP_API_HISTORY_PRIVACY_HASH_SECRET",
-        "OPENAI_API_KEY",
     )
     for name in required_secrets:
         if not _managed_secret(name):
@@ -42,6 +46,24 @@ def validate_runtime_configuration() -> None:
     for name in required_values:
         if not os.getenv(name, "").strip():
             errors.append(name)
+
+    provider: ModelProvider | None
+    try:
+        provider = ModelProvider.parse(os.getenv("DWP_MODEL_PROVIDER"))
+    except ProviderConfigurationError:
+        provider = None
+        errors.append("DWP_MODEL_PROVIDER")
+    if provider is not None:
+        provider_configuration = ResponsesProviderConfiguration.from_environment(
+            provider=provider
+        )
+        key_environment = provider_configuration.required_api_key_environment
+        if not _managed_secret(key_environment):
+            errors.append(key_environment)
+        try:
+            provider_configuration.validate_endpoint()
+        except ProviderConfigurationError:
+            errors.append("DWP_OPENAI_BASE_URL=approved-provider-endpoint")
 
     if os.getenv("DWP_AGENT_DATABASE_REQUIRED", "").strip().lower() != "true":
         errors.append("DWP_AGENT_DATABASE_REQUIRED=true")

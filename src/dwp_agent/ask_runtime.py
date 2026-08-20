@@ -292,7 +292,7 @@ class AskRuntime:
                     source_count=len(context.sources),
                     model_route=AskModelRoute(
                         state=ModelRouteState.CONFIGURATION_REQUIRED,
-                        provider="OPENAI",
+                        provider=_model_provider_label(self.model_gateway),
                         model=self.model_gateway.model.strip() or None,
                     ),
                 ),
@@ -312,7 +312,7 @@ class AskRuntime:
                     source_count=len(context.sources),
                     model_route=AskModelRoute(
                         state=ModelRouteState.REFUSED,
-                        provider="OPENAI",
+                        provider=_model_provider_label(self.model_gateway),
                         model=self.model_gateway.model.strip() or None,
                     ),
                 ),
@@ -332,7 +332,7 @@ class AskRuntime:
                     source_count=len(context.sources),
                     model_route=AskModelRoute(
                         state=ModelRouteState.REFUSED,
-                        provider="OPENAI",
+                        provider=_model_provider_label(self.model_gateway),
                         model=self.model_gateway.model.strip() or None,
                     ),
                 ),
@@ -440,6 +440,11 @@ def _safety_identifier(identity: AskIdentity) -> str:
         hashlib.sha256,
     ).hexdigest()
     return f"dwp_{digest[:48]}"
+
+
+def _model_provider_label(model_gateway: object) -> str:
+    provider = getattr(model_gateway, "provider_label", "OPENAI")
+    return str(provider).strip().upper()[:40] or "OPENAI"
 
 
 def _safe_status_code(error: Exception) -> str:

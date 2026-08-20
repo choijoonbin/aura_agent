@@ -5,7 +5,6 @@ import os
 import time
 from dataclasses import dataclass
 from typing import Any
-from urllib.parse import urlparse
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -13,6 +12,10 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from .contracts import AnswerConfidence, AskPageContext
 from .conversation_store import ConversationTurn
 from .context_broker import GroundedContext
+from .model_provider import (
+    ProviderConfigurationError,
+    ResponsesProviderConfiguration,
+)
 
 
 ANSWER_SCHEMA = {
@@ -91,22 +94,34 @@ class OpenAIResponsesGateway:
         api_key: str | None = None,
         model: str | None = None,
         base_url: str | None = None,
+        provider: str | None = None,
         transport: httpx.BaseTransport | None = None,
     ) -> None:
-        self.api_key = api_key if api_key is not None else os.getenv("OPENAI_API_KEY", "")
-        self.model = model if model is not None else os.getenv("DWP_OPENAI_MODEL", "")
-        self.base_url = (
-            base_url
-            if base_url is not None
-            else os.getenv("DWP_OPENAI_BASE_URL", "https://api.openai.com/v1")
-        ).strip().rstrip("/")
+        try:
+            self.provider_configuration = (
+                ResponsesProviderConfiguration.from_environment(
+                    provider=provider,
+                    api_key=api_key,
+                    model=model,
+                    base_url=base_url,
+                )
+            )
+        except ProviderConfigurationError as error:
+            raise ModelConfigurationRequired(str(error)) from error
+        self.api_key = self.provider_configuration.api_key
+        self.model = self.provider_configuration.model
+        self.base_url = self.provider_configuration.base_url
         self.transport = transport
         self.timeout_seconds = _bounded_float("DWP_OPENAI_TIMEOUT_SECONDS", 20.0, 2.0, 60.0)
         self.max_output_tokens = _bounded_int("DWP_OPENAI_MAX_OUTPUT_TOKENS", 900, 128, 4_096)
 
     @property
     def configured(self) -> bool:
-        return bool(self.api_key.strip() and self.model.strip())
+        return self.provider_configuration.configured
+
+    @property
+    def provider_label(self) -> str:
+        return self.provider_configuration.audit_label
 
     def generate(
         self,
@@ -158,10 +173,10 @@ class OpenAIResponsesGateway:
             },
         }
         headers = {
-            "Authorization": f"Bearer {self.api_key.strip()}",
             "Content-Type": "application/json",
             "Accept": "application/json",
             "X-Client-Request-Id": run_id,
+            **self.provider_configuration.authentication_headers(),
         }
 
         started = time.perf_counter_ns()
@@ -198,13 +213,15 @@ class OpenAIResponsesGateway:
             raise GroundingViolation("MODEL_ABSTENTION_REASON_REQUIRED")
 
         usage = body.get("usage") if isinstance(body.get("usage"), dict) else {}
-        provider_request_id = response.headers.get("x-request-id")
+        provider_request_id = response.headers.get("x-request-id") or response.headers.get(
+            "apim-request-id"
+        )
         return ModelAnswer(
             answer=answer,
             cited_source_ids=cited_ids,
             confidence=structured.confidence,
             abstain_reason=abstain_reason,
-            provider="OPENAI",
+            provider=self.provider_configuration.audit_label,
             model=str(body.get("model") or self.model.strip())[:160],
             input_tokens=_nonnegative_int(usage.get("input_tokens")),
             output_tokens=_nonnegative_int(usage.get("output_tokens")),
@@ -241,14 +258,16 @@ class OpenAIResponsesGateway:
         raise ModelCallFailed("MODEL_PROVIDER_UNAVAILABLE")
 
     def _validate_endpoint(self) -> None:
-        parsed = urlparse(self.base_url)
-        official = parsed.scheme == "https" and parsed.hostname == "api.openai.com"
         test_override = (
             self.transport is not None
             and os.getenv("DWP_AGENT_ALLOW_TEST_MODEL_URL", "false").lower() == "true"
         )
-        if not official and not test_override:
-            raise ModelConfigurationRequired("The model provider endpoint is not approved.")
+        try:
+            self.provider_configuration.validate_endpoint(
+                allow_test_override=test_override
+            )
+        except ProviderConfigurationError as error:
+            raise ModelConfigurationRequired(str(error)) from error
 
 
 def _extract_output_text(body: dict[str, Any]) -> str:
