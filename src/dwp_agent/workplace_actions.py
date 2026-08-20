@@ -71,6 +71,10 @@ _ACTIONS: tuple[WorkplaceAction, ...] = (
 )
 
 
+def all_workplace_actions() -> tuple[WorkplaceAction, ...]:
+    return _ACTIONS
+
+
 def available_workplace_actions(permissions: tuple[str, ...]) -> list[WorkplaceAction]:
     authorities = {permission.strip().upper() for permission in permissions}
     return [action for action in _ACTIONS if action.required_permission in authorities]

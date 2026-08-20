@@ -39,14 +39,22 @@ class AskIdentity:
     display_name_b64: str | None = None
 
 
+@dataclass(frozen=True)
+class SafetyControls:
+    privileged_data_outcome: PolicyOutcome = PolicyOutcome.HANDOFF
+    mutation_outcome: PolicyOutcome = PolicyOutcome.HANDOFF
+
+
 def evaluate_ask_policy(
     query: str,
     identity: AskIdentity,
     *,
     agent_key: str = "DWP_ASSISTANT",
+    safety_controls: SafetyControls | None = None,
 ) -> AskPolicyDecision:
     normalized = " ".join(query.strip().split())
     permission_set = {permission.upper() for permission in identity.permissions}
+    controls = safety_controls or SafetyControls()
 
     if "APP.ASK:VIEW" not in permission_set:
         return AskPolicyDecision(
@@ -77,7 +85,7 @@ def evaluate_ask_policy(
 
     if contains_privileged_data(normalized):
         return AskPolicyDecision(
-            outcome=PolicyOutcome.HANDOFF,
+            outcome=controls.privileged_data_outcome,
             risk_tier=RiskTier.L3,
             code="PRIVILEGED_DATA_HANDOFF",
             explanation="The request may involve privileged workforce or financial data.",
@@ -86,7 +94,7 @@ def evaluate_ask_policy(
 
     if _matches(ADMIN_MUTATION_PATTERNS, normalized):
         return AskPolicyDecision(
-            outcome=PolicyOutcome.HANDOFF,
+            outcome=controls.mutation_outcome,
             risk_tier=RiskTier.L2,
             code="MUTATION_REQUIRES_GOVERNED_WORKFLOW",
             explanation="The request describes a change that requires an approved application workflow.",

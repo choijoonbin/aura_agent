@@ -59,6 +59,20 @@ def test_openapi_contains_system_and_plan_preview_api() -> None:
         "/v1/runs/{run_id}/feedback",
         "/v1/actions",
         "/v1/actions/{action_key}/preview",
+        "/v1/admin/overview",
+        "/v1/admin/retention",
+        "/v1/admin/sources",
+        "/v1/admin/sources/{source_key}",
+        "/v1/admin/actions",
+        "/v1/admin/actions/{action_key}",
+        "/v1/admin/safety",
+        "/v1/admin/evaluations",
+        "/v1/admin/evaluations/{evaluation_set_id}",
+        "/v1/admin/evaluations/{evaluation_set_id}/cases",
+        "/v1/admin/evaluations/{evaluation_set_id}/lifecycle",
+        "/v1/admin/evaluations/{evaluation_set_id}/runs",
+        "/v1/admin/audit",
+        "/v1/admin/audit/export",
     }
     parameters = response.json()["paths"]["/v1/plans/preview"]["post"]["parameters"]
     assert "X-DWP-Service-Token" not in {parameter["name"] for parameter in parameters}

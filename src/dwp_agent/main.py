@@ -12,6 +12,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Response, status
 from fastapi.responses import StreamingResponse
 
 from .ask_runtime import AskRuntime
+from .action_api import router as action_router
 from .audit import record_plan_preview
 from .contracts import AskEnvelope, AskRequest, PlanPreviewEnvelope, PlanPreviewRequest
 from .contracts import (
@@ -20,21 +21,20 @@ from .contracts import (
     ConversationListEnvelope,
     FeedbackEnvelope,
     RenameConversationRequest,
-    WorkplaceActionListEnvelope,
-    WorkplaceActionPreview,
-    WorkplaceActionPreviewEnvelope,
-    WorkplaceActionPreviewRequest,
 )
 from .conversation_store import (
     ConversationNotFound,
     ConversationRetentionLocked,
     get_conversation_store,
 )
-from .policy import AskIdentity
+from .policy import AskIdentity, SafetyControls
 from .planner import build_reference_plan
 from .registry import RegistryResolutionError, resolve_agent
 from .readiness import validate_runtime_configuration
 from .observability import install_api_history
+from .operations_api import router as operations_router
+from .governance_api import router as governance_router
+from .governance_store import GovernanceStoreUnavailable
 from .run_store import (
     RequestIdConflict,
     RunInProgress,
@@ -43,13 +43,10 @@ from .run_store import (
     initialize_database,
 )
 from .security import header_values, require_gateway_service, verified_ask_identity
-from .workplace_actions import (
-    WorkplaceActionForbidden,
-    WorkplaceActionInputInvalid,
-    WorkplaceActionNotFound,
-    available_workplace_actions,
-    review_workplace_action_inputs,
-    resolve_workplace_action,
+from .runtime_policy import (
+    SourcePolicyBlocked,
+    SourceScopeLimitExceeded,
+    resolve_runtime_safety_controls,
 )
 
 
@@ -65,6 +62,9 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(title=SERVICE_NAME, version=SERVICE_VERSION, lifespan=lifespan)
 install_api_history(app)
+app.include_router(operations_router)
+app.include_router(governance_router)
+app.include_router(action_router)
 
 
 @app.get("/", include_in_schema=False)
@@ -100,6 +100,25 @@ def require_ask_access(
         )
 
 
+def runtime_safety_controls(request: AskRequest, identity: AskIdentity) -> SafetyControls:
+    try:
+        return resolve_runtime_safety_controls(request, identity)
+    except GovernanceStoreUnavailable as error:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(error)
+        ) from error
+    except SourcePolicyBlocked as error:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=str(error),
+        )
+    except SourceScopeLimitExceeded as error:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(error),
+        )
+
+
 @app.post(
     "/v1/ask",
     response_model=AskEnvelope,
@@ -113,7 +132,9 @@ def ask(
     runtime: AskRuntime = Depends(get_ask_runtime),
 ) -> AskEnvelope:
     try:
-        return AskEnvelope(data=runtime.answer(request, identity=identity))
+        safety_controls = runtime_safety_controls(request, identity)
+        return AskEnvelope(data=runtime.answer(
+            request, identity=identity, safety_controls=safety_controls))
     except RegistryResolutionError as error:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -148,6 +169,8 @@ def ask_stream(
     identity: Annotated[AskIdentity, Depends(verified_ask_identity)],
     runtime: AskRuntime = Depends(get_ask_runtime),
 ) -> StreamingResponse:
+    safety_controls = runtime_safety_controls(request, identity)
+
     def stream():
         events: Queue[tuple[str, dict[str, object] | None]] = Queue()
 
@@ -157,6 +180,7 @@ def ask_stream(
                     request,
                     identity=identity,
                     on_progress=lambda stage: events.put(("progress", {"stage": stage})),
+                    safety_controls=safety_controls,
                 )
                 envelope = AskEnvelope(data=response)
                 events.put(
@@ -294,91 +318,6 @@ def record_feedback(
         return FeedbackEnvelope(data=receipt)
     except ConversationNotFound as error:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(error)) from error
-
-
-@app.get(
-    "/v1/actions",
-    response_model=WorkplaceActionListEnvelope,
-    response_model_by_alias=True,
-    tags=["actions"],
-    dependencies=[Depends(require_gateway_service), Depends(require_ask_access)],
-)
-def list_actions(
-    permissions: Annotated[str | None, Header(alias="X-DWP-Permissions")] = None,
-) -> WorkplaceActionListEnvelope:
-    return WorkplaceActionListEnvelope(
-        data=available_workplace_actions(header_values(permissions))
-    )
-
-
-@app.post(
-    "/v1/actions/{action_key}/preview",
-    response_model=WorkplaceActionPreviewEnvelope,
-    response_model_by_alias=True,
-    tags=["actions"],
-    dependencies=[Depends(require_gateway_service), Depends(require_ask_access)],
-)
-def preview_action(
-    action_key: str,
-    request: WorkplaceActionPreviewRequest,
-    user_id: Annotated[str, Header(alias="X-DWP-User-ID", min_length=1)],
-    tenant_id: Annotated[str, Header(alias="X-DWP-Tenant-ID", min_length=1)],
-    correlation_id: Annotated[str, Header(alias="X-Correlation-ID", min_length=1)],
-    roles: Annotated[str | None, Header(alias="X-DWP-Roles")] = None,
-    permissions: Annotated[str | None, Header(alias="X-DWP-Permissions")] = None,
-) -> WorkplaceActionPreviewEnvelope:
-    try:
-        action = resolve_workplace_action(action_key, header_values(permissions))
-    except WorkplaceActionNotFound as error:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(error)) from error
-    except WorkplaceActionForbidden as error:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(error)) from error
-    try:
-        reviewed_inputs = review_workplace_action_inputs(action, request.inputs)
-    except WorkplaceActionInputInvalid as error:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(error)
-        ) from error
-    try:
-        registry = resolve_agent(
-            "REFERENCE_PLANNER",
-            tenant_id=tenant_id,
-            user_id=user_id,
-            correlation_id=correlation_id,
-        )
-    except RegistryResolutionError as error:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="An active Agent registry contract is required.",
-        ) from error
-    plan = build_reference_plan(
-        PlanPreviewRequest(
-            request_id=request.request_id,
-            intent=f"Prepare governed handoff for {action.action_key}",
-            action=action.action_key,
-            target=action.target_route,
-            source_references=request.source_references,
-            inputs=reviewed_inputs,
-            agent_key="REFERENCE_PLANNER",
-        ),
-        tenant_id=tenant_id,
-        user_id=user_id,
-        roles=list(header_values(roles)),
-        correlation_id=correlation_id,
-        agent_registry=registry,
-    ).model_copy(update={"risk_tier": action.risk_tier})
-    record_plan_preview(
-        plan,
-        tenant_id=tenant_id,
-        user_id=user_id,
-        role_count=len(set(header_values(roles))),
-        roles=list(header_values(roles)),
-    )
-    return WorkplaceActionPreviewEnvelope(
-        data=WorkplaceActionPreview(
-            action=action, reviewed_inputs=reviewed_inputs, plan=plan
-        )
-    )
 
 
 @app.post(

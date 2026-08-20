@@ -35,7 +35,7 @@ from .model_gateway import (
     ModelRefused,
     OpenAIResponsesGateway,
 )
-from .policy import AskIdentity, evaluate_ask_policy
+from .policy import AskIdentity, SafetyControls, evaluate_ask_policy
 from .registry import resolve_agent
 from .run_store import RunInProgress, RunStart, RunStore, get_run_store, privacy_hash
 
@@ -60,6 +60,7 @@ class AskRuntime:
         *,
         identity: AskIdentity,
         on_progress: Callable[[str], None] | None = None,
+        safety_controls: SafetyControls | None = None,
     ) -> AskResponse:
         _progress(on_progress, "AUTHORIZING")
         query_hash = privacy_hash(
@@ -87,6 +88,7 @@ class AskRuntime:
             request.query,
             identity,
             agent_key=registry.entry_key,
+            safety_controls=safety_controls,
         )
         conversation_id = None
         conversation_history: tuple[ConversationTurn, ...] = ()

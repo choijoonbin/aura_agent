@@ -45,7 +45,32 @@ uv run python -m compileall -q src
 인젝션, 데이터 유출, Citation 정확도, 무응답 적합성, 한국어·영어 동등성을 다시
 측정하고 결과를 릴리스 증적으로 보관합니다.
 
-## 3. 보존 및 Legal Hold
+## 3. 운영 Control Plane
+
+- `/v1/admin/overview`는 `ADMIN.DWAION_OPERATIONS:VIEW`가 있는 Gateway 호출만
+  허용합니다. 실행 수, 정책 판정, 답변 상태, 지연, Token, 활성 사용자 수, 대화 수와
+  피드백의 Tenant 집계만 반환합니다.
+- `/v1/admin/governance/sources`, `/actions`, `/safety`는 각각
+  `ADMIN.DWAION_SOURCES`, `ADMIN.DWAION_ACTIONS`, `ADMIN.DWAION_SAFETY` 권한을
+  독립적으로 요구합니다. 조회와 변경 권한을 합치지 않으며 모든 변경은 버전·사유·상관관계
+  ID를 검증합니다.
+- 평가셋 작성·상태 전이·실행은 `ADMIN.DWAION_EVALUATION`의
+  `CREATE|UPDATE|EXECUTE|MANAGE`를 동작별로 요구합니다. 평가 질문과 기대 결과는 대화와
+  동일한 Data Key 계약으로 암호화하고, 실행 결과는 재현 가능한 Agent Revision과 정책
+  버전을 함께 기록합니다.
+- 거버넌스 감사 조회·내보내기는 `ADMIN.DWAION_AUDIT:VIEW|EXPORT`로 분리하며,
+  변경 권한을 가진 운영자에게 감사 삭제나 수정 경로를 제공하지 않습니다.
+- 운영 조회는 질문, 답변, 대화 제목, 인용 원문이나 사용자 식별자를 선택하거나
+  복호화하지 않습니다. 집계 쿼리에 개인 콘텐츠 컬럼을 추가하지 않습니다.
+- `/v1/admin/retention` 조회는 `ADMIN.DWAION_RETENTION:VIEW`, 변경은 `UPDATE` 또는
+  `MANAGE`가 필요합니다.
+  Legal Hold 필드를 포함한 변경은 `MANAGE`만 허용합니다.
+- 변경 요청은 현재 `policyVersion`, 10~500자의 사유와 `X-Correlation-ID`를 요구합니다.
+  버전 충돌은 `409`로 실패하며 묵시적으로 덮어쓰지 않습니다.
+- `ai_retention_policy_events`는 이전 값, 새 값, 수행자, 상관관계 ID, 사유를 append-only로
+  기록합니다. 운영 API로 이 이력을 수정하거나 삭제하는 경로를 제공하지 않습니다.
+
+## 4. 보존 및 Legal Hold
 
 Tenant 정책은 `ai_conversation_retention_policies`가 단일 원장입니다. 기본 보존 기간은
 90일이며 30일에서 3650일 범위만 허용합니다. Legal Hold가 활성화된 Tenant는 자동
@@ -55,7 +80,7 @@ Tenant 정책은 `ai_conversation_retention_policies`가 단일 원장입니다.
 직접 변경하거나 Agent가 임의로 보존 기간을 축소하지 않습니다. Legal Hold 해제 전에는
 법무·보안 승인과 정책 버전 증가를 확인합니다.
 
-## 4. 암호화 키 회전
+## 5. 암호화 키 회전
 
 1. KMS에서 새 32-byte Data Key를 생성하고 새 불변 버전 이름을 정합니다.
 2. 새 Key와 버전을 Active 설정으로, 기존 Key를 Previous Key 맵으로 배포합니다.
@@ -66,9 +91,20 @@ Tenant 정책은 `ai_conversation_retention_policies`가 단일 원장입니다.
 
 Key Material과 원문 질문·답변·Source ID·Service Token은 로그에 남기지 않습니다.
 
-## 5. 근거 기준
+## 6. 검증 증적
+
+- 2026-08-20: 전체 Agent 테스트 91개 통과(적용된 migration checksum 불변성 포함)
+- 2026-08-20: DB migration `V5`~`V7` 적용 및 보존·Source·Action·Safety·Evaluation·감사
+  스키마 확인. 적용된 migration의 checksum 불변성도 재기동으로 검증
+- 2026-08-20: SKAX 위임 운영자에게 실제 집계 지표와 보존 정책 조회, 일반 Tenant
+  관리자에게 메뉴 비노출과 Gateway 차단 확인
+
+## 7. 근거 기준
 
 - [OWASP LLM Prompt Injection Prevention](https://genai.owasp.org/llmrisk/llm01-prompt-injection/)
+- [OWASP Excessive Agency](https://genai.owasp.org/llmrisk/llm062025-excessive-agency/)
 - [NIST AI RMF](https://www.nist.gov/itl/ai-risk-management-framework)
+- [Microsoft Copilot Studio agent evaluation](https://learn.microsoft.com/en-us/microsoft-copilot-studio/analytics-agent-evaluation-intro)
+- [OpenTelemetry GenAI semantic conventions](https://opentelemetry.io/docs/specs/semconv/registry/attributes/gen-ai/)
 - [OpenAI API Data Controls](https://platform.openai.com/docs/models/default-usage-policies-by-endpoint)
 - [AWS KMS Key Rotation](https://docs.aws.amazon.com/kms/latest/developerguide/rotate-keys.html)
