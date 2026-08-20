@@ -33,6 +33,7 @@ from .conversation_store import (
 from .policy import AskIdentity
 from .planner import build_reference_plan
 from .registry import RegistryResolutionError, resolve_agent
+from .readiness import validate_runtime_configuration
 from .observability import install_api_history
 from .run_store import (
     RequestIdConflict,
@@ -57,6 +58,7 @@ SERVICE_VERSION = os.getenv("APP_VERSION", "0.2.0")
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    validate_runtime_configuration()
     initialize_database()
     yield
 

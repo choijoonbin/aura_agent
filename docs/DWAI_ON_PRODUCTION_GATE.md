@@ -15,6 +15,10 @@ DWAI·ON은 읽기 전용 근거 탐색과 담당 앱 초안 전달까지만 수
   이전 키는 `DWP_AGENT_PREVIOUS_DATA_KEYS` JSON 맵으로 제공합니다.
 - 승인된 모델 Snapshot과 관리형 API Key를 사용합니다. 모델 설정이 없으면
   `CONFIGURATION_REQUIRED`가 정상 결과이며 대체 답변을 생성하지 않습니다.
+- `DWP_ENVIRONMENT=production`에서는 위 설정과 전용 DB, 분리된 Service Token,
+  감사/API 이력 수집 설정이 누락되거나 서로 재사용되면 프로세스가 시작되지 않습니다.
+- Gateway의 `agentRuntime` 제한 시간은 모델 호출 제한보다 길어야 합니다. 기본 계약은
+  모델 20초, Slow-call 30초, Gateway 45초이며 일반 업무 API의 10초 제한과 분리합니다.
 
 ## 2. 릴리스 차단 테스트
 
