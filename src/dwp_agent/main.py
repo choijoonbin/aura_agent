@@ -34,6 +34,10 @@ from .readiness import validate_runtime_configuration
 from .observability import install_api_history
 from .operations_api import router as operations_router
 from .governance_api import router as governance_router
+from .operational_gate_api import (
+    install_operational_gate_problem_handler,
+    router as operational_gate_router,
+)
 from .governance_store import GovernanceStoreUnavailable
 from .run_store import (
     RequestIdConflict,
@@ -62,8 +66,10 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(title=SERVICE_NAME, version=SERVICE_VERSION, lifespan=lifespan)
 install_api_history(app)
+install_operational_gate_problem_handler(app)
 app.include_router(operations_router)
 app.include_router(governance_router)
+app.include_router(operational_gate_router)
 app.include_router(action_router)
 
 

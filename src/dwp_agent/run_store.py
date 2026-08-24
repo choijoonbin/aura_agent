@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import os
+import re
 import threading
 from dataclasses import dataclass
 from pathlib import Path
@@ -411,7 +412,7 @@ def privacy_hash(value: str) -> str:
 
 def _apply_migrations(database_url: str) -> None:
     migration_dir = Path(__file__).resolve().parent / "migrations"
-    migrations = sorted(migration_dir.glob("V*__*.sql"), key=lambda path: path.name)
+    migrations = sorted(migration_dir.glob("V*__*.sql"), key=_migration_sort_key)
     with connect(database_url) as connection:
         connection.execute(
             """
@@ -445,6 +446,13 @@ def _apply_migrations(database_url: str) -> None:
                 """,
                 (version, description.replace("_", " "), checksum),
             )
+
+
+def _migration_sort_key(path: Path) -> int:
+    match = re.fullmatch(r"V(\d+)__.+", path.stem)
+    if match is None:
+        raise RunStoreUnavailable(f"Invalid Agent migration name: {path.name}")
+    return int(match.group(1))
 
 
 def _aad(tenant_id: str, user_id: str, request_id: str, run_id: str) -> bytes:

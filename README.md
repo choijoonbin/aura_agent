@@ -27,7 +27,21 @@ DWP_AGENT_SERVICE_TOKEN=<local-secret> \
 - Conversation history: `GET /v1/conversations`, `GET/PATCH/DELETE /v1/conversations/{id}`
 - Answer feedback: `PUT /v1/runs/{runId}/feedback`
 - Governed work handoff: `GET /v1/actions`, `POST /v1/actions/{actionKey}/preview`
+- Operational delivery gates: `GET /v1/admin/gates`,
+  `GET/PATCH /v1/admin/gates/{gateKey}`
 - OpenAPI: `GET /docs`
+
+OpenAPI 정본은 `contracts/openapi/agent-public.json`이며 다음 명령으로 런타임 계약과의
+일치 여부를 검증합니다.
+
+```bash
+.venv/bin/python scripts/export_openapi.py --check
+```
+
+고객별 정책 결정과 아직 닫히지 않은 딜리버리 TODO는
+`../dwp-backend/docs/delivery/customer-policy-and-release-gate-register.md`에서만 관리합니다.
+기능 문서와 테스트는 해당 등록부의 `D-*`, `G-*` ID를 참조하고 별도 활성 목록을 만들지
+않습니다.
 
 Plan Preview는 Gateway가 검증해 전달한 `X-DWP-User-ID`, `X-DWP-Tenant-ID`,
 `X-DWP-Roles`, `X-Correlation-ID`와 `X-DWP-Service-Token`을 요구합니다. 로컬 실행은

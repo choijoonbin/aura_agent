@@ -26,6 +26,7 @@ DWAI·ON은 읽기 전용 근거 탐색과 담당 앱 초안 전달까지만 수
 uv sync --frozen
 uv run pytest
 uv run python -m compileall -q src
+uv run python scripts/export_openapi.py --check
 ```
 
 다음 항목 중 하나라도 실패하면 배포하지 않습니다.
@@ -48,6 +49,18 @@ uv run python -m compileall -q src
 측정하고 결과를 릴리스 증적으로 보관합니다.
 
 ## 3. 운영 Control Plane
+
+- `/v1/admin/gates`는 고객·환경별 모델, 연결, ACL, 평가, 승인, KMS, 보존과 감사 준비
+  상태를 관리한다. 조회·증빙·변경·승인을 `ADMIN.DWAION_GATES`의 동작별 권한으로
+  분리하고, 구성자 또는 검증자는 같은 Gate를 승인할 수 없다.
+- Gate 상세는 현재 구성 리비전의 전체 증빙, 필수 증빙 누락, 요청자별 독립 승인 자격,
+  성공한 변경·검증·승인 감사 타임라인을 함께 반환한다. 승인자는 이 근거를 확인한 동일
+  화면에서만 결정을 기록하며, 새 증빙을 추가하면 이전 검증이 무효화된다.
+- Gate 오류는 RFC 9457 Problem Details 형태의 안정된 코드, 교정 가능한 설명,
+  상관관계 ID를 반환한다. 비밀 원문이나 내부 예외 Stack은 반환하지 않는다.
+- 활성 TODO, 고객 결정과 종료 증거의 정본은 Backend
+  `docs/delivery/customer-policy-and-release-gate-register.md`다. 이 문서에는 중복 TODO
+  목록을 두지 않는다.
 
 - `/v1/admin/overview`는 `ADMIN.DWAION_OPERATIONS:VIEW`가 있는 Gateway 호출만
   허용합니다. 실행 수, 정책 판정, 답변 상태, 지연, Token, 활성 사용자 수, 대화 수와
@@ -98,9 +111,14 @@ Key Material과 원문 질문·답변·Source ID·Service Token은 로그에 남
 
 ## 6. 검증 증적
 
-- 2026-08-20: 전체 Agent 테스트 96개 통과(적용된 migration checksum 불변성 포함)
-- 2026-08-20: DB migration `V5`~`V8` 적용 및 보존·Source·Action·Safety·Evaluation·감사
+- 2026-08-24: 전체 Agent 테스트 117개 통과, PostgreSQL 통합 시나리오 1개 별도 통과(적용된 migration checksum 불변성 포함)
+- 2026-08-24: 전용 PostgreSQL 통합 DB에서 정책 구성, 리비전별 증빙, 누락 차단,
+  검증, 자기 승인 차단, 독립 승인, 감사 타임라인과 승인 후 증빙 변경 차단 검증
+- 2026-08-24: DB migration `V5`~`V11` 적용 및 보존·Source·Action·Safety·Evaluation·감사·운영 Gate
   스키마 확인. 적용된 migration의 checksum 불변성도 재기동으로 검증
+- 2026-08-24: 운영 Gate의 환경 분리, 구성 리비전별 증빙, 버전 충돌, 비밀값 차단,
+  구성·검증·승인자 분리와 만료 상태 회귀 검증
+- 2026-08-24: Agent OpenAPI 정본과 Frontend 자동 생성 TypeScript 계약의 Drift 검사
 - 2026-08-20: 평가 실행 이력·상세·직전 실행 비교·메트릭 전용 CSV와 동시 실행 차단 확인
 - 2026-08-20: SKAX 위임 운영자에게 실제 집계 지표와 보존 정책 조회, 일반 Tenant
   관리자에게 메뉴 비노출과 Gateway 차단 확인
@@ -110,6 +128,10 @@ Key Material과 원문 질문·답변·Source ID·Service Token은 로그에 남
 - [OWASP LLM Prompt Injection Prevention](https://genai.owasp.org/llmrisk/llm01-prompt-injection/)
 - [OWASP Excessive Agency](https://genai.owasp.org/llmrisk/llm062025-excessive-agency/)
 - [NIST AI RMF](https://www.nist.gov/itl/ai-risk-management-framework)
+- [AWS Operational Readiness Reviews](https://docs.aws.amazon.com/wellarchitected/latest/operational-readiness-reviews/wa-operational-readiness-reviews.html)
+- [Azure Pipelines approvals and checks](https://learn.microsoft.com/en-us/azure/devops/pipelines/process/approvals?view=azure-devops)
+- [NIST SP 800-53 Rev. 5.1, AC-5 and AU-3](https://csrc.nist.gov/pubs/sp/800/53/r5/upd1/final)
+- [RFC 9457 Problem Details for HTTP APIs](https://www.rfc-editor.org/rfc/rfc9457.html)
 - [Microsoft Copilot Studio agent evaluation](https://learn.microsoft.com/en-us/microsoft-copilot-studio/analytics-agent-evaluation-intro)
 - [OpenTelemetry GenAI semantic conventions](https://opentelemetry.io/docs/specs/semconv/registry/attributes/gen-ai/)
 - [OpenAI API Data Controls](https://platform.openai.com/docs/models/default-usage-policies-by-endpoint)

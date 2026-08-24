@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+from pathlib import Path
 
 import pytest
 import httpx
@@ -11,6 +12,7 @@ from dwp_agent.registry import resolve_agent
 
 
 SERVICE_TOKEN = "test-gateway-service-token"
+ROOT = Path(__file__).resolve().parents[1]
 
 
 @pytest.fixture(autouse=True)
@@ -75,9 +77,24 @@ def test_openapi_contains_system_and_plan_preview_api() -> None:
         "/v1/admin/evaluations/{evaluation_set_id}/runs/{evaluation_run_id}/export",
         "/v1/admin/audit",
         "/v1/admin/audit/export",
+        "/v1/admin/gates",
+        "/v1/admin/gates/{gate_key}",
+        "/v1/admin/gates/{gate_key}/evidence",
+        "/v1/admin/gates/{gate_key}/validation",
+        "/v1/admin/gates/{gate_key}/decision",
     }
     parameters = response.json()["paths"]["/v1/plans/preview"]["post"]["parameters"]
     assert "X-DWP-Service-Token" not in {parameter["name"] for parameter in parameters}
+
+
+def test_openapi_snapshot_matches_runtime_contract() -> None:
+    snapshot = json.loads(
+        (ROOT / "contracts" / "openapi" / "agent-public.json").read_text(
+            encoding="utf-8"
+        )
+    )
+
+    assert snapshot == app.openapi()
 
 
 def test_plan_preview_is_deterministic_and_never_mutates() -> None:
