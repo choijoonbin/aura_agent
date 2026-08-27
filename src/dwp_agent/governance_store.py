@@ -13,11 +13,12 @@ from uuid import uuid4
 from psycopg import connect
 
 from .contracts import CitationSourceType, PolicyOutcome
+from .governance_bootstrap import bootstrap_governance_policies
+from .governance_catalog import SOURCE_DEFINITIONS
 from .governance_contracts import (
-    ActionExecutionPolicy,
     ActionPolicy,
+    BootstrapGovernancePoliciesRequest,
     ConnectionState,
-    DataClassification,
     DataSourcePolicy,
     GovernanceAuditEvent,
     GovernanceAuditPage,
@@ -27,76 +28,39 @@ from .governance_contracts import (
     UpdateDataSourcePolicyRequest,
     UpdateSafetyPolicyRequest,
 )
+from .governance_errors import (
+    GovernancePolicyConflict,
+    GovernancePolicyNotInitialized,
+    GovernanceStoreUnavailable,
+)
 from .workplace_actions import all_workplace_actions
 
 
 MAX_AUDIT_EXPORT_ROWS = 10_000
 
 
-class GovernanceStoreUnavailable(RuntimeError):
-    pass
-
-
-class GovernancePolicyConflict(RuntimeError):
-    pass
-
-
-SOURCE_DEFINITIONS = {
-    CitationSourceType.WORK_ITEM: (
-        "업무",
-        "현재 사용자에게 배정되거나 공개된 통합 업무 항목",
-        "DWP_PLATFORM",
-        DataClassification.INTERNAL,
-    ),
-    CitationSourceType.MAIL: (
-        "메일",
-        "현재 사용자의 연결된 업무 메일과 스레드 메타데이터",
-        "DWP_MAIL",
-        DataClassification.CONFIDENTIAL,
-    ),
-    CitationSourceType.CALENDAR: (
-        "캘린더",
-        "현재 사용자가 열람할 수 있는 일정과 회의",
-        "DWP_CALENDAR",
-        DataClassification.CONFIDENTIAL,
-    ),
-    CitationSourceType.APPROVAL_TASK: (
-        "결재 업무",
-        "현재 사용자에게 배정된 결재 검토 업무",
-        "DWP_APPROVAL",
-        DataClassification.CONFIDENTIAL,
-    ),
-    CitationSourceType.APPROVAL_REQUEST: (
-        "결재 요청",
-        "현재 사용자가 열람할 수 있는 결재 요청",
-        "DWP_APPROVAL",
-        DataClassification.CONFIDENTIAL,
-    ),
-    CitationSourceType.APPROVAL_FORM: (
-        "결재 양식",
-        "게시된 결재 양식과 입력 계약",
-        "DWP_APPROVAL",
-        DataClassification.INTERNAL,
-    ),
-    CitationSourceType.APPROVAL_OPERATION: (
-        "결재 운영",
-        "권한 범위 내 결재 운영 신호",
-        "DWP_APPROVAL",
-        DataClassification.RESTRICTED,
-    ),
-}
-
-
 class GovernanceStore(Protocol):
     def source_policies(self, *, tenant_id: str, actor_user_id: str) -> list[DataSourcePolicy]: ...
+    def bootstrap_source_policies(
+        self, *, tenant_id: str, actor_user_id: str, correlation_id: str,
+        request: BootstrapGovernancePoliciesRequest,
+    ) -> list[DataSourcePolicy]: ...
     def update_source_policy(self, *, tenant_id: str, actor_user_id: str, correlation_id: str,
                              source_key: CitationSourceType,
                              request: UpdateDataSourcePolicyRequest) -> DataSourcePolicy: ...
     def action_policies(self, *, tenant_id: str, actor_user_id: str) -> list[ActionPolicy]: ...
+    def bootstrap_action_policies(
+        self, *, tenant_id: str, actor_user_id: str, correlation_id: str,
+        request: BootstrapGovernancePoliciesRequest,
+    ) -> list[ActionPolicy]: ...
     def update_action_policy(self, *, tenant_id: str, actor_user_id: str, correlation_id: str,
                              action_key: str,
                              request: UpdateActionPolicyRequest) -> ActionPolicy: ...
     def safety_policy(self, *, tenant_id: str, actor_user_id: str) -> SafetyPolicy: ...
+    def bootstrap_safety_policy(
+        self, *, tenant_id: str, actor_user_id: str, correlation_id: str,
+        request: BootstrapGovernancePoliciesRequest,
+    ) -> SafetyPolicy: ...
     def update_safety_policy(self, *, tenant_id: str, actor_user_id: str, correlation_id: str,
                              request: UpdateSafetyPolicyRequest) -> SafetyPolicy: ...
     def audit_events(self, *, tenant_id: str, category: str | None, query: str | None,
@@ -112,7 +76,6 @@ class PostgresGovernanceStore:
     def source_policies(self, *, tenant_id: str, actor_user_id: str) -> list[DataSourcePolicy]:
         tenant = int(tenant_id)
         with connect(self.database_url) as connection:
-            self._ensure_sources(connection, tenant, actor_user_id)
             rows = connection.execute(
                 """SELECT source_key, display_name, description, provider_type,
                           classification, access_mode, enabled, connection_state,
@@ -123,13 +86,33 @@ class PostgresGovernanceStore:
             ).fetchall()
         return [self._source(row) for row in rows]
 
+    def bootstrap_source_policies(
+        self, *, tenant_id: str, actor_user_id: str, correlation_id: str,
+        request: BootstrapGovernancePoliciesRequest,
+    ) -> list[DataSourcePolicy]:
+        tenant = int(tenant_id)
+        bootstrap_governance_policies(
+            database_url=self.database_url,
+            tenant=tenant,
+            actor_user_id=actor_user_id,
+            correlation_id=correlation_id,
+            request=request,
+            category="SOURCE",
+            event_type="source-policies.bootstrapped",
+            target_type="DATA_SOURCE_POLICY_SET",
+            existing_count_sql=(
+                "SELECT COUNT(*) FROM ai_data_source_policies WHERE tenant_id = %s"
+            ),
+            initialize=self._ensure_sources,
+        )
+        return self.source_policies(tenant_id=tenant_id, actor_user_id=actor_user_id)
+
     def update_source_policy(
         self, *, tenant_id: str, actor_user_id: str, correlation_id: str,
         source_key: CitationSourceType, request: UpdateDataSourcePolicyRequest,
     ) -> DataSourcePolicy:
         tenant = int(tenant_id)
         with connect(self.database_url) as connection:
-            self._ensure_sources(connection, tenant, actor_user_id)
             current_row = connection.execute(
                 """SELECT source_key, display_name, description, provider_type,
                           classification, access_mode, enabled, connection_state,
@@ -138,6 +121,10 @@ class PostgresGovernanceStore:
                     WHERE tenant_id = %s AND source_key = %s FOR UPDATE""",
                 (tenant, source_key.value),
             ).fetchone()
+            if current_row is None:
+                raise GovernancePolicyNotInitialized(
+                    "GOVERNANCE_BOOTSTRAP_REQUIRED: The source policy set has not been initialized."
+                )
             current = self._source(current_row)
             self._require_version(current.policy_version, request.expected_version)
             state = self._source_state(
@@ -171,7 +158,6 @@ class PostgresGovernanceStore:
     def action_policies(self, *, tenant_id: str, actor_user_id: str) -> list[ActionPolicy]:
         tenant = int(tenant_id)
         with connect(self.database_url) as connection:
-            self._ensure_actions(connection, tenant, actor_user_id)
             rows = connection.execute(
                 """SELECT action_key, enabled, confirmation_required, execution_policy,
                           policy_version, updated_at
@@ -180,6 +166,27 @@ class PostgresGovernanceStore:
             ).fetchall()
         definitions = {action.action_key: action for action in all_workplace_actions()}
         return [self._action(row, definitions[row[0]]) for row in rows if row[0] in definitions]
+
+    def bootstrap_action_policies(
+        self, *, tenant_id: str, actor_user_id: str, correlation_id: str,
+        request: BootstrapGovernancePoliciesRequest,
+    ) -> list[ActionPolicy]:
+        tenant = int(tenant_id)
+        bootstrap_governance_policies(
+            database_url=self.database_url,
+            tenant=tenant,
+            actor_user_id=actor_user_id,
+            correlation_id=correlation_id,
+            request=request,
+            category="ACTION",
+            event_type="action-policies.bootstrapped",
+            target_type="ACTION_POLICY_SET",
+            existing_count_sql=(
+                "SELECT COUNT(*) FROM ai_action_policies WHERE tenant_id = %s"
+            ),
+            initialize=self._ensure_actions,
+        )
+        return self.action_policies(tenant_id=tenant_id, actor_user_id=actor_user_id)
 
     def update_action_policy(
         self, *, tenant_id: str, actor_user_id: str, correlation_id: str,
@@ -192,7 +199,6 @@ class PostgresGovernanceStore:
             raise KeyError(normalized)
         tenant = int(tenant_id)
         with connect(self.database_url) as connection:
-            self._ensure_actions(connection, tenant, actor_user_id)
             current_row = connection.execute(
                 """SELECT action_key, enabled, confirmation_required, execution_policy,
                           policy_version, updated_at
@@ -200,6 +206,10 @@ class PostgresGovernanceStore:
                     WHERE tenant_id = %s AND action_key = %s FOR UPDATE""",
                 (tenant, normalized),
             ).fetchone()
+            if current_row is None:
+                raise GovernancePolicyNotInitialized(
+                    "GOVERNANCE_BOOTSTRAP_REQUIRED: The action policy set has not been initialized."
+                )
             current = self._action(current_row, definition)
             self._require_version(current.policy_version, request.expected_version)
             row = connection.execute(
@@ -225,9 +235,33 @@ class PostgresGovernanceStore:
     def safety_policy(self, *, tenant_id: str, actor_user_id: str) -> SafetyPolicy:
         tenant = int(tenant_id)
         with connect(self.database_url) as connection:
-            self._ensure_safety(connection, tenant, actor_user_id)
             row = connection.execute(self._safety_select(), (tenant,)).fetchone()
+        if row is None:
+            raise GovernancePolicyNotInitialized(
+                "GOVERNANCE_BOOTSTRAP_REQUIRED: The safety policy has not been initialized."
+            )
         return self._safety(row)
+
+    def bootstrap_safety_policy(
+        self, *, tenant_id: str, actor_user_id: str, correlation_id: str,
+        request: BootstrapGovernancePoliciesRequest,
+    ) -> SafetyPolicy:
+        tenant = int(tenant_id)
+        bootstrap_governance_policies(
+            database_url=self.database_url,
+            tenant=tenant,
+            actor_user_id=actor_user_id,
+            correlation_id=correlation_id,
+            request=request,
+            category="SAFETY",
+            event_type="safety-policy.bootstrapped",
+            target_type="SAFETY_POLICY_SET",
+            existing_count_sql=(
+                "SELECT COUNT(*) FROM ai_safety_policies WHERE tenant_id = %s"
+            ),
+            initialize=self._ensure_safety,
+        )
+        return self.safety_policy(tenant_id=tenant_id, actor_user_id=actor_user_id)
 
     def update_safety_policy(
         self, *, tenant_id: str, actor_user_id: str, correlation_id: str,
@@ -235,9 +269,14 @@ class PostgresGovernanceStore:
     ) -> SafetyPolicy:
         tenant = int(tenant_id)
         with connect(self.database_url) as connection:
-            self._ensure_safety(connection, tenant, actor_user_id)
-            current = self._safety(connection.execute(
-                self._safety_select(" FOR UPDATE"), (tenant,)).fetchone())
+            current_row = connection.execute(
+                self._safety_select(" FOR UPDATE"), (tenant,)
+            ).fetchone()
+            if current_row is None:
+                raise GovernancePolicyNotInitialized(
+                    "GOVERNANCE_BOOTSTRAP_REQUIRED: The safety policy has not been initialized."
+                )
+            current = self._safety(current_row)
             self._require_version(current.policy_version, request.expected_version)
             row = connection.execute(
                 """UPDATE ai_safety_policies
@@ -329,35 +368,39 @@ class PostgresGovernanceStore:
             ]])
         return buffer.getvalue(), truncated
 
-    def _ensure_sources(self, connection, tenant: int, actor: str) -> None:
+    def _ensure_sources(self, connection, tenant: int, actor: str) -> int:
+        created = 0
         for source_key, (name, description, provider, classification) in SOURCE_DEFINITIONS.items():
-            connection.execute(
+            result = connection.execute(
                 """INSERT INTO ai_data_source_policies (
                        tenant_id, source_key, display_name, description, provider_type,
                        classification, access_mode, enabled, connection_state, updated_by)
-                   VALUES (%s, %s, %s, %s, %s, %s, 'SOURCE_PERMISSIONS', TRUE, 'CONNECTED', %s)
+                   VALUES (%s, %s, %s, %s, %s, %s, 'BLOCKED', FALSE, 'BLOCKED', %s)
                    ON CONFLICT (tenant_id, source_key) DO NOTHING""",
                 (tenant, source_key.value, name, description, provider, classification.value, actor),
             )
+            created += result.rowcount
+        return created
 
-    def _ensure_actions(self, connection, tenant: int, actor: str) -> None:
+    def _ensure_actions(self, connection, tenant: int, actor: str) -> int:
+        created = 0
         for action in all_workplace_actions():
-            execution = (ActionExecutionPolicy.APPROVAL_HANDOFF
-                         if action.risk_tier.value in {"L2", "L3"}
-                         else ActionExecutionPolicy.USER_HANDOFF)
-            connection.execute(
+            result = connection.execute(
                 """INSERT INTO ai_action_policies (
                        tenant_id, action_key, enabled, confirmation_required,
                        execution_policy, updated_by)
-                   VALUES (%s, %s, TRUE, TRUE, %s, %s)
+                   VALUES (%s, %s, FALSE, TRUE, 'BLOCKED', %s)
                    ON CONFLICT (tenant_id, action_key) DO NOTHING""",
-                (tenant, action.action_key, execution.value, actor),
+                (tenant, action.action_key, actor),
             )
+            created += result.rowcount
+        return created
 
-    def _ensure_safety(self, connection, tenant: int, actor: str) -> None:
-        connection.execute(
+    def _ensure_safety(self, connection, tenant: int, actor: str) -> int:
+        result = connection.execute(
             """INSERT INTO ai_safety_policies (tenant_id, updated_by)
                VALUES (%s, %s) ON CONFLICT (tenant_id) DO NOTHING""", (tenant, actor))
+        return result.rowcount
 
     def _source(self, row) -> DataSourcePolicy:
         return DataSourcePolicy(

@@ -12,6 +12,7 @@ from dwp_agent import ask_runtime as ask_runtime_module
 from dwp_agent.approval_context import approval_tasks
 from dwp_agent.ask_runtime import AskRuntime
 from dwp_agent.context_broker import GroundedContext, GroundedSource, WorkspaceContextBroker
+from dwp_agent.conversation_store import InMemoryConversationStore
 from dwp_agent.contracts import (
     AgentRegistryResolution,
     AnswerConfidence,
@@ -34,6 +35,7 @@ from dwp_agent.run_store import (
     PayloadCipher,
     RequestIdConflict,
     RunStart,
+    RunInProgress,
     RunStoreUnavailable,
 )
 
@@ -122,6 +124,11 @@ class FailingAzureModel:
         raise ModelCallFailed("MODEL_PROVIDER_UNAVAILABLE")
 
 
+class AlwaysContendedRunStore(InMemoryRunStore):
+    def begin(self, _start: RunStart):
+        return None
+
+
 @pytest.fixture(autouse=True)
 def runtime_secrets(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DWP_AGENT_PRIVACY_HASH_SECRET", "test-privacy-secret")
@@ -155,6 +162,29 @@ def test_grounded_answer_is_idempotent_and_citation_scoped() -> None:
     assert first.model_route.total_tokens == 148
     assert broker.calls == 1
     assert model.calls == 1
+
+
+def test_contended_request_does_not_create_an_orphan_conversation() -> None:
+    run_store = AlwaysContendedRunStore()
+    conversation_store = InMemoryConversationStore(run_store)
+    runtime = AskRuntime(
+        context_broker=FakeBroker(),
+        model_gateway=FakeModel(),
+        run_store=run_store,
+        conversation_store=conversation_store,
+    )
+
+    with pytest.raises(RunInProgress):
+        runtime.answer(
+            AskRequest(
+                request_id="request-conversation-contended",
+                query="What is blocking my urgent work?",
+                locale="en",
+            ),
+            identity=identity("APP.ASK:VIEW", "APP.WORK:VIEW"),
+        )
+
+    assert conversation_store.list(tenant_id="1", user_id="7") == []
 
 
 def test_model_failure_preserves_azure_provider_in_audit_route() -> None:
@@ -273,10 +303,15 @@ def test_failed_request_can_retry_only_the_same_query() -> None:
         query_hash="b" * 64,
     )
 
-    assert store.begin(first) is True
-    store.fail(first.run_id, "MODEL_PROVIDER_UNAVAILABLE")
-    assert store.begin(retry) is True
-    store.fail(retry.run_id, "MODEL_PROVIDER_UNAVAILABLE")
+    first_lease = store.begin(first)
+    assert first_lease is not None
+    assert first_lease.run_id == first.run_id
+    store.fail(first_lease, "MODEL_PROVIDER_UNAVAILABLE")
+    retry_lease = store.begin(retry)
+    assert retry_lease is not None
+    assert retry_lease.run_id == first.run_id
+    assert retry_lease.generation == first_lease.generation + 1
+    store.fail(retry_lease, "MODEL_PROVIDER_UNAVAILABLE")
     with pytest.raises(RequestIdConflict):
         store.begin(conflicting_retry)
 
@@ -713,6 +748,41 @@ def test_model_gateway_uses_non_persistent_structured_output_and_rejects_fake_ci
             "schema": captured[0]["text"]["format"]["schema"],
         }
     }
+
+
+def test_model_gateway_retries_within_one_bounded_total_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request_timeouts: list[float] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        timeout = request.extensions["timeout"]
+        request_timeouts.append(float(timeout["read"]))
+        if len(request_timeouts) == 1:
+            return httpx.Response(503, headers={"retry-after": "0"}, json={})
+        return httpx.Response(400, json={"error": {"code": "invalid_request"}})
+
+    monkeypatch.setenv("DWP_AGENT_ALLOW_TEST_MODEL_URL", "true")
+    monkeypatch.setenv("DWP_OPENAI_TIMEOUT_SECONDS", "99")
+    gateway = OpenAIResponsesGateway(
+        api_key="test-key",
+        model="gpt-test",
+        base_url="http://model.test/v1",
+        transport=httpx.MockTransport(handler),
+    )
+
+    with pytest.raises(ModelCallFailed):
+        gateway.generate(
+            "What is blocking my work?",
+            context=context(),
+            locale="en",
+            run_id="7ba70ea1-2586-4a28-8e9f-7f320815d380",
+            safety_identifier="dwp_test",
+        )
+
+    assert gateway.timeout_seconds == 24.0
+    assert len(request_timeouts) == 2
+    assert 0 < request_timeouts[1] <= request_timeouts[0] <= 24.0
 
 
 def test_azure_model_gateway_uses_v1_endpoint_and_api_key_header() -> None:

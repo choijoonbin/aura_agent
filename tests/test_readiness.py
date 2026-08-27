@@ -2,6 +2,7 @@ import base64
 
 import pytest
 
+from dwp_agent.key_provider import VersionedKeyMaterial
 from dwp_agent.readiness import RuntimeConfigurationError, validate_runtime_configuration
 
 
@@ -35,7 +36,7 @@ def test_production_runtime_accepts_complete_distinct_configuration(
 ) -> None:
     _configure_production(monkeypatch)
 
-    validate_runtime_configuration()
+    validate_runtime_configuration(ManagedTestKeyProvider())
 
 
 def test_production_runtime_rejects_shared_identity_and_insecure_model_endpoint(
@@ -49,7 +50,7 @@ def test_production_runtime_rejects_shared_identity_and_insecure_model_endpoint(
     monkeypatch.setenv("DWP_OPENAI_BASE_URL", "http://model.internal/v1")
 
     with pytest.raises(RuntimeConfigurationError) as captured:
-        validate_runtime_configuration()
+        validate_runtime_configuration(ManagedTestKeyProvider())
 
     assert "distinct service identity tokens" in str(captured.value)
     assert "DWP_OPENAI_BASE_URL=https" in str(captured.value)
@@ -69,7 +70,7 @@ def test_production_runtime_accepts_approved_azure_openai_configuration(
         "https://dwp-model.openai.azure.com/openai/v1",
     )
 
-    validate_runtime_configuration()
+    validate_runtime_configuration(ManagedTestKeyProvider())
 
 
 def test_production_runtime_rejects_azure_lookalike_endpoint(
@@ -87,9 +88,19 @@ def test_production_runtime_rejects_azure_lookalike_endpoint(
     )
 
     with pytest.raises(RuntimeConfigurationError) as captured:
-        validate_runtime_configuration()
+        validate_runtime_configuration(ManagedTestKeyProvider())
 
     assert "DWP_OPENAI_BASE_URL=approved-provider-endpoint" in str(captured.value)
+
+
+def test_production_runtime_rejects_plaintext_key_without_managed_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _configure_production(monkeypatch)
+    monkeypatch.setenv("DWP_AGENT_DATA_KEY", base64.b64encode(b"a" * 32).decode("ascii"))
+
+    with pytest.raises(RuntimeConfigurationError, match="DWP_AGENT_KEY_PROVIDER"):
+        validate_runtime_configuration()
 
 
 def _configure_production(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -100,6 +111,7 @@ def _configure_production(monkeypatch: pytest.MonkeyPatch) -> None:
 _PRODUCTION_ENVIRONMENT = {
     "DWP_ENVIRONMENT": "production",
     "DWP_AGENT_SERVICE_TOKEN": "agent-service-token-for-production",
+    "DWP_AGENT_IDENTITY_SIGNING_SECRET": "agent-identity-signing-secret-for-production",
     "DWP_PLATFORM_RUNTIME_SERVICE_TOKEN": "platform-runtime-token-for-production",
     "DWP_APPROVAL_RUNTIME_SERVICE_TOKEN": "approval-runtime-token-for-production",
     "DWP_AGENT_PRIVACY_HASH_SECRET": "agent-privacy-secret-for-production",
@@ -111,9 +123,7 @@ _PRODUCTION_ENVIRONMENT = {
     "DWP_AGENT_DATABASE_URL": "postgresql://agent@database.internal/dwp_agent",
     "DWP_AGENT_DATABASE_REQUIRED": "true",
     "DWP_AGENT_REGISTRY_MODE": "enforced",
-    "DWP_AGENT_DATA_KEY": base64.b64encode(b"a" * 32).decode("ascii"),
-    "DWP_AGENT_DATA_KEY_VERSION": "2026-08-v1",
-    "DWP_AGENT_PREVIOUS_DATA_KEYS": "{}",
+    "DWP_AGENT_KEY_REFERENCE": "kms://dwp-agent/payload/2026-08-v1",
     "SERVICE_PLATFORM_URL": "http://platform:8002",
     "SERVICE_APPROVAL_URL": "http://approval:8005",
     "DWP_AUDIT_COLLECTOR_URL": "http://platform:8002/internal/audit/events",
@@ -123,3 +133,15 @@ _PRODUCTION_ENVIRONMENT = {
     "DWP_OPENAI_MODEL": "approved-model-snapshot",
     "DWP_OPENAI_BASE_URL": "https://api.openai.com/v1",
 }
+
+
+class ManagedTestKeyProvider:
+    provider_id = "managed-test"
+    managed = True
+
+    def load(self) -> VersionedKeyMaterial:
+        return VersionedKeyMaterial(
+            provider_id=self.provider_id,
+            active_version="2026-08-v1",
+            active_key=base64.b64encode(b"a" * 32).decode("ascii"),
+        )

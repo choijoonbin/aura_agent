@@ -53,6 +53,17 @@ class EvaluationOutcome(StrEnum):
     CONFIGURATION_REQUIRED = "CONFIGURATION_REQUIRED"
 
 
+class BootstrapGovernancePoliciesRequest(ContractModel):
+    idempotency_key: UUID
+    expected_existing_count: int = Field(ge=0, le=100)
+    change_reason: str = Field(min_length=10, max_length=500)
+
+    @model_validator(mode="after")
+    def normalize(self) -> "BootstrapGovernancePoliciesRequest":
+        self.change_reason = self.change_reason.strip()
+        return self
+
+
 class DataSourcePolicy(ContractModel):
     source_key: CitationSourceType
     display_name: str

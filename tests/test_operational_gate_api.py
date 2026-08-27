@@ -8,6 +8,7 @@ from httpx import ASGITransport, AsyncClient
 import dwp_agent.operational_gate_api as operational_gate_api_module
 from dwp_agent.main import app
 from dwp_agent.operational_gate_contracts import (
+    BootstrapOperationalGatesRequest,
     ConfigureOperationalGateRequest,
     DecideOperationalGateRequest,
     GateCategory,
@@ -38,6 +39,7 @@ class FakeOperationalGateStore:
         self.gate = _gate()
         self.configured_by: str | None = None
         self.decided_by: str | None = None
+        self.bootstrapped_by: str | None = None
 
     def portfolio(self, *, tenant_id: str, actor_user_id: str, environment: GateEnvironment):
         assert (tenant_id, actor_user_id, environment) == ("1", "7", GateEnvironment.PRODUCTION)
@@ -52,6 +54,28 @@ class FakeOperationalGateStore:
             completion_percent=0,
             delivery_ready=False,
             gates=[self.gate],
+        )
+
+    def bootstrap(
+        self,
+        *,
+        tenant_id: str,
+        actor_user_id: str,
+        correlation_id: str,
+        environment: GateEnvironment,
+        request: BootstrapOperationalGatesRequest,
+    ) -> OperationalGatePortfolio:
+        assert (tenant_id, correlation_id, environment) == (
+            "1",
+            "corr-1",
+            GateEnvironment.PRODUCTION,
+        )
+        assert request.expected_existing_count == 0
+        self.bootstrapped_by = actor_user_id
+        return self.portfolio(
+            tenant_id=tenant_id,
+            actor_user_id=actor_user_id,
+            environment=environment,
         )
 
     def configure(
@@ -126,6 +150,42 @@ def test_operational_gates_reject_legacy_aggregate_permission(
     assert denied.status_code == 403
     assert allowed.status_code == 200
     assert allowed.json()["data"]["totalCount"] == 1
+
+
+def test_gate_bootstrap_requires_manage_permission_and_an_explicit_command(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = FakeOperationalGateStore()
+    monkeypatch.setattr(
+        operational_gate_api_module, "get_operational_gate_store", lambda: store
+    )
+    body = {
+        "idempotencyKey": "00000000-0000-0000-0000-000000000042",
+        "expectedExistingCount": 0,
+        "changeReason": "Initialize the production delivery gate portfolio.",
+    }
+
+    denied = asyncio.run(
+        request(
+            "POST",
+            "/v1/admin/gates/bootstrap",
+            permissions="ADMIN.DWAION_GATES:VIEW",
+            json=body,
+        )
+    )
+    created = asyncio.run(
+        request(
+            "POST",
+            "/v1/admin/gates/bootstrap",
+            permissions="ADMIN.DWAION_GATES:MANAGE",
+            json=body,
+        )
+    )
+
+    assert denied.status_code == 403
+    assert created.status_code == 200
+    assert created.json()["data"]["totalCount"] == 1
+    assert store.bootstrapped_by == "7"
 
 
 def test_gate_configuration_and_approval_use_separate_permissions(

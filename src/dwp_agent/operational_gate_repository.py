@@ -4,14 +4,18 @@ import json
 from datetime import datetime, timezone
 from uuid import uuid4
 
+from psycopg import connect
+
 from .operational_gate_catalog import OPERATIONAL_GATE_CATALOG, operational_gate_definition
 from .operational_gate_contracts import (
+    BootstrapOperationalGatesRequest,
     GateEnvironment,
     GateStatus,
     OperationalGateAuditEvent,
     OperationalGateEvidence,
     OperationalGateKey,
     OperationalGateOption,
+    OperationalGatePortfolio,
     OperationalGateSummary,
 )
 from .operational_gate_store_errors import OperationalGateConflict
@@ -20,15 +24,85 @@ from .operational_gate_store_errors import OperationalGateConflict
 class OperationalGateRepositoryMixin:
     def _ensure_gates(
         self, connection, tenant: int, actor: str, environment: GateEnvironment
-    ) -> None:
+    ) -> int:
+        created = 0
         for definition in OPERATIONAL_GATE_CATALOG:
-            connection.execute(
+            result = connection.execute(
                 """INSERT INTO ai_operational_gates (
                        tenant_id, environment, gate_key, updated_by)
                    VALUES (%s, %s, %s, %s)
                    ON CONFLICT (tenant_id, environment, gate_key) DO NOTHING""",
                 (tenant, environment.value, definition.gate_key.value, actor),
             )
+            created += result.rowcount
+        return created
+
+    def bootstrap(
+        self,
+        *,
+        tenant_id: str,
+        actor_user_id: str,
+        correlation_id: str,
+        environment: GateEnvironment,
+        request: BootstrapOperationalGatesRequest,
+    ) -> OperationalGatePortfolio:
+        tenant = int(tenant_id)
+        command_key = f"{environment.value}:BOOTSTRAP:{request.idempotency_key}"
+        with connect(self.database_url) as connection:
+            connection.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                (f"dwp-agent:gates:{tenant}:{environment.value}",),
+            )
+            replayed = connection.execute(
+                """SELECT 1 FROM ai_governance_events
+                    WHERE tenant_id = %s AND category = 'GATE'
+                      AND event_type = 'operational-gates.bootstrapped'
+                      AND target_type = 'OPERATIONAL_GATE_PORTFOLIO'
+                      AND target_key = %s""",
+                (tenant, command_key),
+            ).fetchone()
+            if replayed is None:
+                existing_count = connection.execute(
+                    """SELECT COUNT(*) FROM ai_operational_gates
+                        WHERE tenant_id = %s AND environment = %s""",
+                    (tenant, environment.value),
+                ).fetchone()[0]
+                if existing_count != request.expected_existing_count:
+                    raise OperationalGateConflict(
+                        "The operational gate portfolio changed. Reload and retry."
+                    )
+                created_count = self._ensure_gates(
+                    connection, tenant, actor_user_id, environment
+                )
+                connection.execute(
+                    """INSERT INTO ai_governance_events (
+                           event_id, tenant_id, category, event_type, target_type,
+                           target_key, actor_user_id, correlation_id, change_reason,
+                           previous_value, current_value)
+                       VALUES (%s, %s, 'GATE', 'operational-gates.bootstrapped',
+                               'OPERATIONAL_GATE_PORTFOLIO', %s, %s, %s, %s,
+                               %s::jsonb, %s::jsonb)""",
+                    (
+                        uuid4(),
+                        tenant,
+                        command_key,
+                        actor_user_id,
+                        correlation_id,
+                        request.change_reason,
+                        json.dumps({"existingCount": existing_count}),
+                        json.dumps(
+                            {
+                                "createdCount": created_count,
+                                "totalCount": existing_count + created_count,
+                            }
+                        ),
+                    ),
+                )
+        return self.portfolio(
+            tenant_id=tenant_id,
+            actor_user_id=actor_user_id,
+            environment=environment,
+        )
 
     def _locked_gate(
         self,

@@ -52,6 +52,33 @@ def record_plan_preview(
             "targetService": (
                 plan.admin_command.target_service if plan.admin_command is not None else None
             ),
+            "authorityKind": (
+                plan.admin_command.authority_kind if plan.admin_command is not None else None
+            ),
+            "finalAuthorityService": (
+                plan.admin_command.final_authority_service
+                if plan.admin_command is not None
+                else None
+            ),
+            "originAppKey": (
+                plan.handoff_origin.app_key if plan.handoff_origin is not None else None
+            ),
+            "originSurface": (
+                plan.handoff_origin.surface if plan.handoff_origin is not None else None
+            ),
+            "sourceRunId": (
+                plan.handoff_origin.source_run_id if plan.handoff_origin is not None else None
+            ),
+            "sourceRequestId": (
+                plan.handoff_origin.source_request_id
+                if plan.handoff_origin is not None
+                else None
+            ),
+            "sourceCorrelationId": (
+                plan.handoff_origin.source_correlation_id
+                if plan.handoff_origin is not None
+                else None
+            ),
             "roleCount": role_count,
             "sourceCount": len(plan.source_references),
         },
@@ -104,6 +131,37 @@ def record_plan_preview(
                 ),
                 "targetService": (
                     plan.admin_command.target_service if plan.admin_command is not None else None
+                ),
+                "authorityKind": (
+                    plan.admin_command.authority_kind
+                    if plan.admin_command is not None
+                    else None
+                ),
+                "finalAuthorityService": (
+                    plan.admin_command.final_authority_service
+                    if plan.admin_command is not None
+                    else None
+                ),
+                "originAppKey": (
+                    plan.handoff_origin.app_key if plan.handoff_origin is not None else None
+                ),
+                "originSurface": (
+                    plan.handoff_origin.surface if plan.handoff_origin is not None else None
+                ),
+                "sourceRunId": (
+                    plan.handoff_origin.source_run_id
+                    if plan.handoff_origin is not None
+                    else None
+                ),
+                "sourceRequestId": (
+                    plan.handoff_origin.source_request_id
+                    if plan.handoff_origin is not None
+                    else None
+                ),
+                "sourceCorrelationId": (
+                    plan.handoff_origin.source_correlation_id
+                    if plan.handoff_origin is not None
+                    else None
                 ),
                 "roleCount": role_count,
                 "sourceCount": len(plan.source_references),

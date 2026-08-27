@@ -1,6 +1,7 @@
 import pytest
 
 from dwp_agent.contracts import (
+    ActionHandoffOrigin,
     AgentRegistryResolution,
     PlanPreviewRequest,
     RegistryResolutionStatus,
@@ -80,7 +81,23 @@ def test_reviewed_inputs_are_bound_to_the_plan_hash() -> None:
     assert first.approval_required is True
 
 
-def _plan(inputs: dict[str, str]):
+def test_declared_handoff_origin_is_bound_to_the_plan_hash_and_response() -> None:
+    first = _plan({"subject": "First draft"})
+    changed = _plan(
+        {"subject": "First draft"},
+        source_run_id="00000000-0000-4000-8000-000000000002",
+    )
+
+    assert first.plan_hash != changed.plan_hash
+    assert first.handoff_origin is not None
+    assert first.handoff_origin.source_run_id == "00000000-0000-4000-8000-000000000001"
+
+
+def _plan(
+    inputs: dict[str, str],
+    *,
+    source_run_id: str = "00000000-0000-4000-8000-000000000001",
+):
     return build_reference_plan(
         PlanPreviewRequest(
             request_id="handoff-1",
@@ -89,6 +106,15 @@ def _plan(inputs: dict[str, str]):
             target="/mail/inbox?compose=open",
             inputs=inputs,
             agent_key="REFERENCE_PLANNER",
+            handoff_origin=ActionHandoffOrigin(
+                app_key="APP.ASK",
+                route="/dwaion/conversations/00000000-0000-4000-8000-000000000001",
+                surface="action-shelf",
+                source_run_id=source_run_id,
+                source_request_id="ask-request-1",
+                source_correlation_id="ask-correlation-1",
+                conversation_id="00000000-0000-0000-0000-000000000001",
+            ),
         ),
         tenant_id="1",
         user_id="user-1",

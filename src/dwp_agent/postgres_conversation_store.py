@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
 from uuid import UUID, uuid4
 
 from psycopg import connect
@@ -18,19 +17,26 @@ from .contracts import (
 from .conversation_store import (
     ConversationNotFound,
     ConversationRetentionLocked,
+    ConversationStoreUnavailable,
     ConversationTurn,
     _title,
 )
-from .crypto import PayloadCipherKeyring
+from .conversation_exchange import build_exchange, exchange_matches
+from .envelope import KeyContext, PayloadEncryption
+from .payload_contexts import (
+    conversation_context,
+    feedback_context,
+    legacy_conversation_aad,
+    legacy_message_aad,
+    message_context,
+)
+from .run_store import RunLease
 
 
 class PostgresConversationStore:
-    def __init__(
-        self, database_url: str, keyring: PayloadCipherKeyring, retention_days: int
-    ) -> None:
+    def __init__(self, database_url: str, encryption: PayloadEncryption) -> None:
         self.database_url = database_url
-        self.keyring = keyring
-        self.retention_days = retention_days
+        self.encryption = encryption
 
     def ensure(
         self,
@@ -58,37 +64,34 @@ class PostgresConversationStore:
                 raise ConversationNotFound("Conversation was not found in the verified user scope.")
             return conversation_id
 
-        created = uuid4()
-        key_version, nonce, ciphertext = self._encrypt_text(
-            _title(initial_query), _conversation_aad(tenant_id, user_id, created, "title")
-        )
         with connect(self.database_url) as connection:
-            connection.execute(
-                """INSERT INTO ai_conversation_retention_policies (tenant_id, retention_days)
-                   VALUES (%s, %s)
-                   ON CONFLICT (tenant_id) DO NOTHING""",
-                (int(tenant_id), self.retention_days),
-            )
-            retention_days = connection.execute(
+            policy = connection.execute(
                 """SELECT retention_days FROM ai_conversation_retention_policies
                     WHERE tenant_id = %s""",
                 (int(tenant_id),),
-            ).fetchone()[0]
+            ).fetchone()
+            if policy is None:
+                raise ConversationStoreUnavailable(
+                    "The tenant retention policy requires explicit bootstrap."
+                )
+        created = uuid4()
+        title_envelope = self._encrypt_text(
+            _title(initial_query), conversation_context(tenant_id, created, "title")
+        )
+        with connect(self.database_url) as connection:
             connection.execute(
                 """INSERT INTO ai_conversations (
                        conversation_id, tenant_id, user_id, locale,
-                       title_nonce, title_ciphertext, encryption_key_version, retention_until)
-                   VALUES (%s, %s, %s, %s, %s, %s, %s,
+                       title_envelope, retention_until)
+                   VALUES (%s, %s, %s, %s, %s,
                            CURRENT_TIMESTAMP + make_interval(days => %s))""",
                 (
                     created,
                     int(tenant_id),
                     user_id,
                     locale,
-                    nonce,
-                    ciphertext,
-                    key_version,
-                    retention_days,
+                    title_envelope,
+                    policy[0],
                 ),
             )
         return created
@@ -98,7 +101,10 @@ class PostgresConversationStore:
     ) -> tuple[ConversationTurn, ...]:
         rows = self._message_rows(tenant_id, user_id, conversation_id, limit=limit)
         return tuple(
-            ConversationTurn(role=ConversationRole(row[1]), content=self._message(row).content)
+            ConversationTurn(
+                role=ConversationRole(row[1]),
+                content=self._message(tenant_id, conversation_id, row).content,
+            )
             for row in rows
         )
 
@@ -111,8 +117,30 @@ class PostgresConversationStore:
         request_id: str,
         query: str,
         response: AskResponse,
+        lease: RunLease,
     ) -> tuple[UUID, UUID]:
+        if response.run_id != lease.run_id or response.request_id != request_id:
+            raise ConversationStoreUnavailable(
+                "The conversation response does not match the claimed run lease."
+            )
         with connect(self.database_url) as connection:
+            active_lease = connection.execute(
+                """SELECT run_id FROM ai_agent_runs
+                     WHERE run_id = %s AND tenant_id = %s AND user_id = %s
+                       AND request_id = %s AND lease_generation = %s
+                       AND run_state = 'RUNNING'
+                       AND lease_expires_at > CURRENT_TIMESTAMP
+                     FOR UPDATE""",
+                (
+                    UUID(lease.run_id),
+                    int(tenant_id),
+                    user_id,
+                    request_id,
+                    lease.generation,
+                ),
+            ).fetchone()
+            if active_lease is None:
+                raise ConversationStoreUnavailable("Agent run lease is no longer owned.")
             owner = connection.execute(
                 """SELECT conversation.conversation_id
                      FROM ai_conversations conversation
@@ -127,81 +155,85 @@ class PostgresConversationStore:
             ).fetchone()
             if owner is None:
                 raise ConversationNotFound("Conversation was not found in the verified user scope.")
+            connection.execute(
+                """DELETE FROM ai_conversation_messages message
+                     USING ai_agent_runs run
+                     WHERE message.conversation_id = %s
+                       AND message.lease_generation IS NOT NULL
+                       AND run.run_id = message.run_id
+                       AND (run.lease_generation <> message.lease_generation
+                            OR run.run_state = 'FAILED'
+                            OR (run.run_state = 'RUNNING'
+                                AND run.lease_expires_at <= CURRENT_TIMESTAMP))""",
+                (conversation_id,),
+            )
             existing = connection.execute(
-                """SELECT message_id, role FROM ai_conversation_messages
+                """SELECT message_id, role, payload_envelope, payload_nonce,
+                          payload_ciphertext, encryption_key_version, run_id,
+                          lease_generation
+                     FROM ai_conversation_messages
                      WHERE conversation_id = %s AND request_id = %s""",
                 (conversation_id, request_id),
             ).fetchall()
             if len(existing) == 2:
-                by_role = {str(row[1]): UUID(str(row[0])) for row in existing}
-                return by_role[ConversationRole.USER], by_role[ConversationRole.ASSISTANT]
+                messages = [self._message(tenant_id, conversation_id, row) for row in existing]
+                database_run_ids = {
+                    ConversationRole(row[1]): UUID(str(row[6])) if row[6] else None
+                    for row in existing
+                }
+                if (
+                    all(int(row[7]) == lease.generation for row in existing)
+                    and database_run_ids.get(ConversationRole.USER) == UUID(lease.run_id)
+                    and database_run_ids.get(ConversationRole.ASSISTANT) == UUID(lease.run_id)
+                    and exchange_matches(messages, query=query, response=response)
+                ):
+                    by_role = {
+                        ConversationRole(row[1]): UUID(str(row[0])) for row in existing
+                    }
+                    return by_role[ConversationRole.USER], by_role[ConversationRole.ASSISTANT]
+            if existing:
+                connection.execute(
+                    """DELETE FROM ai_conversation_messages
+                        WHERE conversation_id = %s AND request_id = %s""",
+                    (conversation_id, request_id),
+                )
 
-            user_message_id = uuid4()
-            assistant_message_id = uuid4()
-            user_message = ConversationMessage(
-                message_id=user_message_id,
-                role=ConversationRole.USER,
-                content=query,
-                created_at=datetime.now(timezone.utc),
-            )
-            assistant_message = ConversationMessage(
-                message_id=assistant_message_id,
-                role=ConversationRole.ASSISTANT,
-                content=response.answer or response.status_code,
-                run_id=UUID(response.run_id),
-                status_code=response.status_code,
-                citations=response.citations,
-                created_at=datetime.now(timezone.utc),
-            )
+            user_message, assistant_message = build_exchange(query, response)
             for message in (user_message, assistant_message):
-                key_version, nonce, ciphertext = self._encrypt_message(message)
+                envelope = self._encrypt_message(
+                    message, tenant_id=tenant_id, conversation_id=conversation_id
+                )
                 connection.execute(
                     """INSERT INTO ai_conversation_messages (
                            message_id, conversation_id, request_id, run_id, role,
-                           payload_nonce, payload_ciphertext, encryption_key_version, created_at)
-                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                           payload_envelope, created_at, lease_generation)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
                     (
                         message.message_id,
                         conversation_id,
                         request_id,
-                        message.run_id,
+                        UUID(lease.run_id),
                         message.role,
-                        nonce,
-                        ciphertext,
-                        key_version,
+                        envelope,
                         message.created_at,
+                        lease.generation,
                     ),
                 )
-            connection.execute(
-                """UPDATE ai_conversations
-                      SET message_count = message_count + 2,
-                          updated_at = CURRENT_TIMESTAMP,
-                          last_message_at = CURRENT_TIMESTAMP
-                    WHERE conversation_id = %s""",
-                (conversation_id,),
-            )
-            return user_message_id, assistant_message_id
+            return user_message.message_id, assistant_message.message_id
 
     def list(self, *, tenant_id: str, user_id: str, limit: int = 30) -> list[ConversationSummary]:
         with connect(self.database_url) as connection:
-            connection.execute(
-                """DELETE FROM ai_conversations conversation
-                    WHERE conversation.retention_until <= CURRENT_TIMESTAMP
-                      AND NOT EXISTS (
-                          SELECT 1 FROM ai_conversation_retention_policies policy
-                           WHERE policy.tenant_id = conversation.tenant_id
-                             AND policy.legal_hold)"""
-            )
             rows = connection.execute(
                 """SELECT conversation.conversation_id, conversation.locale,
                           conversation.message_count, conversation.created_at,
                           conversation.updated_at, conversation.last_message_at,
-                          conversation.title_nonce, conversation.title_ciphertext,
-                          conversation.encryption_key_version
+                          conversation.title_envelope, conversation.title_nonce,
+                          conversation.title_ciphertext, conversation.encryption_key_version
                      FROM ai_conversations conversation
                      LEFT JOIN ai_conversation_retention_policies policy
                        ON policy.tenant_id = conversation.tenant_id
                     WHERE conversation.tenant_id = %s AND conversation.user_id = %s
+                      AND conversation.message_count > 0
                       AND (conversation.retention_until > CURRENT_TIMESTAMP
                            OR COALESCE(policy.legal_hold, FALSE))
                     ORDER BY conversation.last_message_at DESC
@@ -218,13 +250,14 @@ class PostgresConversationStore:
                 """SELECT conversation.conversation_id, conversation.locale,
                           conversation.message_count, conversation.created_at,
                           conversation.updated_at, conversation.last_message_at,
-                          conversation.title_nonce, conversation.title_ciphertext,
-                          conversation.encryption_key_version
+                          conversation.title_envelope, conversation.title_nonce,
+                          conversation.title_ciphertext, conversation.encryption_key_version
                      FROM ai_conversations conversation
                      LEFT JOIN ai_conversation_retention_policies policy
                        ON policy.tenant_id = conversation.tenant_id
                     WHERE conversation.conversation_id = %s
                       AND conversation.tenant_id = %s AND conversation.user_id = %s
+                      AND conversation.message_count > 0
                       AND (conversation.retention_until > CURRENT_TIMESTAMP
                            OR COALESCE(policy.legal_hold, FALSE))""",
                 (conversation_id, int(tenant_id), user_id),
@@ -234,7 +267,7 @@ class PostgresConversationStore:
         return ConversationDetail(
             summary=self._summary_from_row(tenant_id, user_id, row),
             messages=[
-                self._message(item)
+                self._message(tenant_id, conversation_id, item)
                 for item in self._message_rows(tenant_id, user_id, conversation_id, limit=200)
             ],
         )
@@ -242,14 +275,15 @@ class PostgresConversationStore:
     def rename(
         self, *, tenant_id: str, user_id: str, conversation_id: UUID, title: str
     ) -> ConversationDetail:
-        key_version, nonce, ciphertext = self._encrypt_text(
-            _title(title), _conversation_aad(tenant_id, user_id, conversation_id, "title")
+        title_envelope = self._encrypt_text(
+            _title(title), conversation_context(tenant_id, conversation_id, "title")
         )
         with connect(self.database_url) as connection:
             updated = connection.execute(
                 """UPDATE ai_conversations conversation
-                      SET title_nonce = %s, title_ciphertext = %s,
-                          encryption_key_version = %s,
+                      SET title_envelope = %s,
+                          title_nonce = NULL, title_ciphertext = NULL,
+                          encryption_key_version = NULL,
                           updated_at = CURRENT_TIMESTAMP
                      FROM ai_conversation_retention_policies policy
                     WHERE policy.tenant_id = conversation.tenant_id
@@ -257,7 +291,7 @@ class PostgresConversationStore:
                       AND conversation.tenant_id = %s AND conversation.user_id = %s
                       AND (conversation.retention_until > CURRENT_TIMESTAMP
                            OR policy.legal_hold)""",
-                (nonce, ciphertext, key_version, conversation_id, int(tenant_id), user_id),
+                (title_envelope, conversation_id, int(tenant_id), user_id),
             ).rowcount
         if updated != 1:
             raise ConversationNotFound("Conversation was not found in the verified user scope.")
@@ -295,12 +329,10 @@ class PostgresConversationStore:
         run_id: UUID,
         request: AnswerFeedbackRequest,
     ) -> FeedbackReceipt:
-        comment_nonce: bytes | None = None
-        comment_ciphertext: bytes | None = None
-        key_version = self.keyring.active_version
+        comment_envelope: str | None = None
         if request.comment:
-            key_version, comment_nonce, comment_ciphertext = self._encrypt_text(
-                request.comment, f"{tenant_id}:{user_id}:{run_id}:feedback".encode()
+            comment_envelope = self._encrypt_text(
+                request.comment, feedback_context(tenant_id, run_id)
             )
         with connect(self.database_url) as connection:
             owner = connection.execute(
@@ -314,14 +346,15 @@ class PostgresConversationStore:
             row = connection.execute(
                 """INSERT INTO ai_answer_feedback (
                        run_id, tenant_id, user_id, rating, reason_codes,
-                       comment_nonce, comment_ciphertext, encryption_key_version)
-                   VALUES (%s, %s, %s, %s, %s::jsonb, %s, %s, %s)
+                       comment_envelope)
+                   VALUES (%s, %s, %s, %s, %s::jsonb, %s)
                    ON CONFLICT (run_id, user_id) DO UPDATE SET
                        rating = EXCLUDED.rating,
                        reason_codes = EXCLUDED.reason_codes,
-                       comment_nonce = EXCLUDED.comment_nonce,
-                       comment_ciphertext = EXCLUDED.comment_ciphertext,
-                       encryption_key_version = EXCLUDED.encryption_key_version,
+                       comment_envelope = EXCLUDED.comment_envelope,
+                       comment_nonce = NULL,
+                       comment_ciphertext = NULL,
+                       encryption_key_version = NULL,
                        updated_at = CURRENT_TIMESTAMP
                    RETURNING updated_at""",
                 (
@@ -330,9 +363,7 @@ class PostgresConversationStore:
                     user_id,
                     request.rating,
                     json.dumps(request.reason_codes),
-                    comment_nonce,
-                    comment_ciphertext,
-                    key_version,
+                    comment_envelope,
                 ),
             ).fetchone()
         return FeedbackReceipt(run_id=run_id, rating=request.rating, recorded_at=row[0])
@@ -355,31 +386,47 @@ class PostgresConversationStore:
             if owner is None:
                 raise ConversationNotFound("Conversation was not found in the verified user scope.")
             rows = connection.execute(
-                """SELECT message_id, role, payload_nonce, payload_ciphertext,
-                          encryption_key_version
-                     FROM ai_conversation_messages
-                    WHERE conversation_id = %s
-                    ORDER BY created_at DESC, message_id DESC
+                """SELECT message.message_id, message.role, message.payload_envelope,
+                          message.payload_nonce, message.payload_ciphertext,
+                          message.encryption_key_version
+                     FROM ai_conversation_messages message
+                     JOIN ai_agent_runs completed_run
+                       ON completed_run.run_id = message.run_id
+                      AND completed_run.run_state = 'COMPLETED'
+                      AND completed_run.lease_generation = message.lease_generation
+                    WHERE message.conversation_id = %s
+                    ORDER BY message.created_at DESC, message.message_id DESC
                     LIMIT %s""",
                 (conversation_id, max(1, min(limit, 200))),
             ).fetchall()
         rows.reverse()
         return rows
 
-    def _message(self, row: tuple) -> ConversationMessage:
+    def _message(
+        self, tenant_id: str, conversation_id: UUID, row: tuple
+    ) -> ConversationMessage:
         message_id = UUID(str(row[0]))
-        payload = self.keyring.decrypt_bytes(
-            str(row[4]), bytes(row[2]), bytes(row[3]), _message_aad(message_id)
+        payload = self.encryption.decrypt_bytes(
+            envelope=str(row[2]) if row[2] is not None else None,
+            context=message_context(tenant_id, conversation_id, message_id),
+            legacy_version=str(row[5]) if row[5] is not None else None,
+            legacy_nonce=bytes(row[3]) if row[3] is not None else None,
+            legacy_ciphertext=bytes(row[4]) if row[4] is not None else None,
+            legacy_aad=legacy_message_aad(message_id),
         )
         return ConversationMessage.model_validate_json(payload)
 
     def _summary_from_row(self, tenant_id: str, user_id: str, row: tuple) -> ConversationSummary:
         conversation_id = UUID(str(row[0]))
         title = self._decrypt_text(
-            str(row[8]),
-            bytes(row[6]),
-            bytes(row[7]),
-            _conversation_aad(tenant_id, user_id, conversation_id, "title"),
+            envelope=str(row[6]) if row[6] is not None else None,
+            context=conversation_context(tenant_id, conversation_id, "title"),
+            legacy_version=str(row[9]) if row[9] is not None else None,
+            legacy_nonce=bytes(row[7]) if row[7] is not None else None,
+            legacy_ciphertext=bytes(row[8]) if row[8] is not None else None,
+            legacy_aad=legacy_conversation_aad(
+                tenant_id, user_id, conversation_id, "title"
+            ),
         )
         return ConversationSummary(
             conversation_id=conversation_id,
@@ -391,26 +438,36 @@ class PostgresConversationStore:
             last_message_at=row[5],
         )
 
-    def _encrypt_text(self, value: str, aad: bytes) -> tuple[str, bytes, bytes]:
-        return self.keyring.encrypt_bytes(value.encode("utf-8"), aad)
+    def _encrypt_text(self, value: str, context: KeyContext) -> str:
+        return self.encryption.encrypt_bytes(value.encode("utf-8"), context)
 
     def _decrypt_text(
-        self, version: str, nonce: bytes, ciphertext: bytes, aad: bytes
+        self,
+        *,
+        envelope: str | None,
+        context: KeyContext,
+        legacy_version: str | None,
+        legacy_nonce: bytes | None,
+        legacy_ciphertext: bytes | None,
+        legacy_aad: bytes,
     ) -> str:
-        return self.keyring.decrypt_bytes(version, nonce, ciphertext, aad).decode("utf-8")
+        return self.encryption.decrypt_bytes(
+            envelope=envelope,
+            context=context,
+            legacy_version=legacy_version,
+            legacy_nonce=legacy_nonce,
+            legacy_ciphertext=legacy_ciphertext,
+            legacy_aad=legacy_aad,
+        ).decode("utf-8")
 
-    def _encrypt_message(self, message: ConversationMessage) -> tuple[str, bytes, bytes]:
-        return self.keyring.encrypt_bytes(
+    def _encrypt_message(
+        self,
+        message: ConversationMessage,
+        *,
+        tenant_id: str,
+        conversation_id: UUID,
+    ) -> str:
+        return self.encryption.encrypt_bytes(
             message.model_dump_json(by_alias=True).encode(),
-            _message_aad(message.message_id),
+            message_context(tenant_id, conversation_id, message.message_id),
         )
-
-
-def _conversation_aad(
-    tenant_id: str, user_id: str, conversation_id: UUID, field: str
-) -> bytes:
-    return f"{tenant_id}:{user_id}:{conversation_id}:{field}".encode()
-
-
-def _message_aad(message_id: UUID) -> bytes:
-    return f"dwaion-message:{message_id}".encode()

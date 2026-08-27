@@ -6,7 +6,8 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 import dwp_agent.operations_api as operations_api_module
-from dwp_agent.contracts import (
+from dwp_agent.operations_contracts import (
+    BootstrapRetentionPolicyRequest,
     DwaionOperationsOverview,
     RetentionPolicy,
     UpdateRetentionPolicyRequest,
@@ -56,6 +57,23 @@ class FakeOperationsStore:
 
     def retention_policy(self, *, tenant_id: str):
         assert tenant_id == "1"
+        return self.policy
+
+    def bootstrap_retention_policy(
+        self,
+        *,
+        tenant_id: str,
+        actor_user_id: str,
+        correlation_id: str,
+        request: BootstrapRetentionPolicyRequest,
+    ):
+        assert (tenant_id, actor_user_id, correlation_id) == ("1", "7", "corr-1")
+        self.policy = RetentionPolicy(
+            retention_days=request.retention_days,
+            legal_hold=request.legal_hold,
+            policy_version=1,
+            updated_at=datetime.now(timezone.utc),
+        )
         return self.policy
 
     def update_retention_policy(
@@ -172,3 +190,38 @@ def test_retention_update_uses_versioned_policy_and_manage_for_legal_hold(
     assert denied_hold.status_code == 403
     assert allowed_hold.status_code == 200
     assert allowed_hold.json()["data"]["legalHold"] is True
+
+
+def test_retention_bootstrap_requires_manage_and_explicit_command_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = FakeOperationsStore()
+    monkeypatch.setattr(operations_api_module, "get_operations_store", lambda: store)
+    command = {
+        "idempotencyKey": "00000000-0000-4000-8000-000000000001",
+        "expectedExistingCount": 0,
+        "retentionDays": 365,
+        "legalHold": False,
+        "changeReason": "Initialize the tenant records retention policy.",
+    }
+
+    denied = asyncio.run(
+        request(
+            "POST",
+            "/v1/admin/retention/bootstrap",
+            permissions="ADMIN.DWAION_RETENTION:UPDATE",
+            json=command,
+        )
+    )
+    allowed = asyncio.run(
+        request(
+            "POST",
+            "/v1/admin/retention/bootstrap",
+            permissions="ADMIN.DWAION_RETENTION:MANAGE",
+            json=command,
+        )
+    )
+
+    assert denied.status_code == 403
+    assert allowed.status_code == 200
+    assert allowed.json()["data"]["retentionDays"] == 365

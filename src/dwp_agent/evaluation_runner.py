@@ -17,6 +17,7 @@ from .governance_store import GovernanceStoreUnavailable
 from .policy import AskIdentity
 from .run_store import InMemoryRunStore
 from .runtime_policy import (
+    RuntimeGovernanceNotConfigured,
     SourcePolicyBlocked,
     SourceScopeLimitExceeded,
     resolve_runtime_safety_controls,
@@ -53,9 +54,10 @@ def run_evaluation(
 def _evaluate_cases(
     *, run_id: UUID, evaluation_set: EvaluationSetDetail, identity: AskIdentity
 ) -> tuple[list[EvaluationResult], str | None]:
+    run_store = InMemoryRunStore()
     runtime = AskRuntime(
-        run_store=InMemoryRunStore(),
-        conversation_store=InMemoryConversationStore(),
+        run_store=run_store,
+        conversation_store=InMemoryConversationStore(run_store),
     )
     results: list[EvaluationResult] = []
     model_ref: str | None = None
@@ -69,7 +71,12 @@ def _evaluate_cases(
         )
         try:
             safety_controls = resolve_runtime_safety_controls(request, identity)
-        except (GovernanceStoreUnavailable, SourcePolicyBlocked, SourceScopeLimitExceeded) as error:
+        except (
+            GovernanceStoreUnavailable,
+            RuntimeGovernanceNotConfigured,
+            SourcePolicyBlocked,
+            SourceScopeLimitExceeded,
+        ) as error:
             results.append(EvaluationResult(
                 evaluation_case_id=case.evaluation_case_id,
                 case_name=case.name,

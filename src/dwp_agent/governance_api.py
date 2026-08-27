@@ -18,6 +18,7 @@ from .evaluation_store import (
 from .governance_contracts import (
     ActionPolicyEnvelope,
     ActionPolicyListEnvelope,
+    BootstrapGovernancePoliciesRequest,
     CreateEvaluationCaseRequest,
     CreateEvaluationSetRequest,
     DataSourcePolicyEnvelope,
@@ -27,14 +28,13 @@ from .governance_contracts import (
     EvaluationSetEnvelope,
     EvaluationSetListEnvelope,
     GovernanceAuditEnvelope,
-    SafetyPolicyEnvelope,
     UpdateActionPolicyRequest,
     UpdateDataSourcePolicyRequest,
     UpdateEvaluationLifecycleRequest,
-    UpdateSafetyPolicyRequest,
 )
 from .governance_store import (
     GovernancePolicyConflict,
+    GovernancePolicyNotInitialized,
     GovernanceStoreUnavailable,
     get_governance_store,
 )
@@ -91,6 +91,33 @@ def list_source_policies(
         raise HTTPException(status_code=503, detail=str(error)) from error
 
 
+@router.post(
+    "/sources/bootstrap",
+    response_model=DataSourcePolicyListEnvelope,
+    response_model_by_alias=True,
+)
+def bootstrap_source_policies(
+    request: BootstrapGovernancePoliciesRequest,
+    headers: Annotated[tuple[str, str, str, str | None], Depends(_headers)],
+):
+    tenant, user, correlation, permissions = headers
+    _context(tenant, user, correlation, permissions, "ADMIN.DWAION_SOURCES", "MANAGE")
+    try:
+        return DataSourcePolicyListEnvelope(
+            message="DWAI-ON source policies initialized in a blocked state.",
+            data=get_governance_store().bootstrap_source_policies(
+                tenant_id=tenant,
+                actor_user_id=user,
+                correlation_id=correlation,
+                request=request,
+            ),
+        )
+    except GovernancePolicyConflict as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    except GovernanceStoreUnavailable as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
+
+
 @router.patch(
     "/sources/{source_key}",
     response_model=DataSourcePolicyEnvelope,
@@ -115,6 +142,8 @@ def update_source_policy(
             message="DWAI-ON source policy updated.", data=policy)
     except GovernancePolicyConflict as error:
         raise HTTPException(status_code=409, detail=str(error)) from error
+    except GovernancePolicyNotInitialized as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
     except GovernanceStoreUnavailable as error:
         raise HTTPException(status_code=503, detail=str(error)) from error
 
@@ -128,6 +157,33 @@ def list_action_policies(
     return ActionPolicyListEnvelope(
         data=get_governance_store().action_policies(
             tenant_id=tenant, actor_user_id=user))
+
+
+@router.post(
+    "/actions/bootstrap",
+    response_model=ActionPolicyListEnvelope,
+    response_model_by_alias=True,
+)
+def bootstrap_action_policies(
+    request: BootstrapGovernancePoliciesRequest,
+    headers: Annotated[tuple[str, str, str, str | None], Depends(_headers)],
+):
+    tenant, user, correlation, permissions = headers
+    _context(tenant, user, correlation, permissions, "ADMIN.DWAION_ACTIONS", "MANAGE")
+    try:
+        return ActionPolicyListEnvelope(
+            message="DWAI-ON action policies initialized in a blocked state.",
+            data=get_governance_store().bootstrap_action_policies(
+                tenant_id=tenant,
+                actor_user_id=user,
+                correlation_id=correlation,
+                request=request,
+            ),
+        )
+    except GovernancePolicyConflict as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    except GovernanceStoreUnavailable as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
 
 
 @router.patch(
@@ -154,37 +210,8 @@ def update_action_policy(
             message="DWAI-ON action policy updated.", data=policy)
     except KeyError as error:
         raise HTTPException(status_code=404, detail="The action is not registered.") from error
-    except GovernancePolicyConflict as error:
+    except GovernancePolicyNotInitialized as error:
         raise HTTPException(status_code=409, detail=str(error)) from error
-
-
-@router.get("/safety", response_model=SafetyPolicyEnvelope, response_model_by_alias=True)
-def get_safety_policy(
-    headers: Annotated[tuple[str, str, str, str | None], Depends(_headers)],
-):
-    tenant, user, correlation, permissions = headers
-    _context(tenant, user, correlation, permissions, "ADMIN.DWAION_SAFETY", "VIEW")
-    return SafetyPolicyEnvelope(
-        data=get_governance_store().safety_policy(
-            tenant_id=tenant, actor_user_id=user))
-
-
-@router.patch("/safety", response_model=SafetyPolicyEnvelope, response_model_by_alias=True)
-def update_safety_policy(
-    request: UpdateSafetyPolicyRequest,
-    headers: Annotated[tuple[str, str, str, str | None], Depends(_headers)],
-):
-    tenant, user, correlation, permissions = headers
-    _context(tenant, user, correlation, permissions, "ADMIN.DWAION_SAFETY", "UPDATE")
-    try:
-        policy = get_governance_store().update_safety_policy(
-            tenant_id=tenant,
-            actor_user_id=user,
-            correlation_id=correlation,
-            request=request,
-        )
-        return SafetyPolicyEnvelope(
-            message="DWAI-ON safety policy updated.", data=policy)
     except GovernancePolicyConflict as error:
         raise HTTPException(status_code=409, detail=str(error)) from error
 

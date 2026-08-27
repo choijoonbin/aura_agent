@@ -7,6 +7,7 @@ from fastapi.responses import JSONResponse
 
 from .governance_store import GovernanceStoreUnavailable
 from .operational_gate_contracts import (
+    BootstrapOperationalGatesRequest,
     ConfigureOperationalGateRequest,
     CreateOperationalGateEvidenceRequest,
     DecideOperationalGateRequest,
@@ -17,7 +18,7 @@ from .operational_gate_contracts import (
     OperationalGateProblem,
     ValidateOperationalGateRequest,
 )
-from .operational_gate_store import get_operational_gate_store
+from .operational_gate_store_provider import get_operational_gate_store
 from .operational_gate_store_errors import (
     OperationalGateConflict,
     OperationalGateInvalidTransition,
@@ -125,6 +126,35 @@ def list_operational_gates(
         _raise_domain_problem(error)
 
 
+@router.post(
+    "/bootstrap",
+    response_model=OperationalGatePortfolioEnvelope,
+    response_model_by_alias=True,
+)
+def bootstrap_operational_gates(
+    request: BootstrapOperationalGatesRequest,
+    headers: Annotated[tuple[str, str, str, str | None], Depends(_headers)],
+    environment: GateEnvironment = GateEnvironment.PRODUCTION,
+):
+    tenant, user, correlation, permissions = headers
+    _require_permission(permissions, "MANAGE")
+    try:
+        return OperationalGatePortfolioEnvelope(
+            message="DWAI-ON operational gates initialized in a blocked state.",
+            data=get_operational_gate_store().bootstrap(
+                tenant_id=tenant,
+                actor_user_id=user,
+                correlation_id=correlation,
+                environment=environment,
+                request=request,
+            ),
+        )
+    except OperationalGateConflict as error:
+        _raise_domain_problem(error)
+    except GovernanceStoreUnavailable as error:
+        _raise_domain_problem(error)
+
+
 @router.get(
     "/{gate_key}",
     response_model=OperationalGateDetailEnvelope,
@@ -165,7 +195,7 @@ def configure_operational_gate(
         return OperationalGateDetailEnvelope(
             message="DWAI-ON operational gate configured.", data=data
         )
-    except (OperationalGateConflict, OperationalGateInvalidTransition) as error:
+    except (KeyError, OperationalGateConflict, OperationalGateInvalidTransition) as error:
         _raise_domain_problem(error)
     except GovernanceStoreUnavailable as error:
         _raise_domain_problem(error)
@@ -197,7 +227,7 @@ def add_operational_gate_evidence(
         return OperationalGateDetailEnvelope(
             message="DWAI-ON operational gate evidence added.", data=data
         )
-    except (OperationalGateConflict, OperationalGateInvalidTransition) as error:
+    except (KeyError, OperationalGateConflict, OperationalGateInvalidTransition) as error:
         _raise_domain_problem(error)
     except GovernanceStoreUnavailable as error:
         _raise_domain_problem(error)
@@ -228,7 +258,7 @@ def validate_operational_gate(
         return OperationalGateDetailEnvelope(
             message="DWAI-ON operational gate validation recorded.", data=data
         )
-    except (OperationalGateConflict, OperationalGateInvalidTransition) as error:
+    except (KeyError, OperationalGateConflict, OperationalGateInvalidTransition) as error:
         _raise_domain_problem(error)
     except GovernanceStoreUnavailable as error:
         _raise_domain_problem(error)
@@ -263,6 +293,7 @@ def decide_operational_gate(
         OperationalGateConflict,
         OperationalGateInvalidTransition,
         OperationalGateSeparationOfDutyViolation,
+        KeyError,
     ) as error:
         _raise_domain_problem(error)
     except GovernanceStoreUnavailable as error:
@@ -296,6 +327,13 @@ def _detail(
 
 
 def _raise_domain_problem(error: Exception) -> NoReturn:
+    if isinstance(error, KeyError):
+        raise OperationalGateApiProblem(
+            status_code=status.HTTP_404_NOT_FOUND,
+            code="GATE_NOT_FOUND",
+            title="Operational gate not found",
+            detail="Initialize the operational gate portfolio before changing a gate.",
+        ) from error
     if isinstance(error, OperationalGateMissingEvidence):
         raise OperationalGateApiProblem(
             status_code=status.HTTP_409_CONFLICT,

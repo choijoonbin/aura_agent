@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from .contracts import AskRequest
 from .governance_contracts import SourceAccessMode
-from .governance_store import GovernanceStore, get_governance_store
+from .governance_store import (
+    GovernancePolicyNotInitialized,
+    GovernanceStore,
+    get_governance_store,
+)
 from .policy import AskIdentity, SafetyControls
 
 
@@ -19,6 +23,10 @@ class SourceScopeLimitExceeded(RuntimeError):
         super().__init__(f"At most {allowed} source scopes are allowed; received {requested}.")
 
 
+class RuntimeGovernanceNotConfigured(RuntimeError):
+    pass
+
+
 def resolve_runtime_safety_controls(
     request: AskRequest,
     identity: AskIdentity,
@@ -30,10 +38,13 @@ def resolve_runtime_safety_controls(
         tenant_id=identity.tenant_id,
         actor_user_id=identity.user_id,
     )
-    safety = store.safety_policy(
-        tenant_id=identity.tenant_id,
-        actor_user_id=identity.user_id,
-    )
+    try:
+        safety = store.safety_policy(
+            tenant_id=identity.tenant_id,
+            actor_user_id=identity.user_id,
+        )
+    except GovernancePolicyNotInitialized as error:
+        raise RuntimeGovernanceNotConfigured(str(error)) from error
     allowed_sources = {
         policy.source_key
         for policy in source_policies

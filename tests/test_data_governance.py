@@ -2,7 +2,6 @@ import base64
 
 import pytest
 
-from dwp_agent.conversation_store import _retention_days
 from dwp_agent.crypto import DataKeyConfigurationError, PayloadCipherKeyring
 from dwp_agent.run_store import RunStoreUnavailable, load_payload_keyring
 
@@ -33,6 +32,7 @@ def test_keyring_fails_closed_when_historical_key_is_missing() -> None:
 def test_environment_keyring_requires_a_valid_versioned_key_map(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setenv("DWP_ENVIRONMENT", "local")
     monkeypatch.setenv("DWP_AGENT_DATA_KEY", key(2))
     monkeypatch.setenv("DWP_AGENT_DATA_KEY_VERSION", "v2")
     monkeypatch.setenv("DWP_AGENT_PREVIOUS_DATA_KEYS", '{"v1":"not-base64"}')
@@ -48,14 +48,3 @@ def test_keyring_rejects_invalid_historical_key_version() -> None:
             active_key=key(2),
             previous_keys={"../../v1": key(1)},
         )
-
-
-@pytest.mark.parametrize("value", ["29", "3651", "not-a-number"])
-def test_conversation_retention_rejects_unsupported_policy_defaults(value: str) -> None:
-    with pytest.raises(RunStoreUnavailable):
-        _retention_days(value)
-
-
-def test_conversation_retention_accepts_enterprise_policy_range() -> None:
-    assert _retention_days("90") == 90
-    assert _retention_days("3650") == 3650

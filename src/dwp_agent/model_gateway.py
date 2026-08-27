@@ -112,7 +112,7 @@ class OpenAIResponsesGateway:
         self.model = self.provider_configuration.model
         self.base_url = self.provider_configuration.base_url
         self.transport = transport
-        self.timeout_seconds = _bounded_float("DWP_OPENAI_TIMEOUT_SECONDS", 20.0, 2.0, 60.0)
+        self.timeout_seconds = _bounded_float("DWP_OPENAI_TIMEOUT_SECONDS", 20.0, 2.0, 24.0)
         self.max_output_tokens = _bounded_int("DWP_OPENAI_MAX_OUTPUT_TOKENS", 900, 128, 4_096)
 
     @property
@@ -235,13 +235,18 @@ class OpenAIResponsesGateway:
         payload: dict[str, Any],
         headers: dict[str, str],
     ) -> httpx.Response:
+        deadline = time.monotonic() + self.timeout_seconds
         with httpx.Client(transport=self.transport, timeout=self.timeout_seconds) as client:
             for attempt in range(2):
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
                 try:
                     response = client.post(
                         f"{self.base_url}/responses",
                         json=payload,
                         headers=headers,
+                        timeout=remaining,
                     )
                 except httpx.HTTPError as error:
                     if attempt == 0:
@@ -254,7 +259,10 @@ class OpenAIResponsesGateway:
                     delay = min(max(float(retry_after or "0.15"), 0.0), 1.0)
                 except ValueError:
                     delay = 0.15
-                time.sleep(delay)
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                time.sleep(min(delay, remaining))
         raise ModelCallFailed("MODEL_PROVIDER_UNAVAILABLE")
 
     def _validate_endpoint(self) -> None:

@@ -9,6 +9,7 @@ from httpx import ASGITransport, AsyncClient
 import dwp_agent.governance_api as governance_api_module
 from dwp_agent.contracts import CitationSourceType
 from dwp_agent.governance_contracts import (
+    BootstrapGovernancePoliciesRequest,
     ConnectionState,
     DataClassification,
     DataSourcePolicy,
@@ -24,6 +25,7 @@ from dwp_agent.governance_contracts import (
 )
 from dwp_agent.evaluation_store import EvaluationRunAlreadyActive, EvaluationRunLeaseLost
 from dwp_agent.evaluation_evidence_store import EvaluationEvidenceStoreMixin
+from dwp_agent.governance_store import GovernancePolicyNotInitialized
 from dwp_agent.main import app
 
 
@@ -37,6 +39,7 @@ def configured_service_identity(monkeypatch: pytest.MonkeyPatch) -> None:
 
 class FakeGovernanceStore:
     def __init__(self) -> None:
+        self.bootstrap_calls = 0
         self.policy = DataSourcePolicy(
             source_key=CitationSourceType.WORK_ITEM,
             display_name="Work",
@@ -52,6 +55,19 @@ class FakeGovernanceStore:
 
     def source_policies(self, *, tenant_id: str, actor_user_id: str):
         assert (tenant_id, actor_user_id) == ("1", "7")
+        return [self.policy]
+
+    def bootstrap_source_policies(
+        self,
+        *,
+        tenant_id: str,
+        actor_user_id: str,
+        correlation_id: str,
+        request: BootstrapGovernancePoliciesRequest,
+    ):
+        assert (tenant_id, actor_user_id, correlation_id) == ("1", "7", "corr-1")
+        assert request.expected_existing_count == 0
+        self.bootstrap_calls += 1
         return [self.policy]
 
     def update_source_policy(
@@ -218,6 +234,90 @@ def test_source_governance_requires_granular_permissions(
     assert allowed.status_code == 200
     assert updated.status_code == 200
     assert updated.json()["data"]["policyVersion"] == 2
+
+
+def test_source_policy_bootstrap_requires_manage_permission(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = FakeGovernanceStore()
+    monkeypatch.setattr(governance_api_module, "get_governance_store", lambda: store)
+
+    payload = {
+        "idempotencyKey": str(uuid4()),
+        "expectedExistingCount": 0,
+        "changeReason": "Initialize blocked source policies for this tenant.",
+    }
+    denied = asyncio.run(
+        request(
+            "POST",
+            "/v1/admin/sources/bootstrap",
+            permissions="ADMIN.DWAION_SOURCES:VIEW",
+            json=payload,
+        )
+    )
+    allowed = asyncio.run(
+        request(
+            "POST",
+            "/v1/admin/sources/bootstrap",
+            permissions="ADMIN.DWAION_SOURCES:MANAGE",
+            json=payload,
+        )
+    )
+
+    assert denied.status_code == 403
+    assert allowed.status_code == 200
+    assert store.bootstrap_calls == 1
+
+
+def test_policy_updates_require_explicit_bootstrap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = FakeGovernanceStore()
+
+    def reject_uninitialized(**_kwargs):
+        raise GovernancePolicyNotInitialized(
+            "GOVERNANCE_BOOTSTRAP_REQUIRED: The policy set has not been initialized."
+        )
+
+    monkeypatch.setattr(store, "update_source_policy", reject_uninitialized)
+    monkeypatch.setattr(
+        store, "update_action_policy", reject_uninitialized, raising=False
+    )
+    monkeypatch.setattr(governance_api_module, "get_governance_store", lambda: store)
+
+    source = asyncio.run(
+        request(
+            "PATCH",
+            "/v1/admin/sources/WORK_ITEM",
+            permissions="ADMIN.DWAION_SOURCES:UPDATE",
+            json={
+                "enabled": False,
+                "accessMode": "BLOCKED",
+                "classification": "INTERNAL",
+                "expectedVersion": 1,
+                "changeReason": "Reject the source update before explicit initialization.",
+            },
+        )
+    )
+    action = asyncio.run(
+        request(
+            "PATCH",
+            "/v1/admin/actions/CALENDAR.EVENT.CREATE",
+            permissions="ADMIN.DWAION_ACTIONS:UPDATE",
+            json={
+                "enabled": False,
+                "confirmationRequired": True,
+                "executionPolicy": "BLOCKED",
+                "expectedVersion": 1,
+                "changeReason": "Reject the action update before explicit initialization.",
+            },
+        )
+    )
+
+    assert source.status_code == 409
+    assert action.status_code == 409
+    assert source.json()["detail"].startswith("GOVERNANCE_BOOTSTRAP_REQUIRED")
+    assert action.json()["detail"].startswith("GOVERNANCE_BOOTSTRAP_REQUIRED")
 
 
 def test_audit_export_requires_export_permission(

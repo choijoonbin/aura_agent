@@ -3,7 +3,17 @@ from __future__ import annotations
 import os
 from urllib.parse import urlparse
 
-from .crypto import DataKeyConfigurationError, load_payload_keyring
+from .crypto import DataKeyConfigurationError
+from .envelope import (
+    EnvelopeEncryptionError,
+    KeyContext,
+    load_payload_encryption,
+)
+from .key_provider import (
+    KeyProvider,
+    KeyProviderConfigurationError,
+    normalized_environment,
+)
 from .model_provider import (
     ModelProvider,
     ProviderConfigurationError,
@@ -15,13 +25,49 @@ class RuntimeConfigurationError(RuntimeError):
     pass
 
 
-def validate_runtime_configuration() -> None:
-    if os.getenv("DWP_ENVIRONMENT", "local").strip().lower() != "production":
+def validate_runtime_configuration(key_provider: KeyProvider | None = None) -> None:
+    environment = normalized_environment()
+    if environment == "local":
         return
 
     errors: list[str] = []
+    if not _managed_secret("DWP_AGENT_IDENTITY_SIGNING_SECRET"):
+        errors.append("DWP_AGENT_IDENTITY_SIGNING_SECRET")
+    try:
+        encryption = load_payload_encryption(key_provider)
+        probe_context = KeyContext(
+            environment=environment,
+            service="dwp-agent",
+            purpose="payload",
+            tenant_id=0,
+            resource_type="runtime-probe",
+            resource_id="startup",
+            field="payload",
+        )
+        probe_envelope = encryption.encrypt_bytes(b"dwp-agent-readiness", probe_context)
+        if encryption.decrypt_bytes(
+            envelope=probe_envelope,
+            context=probe_context,
+            legacy_version=None,
+            legacy_nonce=None,
+            legacy_ciphertext=None,
+            legacy_aad=b"",
+        ) != b"dwp-agent-readiness":
+            raise EnvelopeEncryptionError("Agent envelope key provider probe failed.")
+    except (
+        DataKeyConfigurationError,
+        EnvelopeEncryptionError,
+        KeyProviderConfigurationError,
+        ValueError,
+    ):
+        errors.append("DWP_AGENT_KEY_PROVIDER")
+    if environment != "prod":
+        _raise_if_errors(errors, environment)
+        return
+
     required_secrets = (
         "DWP_AGENT_SERVICE_TOKEN",
+        "DWP_AGENT_IDENTITY_SIGNING_SECRET",
         "DWP_PLATFORM_RUNTIME_SERVICE_TOKEN",
         "DWP_APPROVAL_RUNTIME_SERVICE_TOKEN",
         "DWP_AGENT_PRIVACY_HASH_SECRET",
@@ -36,7 +82,6 @@ def validate_runtime_configuration() -> None:
 
     required_values = (
         "DWP_AGENT_DATABASE_URL",
-        "DWP_AGENT_DATA_KEY_VERSION",
         "SERVICE_PLATFORM_URL",
         "SERVICE_APPROVAL_URL",
         "DWP_AUDIT_COLLECTOR_URL",
@@ -69,14 +114,6 @@ def validate_runtime_configuration() -> None:
         errors.append("DWP_AGENT_DATABASE_REQUIRED=true")
     if os.getenv("DWP_AGENT_REGISTRY_MODE", "").strip().lower() != "enforced":
         errors.append("DWP_AGENT_REGISTRY_MODE=enforced")
-    if os.getenv("DWP_AGENT_DATA_KEY_VERSION", "").strip() in {"", "legacy-v1"}:
-        errors.append("DWP_AGENT_DATA_KEY_VERSION")
-
-    try:
-        load_payload_keyring()
-    except DataKeyConfigurationError:
-        errors.append("DWP_AGENT_DATA_KEY")
-
     base_url = os.getenv("DWP_OPENAI_BASE_URL", "https://api.openai.com/v1").strip()
     if urlparse(base_url).scheme.lower() != "https":
         errors.append("DWP_OPENAI_BASE_URL=https")
@@ -85,6 +122,7 @@ def validate_runtime_configuration() -> None:
         errors,
         "service identity tokens",
         "DWP_AGENT_SERVICE_TOKEN",
+        "DWP_AGENT_IDENTITY_SIGNING_SECRET",
         "DWP_PLATFORM_RUNTIME_SERVICE_TOKEN",
         "DWP_APPROVAL_RUNTIME_SERVICE_TOKEN",
     )
@@ -96,11 +134,7 @@ def validate_runtime_configuration() -> None:
         "DWP_API_HISTORY_PRIVACY_HASH_SECRET",
     )
 
-    if errors:
-        unique = ", ".join(dict.fromkeys(errors))
-        raise RuntimeConfigurationError(
-            f"Production Agent configuration is incomplete or unsafe: {unique}."
-        )
+    _raise_if_errors(errors, environment)
 
 
 def _managed_secret(name: str) -> bool:
@@ -114,3 +148,12 @@ def _require_distinct(errors: list[str], label: str, *names: str) -> None:
     configured = [value for value in values if value]
     if len(configured) != len(set(configured)):
         errors.append(f"distinct {label}")
+
+
+def _raise_if_errors(errors: list[str], environment: str) -> None:
+    if not errors:
+        return
+    unique = ", ".join(dict.fromkeys(errors))
+    raise RuntimeConfigurationError(
+        f"{environment} Agent configuration is incomplete or unsafe: {unique}."
+    )

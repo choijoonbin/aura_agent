@@ -3,11 +3,39 @@ from __future__ import annotations
 from .operational_gate_contracts import (
     GateActorRole,
     GateApprovalEligibilityReason,
+    GateEnvironment,
     GateStatus,
     OperationalGateApprovalEligibility,
+    OperationalGateKey,
     OperationalGateSummary,
 )
 from .operational_gate_store_errors import OperationalGateSeparationOfDutyViolation
+
+
+_DEVELOPMENT_ONLY_OPTIONS = {
+    (OperationalGateKey.NETWORK_ISOLATION, "DEVELOPMENT_PUBLIC_ONLY"),
+    (OperationalGateKey.EVALUATION_DATASET, "SYNTHETIC_DEVELOPMENT_ONLY"),
+    (OperationalGateKey.RETENTION_LEGAL_HOLD, "DWP_DEVELOPMENT_DEFAULT"),
+}
+_NEVER_DELIVERABLE_OPTIONS = {
+    (OperationalGateKey.ACTION_APPROVAL, "BLOCKED"),
+    (OperationalGateKey.TENANT_KMS, "LOCAL_DEVELOPMENT_KEY"),
+}
+
+
+def option_allowed_for_environment(
+    gate_key: OperationalGateKey,
+    environment: GateEnvironment,
+    selected_option: str | None,
+) -> bool:
+    if not selected_option:
+        return False
+    option = selected_option.strip().upper()
+    if (gate_key, option) in _NEVER_DELIVERABLE_OPTIONS:
+        return False
+    if (gate_key, option) in _DEVELOPMENT_ONLY_OPTIONS:
+        return environment == GateEnvironment.DEVELOPMENT
+    return True
 
 
 def approval_eligibility(

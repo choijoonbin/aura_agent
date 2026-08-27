@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import threading
 from datetime import datetime, timezone
@@ -8,7 +9,8 @@ from uuid import uuid4
 
 from psycopg import connect
 
-from .contracts import (
+from .operations_contracts import (
+    BootstrapRetentionPolicyRequest,
     DwaionOperationsOverview,
     RetentionPolicy,
     UpdateRetentionPolicyRequest,
@@ -23,10 +25,23 @@ class RetentionPolicyConflict(RuntimeError):
     pass
 
 
+class RetentionPolicyNotConfigured(RuntimeError):
+    pass
+
+
 class OperationsStore(Protocol):
     def overview(self, *, tenant_id: str, period_days: int = 30) -> DwaionOperationsOverview: ...
 
     def retention_policy(self, *, tenant_id: str) -> RetentionPolicy: ...
+
+    def bootstrap_retention_policy(
+        self,
+        *,
+        tenant_id: str,
+        actor_user_id: str,
+        correlation_id: str,
+        request: BootstrapRetentionPolicyRequest,
+    ) -> RetentionPolicy: ...
 
     def update_retention_policy(
         self,
@@ -39,9 +54,8 @@ class OperationsStore(Protocol):
 
 
 class PostgresOperationsStore:
-    def __init__(self, database_url: str, default_retention_days: int = 90) -> None:
+    def __init__(self, database_url: str) -> None:
         self.database_url = database_url
-        self.default_retention_days = default_retention_days
 
     def overview(
         self, *, tenant_id: str, period_days: int = 30
@@ -118,6 +132,80 @@ class PostgresOperationsStore:
     def retention_policy(self, *, tenant_id: str) -> RetentionPolicy:
         with connect(self.database_url) as connection:
             return self._retention_policy(connection, int(tenant_id))
+
+    def bootstrap_retention_policy(
+        self,
+        *,
+        tenant_id: str,
+        actor_user_id: str,
+        correlation_id: str,
+        request: BootstrapRetentionPolicyRequest,
+    ) -> RetentionPolicy:
+        tenant = int(tenant_id)
+        command_key = f"{tenant}:BOOTSTRAP:{request.idempotency_key}"
+        with connect(self.database_url) as connection:
+            connection.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                (f"dwp-agent:retention:{tenant}",),
+            )
+            replayed = connection.execute(
+                """SELECT current_value FROM ai_governance_events
+                    WHERE tenant_id = %s AND category = 'RETENTION'
+                      AND event_type = 'retention-policy.bootstrapped'
+                      AND target_type = 'RETENTION_POLICY' AND target_key = %s""",
+                (tenant, command_key),
+            ).fetchone()
+            if replayed is not None:
+                recorded = replayed[0]
+                if (
+                    recorded.get("retentionDays") != request.retention_days
+                    or recorded.get("legalHold") != request.legal_hold
+                ):
+                    raise RetentionPolicyConflict(
+                        "The idempotency key was already used for another retention policy."
+                    )
+            else:
+                existing_count = connection.execute(
+                    """SELECT COUNT(*) FROM ai_conversation_retention_policies
+                        WHERE tenant_id = %s""",
+                    (tenant,),
+                ).fetchone()[0]
+                if existing_count != request.expected_existing_count:
+                    raise RetentionPolicyConflict(
+                        "The retention policy already exists. Reload and retry."
+                    )
+                connection.execute(
+                    """INSERT INTO ai_conversation_retention_policies (
+                           tenant_id, retention_days, legal_hold)
+                       VALUES (%s, %s, %s)""",
+                    (tenant, request.retention_days, request.legal_hold),
+                )
+                connection.execute(
+                    """INSERT INTO ai_governance_events (
+                           event_id, tenant_id, category, event_type, target_type,
+                           target_key, actor_user_id, correlation_id, change_reason,
+                           previous_value, current_value)
+                       VALUES (%s, %s, 'RETENTION', 'retention-policy.bootstrapped',
+                               'RETENTION_POLICY', %s, %s, %s, %s,
+                               %s::jsonb, %s::jsonb)""",
+                    (
+                        uuid4(),
+                        tenant,
+                        command_key,
+                        actor_user_id,
+                        correlation_id,
+                        request.change_reason,
+                        json.dumps({"existingCount": existing_count}),
+                        json.dumps(
+                            {
+                                "retentionDays": request.retention_days,
+                                "legalHold": request.legal_hold,
+                                "policyVersion": 1,
+                            }
+                        ),
+                    ),
+                )
+            return self._retention_policy(connection, tenant)
 
     def update_retention_policy(
         self,
@@ -221,14 +309,6 @@ class PostgresOperationsStore:
     def _retention_policy(
         self, connection, tenant_id: int, *, lock: bool = False
     ) -> RetentionPolicy:
-        connection.execute(
-            """
-            INSERT INTO ai_conversation_retention_policies (tenant_id, retention_days)
-            VALUES (%s, %s)
-            ON CONFLICT (tenant_id) DO NOTHING
-            """,
-            (tenant_id, self.default_retention_days),
-        )
         suffix = " FOR UPDATE" if lock else ""
         row = connection.execute(
             """
@@ -239,6 +319,10 @@ class PostgresOperationsStore:
             + suffix,
             (tenant_id,),
         ).fetchone()
+        if row is None:
+            raise RetentionPolicyNotConfigured(
+                "The retention policy is not configured. Run the explicit bootstrap command."
+            )
         return RetentionPolicy(
             retention_days=row[0],
             legal_hold=row[1],
@@ -261,10 +345,7 @@ def get_operations_store() -> OperationsStore:
             raise OperationsStoreUnavailable(
                 "DWAI-ON operations require the configured Agent database."
             )
-        retention_days = int(
-            os.getenv("DWP_AGENT_CONVERSATION_RETENTION_DAYS", "90")
-        )
-        _STORE = PostgresOperationsStore(database_url, retention_days)
+        _STORE = PostgresOperationsStore(database_url)
         return _STORE
 
 

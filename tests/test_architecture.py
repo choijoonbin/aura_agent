@@ -34,6 +34,42 @@ def test_runtime_uses_installable_src_package() -> None:
     assert (PACKAGE_ROOT / "migrations" / "V6__govern_sources_actions_safety_evaluation_and_audit.sql").is_file()
     assert (PACKAGE_ROOT / "migrations" / "V7__expand_default_safety_source_scopes.sql").is_file()
     assert (PACKAGE_ROOT / "migrations" / "V8__govern_evaluation_run_leases.sql").is_file()
+    assert (
+        PACKAGE_ROOT / "migrations" / "V12__disable_implicit_governance_defaults.sql"
+    ).is_file()
+    assert (PACKAGE_ROOT / "migrations" / "V13__adopt_envelope_encryption_v2.sql").is_file()
+    assert (PACKAGE_ROOT / "migrations" / "V14__govern_agent_run_leases.sql").is_file()
+    assert (
+        PACKAGE_ROOT / "migrations" / "V15__fence_agent_run_lease_owners.sql"
+    ).is_file()
+    assert (
+        PACKAGE_ROOT / "migrations" / "V16__create_one_time_question_launches.sql"
+    ).is_file()
+    assert (
+        PACKAGE_ROOT
+        / "migrations"
+        / "V17__bind_conversation_messages_to_run_leases.sql"
+    ).is_file()
+    assert (
+        PACKAGE_ROOT
+        / "migrations"
+        / "V18__enforce_completed_conversation_message_leases.sql"
+    ).is_file()
+    assert (
+        PACKAGE_ROOT / "migrations" / "V19__create_governed_agent_proposals.sql"
+    ).is_file()
+    assert (
+        PACKAGE_ROOT
+        / "migrations"
+        / "V20__harden_agent_proposal_idempotency.sql"
+    ).is_file()
+
+
+def test_migration_versions_are_unique() -> None:
+    migrations = (PACKAGE_ROOT / "migrations").glob("V*__*.sql")
+    versions = [migration.stem.split("__", 1)[0] for migration in migrations]
+
+    assert len(versions) == len(set(versions))
 
 
 def test_applied_migrations_are_immutable() -> None:

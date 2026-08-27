@@ -12,6 +12,12 @@ from .contracts import (
     WorkplaceActionPreviewEnvelope,
     WorkplaceActionPreviewRequest,
 )
+from .delivery_gate import (
+    DeliveryCapability,
+    OperationalDeliveryConfigurationError,
+    OperationalDeliveryNotReady,
+    require_delivery_capability,
+)
 from .governance_contracts import ActionExecutionPolicy
 from .governance_store import GovernanceStoreUnavailable, get_governance_store
 from .planner import build_reference_plan
@@ -42,6 +48,19 @@ def require_ask_access(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="DWAI-ON access is required.",
         )
+
+
+def require_action_delivery(tenant_id: str, user_id: str) -> None:
+    try:
+        require_delivery_capability(
+            tenant_id=tenant_id,
+            capability=DeliveryCapability.ACTION,
+        )
+    except (OperationalDeliveryConfigurationError, OperationalDeliveryNotReady) as error:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="DWAI-ON actions are not approved for this environment.",
+        ) from error
 
 
 @router.get(
@@ -92,6 +111,7 @@ def preview_action(
     roles: Annotated[str | None, Header(alias="X-DWP-Roles")] = None,
     permissions: Annotated[str | None, Header(alias="X-DWP-Permissions")] = None,
 ) -> WorkplaceActionPreviewEnvelope:
+    require_action_delivery(tenant_id, user_id)
     try:
         action_policy = next(
             (
@@ -146,6 +166,7 @@ def preview_action(
             source_references=request.source_references,
             inputs=reviewed_inputs,
             agent_key="REFERENCE_PLANNER",
+            handoff_origin=request.origin,
         ),
         tenant_id=tenant_id,
         user_id=user_id,

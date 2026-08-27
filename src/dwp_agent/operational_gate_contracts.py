@@ -175,6 +175,18 @@ class OperationalGatePortfolio(ContractModel):
     gates: list[OperationalGateSummary]
 
 
+class BootstrapOperationalGatesRequest(ContractModel):
+    idempotency_key: UUID
+    expected_existing_count: int = Field(ge=0, le=100)
+    change_reason: str = Field(min_length=10, max_length=500)
+
+    @model_validator(mode="after")
+    def normalize(self) -> "BootstrapOperationalGatesRequest":
+        self.change_reason = self.change_reason.strip()
+        _reject_secret_material(self.change_reason)
+        return self
+
+
 class ConfigureOperationalGateRequest(ContractModel):
     selected_option: str = Field(min_length=2, max_length=80, pattern=r"^[A-Z][A-Z0-9_]+$")
     owner_user_id: str = Field(min_length=1, max_length=160)

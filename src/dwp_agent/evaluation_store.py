@@ -9,7 +9,7 @@ from uuid import UUID, uuid4
 from psycopg import connect
 from psycopg.errors import UniqueViolation
 
-from .crypto import PayloadCipherKeyring, load_payload_keyring
+from .envelope import PayloadEncryption
 from .evaluation_evidence_store import EvaluationEvidenceStoreMixin, EvaluationRunNotFound
 from .governance_contracts import (
     CreateEvaluationCaseRequest,
@@ -25,6 +25,8 @@ from .governance_contracts import (
     UpdateEvaluationLifecycleRequest,
 )
 from .governance_store import GovernancePolicyConflict, GovernanceStoreUnavailable
+from .payload_contexts import evaluation_context, legacy_evaluation_aad
+from .run_store import load_payload_encryption
 
 
 class EvaluationSetNotFound(RuntimeError):
@@ -48,9 +50,9 @@ EVALUATION_RUN_LEASE_MINUTES = 30
 
 
 class PostgresEvaluationStore(EvaluationEvidenceStoreMixin):
-    def __init__(self, database_url: str, keyring: PayloadCipherKeyring) -> None:
+    def __init__(self, database_url: str, encryption: PayloadEncryption) -> None:
         self.database_url = database_url
-        self.keyring = keyring
+        self.encryption = encryption
 
     def list_sets(self, *, tenant_id: str) -> list[EvaluationSetSummary]:
         with connect(self.database_url) as connection:
@@ -88,9 +90,10 @@ class PostgresEvaluationStore(EvaluationEvidenceStoreMixin):
         with connect(self.database_url) as connection:
             rows = connection.execute(
                 """SELECT evaluation_case_id, evaluation_set_id, name,
-                          prompt_nonce, prompt_ciphertext,
-                          expected_terms_nonce, expected_terms_ciphertext,
-                          encryption_key_version, source_scopes, version, created_at
+                          prompt_envelope, prompt_nonce, prompt_ciphertext,
+                          expected_terms_envelope, expected_terms_nonce,
+                          expected_terms_ciphertext, encryption_key_version,
+                          source_scopes, version, created_at
                      FROM ai_evaluation_cases
                     WHERE tenant_id = %s AND evaluation_set_id = %s
                     ORDER BY created_at, evaluation_case_id""",
@@ -145,25 +148,21 @@ class PostgresEvaluationStore(EvaluationEvidenceStoreMixin):
                 raise EvaluationSetNotRunnable(
                     f"An evaluation set supports at most {MAX_EVALUATION_CASES} cases."
                 )
-            aad = self._aad(tenant_id, evaluation_set_id, case_id)
-            key_version, prompt_nonce, prompt_ciphertext = self.keyring.encrypt_bytes(
-                request.prompt.encode("utf-8"), aad + b":prompt")
-            expected_version, expected_nonce, expected_ciphertext = self.keyring.encrypt_bytes(
+            prompt_envelope = self.encryption.encrypt_bytes(
+                request.prompt.encode("utf-8"),
+                evaluation_context(tenant_id, evaluation_set_id, case_id, "prompt"),
+            )
+            expected_envelope = self.encryption.encrypt_bytes(
                 json.dumps(request.expected_terms, ensure_ascii=False).encode("utf-8"),
-                aad + b":expected")
-            if key_version != expected_version:
-                raise GovernanceStoreUnavailable(
-                    "Evaluation encryption key changed during the request."
-                )
+                evaluation_context(tenant_id, evaluation_set_id, case_id, "expected"),
+            )
             connection.execute(
                 """INSERT INTO ai_evaluation_cases (
                        evaluation_case_id, tenant_id, evaluation_set_id, name,
-                       prompt_nonce, prompt_ciphertext,
-                       expected_terms_nonce, expected_terms_ciphertext,
-                       encryption_key_version, source_scopes, created_by)
-                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s)""",
-                (case_id, tenant, evaluation_set_id, request.name, prompt_nonce,
-                 prompt_ciphertext, expected_nonce, expected_ciphertext, key_version,
+                       prompt_envelope, expected_terms_envelope, source_scopes, created_by)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, %s)""",
+                (case_id, tenant, evaluation_set_id, request.name, prompt_envelope,
+                 expected_envelope,
                  json.dumps([scope.value for scope in request.source_scopes]), actor_user_id),
             )
             connection.execute(
@@ -341,14 +340,29 @@ class PostgresEvaluationStore(EvaluationEvidenceStoreMixin):
             latest_pass_rate=row[7], version=row[8], updated_at=row[9])
 
     def _case(self, tenant_id: str, row) -> EvaluationCase:
-        aad = self._aad(tenant_id, row[1], row[0])
-        prompt = self.keyring.decrypt_bytes(
-            row[7], bytes(row[3]), bytes(row[4]), aad + b":prompt").decode("utf-8")
-        expected = json.loads(self.keyring.decrypt_bytes(
-            row[7], bytes(row[5]), bytes(row[6]), aad + b":expected").decode("utf-8"))
+        prompt = self.encryption.decrypt_bytes(
+            envelope=str(row[3]) if row[3] is not None else None,
+            context=evaluation_context(tenant_id, row[1], row[0], "prompt"),
+            legacy_version=str(row[9]) if row[9] is not None else None,
+            legacy_nonce=bytes(row[4]) if row[4] is not None else None,
+            legacy_ciphertext=bytes(row[5]) if row[5] is not None else None,
+            legacy_aad=legacy_evaluation_aad(
+                tenant_id, row[1], row[0], "prompt"
+            ),
+        ).decode("utf-8")
+        expected = json.loads(self.encryption.decrypt_bytes(
+            envelope=str(row[6]) if row[6] is not None else None,
+            context=evaluation_context(tenant_id, row[1], row[0], "expected"),
+            legacy_version=str(row[9]) if row[9] is not None else None,
+            legacy_nonce=bytes(row[7]) if row[7] is not None else None,
+            legacy_ciphertext=bytes(row[8]) if row[8] is not None else None,
+            legacy_aad=legacy_evaluation_aad(
+                tenant_id, row[1], row[0], "expected"
+            ),
+        ).decode("utf-8"))
         return EvaluationCase(
             evaluation_case_id=row[0], evaluation_set_id=row[1], name=row[2], prompt=prompt,
-            expected_terms=expected, source_scopes=row[8], version=row[9], created_at=row[10])
+            expected_terms=expected, source_scopes=row[10], version=row[11], created_at=row[12])
 
     def _event(self, connection, tenant: int, event_type: str, target_type: str,
                target_key: str, actor: str, correlation: str, reason: str | None) -> None:
@@ -358,10 +372,6 @@ class PostgresEvaluationStore(EvaluationEvidenceStoreMixin):
                    actor_user_id, correlation_id, change_reason)
                VALUES (%s, %s, 'EVALUATION', %s, %s, %s, %s, %s, %s)""",
             (uuid4(), tenant, event_type, target_type, target_key, actor, correlation, reason))
-
-    def _aad(self, tenant_id: str, set_id: UUID, case_id: UUID) -> bytes:
-        return f"dwaion:evaluation:{tenant_id}:{set_id}:{case_id}".encode("utf-8")
-
 
 _STORE: PostgresEvaluationStore | None = None
 _STORE_LOCK = threading.Lock()
@@ -376,7 +386,7 @@ def get_evaluation_store() -> PostgresEvaluationStore:
         if not database_url:
             raise GovernanceStoreUnavailable(
                 "DWAI-ON evaluation requires the configured Agent database.")
-        _STORE = PostgresEvaluationStore(database_url, load_payload_keyring())
+        _STORE = PostgresEvaluationStore(database_url, load_payload_encryption())
         return _STORE
 
 

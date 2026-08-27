@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import StrEnum
+from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
@@ -116,14 +117,31 @@ class AdminChangeIntent(ContractModel):
         resolve_admin_command(self.command_key, self.target_type, self.parameters)
         return self
 
-
 class AdminCommandResolution(ContractModel):
     command_key: str
     catalog_revision: int = Field(ge=1)
     target_service: str
     http_method: str
     endpoint_template: str
-    required_permission: str
+    required_permission: str | None = None
+    authority_kind: Literal["TENANT_PERMISSION", "PROVIDER_ROLE", "APP_GOVERNANCE_CAPABILITY"]
+    identity_plane: Literal["TENANT", "PROVIDER"]
+    required_roles: list[str] = Field(default_factory=list)
+    required_authorities: list[str] = Field(default_factory=list)
+    body_parameters: list[str] = Field(default_factory=list)
+    query_parameters: list[str] = Field(default_factory=list)
+    header_parameters: dict[str, str] = Field(default_factory=dict)
+    context_parameters: list[str] = Field(default_factory=list)
+    final_authority_service: str
+
+class ActionHandoffOrigin(ContractModel):
+    app_key: Literal["APP.ASK"]
+    route: str = Field(max_length=500, pattern=r"^/dwaion/(?:new|conversations/[0-9a-f-]{36})$")
+    surface: Literal["action-shelf"]
+    source_run_id: str = Field(pattern=r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
+    source_request_id: str = Field(min_length=1, max_length=128)
+    source_correlation_id: str = Field(min_length=1, max_length=128)
+    conversation_id: UUID | None = None
 
 
 class PlanPreviewRequest(ContractModel):
@@ -138,6 +156,7 @@ class PlanPreviewRequest(ContractModel):
         pattern=r"^[A-Za-z][A-Za-z0-9_.-]{0,99}$",
     )
     admin_change: AdminChangeIntent | None = None
+    handoff_origin: ActionHandoffOrigin | None = None
 
 
 class PlanStep(ContractModel):
@@ -162,6 +181,7 @@ class PlanPreviewResponse(ContractModel):
     reference_mode: bool
     agent_registry: AgentRegistryResolution
     admin_command: AdminCommandResolution | None = None
+    handoff_origin: ActionHandoffOrigin | None = None
 
 
 class PlanPreviewEnvelope(ContractModel):
@@ -408,6 +428,7 @@ class WorkplaceActionPreviewRequest(ContractModel):
     request_id: str = Field(min_length=1, max_length=128)
     inputs: dict[str, JsonValue] = Field(default_factory=dict, max_length=20)
     source_references: list[str] = Field(default_factory=list, max_length=20)
+    origin: ActionHandoffOrigin
 
 
 class WorkplaceActionPreview(ContractModel):
@@ -421,59 +442,3 @@ class WorkplaceActionPreviewEnvelope(ContractModel):
     message: str = "Action handoff preview prepared."
     success: bool = True
     data: WorkplaceActionPreview
-
-
-class RetentionPolicy(ContractModel):
-    retention_days: int = Field(ge=30, le=3650)
-    legal_hold: bool
-    policy_version: int = Field(ge=1)
-    updated_at: datetime
-
-
-class UpdateRetentionPolicyRequest(ContractModel):
-    retention_days: int | None = Field(default=None, ge=30, le=3650)
-    legal_hold: bool | None = None
-    expected_version: int = Field(ge=1)
-    change_reason: str = Field(min_length=10, max_length=500)
-
-    @model_validator(mode="after")
-    def require_change(self) -> "UpdateRetentionPolicyRequest":
-        if self.retention_days is None and self.legal_hold is None:
-            raise ValueError("At least one retention policy field must be supplied.")
-        self.change_reason = self.change_reason.strip()
-        return self
-
-
-class DwaionOperationsOverview(ContractModel):
-    period_days: int = Field(ge=1, le=90)
-    run_count: int = Field(ge=0)
-    completed_run_count: int = Field(ge=0)
-    failed_run_count: int = Field(ge=0)
-    allowed_run_count: int = Field(ge=0)
-    handed_off_run_count: int = Field(ge=0)
-    denied_run_count: int = Field(ge=0)
-    grounded_answer_count: int = Field(ge=0)
-    abstained_answer_count: int = Field(ge=0)
-    configuration_required_count: int = Field(ge=0)
-    average_latency_ms: int = Field(ge=0)
-    total_tokens: int = Field(ge=0)
-    active_user_count: int = Field(ge=0)
-    conversation_count: int = Field(ge=0)
-    feedback_up_count: int = Field(ge=0)
-    feedback_down_count: int = Field(ge=0)
-    retention: RetentionPolicy
-    generated_at: datetime
-
-
-class DwaionOperationsOverviewEnvelope(ContractModel):
-    status: str = "SUCCESS"
-    message: str = "DWAI-ON operations overview loaded."
-    success: bool = True
-    data: DwaionOperationsOverview
-
-
-class RetentionPolicyEnvelope(ContractModel):
-    status: str = "SUCCESS"
-    message: str = "DWAI-ON retention policy loaded."
-    success: bool = True
-    data: RetentionPolicy

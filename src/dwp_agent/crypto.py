@@ -2,13 +2,17 @@ from __future__ import annotations
 
 import base64
 import binascii
-import json
 import os
 import re
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from .contracts import AskResponse
+from .key_provider import (
+    KeyProvider,
+    KeyProviderConfigurationError,
+    load_versioned_key_material,
+)
 
 _KEY_VERSION_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
 
@@ -77,25 +81,13 @@ class PayloadCipherKeyring:
         )
 
 
-def load_payload_keyring() -> PayloadCipherKeyring:
-    active_key = os.getenv("DWP_AGENT_DATA_KEY", "").strip()
-    if not active_key:
-        raise DataKeyConfigurationError("Agent data encryption key is required.")
-    active_version = os.getenv("DWP_AGENT_DATA_KEY_VERSION", "legacy-v1").strip()
-    raw_previous = os.getenv("DWP_AGENT_PREVIOUS_DATA_KEYS", "{}").strip() or "{}"
+def load_payload_keyring(provider: KeyProvider | None = None) -> PayloadCipherKeyring:
     try:
-        parsed = json.loads(raw_previous)
-    except json.JSONDecodeError as error:
-        raise DataKeyConfigurationError(
-            "Agent previous data keys must be a JSON object."
-        ) from error
-    if not isinstance(parsed, dict) or any(
-        not isinstance(version, str) or not isinstance(key, str)
-        for version, key in parsed.items()
-    ):
-        raise DataKeyConfigurationError("Agent previous data keys must be a string map.")
+        material = load_versioned_key_material(provider)
+    except KeyProviderConfigurationError as error:
+        raise DataKeyConfigurationError(str(error)) from error
     return PayloadCipherKeyring(
-        active_version=active_version,
-        active_key=active_key,
-        previous_keys=parsed,
+        active_version=material.active_version,
+        active_key=material.active_key,
+        previous_keys=dict(material.previous_keys),
     )

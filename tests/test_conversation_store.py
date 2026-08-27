@@ -18,18 +18,27 @@ from dwp_agent.contracts import (
     RegistryRiskTier,
     RiskTier,
 )
-from dwp_agent.conversation_store import ConversationNotFound, InMemoryConversationStore
+from dwp_agent.conversation_store import (
+    ConversationNotFound,
+    ConversationStoreUnavailable,
+    InMemoryConversationStore,
+)
+from dwp_agent.run_store import InMemoryRunStore, RunLease, RunStart
 from dwp_agent.workplace_actions import available_workplace_actions, resolve_workplace_action
 
 
-def response() -> AskResponse:
+def response(
+    *,
+    run_id: str = "d6df3a1c-326d-45d1-a3ac-4dcdd8ed694a",
+    answer: str = "Your next meeting starts at 15:00.",
+) -> AskResponse:
     return AskResponse(
-        run_id="d6df3a1c-326d-45d1-a3ac-4dcdd8ed694a",
+        run_id=run_id,
         audit_id="audit-1",
         request_id="request-1",
         correlation_id="correlation-1",
         state="COMPLETED",
-        answer="Your next meeting starts at 15:00.",
+        answer=answer,
         confidence=AnswerConfidence.HIGH,
         citations=[
             AskCitation(
@@ -66,7 +75,10 @@ def response() -> AskResponse:
 
 
 def test_conversation_store_is_user_scoped_idempotent_and_feedback_capable() -> None:
-    store = InMemoryConversationStore()
+    result = response()
+    run_store = InMemoryRunStore()
+    lease = begin(run_store, result)
+    store = InMemoryConversationStore(run_store)
     conversation_id = store.ensure(
         tenant_id="1",
         user_id="7",
@@ -80,7 +92,8 @@ def test_conversation_store_is_user_scoped_idempotent_and_feedback_capable() -> 
         conversation_id=conversation_id,
         request_id="request-1",
         query="오늘 다음 일정은 무엇인가요?",
-        response=response(),
+        response=result,
+        lease=lease,
     )
     replay_pair = store.append_exchange(
         tenant_id="1",
@@ -88,10 +101,22 @@ def test_conversation_store_is_user_scoped_idempotent_and_feedback_capable() -> 
         conversation_id=conversation_id,
         request_id="request-1",
         query="오늘 다음 일정은 무엇인가요?",
-        response=response(),
+        response=result,
+        lease=lease,
     )
 
     assert first_pair == replay_pair
+    assert store.list(tenant_id="1", user_id="7") == []
+    with pytest.raises(ConversationNotFound):
+        store.get(tenant_id="1", user_id="7", conversation_id=conversation_id)
+    result = result.model_copy(
+        update={
+            "conversation_id": conversation_id,
+            "user_message_id": first_pair[0],
+            "assistant_message_id": first_pair[1],
+        }
+    )
+    run_store.complete(result, lease=lease, tenant_id="1", user_id="7")
     detail = store.get(tenant_id="1", user_id="7", conversation_id=conversation_id)
     assert detail.summary.message_count == 2
     assert [message.role for message in detail.messages] == ["USER", "ASSISTANT"]
@@ -99,13 +124,86 @@ def test_conversation_store_is_user_scoped_idempotent_and_feedback_capable() -> 
     receipt = store.feedback(
         tenant_id="1",
         user_id="7",
-        run_id=UUID(response().run_id),
+        run_id=UUID(result.run_id),
         request=AnswerFeedbackRequest(rating="UP"),
     )
     assert receipt.rating == "UP"
 
     with pytest.raises(ConversationNotFound):
         store.get(tenant_id="1", user_id="8", conversation_id=conversation_id)
+
+
+def test_stale_in_memory_exchange_is_hidden_and_replaced_by_the_new_owner() -> None:
+    run_store = InMemoryRunStore()
+    stale_response = response()
+    stale_lease = begin(run_store, stale_response)
+    store = InMemoryConversationStore(run_store)
+    conversation_id = store.ensure(
+        tenant_id="1",
+        user_id="7",
+        conversation_id=None,
+        locale="ko",
+        initial_query="lease visibility",
+    )
+    store.append_exchange(
+        tenant_id="1",
+        user_id="7",
+        conversation_id=conversation_id,
+        request_id=stale_response.request_id,
+        query="lease visibility",
+        response=stale_response,
+        lease=stale_lease,
+    )
+    run_store.fail(stale_lease, "LEASE_EXPIRED")
+
+    with pytest.raises(ConversationStoreUnavailable, match="no longer owned"):
+        store.append_exchange(
+            tenant_id="1",
+            user_id="7",
+            conversation_id=conversation_id,
+            request_id=stale_response.request_id,
+            query="lease visibility",
+            response=stale_response,
+            lease=stale_lease,
+        )
+    assert store.list(tenant_id="1", user_id="7") == []
+    with pytest.raises(ConversationNotFound):
+        store.get(tenant_id="1", user_id="7", conversation_id=conversation_id)
+
+    active_response = response(
+        run_id=stale_response.run_id,
+        answer="Only the active owner is visible.",
+    )
+    active_lease = begin(run_store, active_response)
+    pair = store.append_exchange(
+        tenant_id="1",
+        user_id="7",
+        conversation_id=conversation_id,
+        request_id=active_response.request_id,
+        query="lease visibility",
+        response=active_response,
+        lease=active_lease,
+    )
+    active_response = active_response.model_copy(
+        update={
+            "conversation_id": conversation_id,
+            "user_message_id": pair[0],
+            "assistant_message_id": pair[1],
+        }
+    )
+    run_store.complete(
+        active_response,
+        lease=active_lease,
+        tenant_id="1",
+        user_id="7",
+    )
+
+    detail = store.get(tenant_id="1", user_id="7", conversation_id=conversation_id)
+    assert detail.summary.message_count == 2
+    assert [message.content for message in detail.messages] == [
+        "lease visibility",
+        "Only the active owner is visible.",
+    ]
 
 
 def test_workplace_action_registry_filters_exact_verified_permissions() -> None:
@@ -124,3 +222,23 @@ def test_workplace_action_registry_filters_exact_verified_permissions() -> None:
     assert resolve_workplace_action(
         "calendar.event.create", permissions
     ).target_route == "/calendar/schedule?create=event"
+
+
+def begin(run_store: InMemoryRunStore, result: AskResponse) -> RunLease:
+    lease = run_store.begin(
+        RunStart(
+            run_id=result.run_id,
+            tenant_id="1",
+            user_id="7",
+            request_id=result.request_id,
+            query_hash="a" * 64,
+            agent_key="DWP_ASSISTANT",
+            agent_revision=1,
+            risk_tier="L1",
+            policy_outcome="ALLOW",
+            locale="ko",
+            correlation_id=result.correlation_id,
+        )
+    )
+    assert lease is not None
+    return lease

@@ -4,8 +4,13 @@ import os
 from hmac import compare_digest
 from typing import Annotated
 
-from fastapi import Header, HTTPException, status
+from fastapi import Header, HTTPException, Request, status
 
+from .delegated_identity import (
+    ASSERTION_HEADER,
+    DelegatedIdentityError,
+    verify_delegated_identity,
+)
 from .policy import AskIdentity
 
 
@@ -13,9 +18,14 @@ SERVICE_TOKEN_HEADER = "X-DWP-Service-Token"
 
 
 def require_gateway_service(
+    request: Request,
     service_token: Annotated[
         str | None,
         Header(alias=SERVICE_TOKEN_HEADER, include_in_schema=False),
+    ] = None,
+    delegated_identity: Annotated[
+        str | None,
+        Header(alias=ASSERTION_HEADER, include_in_schema=False),
     ] = None,
 ) -> None:
     expected = os.getenv("DWP_AGENT_SERVICE_TOKEN", "").strip()
@@ -29,6 +39,28 @@ def require_gateway_service(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid Agent service identity.",
         )
+    signing_secret = os.getenv("DWP_AGENT_IDENTITY_SIGNING_SECRET", "").strip()
+    if not signing_secret:
+        return
+    if delegated_identity is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Signed delegated identity is required.",
+        )
+    try:
+        verify_delegated_identity(
+            assertion=delegated_identity,
+            secret=signing_secret,
+            method=request.method,
+            path=request.url.path,
+            headers=request.headers,
+            key_id=os.getenv("DWP_AGENT_IDENTITY_KEY_ID", "gateway-agent-v1").strip(),
+        )
+    except DelegatedIdentityError as error:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid delegated identity assertion.",
+        ) from error
 
 
 def verified_ask_identity(

@@ -3,6 +3,7 @@ from __future__ import annotations
 from hashlib import sha256
 from json import dumps
 
+from .admin_authority import required_admin_preflight_authorities
 from .admin_commands import resolve_admin_command
 from .contracts import (
     AdminCommandResolution,
@@ -23,8 +24,13 @@ def build_reference_plan(
     roles: list[str],
     correlation_id: str,
     agent_registry: AgentRegistryResolution,
+    identity_plane: str = "TENANT",
+    resource_roles: list[str] | None = None,
 ) -> PlanPreviewResponse:
     normalized_roles = sorted({role.strip() for role in roles if role.strip()})
+    normalized_resource_roles = sorted(
+        {role.strip() for role in (resource_roles or []) if role.strip()}
+    )
     admin_change = request.admin_change
     command_definition = (
         resolve_admin_command(
@@ -43,6 +49,20 @@ def build_reference_plan(
             http_method=command_definition.http_method,
             endpoint_template=command_definition.endpoint_template,
             required_permission=command_definition.required_permission,
+            authority_kind=command_definition.authority_kind,
+            identity_plane=command_definition.identity_plane,
+            required_roles=sorted(command_definition.required_roles),
+            required_authorities=list(
+                required_admin_preflight_authorities(
+                    command_definition,
+                    admin_change.parameters,
+                )
+            ),
+            body_parameters=sorted(command_definition.resolved_body_parameters()),
+            query_parameters=sorted(command_definition.query_parameters),
+            header_parameters=dict(sorted(command_definition.header_parameters.items())),
+            context_parameters=sorted(command_definition.context_parameters),
+            final_authority_service=command_definition.target_service,
         )
         if command_definition is not None
         else None
@@ -52,6 +72,8 @@ def build_reference_plan(
             "tenantId": tenant_id,
             "userId": user_id,
             "roles": normalized_roles,
+            "resourceRoles": normalized_resource_roles,
+            "identityPlane": identity_plane,
             "agentRegistry": agent_registry.model_dump(mode="json", by_alias=True),
             "adminCommandResolution": (
                 command_resolution.model_dump(mode="json", by_alias=True)
@@ -75,15 +97,17 @@ def build_reference_plan(
         )
     ]
     if admin_change is not None:
+        authority_candidates = " or ".join(command_resolution.required_authorities)
         steps.append(
             PlanStep(
                 id="validate-admin-command",
                 title="Validate scope, authority, and target revision",
                 tool="admin.command.resolve",
                 description=(
-                    f"Require {command_definition.required_permission} and resolve the versioned "
-                    f"{command_definition.target_service} service contract. Stop on tenant scope, "
-                    "separation-of-duty, or expected-version mismatch."
+                    f"Preflight Gateway-verified authority candidate {authority_candidates} and "
+                    f"resolve the versioned {command_definition.target_service} service contract. "
+                    f"The {command_definition.target_service} service remains the final authority "
+                    "and must re-check target scope, lifecycle, separation of duties, and version."
                 ),
             )
         )
@@ -132,4 +156,5 @@ def build_reference_plan(
         reference_mode=True,
         agent_registry=agent_registry,
         admin_command=command_resolution,
+        handoff_origin=request.handoff_origin,
     )

@@ -52,7 +52,7 @@ class AskRuntime:
         self.context_broker = context_broker or WorkspaceContextBroker()
         self.model_gateway = model_gateway or OpenAIResponsesGateway()
         self.run_store = run_store or get_run_store()
-        self.conversation_store = conversation_store or get_conversation_store()
+        self.conversation_store = conversation_store or get_conversation_store(self.run_store)
 
     def answer(
         self,
@@ -92,22 +92,6 @@ class AskRuntime:
         )
         conversation_id = None
         conversation_history: tuple[ConversationTurn, ...] = ()
-        if (
-            registry.entry_key == "DWP_ASSISTANT"
-            and "APP.ASK:VIEW" in {permission.upper() for permission in identity.permissions}
-        ):
-            conversation_id = self.conversation_store.ensure(
-                tenant_id=identity.tenant_id,
-                user_id=identity.user_id,
-                conversation_id=request.conversation_id,
-                locale=request.locale,
-                initial_query=request.query,
-            )
-            conversation_history = self.conversation_store.recent_history(
-                tenant_id=identity.tenant_id,
-                user_id=identity.user_id,
-                conversation_id=conversation_id,
-            )
         started = RunStart(
             run_id=run_id,
             tenant_id=identity.tenant_id,
@@ -121,7 +105,8 @@ class AskRuntime:
             locale=request.locale,
             correlation_id=identity.correlation_id,
         )
-        if not self.run_store.begin(started):
+        lease = self.run_store.begin(started)
+        if lease is None:
             replay = self.run_store.load(
                 identity.tenant_id,
                 identity.user_id,
@@ -131,9 +116,27 @@ class AskRuntime:
             if replay is not None:
                 return replay
             raise RunInProgress("The Ask request is already running.")
+        run_id = lease.run_id
 
         provider_request_hash: str | None = None
         try:
+            if (
+                registry.entry_key == "DWP_ASSISTANT"
+                and "APP.ASK:VIEW"
+                in {permission.upper() for permission in identity.permissions}
+            ):
+                conversation_id = self.conversation_store.ensure(
+                    tenant_id=identity.tenant_id,
+                    user_id=identity.user_id,
+                    conversation_id=request.conversation_id,
+                    locale=request.locale,
+                    initial_query=request.query,
+                )
+                conversation_history = self.conversation_store.recent_history(
+                    tenant_id=identity.tenant_id,
+                    user_id=identity.user_id,
+                    conversation_id=conversation_id,
+                )
             if registry.resolution != RegistryResolutionStatus.ACTIVE:
                 response = self._response(
                     request=request,
@@ -181,6 +184,7 @@ class AskRuntime:
                     request_id=request.request_id,
                     query=request.query,
                     response=response,
+                    lease=lease,
                 )
                 response = response.model_copy(
                     update={
@@ -191,6 +195,7 @@ class AskRuntime:
                 )
             self.run_store.complete(
                 response,
+                lease=lease,
                 tenant_id=identity.tenant_id,
                 user_id=identity.user_id,
                 provider_request_hash=provider_request_hash,
@@ -204,7 +209,7 @@ class AskRuntime:
             _progress(on_progress, "COMPLETED")
             return response
         except Exception:
-            self.run_store.fail(run_id, "ASK_RUNTIME_FAILED")
+            self.run_store.fail(lease, "ASK_RUNTIME_FAILED")
             raise
 
     def _grounded_answer(

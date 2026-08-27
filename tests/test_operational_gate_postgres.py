@@ -5,8 +5,10 @@ from urllib.parse import urlparse
 from uuid import uuid4
 
 import pytest
+from psycopg import connect
 
 from dwp_agent.operational_gate_contracts import (
+    BootstrapOperationalGatesRequest,
     ConfigureOperationalGateRequest,
     CreateOperationalGateEvidenceRequest,
     DecideOperationalGateRequest,
@@ -48,7 +50,42 @@ def test_postgres_gate_workflow_preserves_evidence_and_approval_independence() -
         tenant_id=tenant_id,
         actor_user_id="bootstrap",
         environment=environment,
-    ).gates
+    )
+    assert initial.gates == []
+    idempotency_key = uuid4()
+    bootstrapped = store.bootstrap(
+        tenant_id=tenant_id,
+        actor_user_id="bootstrap",
+        correlation_id="integration-bootstrap",
+        environment=environment,
+        request=BootstrapOperationalGatesRequest(
+            idempotency_key=idempotency_key,
+            expected_existing_count=0,
+            change_reason="Initialize the staging delivery gate portfolio.",
+        ),
+    )
+    replayed = store.bootstrap(
+        tenant_id=tenant_id,
+        actor_user_id="bootstrap",
+        correlation_id="integration-bootstrap-retry",
+        environment=environment,
+        request=BootstrapOperationalGatesRequest(
+            idempotency_key=idempotency_key,
+            expected_existing_count=0,
+            change_reason="Retry the staging delivery gate initialization.",
+        ),
+    )
+    assert replayed.total_count == bootstrapped.total_count
+    with connect(database_url) as connection:
+        bootstrap_events = connection.execute(
+            """SELECT COUNT(*) FROM ai_governance_events
+                WHERE tenant_id = %s AND category = 'GATE'
+                  AND event_type = 'operational-gates.bootstrapped'""",
+            (int(tenant_id),),
+        ).fetchone()[0]
+    assert bootstrap_events == 1
+
+    initial = bootstrapped.gates
     gate = next(item for item in initial if item.gate_key == gate_key)
 
     configured = store.configure(

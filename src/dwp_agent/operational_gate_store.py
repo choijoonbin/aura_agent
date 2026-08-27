@@ -1,13 +1,10 @@
 from __future__ import annotations
 
-import os
-import threading
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 from psycopg import connect
 
-from .governance_store import GovernanceStoreUnavailable
 from .operational_gate_catalog import operational_gate_definition
 from .operational_gate_contracts import (
     ConfigureOperationalGateRequest,
@@ -24,7 +21,11 @@ from .operational_gate_contracts import (
     ValidateOperationalGateRequest,
 )
 from .operational_gate_repository import OperationalGateRepositoryMixin
-from .operational_gate_policy import approval_eligibility, require_independent_approver
+from .operational_gate_policy import (
+    approval_eligibility,
+    option_allowed_for_environment,
+    require_independent_approver,
+)
 from .operational_gate_store_errors import (
     OperationalGateConflict,
     OperationalGateInvalidTransition,
@@ -36,12 +37,56 @@ class PostgresOperationalGateStore(OperationalGateRepositoryMixin):
     def __init__(self, database_url: str) -> None:
         self.database_url = database_url
 
+    def schema_ready(self) -> bool:
+        with connect(self.database_url) as connection:
+            row = connection.execute(
+                "SELECT to_regclass('public.ai_operational_gates')"
+            ).fetchone()
+        return bool(row and row[0])
+
+    def runtime_gate_states(
+        self,
+        *,
+        tenant_id: str,
+        environment: GateEnvironment,
+        gate_keys: frozenset[OperationalGateKey],
+    ) -> dict[OperationalGateKey, GateStatus]:
+        if not gate_keys:
+            return {}
+        with connect(self.database_url) as connection:
+            rows = connection.execute(
+                """SELECT gate_key, status, selected_option, effective_at, expires_at
+                     FROM ai_operational_gates
+                    WHERE tenant_id = %s AND environment = %s
+                      AND gate_key = ANY(%s)""",
+                (
+                    int(tenant_id),
+                    environment.value,
+                    [gate_key.value for gate_key in gate_keys],
+                ),
+            ).fetchall()
+        now = datetime.now(timezone.utc)
+        states: dict[OperationalGateKey, GateStatus] = {}
+        for gate_key, raw_status, selected_option, effective_at, expires_at in rows:
+            normalized_key = OperationalGateKey(gate_key)
+            gate_status = GateStatus(raw_status)
+            if gate_status == GateStatus.APPROVED:
+                if not option_allowed_for_environment(
+                    normalized_key, environment, selected_option
+                ):
+                    gate_status = GateStatus.BLOCKED
+                elif effective_at is None or effective_at > now or expires_at is None:
+                    gate_status = GateStatus.BLOCKED
+                elif expires_at <= now:
+                    gate_status = GateStatus.EXPIRED
+            states[normalized_key] = gate_status
+        return states
+
     def portfolio(
         self, *, tenant_id: str, actor_user_id: str, environment: GateEnvironment
     ) -> OperationalGatePortfolio:
         tenant = int(tenant_id)
         with connect(self.database_url) as connection:
-            self._ensure_gates(connection, tenant, actor_user_id, environment)
             rows = connection.execute(
                 self._gate_select() + " ORDER BY gate_key",
                 (tenant, environment.value),
@@ -50,7 +95,12 @@ class PostgresOperationalGateStore(OperationalGateRepositoryMixin):
         approved = sum(gate.status == GateStatus.APPROVED for gate in gates)
         required = sum(gate.delivery_critical for gate in gates)
         approved_required = sum(
-            gate.delivery_critical and gate.status == GateStatus.APPROVED for gate in gates
+            gate.delivery_critical
+            and gate.status == GateStatus.APPROVED
+            and option_allowed_for_environment(
+                gate.gate_key, environment, gate.selected_option
+            )
+            for gate in gates
         )
         return OperationalGatePortfolio(
             environment=environment,
@@ -77,7 +127,6 @@ class PostgresOperationalGateStore(OperationalGateRepositoryMixin):
     ) -> OperationalGateDetail:
         tenant = int(tenant_id)
         with connect(self.database_url) as connection:
-            self._ensure_gates(connection, tenant, actor_user_id, environment)
             row = self._locked_gate(
                 connection, tenant, environment, gate_key, lock=False
             )
@@ -128,8 +177,13 @@ class PostgresOperationalGateStore(OperationalGateRepositoryMixin):
             raise OperationalGateInvalidTransition(
                 f"{request.selected_option} is not valid for {gate_key.value}."
             )
+        if not option_allowed_for_environment(
+            gate_key, environment, request.selected_option
+        ):
+            raise OperationalGateInvalidTransition(
+                f"{request.selected_option} cannot authorize {environment.value} delivery."
+            )
         with connect(self.database_url) as connection:
-            self._ensure_gates(connection, tenant, actor_user_id, environment)
             current_row = self._locked_gate(connection, tenant, environment, gate_key)
             self._require_version(current_row[10], request.expected_version)
             result = connection.execute(
@@ -192,7 +246,6 @@ class PostgresOperationalGateStore(OperationalGateRepositoryMixin):
     ) -> OperationalGateDetail:
         tenant = int(tenant_id)
         with connect(self.database_url) as connection:
-            self._ensure_gates(connection, tenant, actor_user_id, environment)
             current_row = self._locked_gate(connection, tenant, environment, gate_key)
             self._require_version(current_row[10], request.expected_version)
             current = self._gate(current_row)
@@ -292,7 +345,6 @@ class PostgresOperationalGateStore(OperationalGateRepositoryMixin):
         tenant = int(tenant_id)
         definition = operational_gate_definition(gate_key)
         with connect(self.database_url) as connection:
-            self._ensure_gates(connection, tenant, actor_user_id, environment)
             current_row = self._locked_gate(connection, tenant, environment, gate_key)
             self._require_version(current_row[10], request.expected_version)
             current = self._gate(current_row)
@@ -382,7 +434,6 @@ class PostgresOperationalGateStore(OperationalGateRepositoryMixin):
     ) -> OperationalGateDetail:
         tenant = int(tenant_id)
         with connect(self.database_url) as connection:
-            self._ensure_gates(connection, tenant, actor_user_id, environment)
             current_row = self._locked_gate(connection, tenant, environment, gate_key)
             self._require_version(current_row[10], request.expected_version)
             current = self._gate(current_row)
@@ -393,6 +444,12 @@ class PostgresOperationalGateStore(OperationalGateRepositoryMixin):
             self._require_independent_approver(current, actor_user_id)
             now = datetime.now(timezone.utc)
             approved = request.decision == GateDecision.APPROVE
+            if approved and not option_allowed_for_environment(
+                gate_key, environment, current.selected_option
+            ):
+                raise OperationalGateInvalidTransition(
+                    "The selected option cannot authorize this delivery environment."
+                )
             next_status = GateStatus.APPROVED if approved else GateStatus.BLOCKED
             result = connection.execute(
                 """UPDATE ai_operational_gates
@@ -441,26 +498,3 @@ class PostgresOperationalGateStore(OperationalGateRepositoryMixin):
         gate: OperationalGateSummary, actor_user_id: str
     ) -> None:
         require_independent_approver(gate, actor_user_id)
-
-_STORE: PostgresOperationalGateStore | None = None
-_STORE_LOCK = threading.Lock()
-
-
-def get_operational_gate_store() -> PostgresOperationalGateStore:
-    global _STORE
-    with _STORE_LOCK:
-        if _STORE is not None:
-            return _STORE
-        database_url = os.getenv("DWP_AGENT_DATABASE_URL", "").strip()
-        if not database_url:
-            raise GovernanceStoreUnavailable(
-                "DWAI-ON operational gates require the configured Agent database."
-            )
-        _STORE = PostgresOperationalGateStore(database_url)
-        return _STORE
-
-
-def reset_operational_gate_store_for_tests() -> None:
-    global _STORE
-    with _STORE_LOCK:
-        _STORE = None
