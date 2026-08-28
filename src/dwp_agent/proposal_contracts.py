@@ -4,7 +4,7 @@ from datetime import datetime
 from enum import StrEnum
 from uuid import UUID
 
-from pydantic import Field, JsonValue, model_validator
+from pydantic import Field, JsonValue, field_validator, model_validator
 
 from .contracts import ContractModel
 
@@ -50,6 +50,21 @@ class ProposalEvidence(ContractModel):
     reference_id: str = Field(min_length=1, max_length=160)
     label: str = Field(min_length=1, max_length=240)
     occurred_at: datetime | None = None
+    route: str | None = Field(default=None, max_length=1_000)
+
+    @field_validator("route")
+    @classmethod
+    def validate_internal_route(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        route = value.strip()
+        if (
+            not route.startswith("/")
+            or route.startswith("//")
+            or any(character in route for character in ("\r", "\n", "\x00"))
+        ):
+            raise ValueError("Evidence routes must be safe workspace-relative paths.")
+        return route
 
 
 class ProposalContent(ContractModel):

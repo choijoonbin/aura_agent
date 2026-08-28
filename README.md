@@ -26,7 +26,8 @@ DWP_AGENT_SERVICE_TOKEN=<local-secret> \
 - Grounded Ask progress stream: `POST /v1/ask/stream`
 - Conversation history: `GET /v1/conversations`, `GET/PATCH/DELETE /v1/conversations/{id}`
 - Answer feedback: `PUT /v1/runs/{runId}/feedback`
-- Proactive Agent Inbox: `GET /v1/proposals`,
+- Proactive Agent Inbox: `GET /v1/proposals`, `POST /v1/proposals/analyze`,
+  `GET/PUT /v1/proposals/preferences`, `POST /v1/proposals/clear`,
   `POST /v1/proposals/{proposalId}/decisions`
 - Governed proposal producer: `POST /v1/admin/proposals`
 - Governed work handoff: `GET /v1/actions`, `POST /v1/actions/{actionKey}/preview`
@@ -40,6 +41,18 @@ OpenAPI 정본은 `contracts/openapi/agent-public.json`이며 다음 명령으�
 ```bash
 .venv/bin/python scripts/export_openapi.py --check
 ```
+
+### Governed meeting intelligence
+
+The internal meeting-intelligence API accepts only normalized transcript segments and returns a
+strict, citation-backed report contract. It does not persist request or response bodies, requests
+provider-side storage to be disabled, rejects citations outside the supplied transcript, and does
+not expose person-level emotion, biometric, personality, or employee-scoring fields. The route is
+fail-closed unless a dedicated service identity, approved model endpoint, processing region,
+no-training attestation, and zero-retention attestation are all configured. See `.env.example` for
+the `DWP_MEETING_INTELLIGENCE_*` runtime gates. Each call also carries a short-lived HMAC workload
+assertion bound to method, path, body digest, tenant, meeting, run, issue/expiry time, and one-time
+identifier. Production uses the Agent database to reject assertion replay across replicas.
 
 고객별 정책 결정과 아직 닫히지 않은 딜리버리 TODO는
 `../dwp-backend/docs/delivery/customer-policy-and-release-gate-register.md`에서만 관리합니다.
@@ -80,6 +93,14 @@ Agent Inbox 제안은 Tenant·대상 사용자·원본 Event에 묶이며 제목
 사전조건과 append-only `ai_agent_proposal_events` 증거를 남깁니다. 제안의 `ACCEPT`는 업무
 실행이 아니며, 등록된 Action이 있더라도 기존 Action Preview와 담당 도메인 앱의 최종 확인을
 다시 거쳐야 합니다.
+
+워크스페이스 분석은 사용자가 `POST /v1/proposals/analyze`를 명시적으로 호출할 때만 수행하며
+백그라운드 수집이나 자동 실행을 하지 않습니다. Gateway가 검증한 사용자 권한으로 Context
+Broker가 반환한 업무·메일·일정 신호만 결정적으로 분류합니다. 분석 Command는 인증 Session과
+Locale Payload에 결속된 세대별 Lease, 재시도 횟수, 암호화된 Canonical Receipt를 사용합니다.
+원본 Event 식별자는 Locale과 분리해 언어 전환이 같은 업무를 중복 제안하지 않습니다. 사용자는
+분석을 끌 수 있고 Inbox를 지울 수 있으며, Clear는 저장된 제안 내용과 완료 영수증 및 진행 중
+Lease를 함께 폐기합니다.
 
 요청의 `agentKey`는 Platform Product Registry의 Active `AGENT` Revision으로 해석되고
 해석 결과가 `planHash`와 감사 Event에 포함됩니다. 현재 읽기 전용 Reference Preview는

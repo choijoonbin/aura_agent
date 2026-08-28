@@ -520,6 +520,21 @@
         "title": "AgentRunState",
         "type": "string"
       },
+      "AnalyzeProposalsRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "commandId": {
+            "format": "uuid",
+            "title": "Commandid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "commandId"
+        ],
+        "title": "AnalyzeProposalsRequest",
+        "type": "object"
+      },
       "AnswerConfidence": {
         "enum": [
           "LOW",
@@ -1144,6 +1159,70 @@
         ],
         "title": "CitationSourceType",
         "type": "string"
+      },
+      "ClearProposalInboxEnvelope": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/ClearProposalInboxReceipt"
+          },
+          "message": {
+            "default": "Proposal inbox cleared.",
+            "title": "Message",
+            "type": "string"
+          },
+          "status": {
+            "default": "SUCCESS",
+            "title": "Status",
+            "type": "string"
+          },
+          "success": {
+            "default": true,
+            "title": "Success",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "title": "ClearProposalInboxEnvelope",
+        "type": "object"
+      },
+      "ClearProposalInboxReceipt": {
+        "additionalProperties": false,
+        "properties": {
+          "clearedAt": {
+            "format": "date-time",
+            "title": "Clearedat",
+            "type": "string"
+          },
+          "hiddenCount": {
+            "minimum": 0.0,
+            "title": "Hiddencount",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "hiddenCount",
+          "clearedAt"
+        ],
+        "title": "ClearProposalInboxReceipt",
+        "type": "object"
+      },
+      "ClearProposalInboxRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "commandId": {
+            "format": "uuid",
+            "title": "Commandid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "commandId"
+        ],
+        "title": "ClearProposalInboxRequest",
+        "type": "object"
       },
       "ConfigureOperationalGateRequest": {
         "additionalProperties": false,
@@ -3745,6 +3824,150 @@
         "title": "PolicyOutcome",
         "type": "string"
       },
+      "ProposalAnalysisEnvelope": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/ProposalAnalysisReceipt"
+          },
+          "message": {
+            "default": "Workspace signals analyzed.",
+            "title": "Message",
+            "type": "string"
+          },
+          "status": {
+            "default": "SUCCESS",
+            "title": "Status",
+            "type": "string"
+          },
+          "success": {
+            "default": true,
+            "title": "Success",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "title": "ProposalAnalysisEnvelope",
+        "type": "object"
+      },
+      "ProposalAnalysisPreference": {
+        "additionalProperties": false,
+        "properties": {
+          "proactiveAnalysisEnabled": {
+            "title": "Proactiveanalysisenabled",
+            "type": "boolean"
+          },
+          "revision": {
+            "minimum": 0.0,
+            "title": "Revision",
+            "type": "integer"
+          },
+          "updatedAt": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Updatedat"
+          }
+        },
+        "required": [
+          "proactiveAnalysisEnabled",
+          "revision"
+        ],
+        "title": "ProposalAnalysisPreference",
+        "type": "object"
+      },
+      "ProposalAnalysisPreferenceEnvelope": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/ProposalAnalysisPreference"
+          },
+          "message": {
+            "default": "Proposal analysis preference loaded.",
+            "title": "Message",
+            "type": "string"
+          },
+          "status": {
+            "default": "SUCCESS",
+            "title": "Status",
+            "type": "string"
+          },
+          "success": {
+            "default": true,
+            "title": "Success",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "title": "ProposalAnalysisPreferenceEnvelope",
+        "type": "object"
+      },
+      "ProposalAnalysisReceipt": {
+        "additionalProperties": false,
+        "properties": {
+          "actionableProposals": {
+            "maximum": 6.0,
+            "minimum": 0.0,
+            "title": "Actionableproposals",
+            "type": "integer"
+          },
+          "analyzedAt": {
+            "format": "date-time",
+            "title": "Analyzedat",
+            "type": "string"
+          },
+          "attemptedSources": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 3,
+            "title": "Attemptedsources",
+            "type": "array"
+          },
+          "proposals": {
+            "items": {
+              "$ref": "#/components/schemas/AgentProposal"
+            },
+            "maxItems": 6,
+            "title": "Proposals",
+            "type": "array"
+          },
+          "sourcesAnalyzed": {
+            "maximum": 12.0,
+            "minimum": 0.0,
+            "title": "Sourcesanalyzed",
+            "type": "integer"
+          },
+          "unavailableSources": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 3,
+            "title": "Unavailablesources",
+            "type": "array"
+          }
+        },
+        "required": [
+          "analyzedAt",
+          "sourcesAnalyzed",
+          "actionableProposals",
+          "attemptedSources",
+          "unavailableSources",
+          "proposals"
+        ],
+        "title": "ProposalAnalysisReceipt",
+        "type": "object"
+      },
       "ProposalContent": {
         "additionalProperties": false,
         "properties": {
@@ -3872,6 +4095,18 @@
             "minLength": 1,
             "title": "Referenceid",
             "type": "string"
+          },
+          "route": {
+            "anyOf": [
+              {
+                "maxLength": 1000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Route"
           },
           "sourceType": {
             "pattern": "^[A-Z][A-Z0-9_.-]{0,63}$",
@@ -4421,6 +4656,32 @@
           "changeReason"
         ],
         "title": "UpdateEvaluationLifecycleRequest",
+        "type": "object"
+      },
+      "UpdateProposalAnalysisPreferenceRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "commandId": {
+            "format": "uuid",
+            "title": "Commandid",
+            "type": "string"
+          },
+          "expectedRevision": {
+            "minimum": 0.0,
+            "title": "Expectedrevision",
+            "type": "integer"
+          },
+          "proactiveAnalysisEnabled": {
+            "title": "Proactiveanalysisenabled",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "commandId",
+          "expectedRevision",
+          "proactiveAnalysisEnabled"
+        ],
+        "title": "UpdateProposalAnalysisPreferenceRequest",
         "type": "object"
       },
       "UpdateRetentionPolicyRequest": {
@@ -9539,6 +9800,642 @@
           }
         },
         "summary": "List Proposals",
+        "tags": [
+          "proposals"
+        ]
+      }
+    },
+    "/v1/proposals/analyze": {
+      "post": {
+        "operationId": "analyze_proposals_v1_proposals_analyze_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-DWP-Auth-Session-ID",
+            "required": true,
+            "schema": {
+              "maxLength": 160,
+              "minLength": 1,
+              "title": "X-Dwp-Auth-Session-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Accept-Language",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 100,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Accept-Language"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Permissions",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Permissions"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Identity-Plane",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Identity-Plane"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-User-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Dwp-User-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Tenant-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Dwp-Tenant-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Correlation-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Correlation-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Roles",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Roles"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Person-Public-ID",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 36,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Person-Public-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Display-Name-B64",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 400,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Display-Name-B64"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AnalyzeProposalsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProposalAnalysisEnvelope"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Analyze Proposals",
+        "tags": [
+          "proposals"
+        ]
+      }
+    },
+    "/v1/proposals/clear": {
+      "post": {
+        "operationId": "clear_proposal_inbox_v1_proposals_clear_post",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-DWP-Permissions",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Permissions"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Identity-Plane",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Identity-Plane"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-User-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Dwp-User-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Tenant-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Dwp-Tenant-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Correlation-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Correlation-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Roles",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Roles"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Person-Public-ID",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 36,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Person-Public-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Display-Name-B64",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 400,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Display-Name-B64"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ClearProposalInboxRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ClearProposalInboxEnvelope"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Clear Proposal Inbox",
+        "tags": [
+          "proposals"
+        ]
+      }
+    },
+    "/v1/proposals/preferences": {
+      "get": {
+        "operationId": "get_proposal_preferences_v1_proposals_preferences_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-DWP-Permissions",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Permissions"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Identity-Plane",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Identity-Plane"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-User-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Dwp-User-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Tenant-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Dwp-Tenant-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Correlation-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Correlation-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Roles",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Roles"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Person-Public-ID",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 36,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Person-Public-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Display-Name-B64",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 400,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Display-Name-B64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProposalAnalysisPreferenceEnvelope"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Proposal Preferences",
+        "tags": [
+          "proposals"
+        ]
+      },
+      "put": {
+        "operationId": "update_proposal_preferences_v1_proposals_preferences_put",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-DWP-Permissions",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Permissions"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Identity-Plane",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Identity-Plane"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-User-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Dwp-User-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Tenant-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Dwp-Tenant-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Correlation-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Correlation-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Roles",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Roles"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Person-Public-ID",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 36,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Person-Public-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Display-Name-B64",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 400,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Display-Name-B64"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateProposalAnalysisPreferenceRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProposalAnalysisPreferenceEnvelope"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Update Proposal Preferences",
         "tags": [
           "proposals"
         ]

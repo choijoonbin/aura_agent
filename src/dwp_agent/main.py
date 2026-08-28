@@ -50,6 +50,9 @@ from .operational_gate_api import (
     router as operational_gate_router,
 )
 from .governance_store import GovernanceStoreUnavailable
+from .meeting_intelligence_api import router as meeting_intelligence_router
+from .meeting_intelligence_body_limit import install_meeting_intelligence_body_limit
+from .meeting_intelligence_provider import validate_meeting_intelligence_runtime_configuration
 from .run_store import (
     RequestIdConflict,
     RunInProgress,
@@ -81,6 +84,7 @@ SERVICE_VERSION = os.getenv("APP_VERSION", "0.2.0")
 async def lifespan(_: FastAPI):
     validate_runtime_configuration()
     validate_voice_runtime_configuration()
+    validate_meeting_intelligence_runtime_configuration()
     initialize_database()
     validate_delivery_gate_runtime()
     question_launch_maintenance.start()
@@ -93,6 +97,7 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(title=SERVICE_NAME, version=SERVICE_VERSION, lifespan=lifespan)
 install_api_history(app)
+install_meeting_intelligence_body_limit(app)
 install_operational_gate_problem_handler(app)
 app.include_router(
     build_system_router(service_name=SERVICE_NAME, service_version=SERVICE_VERSION)
@@ -106,6 +111,7 @@ app.include_router(question_launch_router)
 app.include_router(proposal_router)
 app.include_router(user_run_router)
 app.include_router(voice_router)
+app.include_router(meeting_intelligence_router)
 
 
 def require_operational_delivery(

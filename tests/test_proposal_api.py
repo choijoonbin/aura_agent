@@ -7,20 +7,63 @@ from uuid import uuid4
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+from dwp_agent.context_broker import GroundedContext
 from dwp_agent.main import app
+from dwp_agent.proposal_analysis import (
+    ProposalAnalysisService,
+    set_proposal_analysis_service_for_tests,
+)
+from dwp_agent.proposal_analysis_commands import InMemoryProposalAnalysisCommandStore
+from dwp_agent.proposal_analysis_control import (
+    InMemoryProposalAnalysisControl,
+    set_proposal_analysis_control_for_tests,
+)
+from dwp_agent.proposal_analysis_fingerprints import ProposalAnalysisFingerprints
+from dwp_agent.proposal_privacy import (
+    InMemoryProposalPrivacyService,
+    set_proposal_privacy_service_for_tests,
+)
 from dwp_agent.proposal_store import InMemoryProposalStore, set_proposal_store_for_tests
 
 
 SERVICE_TOKEN = "test-gateway-service-token"
 
 
+class EmptyAnalysisBroker:
+    def collect(self, *_args, **_kwargs) -> GroundedContext:
+        return GroundedContext(
+            sources=(),
+            attempted_sources=("WORK_ITEM", "MAIL", "CALENDAR"),
+            unavailable_sources=(),
+        )
+
+
 @pytest.fixture(autouse=True)
 def configured_runtime(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("DWP_AGENT_SERVICE_TOKEN", SERVICE_TOKEN)
+    monkeypatch.setenv("DWP_ENVIRONMENT", "local")
     monkeypatch.delenv("DWP_AGENT_IDENTITY_SIGNING_SECRET", raising=False)
     store = InMemoryProposalStore()
+    fingerprints = ProposalAnalysisFingerprints.ephemeral()
+    control = InMemoryProposalAnalysisControl(fingerprints)
+    commands = InMemoryProposalAnalysisCommandStore(fingerprints)
     set_proposal_store_for_tests(store)
+    set_proposal_analysis_control_for_tests(control)
+    set_proposal_analysis_service_for_tests(
+        ProposalAnalysisService(
+            broker=EmptyAnalysisBroker(),
+            fingerprints=fingerprints,
+            control=control,
+            commands=commands,
+        )
+    )
+    set_proposal_privacy_service_for_tests(
+        InMemoryProposalPrivacyService(store, commands)
+    )
     yield store
+    set_proposal_privacy_service_for_tests(None)
+    set_proposal_analysis_service_for_tests(None)
+    set_proposal_analysis_control_for_tests(None)
     set_proposal_store_for_tests(None)
 
 
@@ -32,6 +75,8 @@ async def request(
     user_id: str = "member-1",
     permissions: str = "APP.ASK:VIEW",
     identity_plane: str = "TENANT",
+    auth_session_id: str = "proposal-session-1",
+    accept_language: str = "en",
 ):
     transport = ASGITransport(app=app)
     headers = {
@@ -41,6 +86,8 @@ async def request(
         "X-DWP-Identity-Plane": identity_plane,
         "X-DWP-Permissions": permissions,
         "X-Correlation-ID": f"proposal-{user_id}",
+        "X-DWP-Auth-Session-ID": auth_session_id,
+        "Accept-Language": accept_language,
     }
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         return await client.request(method, path, headers=headers, json=body)
@@ -247,3 +294,84 @@ def test_proposal_source_event_is_idempotent_but_payload_drift_conflicts() -> No
     assert replay.json()["data"]["proposalId"] == first.json()["data"]["proposalId"]
     assert conflict.status_code == 409
     assert command_drift.status_code == 409
+
+
+def test_analysis_api_replays_receipt_and_rejects_locale_drift() -> None:
+    command_id = str(uuid4())
+    first = asyncio.run(
+        request(
+            "POST",
+            "/v1/proposals/analyze",
+            body={"commandId": command_id},
+            accept_language="en",
+        )
+    )
+    replay = asyncio.run(
+        request(
+            "POST",
+            "/v1/proposals/analyze",
+            body={"commandId": command_id},
+            accept_language="en",
+        )
+    )
+    drift = asyncio.run(
+        request(
+            "POST",
+            "/v1/proposals/analyze",
+            body={"commandId": command_id},
+            accept_language="ko",
+        )
+    )
+
+    assert first.status_code == 200
+    assert first.headers["Cache-Control"] == "no-store"
+    assert first.json() == replay.json()
+    assert drift.status_code == 409
+
+
+def test_analysis_preference_and_clear_are_user_controlled_and_idempotent() -> None:
+    preference = asyncio.run(request("GET", "/v1/proposals/preferences"))
+    disabled = asyncio.run(
+        request(
+            "PUT",
+            "/v1/proposals/preferences",
+            body={
+                "commandId": str(uuid4()),
+                "expectedRevision": 0,
+                "proactiveAnalysisEnabled": False,
+            },
+        )
+    )
+    blocked = asyncio.run(
+        request(
+            "POST",
+            "/v1/proposals/analyze",
+            body={"commandId": str(uuid4())},
+        )
+    )
+    created = create_proposal(proposal_body(action=False))
+    clear_command = str(uuid4())
+    cleared = asyncio.run(
+        request(
+            "POST",
+            "/v1/proposals/clear",
+            body={"commandId": clear_command},
+        )
+    )
+    replay = asyncio.run(
+        request(
+            "POST",
+            "/v1/proposals/clear",
+            body={"commandId": clear_command},
+        )
+    )
+
+    assert preference.status_code == 200
+    assert preference.json()["data"]["revision"] == 0
+    assert disabled.status_code == 200
+    assert disabled.json()["data"]["proactiveAnalysisEnabled"] is False
+    assert blocked.status_code == 409
+    assert created.status_code == 201
+    assert cleared.status_code == 200
+    assert cleared.json()["data"]["hiddenCount"] == 1
+    assert replay.json() == cleared.json()

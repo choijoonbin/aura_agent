@@ -5,7 +5,37 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response, status
 
+from .delivery_gate import (
+    DeliveryCapability,
+    OperationalDeliveryConfigurationError,
+    OperationalDeliveryNotReady,
+    require_delivery_capability,
+)
 from .policy import AskIdentity
+from .proposal_analysis import (
+    ContextBrokerUnavailable,
+    get_proposal_analysis_service,
+)
+from .proposal_analysis_commands import (
+    ProposalAnalysisCommandUnavailable,
+    ProposalAnalysisInProgress,
+    ProposalAnalysisRateLimited,
+    ProposalAnalysisReplay,
+)
+from .proposal_analysis_contracts import (
+    AnalyzeProposalsRequest,
+    ClearProposalInboxEnvelope,
+    ClearProposalInboxRequest,
+    ProposalAnalysisEnvelope,
+    ProposalAnalysisPreferenceEnvelope,
+    UpdateProposalAnalysisPreferenceRequest,
+)
+from .proposal_analysis_control import (
+    ProposalAnalysisControlUnavailable,
+    ProposalAnalysisDisabled,
+    ProposalAnalysisPreferenceConflict,
+    get_proposal_analysis_control,
+)
 from .proposal_contracts import (
     AgentProposalEnvelope,
     CreateAgentProposalRequest,
@@ -22,6 +52,10 @@ from .proposal_store import (
     ProposalNotFound,
     ProposalStoreUnavailable,
     get_proposal_store,
+)
+from .proposal_privacy import (
+    ProposalPrivacyUnavailable,
+    get_proposal_privacy_service,
 )
 from .security import header_values, require_gateway_service, verified_ask_identity
 from .workplace_actions import (
@@ -65,6 +99,20 @@ def require_proposal_producer(
         )
 
 
+def require_proposal_analysis_delivery(identity: AskIdentity) -> None:
+    try:
+        require_delivery_capability(
+            tenant_id=identity.tenant_id,
+            capability=DeliveryCapability.ASK,
+            actor_user_id=identity.user_id,
+        )
+    except (OperationalDeliveryConfigurationError, OperationalDeliveryNotReady) as error:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="DWAI-ON analysis is not approved for this environment.",
+        ) from error
+
+
 @router.get(
     "/v1/proposals",
     response_model=ProposalInboxEnvelope,
@@ -104,6 +152,143 @@ def list_proposals(
             next_cursor=page.next_cursor,
         )
     )
+
+
+@router.post(
+    "/v1/proposals/analyze",
+    response_model=ProposalAnalysisEnvelope,
+    response_model_by_alias=True,
+    dependencies=[Depends(require_proposal_access)],
+)
+def analyze_proposals(
+    request: AnalyzeProposalsRequest,
+    identity: Annotated[AskIdentity, Depends(verified_ask_identity)],
+    response: Response,
+    auth_session_id: Annotated[
+        str, Header(alias="X-DWP-Auth-Session-ID", min_length=1, max_length=160)
+    ],
+    accept_language: Annotated[
+        str | None, Header(alias="Accept-Language", max_length=100)
+    ] = None,
+) -> ProposalAnalysisEnvelope:
+    require_proposal_analysis_delivery(identity)
+    try:
+        receipt = get_proposal_analysis_service().analyze(
+            identity=identity,
+            command_id=request.command_id,
+            locale=_proposal_locale(accept_language),
+            auth_session_id=auth_session_id,
+        )
+    except ProposalAnalysisDisabled as error:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+    except ProposalAnalysisInProgress as error:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(error),
+            headers={"Retry-After": "5"},
+        ) from error
+    except ProposalAnalysisReplay as error:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+    except ProposalAnalysisRateLimited as error:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=str(error),
+            headers={"Retry-After": "30"},
+        ) from error
+    except (
+        ContextBrokerUnavailable,
+        ProposalAnalysisCommandUnavailable,
+        ProposalAnalysisControlUnavailable,
+        ProposalStoreUnavailable,
+    ) as error:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Workspace analysis is unavailable.",
+        ) from error
+    response.headers["Cache-Control"] = "no-store"
+    return ProposalAnalysisEnvelope(data=receipt)
+
+
+@router.get(
+    "/v1/proposals/preferences",
+    response_model=ProposalAnalysisPreferenceEnvelope,
+    response_model_by_alias=True,
+    dependencies=[Depends(require_proposal_access)],
+)
+def get_proposal_preferences(
+    identity: Annotated[AskIdentity, Depends(verified_ask_identity)],
+    response: Response,
+) -> ProposalAnalysisPreferenceEnvelope:
+    try:
+        preference = get_proposal_analysis_control().preference(
+            tenant_id=identity.tenant_id, user_id=identity.user_id
+        )
+    except ProposalAnalysisControlUnavailable as error:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Proposal preferences are unavailable.",
+        ) from error
+    response.headers["Cache-Control"] = "no-store"
+    return ProposalAnalysisPreferenceEnvelope(data=preference)
+
+
+@router.put(
+    "/v1/proposals/preferences",
+    response_model=ProposalAnalysisPreferenceEnvelope,
+    response_model_by_alias=True,
+    dependencies=[Depends(require_proposal_access)],
+)
+def update_proposal_preferences(
+    request: UpdateProposalAnalysisPreferenceRequest,
+    identity: Annotated[AskIdentity, Depends(verified_ask_identity)],
+    response: Response,
+) -> ProposalAnalysisPreferenceEnvelope:
+    try:
+        preference = get_proposal_analysis_control().update_preference(
+            tenant_id=identity.tenant_id,
+            user_id=identity.user_id,
+            actor_user_id=identity.user_id,
+            correlation_id=identity.correlation_id,
+            command_id=request.command_id,
+            expected_revision=request.expected_revision,
+            enabled=request.proactive_analysis_enabled,
+        )
+    except ProposalAnalysisPreferenceConflict as error:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+    except ProposalAnalysisControlUnavailable as error:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Proposal preferences are unavailable.",
+        ) from error
+    response.headers["Cache-Control"] = "no-store"
+    return ProposalAnalysisPreferenceEnvelope(data=preference)
+
+
+@router.post(
+    "/v1/proposals/clear",
+    response_model=ClearProposalInboxEnvelope,
+    response_model_by_alias=True,
+    dependencies=[Depends(require_proposal_access)],
+)
+def clear_proposal_inbox(
+    request: ClearProposalInboxRequest,
+    identity: Annotated[AskIdentity, Depends(verified_ask_identity)],
+    response: Response,
+) -> ClearProposalInboxEnvelope:
+    try:
+        receipt = get_proposal_privacy_service().clear(
+            tenant_id=identity.tenant_id,
+            user_id=identity.user_id,
+            correlation_id=identity.correlation_id,
+            command_id=request.command_id,
+        )
+    except ProposalPrivacyUnavailable as error:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Proposal privacy controls are unavailable.",
+        ) from error
+    response.headers["Cache-Control"] = "no-store"
+    return ClearProposalInboxEnvelope(data=receipt)
 
 
 @router.post(
@@ -223,3 +408,7 @@ def _validated_request(
             )
         }
     )
+
+
+def _proposal_locale(value: str | None) -> str:
+    return "ko" if (value or "").lower().startswith("ko") else "en"

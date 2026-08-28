@@ -63,6 +63,16 @@ def test_runtime_uses_installable_src_package() -> None:
         / "migrations"
         / "V20__harden_agent_proposal_idempotency.sql"
     ).is_file()
+    assert (
+        PACKAGE_ROOT
+        / "migrations"
+        / "V21__protect_meeting_workload_assertions_from_replay.sql"
+    ).is_file()
+    assert (
+        PACKAGE_ROOT
+        / "migrations"
+        / "V22__govern_proactive_proposal_analysis.sql"
+    ).is_file()
 
 
 def test_migration_versions_are_unique() -> None:

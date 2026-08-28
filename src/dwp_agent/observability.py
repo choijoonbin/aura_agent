@@ -198,6 +198,7 @@ def build_api_history_event(
         "actorId": user_id,
         "authType": "SERVICE"
         if request.headers.get("X-DWP-Service-Token")
+        or request.headers.get("X-DWP-Meeting-Intelligence-Token")
         else "NONE",
         "serviceName": "dwp-agent-runtime",
         "serviceVersion": _clean_identifier(os.getenv("APP_VERSION", "0.2.0"), 60),

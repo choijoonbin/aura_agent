@@ -266,6 +266,22 @@ class InMemoryProposalStore:
             )
             return updated
 
+    def clear_for_user(self, *, tenant_id: str, user_id: str) -> int:
+        with self._lock:
+            proposal_ids = {
+                proposal_id
+                for proposal_id, record in self._records.items()
+                if record.tenant_id == tenant_id and record.target_user_id == user_id
+            }
+            for proposal_id in proposal_ids:
+                del self._records[proposal_id]
+            self._decisions = {
+                key: value
+                for key, value in self._decisions.items()
+                if key[:2] != (tenant_id, user_id)
+            }
+            return len(proposal_ids)
+
 
 def summarize_proposals(proposals: list[AgentProposal]) -> ProposalInboxSummary:
     return ProposalInboxSummary(

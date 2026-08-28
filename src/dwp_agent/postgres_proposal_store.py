@@ -75,6 +75,10 @@ class PostgresProposalStore:
                     (tenant, request.target_user_id, request.source_event_id),
                 ).fetchone()
                 if existing is not None:
+                    if existing[_HIDDEN] is not None:
+                        raise ProposalConflict(
+                            "The source event was removed under the user privacy command."
+                        )
                     if not self.fingerprints.matches_create(
                         str(existing[_REQUEST_FINGERPRINT]), tenant, request
                     ):
@@ -170,6 +174,7 @@ class PostgresProposalStore:
                     "tenant_id = %s",
                     "target_user_id = %s",
                     "available_at <= %s",
+                    "hidden_at IS NULL",
                     _view_condition(view),
                 ]
                 parameters: list[object] = [now, now, tenant, user_id, now]
@@ -248,7 +253,7 @@ class PostgresProposalStore:
                         )
                     row = connection.execute(
                         _SELECT_PROPOSAL
-                        + " WHERE proposal_id = %s AND tenant_id = %s AND target_user_id = %s",
+                        + " WHERE proposal_id = %s AND tenant_id = %s AND target_user_id = %s AND hidden_at IS NULL",
                         (proposal_id, tenant, user_id),
                     ).fetchone()
                     if row is None:
@@ -256,7 +261,7 @@ class PostgresProposalStore:
                     return self._proposal(row, now)
                 row = connection.execute(
                     _SELECT_PROPOSAL
-                    + " WHERE proposal_id = %s AND tenant_id = %s AND target_user_id = %s FOR UPDATE",
+                    + " WHERE proposal_id = %s AND tenant_id = %s AND target_user_id = %s AND hidden_at IS NULL FOR UPDATE",
                     (proposal_id, tenant, user_id),
                 ).fetchone()
                 if row is None:
@@ -277,6 +282,7 @@ class PostgresProposalStore:
                               snoozed_until = %s, decided_at = %s, updated_at = %s
                         WHERE proposal_id = %s AND tenant_id = %s
                           AND target_user_id = %s AND revision = %s
+                          AND hidden_at IS NULL
                     RETURNING revision""",
                     (
                         next_state.value,
@@ -461,6 +467,7 @@ _AVAILABLE = 11
 _EXPIRES = 12
 _SNOOZED = 13
 _DECIDED = 14
+_HIDDEN = 15
 
 _EFFECTIVE_STATE = """CASE
     WHEN expires_at <= %s THEN 'EXPIRED'
@@ -469,19 +476,20 @@ _EFFECTIVE_STATE = """CASE
 
 _SELECT_PROPOSAL = """SELECT proposal_id, tenant_id, kind, priority, state, revision,
        agent_key, action_key, payload_envelope, request_fingerprint, proposed_at,
-       available_at, expires_at, snoozed_until, decided_at
+       available_at, expires_at, snoozed_until, decided_at, hidden_at
   FROM ai_agent_proposals"""
 
 _SELECT_PROJECTED = """SELECT proposal_id, tenant_id, kind, priority,
        """ + _EFFECTIVE_STATE + """ AS state, revision, agent_key, action_key,
        payload_envelope, request_fingerprint, proposed_at, available_at, expires_at,
-       snoozed_until, decided_at
+       snoozed_until, decided_at, hidden_at
   FROM ai_agent_proposals"""
 
 _SUMMARY_QUERY = """WITH projected AS (
     SELECT priority, """ + _EFFECTIVE_STATE + """ AS effective_state
       FROM ai_agent_proposals
      WHERE tenant_id = %s AND target_user_id = %s AND available_at <= %s
+       AND hidden_at IS NULL
 )
 SELECT
     COUNT(*) FILTER (WHERE effective_state = 'PENDING'),

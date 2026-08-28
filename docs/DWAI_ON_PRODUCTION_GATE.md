@@ -145,14 +145,19 @@ uv run python scripts/export_openapi.py --check
   임의 생성한 출처나 v1 Payload는 거부합니다.
 - Agent는 업무 원장을 직접 변경하지 않습니다. Preview의 권한·Version·`planHash`를 담당
   Backend가 최종 확인하고 사용자가 저장을 승인한 뒤에만 업무 API가 변경을 수행합니다.
-- Agent Inbox는 TENANT 관리 생산자가 명시적으로 생성한 제안만 대상 사용자에게 노출합니다.
-  제안 본문과 감사 사유는 Envelope 암호화하고, Source Event 중복·명령 멱등성·Revision
-  사전조건·append-only 결정 증거를 강제합니다. GET은 만료와 미루기 종료를 투영할 뿐 어떤
-  행도 생성·갱신하지 않으며 `ACCEPT`는 자동 실행 권한으로 해석하지 않습니다.
+- Agent Inbox는 TENANT 관리 생산자가 명시적으로 생성하거나, 사용자가 본인 권한 범위에서
+  `POST /v1/proposals/analyze`를 명시 호출한 제안만 대상 사용자에게 노출합니다. 백그라운드
+  분석과 자동 실행은 없습니다. 제안 본문과 감사 사유는 Envelope 암호화하고, Source Event
+  중복·명령 멱등성·Revision 사전조건·append-only 결정 증거를 강제합니다. GET은 만료와
+  미루기 종료를 투영할 뿐 어떤 행도 생성·갱신하지 않으며 `ACCEPT`는 자동 실행 권한으로
+  해석하지 않습니다.
 - 생성·결정 명령의 재시도 지문은 평문 Hash가 아니라 Data Key에서 Tenant와
   `agent-proposal` Purpose를 분리해 파생한 HMAC-SHA-256을 사용합니다. 동일 Command와
   Source Event는 PostgreSQL Transaction Advisory Lock으로 직렬화하고, 사유·Revision·Note·
   Snooze 시각을 포함한 전체 Payload가 달라지면 기존 성공을 재사용하지 않습니다.
+- 사용자 분석 명령은 인증 Session과 Locale Payload를 HMAC으로 결속하고, 세대별 Lease와
+  암호화된 Canonical Receipt로 동시 요청·응답 유실·재시도를 직렬화합니다. Source Event
+  식별자는 Locale과 분리하며, Inbox Clear는 완료 Receipt와 활성 Lease를 함께 Fencing합니다.
 
 ## 5. 보존 및 Legal Hold
 
@@ -196,8 +201,11 @@ Key Material과 원문 질문·답변·Source ID·Service Token은 로그에 남
   Worker와 Action Handoff v2 출처 결합 검증
 - 2026-08-27: 만료 대화를 포함한 모든 GET 무변경, Bootstrap 전 PATCH 409 전제조건,
   시작 상태와 Live DB·Gate Schema를 함께 확인하는 `/readyz` Fail-closed 검증
-- 2026-08-27: 최신 Agent 전체 회귀 `221 passed`, Skip 0, Python Compileall 및 Runtime
-  OpenAPI Snapshot 일치, 모든 Runtime Python 모듈 500줄 이하 확인
+- 2026-08-28: clean PostgreSQL에서 `V1`~`V22` 22개 Migration과 `V18` upgrade path를
+  적용하고 Agent 전체 회귀 `247 passed`, Skip 0을 확인했습니다. `V21` Meeting workload
+  assertion replay 방어와 `V22` 명시적 Workspace 분석 Preference·세대별 Command Lease·
+  암호화 Receipt·Clear Fencing을 포함합니다. Python Compileall, Runtime OpenAPI Snapshot,
+  모든 Runtime Python 모듈 500줄 이하도 함께 확인했습니다.
 - 2026-08-27: Frontend 전체 단위 `253 files / 1,441 tests`, Node 24 Production Build와
   Bundle Budget, Agent·Gateway 생성 OpenAPI 계약 일치를 확인했습니다. Agentic Work OS의
   STT 검토·마이크 해제·명시적 TTS·실행 증거·Agent Inbox 사용자 통제 E2E는 Desktop과

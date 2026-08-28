@@ -75,7 +75,7 @@ def test_readiness_reports_a_runtime_database_failure(
     assert health.json()["status"] == "unavailable"
 
 
-def test_openapi_contains_system_and_plan_preview_api() -> None:
+def test_public_openapi_contains_system_and_plan_preview_api_only() -> None:
     response = asyncio.run(get("/openapi.json"))
 
     assert response.status_code == 200
@@ -87,6 +87,9 @@ def test_openapi_contains_system_and_plan_preview_api() -> None:
         "/v1/ask/stream",
         "/v1/plans/preview",
         "/v1/proposals",
+        "/v1/proposals/analyze",
+        "/v1/proposals/preferences",
+        "/v1/proposals/clear",
         "/v1/proposals/{proposal_id}/decisions",
         "/v1/question-launches",
         "/v1/question-launches/consume",
@@ -128,6 +131,7 @@ def test_openapi_contains_system_and_plan_preview_api() -> None:
     }
     parameters = response.json()["paths"]["/v1/plans/preview"]["post"]["parameters"]
     assert "X-DWP-Service-Token" not in {parameter["name"] for parameter in parameters}
+    assert not any(path.startswith("/internal/") for path in response.json()["paths"])
 
 
 def test_openapi_snapshot_matches_runtime_contract() -> None:
