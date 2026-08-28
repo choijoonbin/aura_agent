@@ -4,6 +4,7 @@ from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response, status
+from pydantic import ValidationError
 
 from .meeting_intelligence_contracts import (
     MeetingIntelligenceAnalysis,
@@ -81,6 +82,18 @@ def get_meeting_intelligence_provider() -> MeetingIntelligenceProvider:
     return MeetingIntelligenceProvider()
 
 
+async def parse_meeting_intelligence_request(
+    request: Request,
+) -> MeetingIntelligenceRequest:
+    try:
+        return MeetingIntelligenceRequest.model_validate_json(await request.body())
+    except (ValidationError, ValueError):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="INVALID_MEETING_INTELLIGENCE_REQUEST",
+        ) from None
+
+
 @router.get(
     "/capabilities",
     include_in_schema=False,
@@ -104,7 +117,10 @@ def capabilities(
     dependencies=[Depends(require_meeting_service)],
 )
 def analyze(
-    request: MeetingIntelligenceRequest,
+    request: Annotated[
+        MeetingIntelligenceRequest,
+        Depends(parse_meeting_intelligence_request),
+    ],
     response: Response,
     correlation_id: Annotated[
         str,

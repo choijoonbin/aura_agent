@@ -52,15 +52,12 @@ class MeetingIntelligenceConfiguration:
     @classmethod
     def from_environment(cls) -> "MeetingIntelligenceConfiguration":
         try:
-            provider = ModelProvider.parse(
-                os.getenv("DWP_MEETING_INTELLIGENCE_PROVIDER")
-                or os.getenv("DWP_MODEL_PROVIDER")
-            )
+            provider = ModelProvider.parse(os.getenv("DWP_MEETING_INTELLIGENCE_PROVIDER"))
             base = ResponsesProviderConfiguration.from_environment(
                 provider=provider,
-                api_key=os.getenv("DWP_MEETING_INTELLIGENCE_API_KEY") or None,
+                api_key=os.getenv("DWP_MEETING_INTELLIGENCE_API_KEY", ""),
                 model=os.getenv("DWP_MEETING_INTELLIGENCE_MODEL", ""),
-                base_url=os.getenv("DWP_MEETING_INTELLIGENCE_BASE_URL") or None,
+                base_url=os.getenv("DWP_MEETING_INTELLIGENCE_BASE_URL", ""),
             )
         except ProviderConfigurationError as error:
             raise MeetingIntelligenceConfigurationError(
@@ -228,7 +225,7 @@ class MeetingIntelligenceProvider:
                     headers={
                         "Content-Type": "application/json",
                         "Accept": "application/json",
-                        "X-Client-Request-Id": correlation_id,
+                        "X-Client-Request-Id": _provider_request_id(correlation_id),
                         **self.configuration.authentication_headers,
                     },
                 ) as response:
@@ -350,6 +347,12 @@ def _system_instruction(locale: str) -> str:
         "conversationClimate describes only meeting-level alignment, disagreement, and evidence "
         "quality. Use INSUFFICIENT_EVIDENCE when the transcript cannot support a conclusion."
     )
+
+
+def _provider_request_id(correlation_id: str) -> str:
+    """Keep caller-controlled correlation values outside the external provider boundary."""
+    digest = hashlib.sha256(correlation_id.encode("utf-8")).hexdigest()[:32]
+    return f"dwp-meeting-{digest}"
 
 
 def _boolean(name: str) -> bool:

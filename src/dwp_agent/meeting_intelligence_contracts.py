@@ -84,6 +84,18 @@ class ConversationClimate(_Contract):
     signals: list[ClimateSignal] = Field(max_length=5)
     citations: list[Citation] = Field(max_length=20)
 
+    @model_validator(mode="after")
+    def validate_evidence(self) -> "ConversationClimate":
+        if len(self.signals) != len(set(self.signals)):
+            raise ValueError("Conversation climate signals must be unique.")
+        low_evidence = ClimateSignal.LOW_TRANSCRIPT_EVIDENCE in self.signals
+        if self.label is ClimateLabel.INSUFFICIENT_EVIDENCE:
+            if not low_evidence:
+                raise ValueError("Insufficient climate evidence must be explicit.")
+        elif low_evidence or not self.citations:
+            raise ValueError("Conversation climate must cite transcript evidence.")
+        return self
+
 
 class MeetingIntelligenceAnalysis(_Contract):
     executive_summary: CitedText

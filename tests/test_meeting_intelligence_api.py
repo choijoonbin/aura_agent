@@ -173,6 +173,29 @@ def test_internal_api_exposes_only_stable_provider_failure_code(monkeypatch) -> 
     assert "배포" not in response.text
 
 
+def test_internal_api_does_not_echo_invalid_transcript_text(monkeypatch) -> None:
+    _configure_identity(monkeypatch)
+    client = TestClient(_app(_FakeProvider()))
+    invalid = _request()
+    invalid["transcript"][0]["text"] = "private-transcript-" + "x" * 4_000  # type: ignore[index]
+    body = json.dumps(invalid, ensure_ascii=False, separators=(",", ":")).encode()
+
+    response = client.post(
+        "/internal/v1/meeting-intelligence/analyze",
+        headers={
+            **_identity_headers(
+                "POST", "/internal/v1/meeting-intelligence/analyze", body
+            ),
+            "Content-Type": "application/json",
+        },
+        content=body,
+    )
+
+    assert response.status_code == 422
+    assert response.json() == {"detail": "INVALID_MEETING_INTELLIGENCE_REQUEST"}
+    assert "private-transcript" not in response.text
+
+
 def test_workload_assertion_is_one_time_and_body_bound(monkeypatch) -> None:
     _configure_identity(monkeypatch)
     client = TestClient(_app(_FakeProvider()))
@@ -264,6 +287,96 @@ def test_provider_uses_zero_storage_and_untrusted_transcript_boundary() -> None:
     system = captured["input"][0]["content"]  # type: ignore[index]
     assert "untrusted data" in system
     assert "individual emotion" in system
+
+
+def test_provider_hashes_caller_correlation_before_external_egress() -> None:
+    captured: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["request_id"] = request.headers["X-Client-Request-Id"]
+        return _model_response(_analysis())
+
+    provider = _provider(transport=httpx.MockTransport(handler))
+    provider.analyze(
+        MeetingIntelligenceRequest.model_validate(_request()),
+        correlation_id="employee@example.test/private-correlation",
+        tenant_id=77,
+        meeting_id=MEETING_ID,
+        run_id=RUN_ID,
+    )
+
+    assert captured["request_id"].startswith("dwp-meeting-")
+    assert "employee" not in captured["request_id"]
+    assert "private-correlation" not in captured["request_id"]
+
+
+def test_meeting_provider_does_not_inherit_general_model_credentials(monkeypatch) -> None:
+    monkeypatch.setenv("DWP_MEETING_INTELLIGENCE_ENABLED", "true")
+    monkeypatch.setenv("DWP_MEETING_INTELLIGENCE_PROCESSING_REGION", "kr-central")
+    monkeypatch.setenv("DWP_MEETING_INTELLIGENCE_TRAINING_DISABLED", "true")
+    monkeypatch.setenv("DWP_MEETING_INTELLIGENCE_RETENTION_DISABLED", "true")
+    monkeypatch.setenv("DWP_MODEL_PROVIDER", "openai")
+    monkeypatch.setenv("OPENAI_API_KEY", "general-agent-key-must-not-be-used")
+    monkeypatch.setenv("DWP_OPENAI_MODEL", "general-agent-model")
+    monkeypatch.setenv("DWP_OPENAI_BASE_URL", "https://api.openai.com/v1")
+    for name in (
+        "DWP_MEETING_INTELLIGENCE_PROVIDER",
+        "DWP_MEETING_INTELLIGENCE_API_KEY",
+        "DWP_MEETING_INTELLIGENCE_MODEL",
+        "DWP_MEETING_INTELLIGENCE_BASE_URL",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    capability = MeetingIntelligenceProvider().capability()
+
+    assert capability.available is False
+    assert capability.provider_code == "DISABLED"
+
+
+@pytest.mark.parametrize(
+    "climate",
+    [
+        {
+            "label": "INSUFFICIENT_EVIDENCE",
+            "signals": [],
+            "citations": [],
+        },
+        {
+            "label": "ALIGNED",
+            "signals": ["LOW_TRANSCRIPT_EVIDENCE"],
+            "citations": [
+                {"segmentId": "seg-001", "startMillis": 1_000, "endMillis": 5_000}
+            ],
+        },
+        {
+            "label": "ALIGNED",
+            "signals": ["BALANCED_TURN_TAKING", "BALANCED_TURN_TAKING"],
+            "citations": [
+                {"segmentId": "seg-001", "startMillis": 1_000, "endMillis": 5_000}
+            ],
+        },
+    ],
+    ids=["missing-low-evidence", "low-evidence-definitive", "duplicate-signals"],
+)
+def test_provider_rejects_climate_contract_not_accepted_by_meeting(
+    climate: dict[str, object],
+) -> None:
+    response = _analysis()
+    response["conversationClimate"] = climate
+    provider = _provider(
+        transport=httpx.MockTransport(lambda _: _model_response(response))
+    )
+
+    with pytest.raises(MeetingIntelligenceUnavailable) as captured:
+        provider.analyze(
+            MeetingIntelligenceRequest.model_validate(_request()),
+            correlation_id="corr-meeting-1",
+            tenant_id=77,
+            meeting_id=MEETING_ID,
+            run_id=RUN_ID,
+        )
+
+    assert captured.value.code == "INVALID_PROVIDER_OUTPUT"
 
 
 class _ChunkedBody(httpx.SyncByteStream):

@@ -1,0 +1,78 @@
+{
+  "schemaVersion": 1,
+  "projectionKey": "dwaion-pep-v4-draft",
+  "registryRef": {
+    "bundleKey": "product-surfaces",
+    "version": 4,
+    "bundleStatus": "DRAFT",
+    "checksum": "a9cd08260fd9a11dd7c612f2db6f03bb312f1e7843a2eb10b4082660da151137"
+  },
+  "policyId": "P-DWAION",
+  "ownerServiceKey": "agent",
+  "ownerServiceModule": "dwp-agent-runtime",
+  "productId": "dwaion",
+  "surfaceKey": "dwaion.work",
+  "activation": {
+    "enabledByDefault": false,
+    "readinessEnvironment": "DWP_AGENT_PRODUCT_AUTHORIZATION_V4_ENABLED"
+  },
+  "accessPolicy": {
+    "accessPolicyKey": "dwaion.work-access.v1",
+    "resolvedAuthority": "APP.ASK:VIEW",
+    "scopeResolver": "SELF",
+    "activeAccessModes": ["NORMAL", "ELEVATED"]
+  },
+  "routes": [
+    {
+      "routeContractKey": "route.dwaion.work.home.page",
+      "routeKind": "PAGE",
+      "accessContractKey": "dwaion.work-access.v1",
+      "resolvedAuthority": "APP.ASK:VIEW",
+      "readOnly": true,
+      "targetKind": "SELF",
+      "gatewayBinding": {
+        "method": "GET",
+        "path": "/api/agent/v1/conversations"
+      },
+      "servicePepBinding": {
+        "serviceKey": "agent",
+        "method": "GET",
+        "path": "/v1/conversations"
+      }
+    },
+    {
+      "routeContractKey": "route.dwaion.work.conversation.data",
+      "routeKind": "DATA",
+      "accessContractKey": "dwaion.work-access.v1",
+      "resolvedAuthority": "APP.ASK:VIEW",
+      "readOnly": true,
+      "targetKind": "SELF",
+      "gatewayBinding": {
+        "method": "GET",
+        "path": "/api/agent/v1/conversations/{conversationId}"
+      },
+      "servicePepBinding": {
+        "serviceKey": "agent",
+        "method": "GET",
+        "path": "/v1/conversations/{conversationId}"
+      }
+    },
+    {
+      "routeContractKey": "route.dwaion.work.ask.action",
+      "routeKind": "ACTION",
+      "accessContractKey": "dwaion.work.ask.execute",
+      "resolvedAuthority": "APP.ASK:VIEW",
+      "readOnly": false,
+      "targetKind": "SELF",
+      "gatewayBinding": {
+        "method": "POST",
+        "path": "/api/agent/v1/ask"
+      },
+      "servicePepBinding": {
+        "serviceKey": "agent",
+        "method": "POST",
+        "path": "/v1/ask"
+      }
+    }
+  ]
+}

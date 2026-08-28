@@ -53,6 +53,7 @@ from .governance_store import GovernanceStoreUnavailable
 from .meeting_intelligence_api import router as meeting_intelligence_router
 from .meeting_intelligence_body_limit import install_meeting_intelligence_body_limit
 from .meeting_intelligence_provider import validate_meeting_intelligence_runtime_configuration
+from .product_surface_pep import install_product_surface_pep
 from .run_store import (
     RequestIdConflict,
     RunInProgress,
@@ -98,6 +99,7 @@ async def lifespan(_: FastAPI):
 app = FastAPI(title=SERVICE_NAME, version=SERVICE_VERSION, lifespan=lifespan)
 install_api_history(app)
 install_meeting_intelligence_body_limit(app)
+install_product_surface_pep(app)
 install_operational_gate_problem_handler(app)
 app.include_router(
     build_system_router(service_name=SERVICE_NAME, service_version=SERVICE_VERSION)
