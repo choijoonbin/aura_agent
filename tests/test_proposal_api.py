@@ -27,10 +27,12 @@ from dwp_agent.proposal_store import InMemoryProposalStore, set_proposal_store_f
 
 
 SERVICE_TOKEN = "test-gateway-service-token"
+ANALYSIS_AUTHORIZATIONS: list[object] = []
 
 
 class EmptyAnalysisBroker:
     def collect(self, *_args, **_kwargs) -> GroundedContext:
+        ANALYSIS_AUTHORIZATIONS.append(_kwargs.get("workspace_authorization"))
         return GroundedContext(
             sources=(),
             attempted_sources=("WORK_ITEM", "MAIL", "CALENDAR"),
@@ -43,6 +45,7 @@ def configured_runtime(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("DWP_AGENT_SERVICE_TOKEN", SERVICE_TOKEN)
     monkeypatch.setenv("DWP_ENVIRONMENT", "local")
     monkeypatch.delenv("DWP_AGENT_IDENTITY_SIGNING_SECRET", raising=False)
+    ANALYSIS_AUTHORIZATIONS.clear()
     store = InMemoryProposalStore()
     fingerprints = ProposalAnalysisFingerprints.ephemeral()
     control = InMemoryProposalAnalysisControl(fingerprints)
@@ -77,6 +80,7 @@ async def request(
     identity_plane: str = "TENANT",
     auth_session_id: str = "proposal-session-1",
     accept_language: str = "en",
+    session_cookie: str | None = None,
 ):
     transport = ASGITransport(app=app)
     headers = {
@@ -89,6 +93,8 @@ async def request(
         "X-DWP-Auth-Session-ID": auth_session_id,
         "Accept-Language": accept_language,
     }
+    if session_cookie is not None:
+        headers["Cookie"] = f"DWP_SESSION={session_cookie}"
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         return await client.request(method, path, headers=headers, json=body)
 
@@ -304,6 +310,7 @@ def test_analysis_api_replays_receipt_and_rejects_locale_drift() -> None:
             "/v1/proposals/analyze",
             body={"commandId": command_id},
             accept_language="en",
+            session_cookie="proposal-session-secret",
         )
     )
     replay = asyncio.run(
@@ -327,6 +334,10 @@ def test_analysis_api_replays_receipt_and_rejects_locale_drift() -> None:
     assert first.headers["Cache-Control"] == "no-store"
     assert first.json() == replay.json()
     assert drift.status_code == 409
+    assert ANALYSIS_AUTHORIZATIONS[0].available is True
+    assert ANALYSIS_AUTHORIZATIONS[0].outbound_headers() == {
+        "Cookie": "DWP_SESSION=proposal-session-secret"
+    }
 
 
 def test_analysis_preference_and_clear_are_user_controlled_and_idempotent() -> None:

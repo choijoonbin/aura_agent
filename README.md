@@ -54,6 +54,15 @@ the `DWP_MEETING_INTELLIGENCE_*` runtime gates. Each call also carries a short-l
 assertion bound to method, path, body digest, tenant, meeting, run, issue/expiry time, and one-time
 identifier. Production uses the Agent database to reject assertion replay across replicas.
 
+Provider egress additionally requires a compact `dwpa1.<payload>.<signature>` policy attestation.
+The payload is canonical, sorted JSON and the Ed25519 signature covers the ASCII
+`dwpa1.<payload>` signing input. Its exact fields bind the key ID, attestation UUID, provider code,
+model, processing region, no-training and no-retention controls, approved policy SHA-256, and Unix
+issue/expiry times. Attestations have a maximum seven-day lifetime and are revalidated both for
+capability discovery and immediately before every model request. The configured public key is a
+trust anchor; production enablement still requires independent evidence for issuer key custody,
+provider policy/deployment state, and attestation issuance.
+
 고객별 정책 결정과 아직 닫히지 않은 딜리버리 TODO는
 `../dwp-backend/docs/delivery/customer-policy-and-release-gate-register.md`에서만 관리합니다.
 기능 문서와 테스트는 해당 등록부의 `D-*`, `G-*` ID를 참조하고 별도 활성 목록을 만들지
@@ -98,6 +107,10 @@ Agent Inbox 제안은 Tenant·대상 사용자·원본 Event에 묶이며 제목
 백그라운드 수집이나 자동 실행을 하지 않습니다. Gateway가 검증한 사용자 권한으로 Context
 Broker가 반환한 업무·메일·일정 신호만 결정적으로 분류합니다. 분석 Command는 인증 Session과
 Locale Payload에 결속된 세대별 Lease, 재시도 횟수, 암호화된 Canonical Receipt를 사용합니다.
+일정 근거는 Agent가 Platform을 직접 호출하지 않고, 요청에서 일시적으로 전달된 사용자
+`DWP_SESSION`/Bearer 자격 증명으로 Gateway의 정확한 Calendar route 결정을 다시 거칩니다.
+자격 증명은 저장·로그·모델 근거에 포함하지 않으며 support mode, 누락, 권위 오류에서는 해당
+Source를 실패 차단합니다. Work와 Mail의 전용 read-only service identity 경계는 그대로 유지합니다.
 원본 Event 식별자는 Locale과 분리해 언어 전환이 같은 업무를 중복 제안하지 않습니다. 사용자는
 분석을 끌 수 있고 Inbox를 지울 수 있으며, Clear는 저장된 제안 내용과 완료 영수증 및 진행 중
 Lease를 함께 폐기합니다.
@@ -109,6 +122,7 @@ Lease를 함께 폐기합니다.
 전환해야 합니다.
 
 ```bash
+SERVICE_GATEWAY_URL=http://localhost:8080
 SERVICE_PLATFORM_URL=http://localhost:8002
 DWP_PLATFORM_RUNTIME_SERVICE_TOKEN=<managed-runtime-read-secret>
 SERVICE_APPROVAL_URL=http://localhost:8005

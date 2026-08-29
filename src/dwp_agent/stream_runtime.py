@@ -14,6 +14,7 @@ from fastapi.responses import StreamingResponse
 from .ask_runtime import AskRuntime
 from .contracts import AskEnvelope, AskRequest
 from .policy import AskIdentity, SafetyControls
+from .workspace_authorization import WorkspaceRequestAuthorization
 
 
 T = TypeVar("T")
@@ -72,6 +73,7 @@ def stream_ask_response(
     safety_controls: SafetyControls,
     encode_event: Callable[[str, dict[str, object]], str],
     error_code: Callable[[Exception], str],
+    workspace_authorization: WorkspaceRequestAuthorization | None = None,
 ) -> StreamingResponse:
     events: Queue[tuple[str, dict[str, object] | None]] = Queue(maxsize=32)
 
@@ -82,6 +84,7 @@ def stream_ask_response(
                 identity=identity,
                 on_progress=lambda stage: events.put(("progress", {"stage": stage})),
                 safety_controls=safety_controls,
+                workspace_authorization=workspace_authorization,
             )
             envelope = AskEnvelope(data=response)
             events.put(("result", envelope.model_dump(mode="json", by_alias=True)))

@@ -37,6 +37,7 @@ from .proposal_contracts import (
     ProposalState,
 )
 from .proposal_store import ProposalConflict, get_proposal_store
+from .workspace_authorization import WorkspaceRequestAuthorization
 
 
 MAX_ANALYSIS_PROPOSALS = 6
@@ -62,6 +63,7 @@ class ProposalContextBroker(Protocol):
         locale: str,
         agent_key: str,
         source_scopes: tuple[CitationSourceType, ...],
+        workspace_authorization: WorkspaceRequestAuthorization | None = None,
     ) -> GroundedContext: ...
 
 
@@ -96,6 +98,7 @@ class ProposalAnalysisService:
         command_id: UUID,
         locale: str,
         auth_session_id: str,
+        workspace_authorization: WorkspaceRequestAuthorization | None = None,
     ) -> ProposalAnalysisReceipt:
         preference = self._control.preference(
             tenant_id=identity.tenant_id,
@@ -125,6 +128,7 @@ class ProposalAnalysisService:
                 locale=locale,
                 agent_key="DWP_ASSISTANT",
                 source_scopes=_ANALYSIS_SCOPES,
+                workspace_authorization=workspace_authorization,
             )
             detected = detect_proactive_signals(context, locale=locale, now=now)
             proposals: list[AgentProposal] = []

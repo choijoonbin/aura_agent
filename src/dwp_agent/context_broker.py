@@ -12,6 +12,7 @@ import httpx
 from .approval_context import collect_approval_context
 from .contracts import AskCitation, AskPageContext, CitationSourceType
 from .policy import AskIdentity, contains_privileged_data, contains_prompt_injection
+from .workspace_authorization import WorkspaceRequestAuthorization
 
 
 MAX_SOURCES = 12
@@ -63,6 +64,7 @@ class WorkspaceContextBroker:
         service_token: str | None = None,
         approval_url: str | None = None,
         approval_service_token: str | None = None,
+        gateway_url: str | None = None,
         transport: httpx.BaseTransport | None = None,
     ) -> None:
         self.platform_url = (
@@ -81,6 +83,9 @@ class WorkspaceContextBroker:
             if approval_service_token is not None
             else os.getenv("DWP_APPROVAL_RUNTIME_SERVICE_TOKEN", "")
         ).strip()
+        self.gateway_url = (
+            gateway_url if gateway_url is not None else os.getenv("SERVICE_GATEWAY_URL", "")
+        ).strip().rstrip("/")
         self.transport = transport
 
     def collect(
@@ -92,6 +97,7 @@ class WorkspaceContextBroker:
         agent_key: str = "DWP_ASSISTANT",
         source_scopes: tuple[CitationSourceType, ...] | list[CitationSourceType] | None = None,
         page_context: AskPageContext | None = None,
+        workspace_authorization: WorkspaceRequestAuthorization | None = None,
     ) -> GroundedContext:
         approval_expert = agent_key.strip().upper() == "DWP_APPROVAL_EXPERT"
         if approval_expert:
@@ -171,19 +177,32 @@ class WorkspaceContextBroker:
                 and "APP.CALENDAR:VIEW" in permissions
             ):
                 attempted.append("CALENDAR")
-                try:
-                    now = datetime.now(timezone.utc)
-                    response = client.get(
-                        f"{self.platform_url}/v1/calendar/events",
-                        headers={**identity_headers, "X-DWP-Service-Token": self.service_token},
-                        params={
-                            "from": now.isoformat(),
-                            "to": (now + timedelta(days=30)).isoformat(),
-                        },
-                    )
-                    candidates.extend(self._calendar_events(response))
-                except (httpx.HTTPError, ValueError, KeyError, TypeError):
+                if (
+                    not self.gateway_url
+                    or workspace_authorization is None
+                    or not workspace_authorization.available
+                ):
                     unavailable.append("CALENDAR")
+                else:
+                    try:
+                        now = datetime.now(timezone.utc)
+                        response = client.get(
+                            f"{self.gateway_url}/api/platform/v1/calendar/events",
+                            headers={
+                                **workspace_authorization.outbound_headers(),
+                                "X-DWP-Tenant-ID": identity.tenant_id,
+                                "X-Correlation-ID": identity.correlation_id,
+                                "Accept-Language": locale,
+                                "Accept": "application/json",
+                            },
+                            params={
+                                "from": now.isoformat(),
+                                "to": (now + timedelta(days=30)).isoformat(),
+                            },
+                        )
+                        candidates.extend(self._calendar_events(response))
+                    except (httpx.HTTPError, ValueError, KeyError, TypeError):
+                        unavailable.append("CALENDAR")
 
         query_tokens = _tokens(query)
         ranked = sorted(

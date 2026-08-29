@@ -82,6 +82,7 @@ def validate_runtime_configuration(key_provider: KeyProvider | None = None) -> N
 
     required_values = (
         "DWP_AGENT_DATABASE_URL",
+        "SERVICE_GATEWAY_URL",
         "SERVICE_PLATFORM_URL",
         "SERVICE_APPROVAL_URL",
         "DWP_AUDIT_COLLECTOR_URL",

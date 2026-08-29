@@ -58,9 +58,13 @@ CONTEXT_KEY = "psc-" + "d" * 64
 class RuntimeSpy:
     def __init__(self) -> None:
         self.calls = 0
+        self.workspace_authorization = None
 
-    def answer(self, request, *, identity, safety_controls) -> AskResponse:
+    def answer(
+        self, request, *, identity, safety_controls, workspace_authorization
+    ) -> AskResponse:
         self.calls += 1
+        self.workspace_authorization = workspace_authorization
         return _ask_response(request.request_id, identity.correlation_id)
 
 
@@ -217,7 +221,10 @@ def test_executes_page_data_action_through_agent_owner_pep() -> None:
     action = _request(
         "POST",
         "/v1/ask",
-        headers=_headers(ACTION_ROUTE),
+        headers={
+            **_headers(ACTION_ROUTE),
+            "Cookie": "DWP_SESSION=product-surface-session",
+        },
         json_body={"requestId": "request-exact", "query": "오늘 할 일을 알려 주세요."},
     )
 
@@ -225,6 +232,10 @@ def test_executes_page_data_action_through_agent_owner_pep() -> None:
     assert data.status_code == 200
     assert action.status_code == 200
     assert runtime.calls == 1
+    assert runtime.workspace_authorization.available is True
+    assert runtime.workspace_authorization.outbound_headers() == {
+        "Cookie": "DWP_SESSION=product-surface-session"
+    }
     for response in (page, data, action):
         assert response.headers[RESPONSE_REVISION_HEADER] == DECISION_REVISION
 

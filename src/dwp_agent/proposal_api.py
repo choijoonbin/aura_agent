@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response, status
 
 from .delivery_gate import (
     DeliveryCapability,
@@ -58,6 +58,7 @@ from .proposal_privacy import (
     get_proposal_privacy_service,
 )
 from .security import header_values, require_gateway_service, verified_ask_identity
+from .workspace_authorization import resolve_workspace_request_authorization
 from .workplace_actions import (
     WorkplaceActionInputInvalid,
     all_workplace_actions,
@@ -162,6 +163,7 @@ def list_proposals(
 )
 def analyze_proposals(
     request: AnalyzeProposalsRequest,
+    http_request: Request,
     identity: Annotated[AskIdentity, Depends(verified_ask_identity)],
     response: Response,
     auth_session_id: Annotated[
@@ -178,6 +180,7 @@ def analyze_proposals(
             command_id=request.command_id,
             locale=_proposal_locale(accept_language),
             auth_session_id=auth_session_id,
+            workspace_authorization=resolve_workspace_request_authorization(http_request),
         )
     except ProposalAnalysisDisabled as error:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error

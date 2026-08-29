@@ -12,6 +12,9 @@ DWAI·ON은 읽기 전용 근거 탐색과 담당 앱 초안 전달까지만 수
   일치를 모두 검증합니다. 이 검증이 활성화되면 개별 `X-DWP-*` Header만 신뢰하지 않습니다.
 - Platform 읽기에는 `DWP_PLATFORM_RUNTIME_SERVICE_TOKEN`, Approval 읽기에는 별도의
   `DWP_APPROVAL_RUNTIME_SERVICE_TOKEN`을 사용합니다. Gateway Token을 재사용하지 않습니다.
+- Calendar 근거는 `SERVICE_GATEWAY_URL`의 public route를 통해 현재 사용자 Session 권위를
+  다시 평가합니다. Agent는 해당 자격 증명을 저장·로그하지 않고 Platform service token으로
+  우회하지 않으며, support mode 또는 401/403/409/503에서는 Calendar Source를 실패 차단합니다.
 - `DWP_AGENT_REGISTRY_MODE=enforced`로 실행하고 승인된 Agent Revision이 없으면
   실패 차단합니다.
 - `dev/qa/prod`는 관리형 `KeyProvider`와 불변 `DWP_AGENT_KEY_REFERENCE`를 사용해야 합니다.

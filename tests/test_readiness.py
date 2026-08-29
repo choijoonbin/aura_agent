@@ -26,6 +26,7 @@ def test_production_runtime_fails_closed_with_safe_setting_names(
 
     message = str(captured.value)
     assert "DWP_AGENT_DATABASE_URL" in message
+    assert "SERVICE_GATEWAY_URL" in message
     assert "DWP_AGENT_REGISTRY_MODE=enforced" in message
     assert "OPENAI_API_KEY" in message
     assert "postgresql://" not in message
@@ -124,6 +125,7 @@ _PRODUCTION_ENVIRONMENT = {
     "DWP_AGENT_DATABASE_REQUIRED": "true",
     "DWP_AGENT_REGISTRY_MODE": "enforced",
     "DWP_AGENT_KEY_REFERENCE": "kms://dwp-agent/payload/2026-08-v1",
+    "SERVICE_GATEWAY_URL": "http://gateway:8080",
     "SERVICE_PLATFORM_URL": "http://platform:8002",
     "SERVICE_APPROVAL_URL": "http://approval:8005",
     "DWP_AUDIT_COLLECTOR_URL": "http://platform:8002/internal/audit/events",

@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Response, status
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response, status
 from fastapi.responses import StreamingResponse
 
 from .admin_authority import AdminPreflightDenied, require_admin_preflight
@@ -68,6 +68,7 @@ from .system_api import build_system_router
 from .user_run_api import router as user_run_router
 from .voice_api import router as voice_router
 from .voice_provider import validate_voice_runtime_configuration
+from .workspace_authorization import resolve_workspace_request_authorization
 from .security import header_values, require_gateway_service, verified_ask_identity
 from .runtime_policy import (
     RuntimeGovernanceNotConfigured,
@@ -177,6 +178,7 @@ def runtime_safety_controls(request: AskRequest, identity: AskIdentity) -> Safet
 )
 def ask(
     request: AskRequest,
+    http_request: Request,
     identity: Annotated[AskIdentity, Depends(verified_ask_identity)],
     runtime: AskRuntime = Depends(get_ask_runtime),
 ) -> AskEnvelope:
@@ -188,7 +190,11 @@ def ask(
     try:
         safety_controls = runtime_safety_controls(request, identity)
         return AskEnvelope(data=runtime.answer(
-            request, identity=identity, safety_controls=safety_controls))
+            request,
+            identity=identity,
+            safety_controls=safety_controls,
+            workspace_authorization=resolve_workspace_request_authorization(http_request),
+        ))
     except RegistryResolutionError as error:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -220,6 +226,7 @@ def ask(
 )
 def ask_stream(
     request: AskRequest,
+    http_request: Request,
     identity: Annotated[AskIdentity, Depends(verified_ask_identity)],
     runtime: AskRuntime = Depends(get_ask_runtime),
 ) -> StreamingResponse:
@@ -237,6 +244,7 @@ def ask_stream(
         safety_controls=safety_controls,
         encode_event=_sse,
         error_code=_stream_error_code,
+        workspace_authorization=resolve_workspace_request_authorization(http_request),
     )
 
 

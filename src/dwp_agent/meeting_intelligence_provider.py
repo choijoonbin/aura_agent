@@ -9,6 +9,10 @@ from typing import Any
 import httpx
 from pydantic import ValidationError
 
+from .meeting_intelligence_attestation import (
+    MeetingIntelligenceAttestationError,
+    verify_meeting_intelligence_attestation,
+)
 from .meeting_intelligence_contracts import (
     CitedText,
     ClimateLabel,
@@ -48,6 +52,10 @@ class MeetingIntelligenceConfiguration:
     customer_data_training_disabled: bool
     provider_retention_disabled: bool
     timeout_seconds: float = 24.0
+    policy_attestation: str = field(default="", repr=False)
+    attestation_public_key_base64: str = field(default="", repr=False)
+    attestation_key_id: str = ""
+    approved_policy_sha256: str = ""
 
     @classmethod
     def from_environment(cls) -> "MeetingIntelligenceConfiguration":
@@ -81,6 +89,18 @@ class MeetingIntelligenceConfiguration:
             timeout_seconds=_timeout(
                 os.getenv("DWP_MEETING_INTELLIGENCE_TIMEOUT_SECONDS")
             ),
+            policy_attestation=os.getenv(
+                "DWP_MEETING_INTELLIGENCE_POLICY_ATTESTATION", ""
+            ).strip(),
+            attestation_public_key_base64=os.getenv(
+                "DWP_MEETING_INTELLIGENCE_ATTESTATION_PUBLIC_KEY_BASE64", ""
+            ).strip(),
+            attestation_key_id=os.getenv(
+                "DWP_MEETING_INTELLIGENCE_ATTESTATION_KEY_ID", ""
+            ).strip(),
+            approved_policy_sha256=os.getenv(
+                "DWP_MEETING_INTELLIGENCE_APPROVED_POLICY_SHA256", ""
+            ).strip(),
         )
 
     @property
@@ -93,6 +113,10 @@ class MeetingIntelligenceConfiguration:
             and self.processing_region
             and self.customer_data_training_disabled
             and self.provider_retention_disabled
+            and self.policy_attestation
+            and self.attestation_public_key_base64
+            and self.attestation_key_id
+            and self.approved_policy_sha256
         )
 
     @property
@@ -126,6 +150,20 @@ class MeetingIntelligenceConfiguration:
         except ProviderConfigurationError as error:
             raise MeetingIntelligenceConfigurationError(
                 "Meeting intelligence provider endpoint is not approved."
+            ) from error
+        try:
+            verify_meeting_intelligence_attestation(
+                compact_attestation=self.policy_attestation,
+                public_key_base64=self.attestation_public_key_base64,
+                expected_key_id=self.attestation_key_id,
+                expected_provider_code=self.provider_code,
+                expected_model=self.model,
+                expected_processing_region=self.processing_region,
+                expected_policy_sha256=self.approved_policy_sha256,
+            )
+        except MeetingIntelligenceAttestationError as error:
+            raise MeetingIntelligenceConfigurationError(
+                "Meeting intelligence policy attestation is invalid."
             ) from error
 
     def capability(self) -> MeetingIntelligenceCapability:

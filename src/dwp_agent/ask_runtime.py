@@ -38,6 +38,7 @@ from .model_gateway import (
 from .policy import AskIdentity, SafetyControls, evaluate_ask_policy
 from .registry import resolve_agent
 from .run_store import RunInProgress, RunStart, RunStore, get_run_store, privacy_hash
+from .workspace_authorization import WorkspaceRequestAuthorization
 
 
 class AskRuntime:
@@ -61,6 +62,7 @@ class AskRuntime:
         identity: AskIdentity,
         on_progress: Callable[[str], None] | None = None,
         safety_controls: SafetyControls | None = None,
+        workspace_authorization: WorkspaceRequestAuthorization | None = None,
     ) -> AskResponse:
         _progress(on_progress, "AUTHORIZING")
         query_hash = privacy_hash(
@@ -173,6 +175,7 @@ class AskRuntime:
                     policy=policy,
                     conversation_history=conversation_history,
                     on_progress=on_progress,
+                    workspace_authorization=workspace_authorization,
                 )
 
             _progress(on_progress, "PERSISTING")
@@ -223,6 +226,7 @@ class AskRuntime:
         policy: AskPolicyDecision,
         conversation_history: tuple[ConversationTurn, ...],
         on_progress: Callable[[str], None] | None,
+        workspace_authorization: WorkspaceRequestAuthorization | None,
     ) -> tuple[AskResponse, str | None]:
         _progress(on_progress, "RETRIEVING")
         try:
@@ -233,6 +237,7 @@ class AskRuntime:
                 agent_key=registry.entry_key,
                 source_scopes=request.source_scopes,
                 page_context=request.page_context,
+                workspace_authorization=workspace_authorization,
             )
         except ContextBrokerUnavailable:
             return (

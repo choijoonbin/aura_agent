@@ -1,14 +1,16 @@
 from __future__ import annotations
 
-import json
 import base64
 import hashlib
 import hmac
+import json
 import time
 from uuid import uuid4
 
 import httpx
 import pytest
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -36,6 +38,8 @@ KEY_ID = "meeting-workload-v1"
 SOURCE_HASH = "a" * 64
 MEETING_ID = "29f14739-0f92-469e-8528-d3731e809f55"
 RUN_ID = "776d0d8e-96e2-4c29-8df5-9f5e3beaf72f"
+ATTESTATION_KEY_ID = "meeting-intelligence-policy-v1"
+APPROVED_POLICY_SHA256 = "f" * 64
 
 
 def _app(provider: object) -> FastAPI:
@@ -78,7 +82,7 @@ def _analysis(citation_end: int = 5_000) -> dict[str, object]:
         "risks": [],
         "conversationClimate": {
             "label": "ALIGNED",
-            "signals": ["BALANCED_TURN_TAKING"],
+            "signals": ["CONSTRUCTIVE_DISAGREEMENT"],
             "citations": cited["citations"],
         },
     }
@@ -258,12 +262,158 @@ def test_provider_capability_is_fail_closed_for_an_unapproved_endpoint() -> None
         processing_region="kr-central",
         customer_data_training_disabled=True,
         provider_retention_disabled=True,
+        **_attestation_fields(),
     )
 
     capability = MeetingIntelligenceProvider(configuration).capability()
 
     assert capability.available is False
     assert capability.provider_code == "DISABLED"
+
+
+def test_provider_rejects_environment_booleans_without_signed_policy_attestation() -> None:
+    configuration = MeetingIntelligenceConfiguration(
+        enabled=True,
+        provider=ModelProvider.OPENAI,
+        api_key="test-key",
+        base_url="https://models.test/v1",
+        model="meeting-model",
+        processing_region="kr-central",
+        customer_data_training_disabled=True,
+        provider_retention_disabled=True,
+    )
+    called = False
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        nonlocal called
+        called = True
+        return _model_response(_analysis())
+
+    provider = MeetingIntelligenceProvider(
+        configuration,
+        transport=httpx.MockTransport(handler),
+        allow_test_endpoint=True,
+    )
+
+    assert provider.capability().available is False
+    with pytest.raises(MeetingIntelligenceUnavailable) as captured:
+        provider.analyze(
+            MeetingIntelligenceRequest.model_validate(_request()),
+            correlation_id="corr-meeting-1",
+            tenant_id=77,
+            meeting_id=MEETING_ID,
+            run_id=RUN_ID,
+        )
+
+    assert captured.value.code == "POLICY_BLOCKED"
+    assert called is False
+
+
+@pytest.mark.parametrize(
+    "claim_override",
+    [
+        {"providerCode": "AZURE_OPENAI"},
+        {"model": "other-model"},
+        {"processingRegion": "us-east"},
+        {"policySha256": "e" * 64},
+        {"customerDataTrainingDisabled": False},
+        {"providerRetentionDisabled": False},
+    ],
+    ids=["provider", "model", "region", "policy", "training", "retention"],
+)
+def test_provider_rejects_signed_attestation_with_mismatched_policy_claims(
+    claim_override: dict[str, object],
+) -> None:
+    configuration = MeetingIntelligenceConfiguration(
+        enabled=True,
+        provider=ModelProvider.OPENAI,
+        api_key="test-key",
+        base_url="https://models.test/v1",
+        model="meeting-model",
+        processing_region="kr-central",
+        customer_data_training_disabled=True,
+        provider_retention_disabled=True,
+        **_attestation_fields(claim_override=claim_override),
+    )
+
+    capability = MeetingIntelligenceProvider(
+        configuration, allow_test_endpoint=True
+    ).capability()
+
+    assert capability.available is False
+    assert capability.customer_data_training_disabled is False
+    assert capability.provider_retention_disabled is False
+
+
+def test_provider_rejects_invalid_attestation_signature() -> None:
+    configuration = MeetingIntelligenceConfiguration(
+        enabled=True,
+        provider=ModelProvider.OPENAI,
+        api_key="test-key",
+        base_url="https://models.test/v1",
+        model="meeting-model",
+        processing_region="kr-central",
+        customer_data_training_disabled=True,
+        provider_retention_disabled=True,
+        **_attestation_fields(tamper_signature=True),
+    )
+
+    capability = MeetingIntelligenceProvider(
+        configuration, allow_test_endpoint=True
+    ).capability()
+
+    assert capability.available is False
+
+
+def test_provider_revalidates_attestation_expiry_before_each_model_egress(
+    monkeypatch,
+) -> None:
+    issued_at = 1_800_000_000
+    expires_at = issued_at + 300
+    configuration = MeetingIntelligenceConfiguration(
+        enabled=True,
+        provider=ModelProvider.OPENAI,
+        api_key="test-key",
+        base_url="https://models.test/v1",
+        model="meeting-model",
+        processing_region="kr-central",
+        customer_data_training_disabled=True,
+        provider_retention_disabled=True,
+        **_attestation_fields(issued_at=issued_at, expires_at=expires_at),
+    )
+    called = False
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        nonlocal called
+        called = True
+        return _model_response(_analysis())
+
+    provider = MeetingIntelligenceProvider(
+        configuration,
+        transport=httpx.MockTransport(handler),
+        allow_test_endpoint=True,
+    )
+    monkeypatch.setattr(
+        "dwp_agent.meeting_intelligence_attestation.time.time",
+        lambda: issued_at + 1,
+    )
+    assert provider.capability().available is True
+    monkeypatch.setattr(
+        "dwp_agent.meeting_intelligence_attestation.time.time",
+        lambda: expires_at,
+    )
+
+    with pytest.raises(MeetingIntelligenceUnavailable) as captured:
+        provider.analyze(
+            MeetingIntelligenceRequest.model_validate(_request()),
+            correlation_id="corr-meeting-1",
+            tenant_id=77,
+            meeting_id=MEETING_ID,
+            run_id=RUN_ID,
+        )
+
+    assert captured.value.code == "POLICY_BLOCKED"
+    assert called is False
 
 
 def test_provider_uses_zero_storage_and_untrusted_transcript_boundary() -> None:
@@ -350,13 +500,36 @@ def test_meeting_provider_does_not_inherit_general_model_credentials(monkeypatch
         },
         {
             "label": "ALIGNED",
-            "signals": ["BALANCED_TURN_TAKING", "BALANCED_TURN_TAKING"],
+            "signals": [
+                "CONSTRUCTIVE_DISAGREEMENT",
+                "CONSTRUCTIVE_DISAGREEMENT",
+            ],
+            "citations": [
+                {"segmentId": "seg-001", "startMillis": 1_000, "endMillis": 5_000}
+            ],
+        },
+        {
+            "label": "ALIGNED",
+            "signals": ["BALANCED_TURN_TAKING"],
+            "citations": [
+                {"segmentId": "seg-001", "startMillis": 1_000, "endMillis": 5_000}
+            ],
+        },
+        {
+            "label": "ALIGNED",
+            "signals": ["DOMINANT_MONOLOGUE_PATTERN"],
             "citations": [
                 {"segmentId": "seg-001", "startMillis": 1_000, "endMillis": 5_000}
             ],
         },
     ],
-    ids=["missing-low-evidence", "low-evidence-definitive", "duplicate-signals"],
+    ids=[
+        "missing-low-evidence",
+        "low-evidence-definitive",
+        "duplicate-signals",
+        "speaker-dependent-turn-taking",
+        "speaker-dependent-monologue",
+    ],
 )
 def test_provider_rejects_climate_contract_not_accepted_by_meeting(
     climate: dict[str, object],
@@ -441,10 +614,59 @@ def _provider(transport: httpx.BaseTransport | None = None) -> MeetingIntelligen
         processing_region="kr-central",
         customer_data_training_disabled=True,
         provider_retention_disabled=True,
+        **_attestation_fields(),
     )
     return MeetingIntelligenceProvider(
         configuration, transport=transport, allow_test_endpoint=True
     )
+
+
+def _attestation_fields(
+    *,
+    claim_override: dict[str, object] | None = None,
+    issued_at: int | None = None,
+    expires_at: int | None = None,
+    tamper_signature: bool = False,
+) -> dict[str, str]:
+    private_key = Ed25519PrivateKey.generate()
+    public_key = private_key.public_key().public_bytes(
+        encoding=serialization.Encoding.DER,
+        format=serialization.PublicFormat.SubjectPublicKeyInfo,
+    )
+    issued = int(time.time()) - 5 if issued_at is None else issued_at
+    expires = issued + 300 if expires_at is None else expires_at
+    payload: dict[str, object] = {
+        "v": 1,
+        "kid": ATTESTATION_KEY_ID,
+        "attestationId": str(uuid4()),
+        "providerCode": "OPENAI",
+        "model": "meeting-model",
+        "processingRegion": "kr-central",
+        "customerDataTrainingDisabled": True,
+        "providerRetentionDisabled": True,
+        "policySha256": APPROVED_POLICY_SHA256,
+        "issuedAt": issued,
+        "expiresAt": expires,
+    }
+    payload.update(claim_override or {})
+    encoded_payload = _base64url(
+        json.dumps(
+            payload, ensure_ascii=True, separators=(",", ":"), sort_keys=True
+        ).encode()
+    )
+    signature = private_key.sign(f"dwpa1.{encoded_payload}".encode("ascii"))
+    if tamper_signature:
+        signature = bytes([signature[0] ^ 1, *signature[1:]])
+    return {
+        "policy_attestation": f"dwpa1.{encoded_payload}.{_base64url(signature)}",
+        "attestation_public_key_base64": base64.b64encode(public_key).decode(),
+        "attestation_key_id": ATTESTATION_KEY_ID,
+        "approved_policy_sha256": APPROVED_POLICY_SHA256,
+    }
+
+
+def _base64url(value: bytes) -> str:
+    return base64.urlsafe_b64encode(value).rstrip(b"=").decode("ascii")
 
 
 def _model_analysis():
