@@ -3,11 +3,11 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
-import json
 import os
 from dataclasses import dataclass
 from typing import Any
 
+from .canonical_json import canonical_json_bytes
 from .key_provider import load_versioned_key_material, normalized_environment
 
 
@@ -34,7 +34,9 @@ class ProposalAnalysisFingerprints:
         return cls((os.urandom(32),))
 
     def source_revision(self, tenant_id: str | int, payload: dict[str, Any]) -> str:
-        return self._digest(tenant_id, "source-revision", _canonical(payload), 0)
+        return self._digest(
+            tenant_id, "source-revision", canonical_json_bytes(payload), 0
+        )
 
     def session(self, tenant_id: str | int, session_id: str) -> str:
         return self._digest(tenant_id, "auth-session", session_id.encode("utf-8"), 0)
@@ -54,14 +56,14 @@ class ProposalAnalysisFingerprints:
         return self._digest(
             tenant_id,
             "analysis-command",
-            _canonical({"locale": locale.strip().lower()}),
+            canonical_json_bytes({"locale": locale.strip().lower()}),
             0,
         )
 
     def matches_analysis_command(
         self, stored: str, tenant_id: str | int, *, locale: str
     ) -> bool:
-        payload = _canonical({"locale": locale.strip().lower()})
+        payload = canonical_json_bytes({"locale": locale.strip().lower()})
         return any(
             hmac.compare_digest(
                 stored,
@@ -76,7 +78,7 @@ class ProposalAnalysisFingerprints:
         return self._digest(
             tenant_id,
             "preference-command",
-            _canonical(
+            canonical_json_bytes(
                 {"enabled": enabled, "expectedRevision": expected_revision}
             ),
             0,
@@ -90,7 +92,7 @@ class ProposalAnalysisFingerprints:
         enabled: bool,
         expected_revision: int,
     ) -> bool:
-        payload = _canonical(
+        payload = canonical_json_bytes(
             {"enabled": enabled, "expectedRevision": expected_revision}
         )
         return any(
@@ -116,12 +118,3 @@ class ProposalAnalysisFingerprints:
             self.key_materials[key_index], context, hashlib.sha256
         ).digest()
         return hmac.new(purpose_key, payload, hashlib.sha256).hexdigest()
-
-
-def _canonical(payload: dict[str, Any]) -> bytes:
-    return json.dumps(
-        payload,
-        ensure_ascii=False,
-        separators=(",", ":"),
-        sort_keys=True,
-    ).encode("utf-8")

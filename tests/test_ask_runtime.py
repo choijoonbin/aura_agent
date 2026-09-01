@@ -187,7 +187,7 @@ def test_contended_request_does_not_create_an_orphan_conversation() -> None:
     assert conversation_store.list(tenant_id="1", user_id="7") == []
 
 
-def test_model_failure_preserves_azure_provider_in_audit_route() -> None:
+def test_model_failure_returns_a_cited_grounded_fallback() -> None:
     runtime = AskRuntime(
         context_broker=FakeBroker(),
         model_gateway=FailingAzureModel(),
@@ -203,9 +203,14 @@ def test_model_failure_preserves_azure_provider_in_audit_route() -> None:
         identity=identity("APP.ASK:VIEW", "APP.WORK:VIEW"),
     )
 
-    assert response.state == "ABSTAINED"
-    assert response.status_code == "MODEL_PROVIDER_UNAVAILABLE"
-    assert response.model_route.provider == "AZURE_OPENAI"
+    assert response.state == "COMPLETED"
+    assert response.status_code == "ANSWER_GROUNDED"
+    assert response.confidence == "LOW"
+    assert response.model_route.provider == "DWP_GROUNDED_FALLBACK"
+    assert response.model_route.model == "evidence-snapshot-v1"
+    assert response.answer is not None
+    assert "[src-01]" in response.answer
+    assert [citation.source_id for citation in response.citations] == ["src-01"]
 
 
 def test_approval_expert_is_permission_gated_and_forwarded_to_runtime_components(

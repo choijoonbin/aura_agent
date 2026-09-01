@@ -12,6 +12,7 @@ from .delegated_identity import (
     verify_delegated_identity,
 )
 from .policy import AskIdentity
+from .request_headers import normalized_header_values as header_values
 
 
 SERVICE_TOKEN_HEADER = "X-DWP-Service-Token"
@@ -84,12 +85,4 @@ def verified_ask_identity(
         correlation_id=correlation_id,
         person_public_id=person_public_id,
         display_name_b64=display_name_b64,
-    )
-
-
-def header_values(value: str | None) -> tuple[str, ...]:
-    if value is None:
-        return ()
-    return tuple(
-        sorted({item.strip().upper() for item in value.split(",") if item.strip()})
     )

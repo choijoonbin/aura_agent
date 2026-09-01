@@ -10,6 +10,7 @@ from uuid import uuid4
 
 from .audit import record_ask_run
 from .context_broker import ContextBrokerUnavailable, WorkspaceContextBroker
+from .grounded_fallback import grounded_evidence_fallback
 from .conversation_store import (
     ConversationStore,
     ConversationTurn,
@@ -328,7 +329,9 @@ class AskRuntime:
                 ),
                 None,
             )
-        except (GroundingViolation, ModelCallFailed) as error:
+        except ModelCallFailed:
+            model_answer = grounded_evidence_fallback(context, request.locale)
+        except GroundingViolation as error:
             return (
                 self._response(
                     request=request,

@@ -52,6 +52,7 @@ from .operational_gate_api import (
 from .governance_store import GovernanceStoreUnavailable
 from .meeting_intelligence_api import router as meeting_intelligence_router
 from .meeting_intelligence_body_limit import install_meeting_intelligence_body_limit
+from .local_governance_seed import seed_local_governance
 from .meeting_intelligence_provider import validate_meeting_intelligence_runtime_configuration
 from .product_surface_pep import install_product_surface_pep
 from .run_store import (
@@ -88,6 +89,7 @@ async def lifespan(_: FastAPI):
     validate_voice_runtime_configuration()
     validate_meeting_intelligence_runtime_configuration()
     initialize_database()
+    seed_local_governance()
     validate_delivery_gate_runtime()
     question_launch_maintenance.start()
     try:

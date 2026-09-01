@@ -10,6 +10,8 @@ import time
 from collections.abc import Mapping
 from uuid import UUID
 
+from .request_headers import normalized_header_values
+
 
 ASSERTION_HEADER = "X-DWP-Delegated-Identity"
 _SEGMENT = re.compile(r"^[A-Za-z0-9_-]+$")
@@ -67,12 +69,16 @@ def verify_delegated_identity(
         "cid": headers.get("X-Correlation-ID"),
         "htm": method.upper(),
         "htu": path,
-        "roles": list(_header_values(headers.get("X-DWP-Roles"))),
-        "permissions": list(_header_values(headers.get("X-DWP-Permissions"))),
+        "roles": list(normalized_header_values(headers.get("X-DWP-Roles"))),
+        "permissions": list(
+            normalized_header_values(headers.get("X-DWP-Permissions"))
+        ),
     }
     resource_roles_header = headers.get("X-DWP-Resource-Roles")
     if resource_roles_header is not None or "resourceRoles" in claims:
-        expected_claims["resourceRoles"] = list(_header_values(resource_roles_header))
+        expected_claims["resourceRoles"] = list(
+            normalized_header_values(resource_roles_header)
+        )
     for claim, expected_value in expected_claims.items():
         if claims.get(claim) != expected_value:
             raise DelegatedIdentityError("Delegated identity assertion does not match the request.")
@@ -104,12 +110,6 @@ def _integer_claim(claims: Mapping[str, object], name: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         raise DelegatedIdentityError("Delegated identity assertion is invalid.")
     return value
-
-
-def _header_values(value: str | None) -> tuple[str, ...]:
-    if value is None:
-        return ()
-    return tuple(sorted({item.strip().upper() for item in value.split(",") if item.strip()}))
 
 
 def _encode(value: bytes) -> str:

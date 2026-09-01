@@ -3,11 +3,11 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
-import json
 import os
 from dataclasses import dataclass
 from uuid import UUID
 
+from .canonical_json import canonical_json_bytes
 from .key_provider import load_versioned_key_material, normalized_environment
 from .proposal_contracts import CreateAgentProposalRequest, DecideAgentProposalRequest
 
@@ -97,7 +97,7 @@ class ProposalRequestFingerprints:
 def _create_payload(request: CreateAgentProposalRequest) -> bytes:
     payload = request.model_dump(mode="json", by_alias=True)
     payload.pop("commandId", None)
-    return _canonical(payload)
+    return canonical_json_bytes(payload)
 
 
 def _decision_payload(
@@ -106,13 +106,4 @@ def _decision_payload(
     payload = request.model_dump(mode="json", by_alias=True)
     payload.pop("commandId", None)
     payload["proposalId"] = str(proposal_id)
-    return _canonical(payload)
-
-
-def _canonical(payload: dict[str, object]) -> bytes:
-    return json.dumps(
-        payload,
-        ensure_ascii=False,
-        separators=(",", ":"),
-        sort_keys=True,
-    ).encode("utf-8")
+    return canonical_json_bytes(payload)

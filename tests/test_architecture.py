@@ -1,4 +1,6 @@
+import ast
 import hashlib
+from collections.abc import Iterable
 from pathlib import Path
 
 
@@ -94,7 +96,129 @@ def test_applied_migrations_are_immutable() -> None:
 def test_runtime_modules_stay_within_reviewable_size() -> None:
     oversized = {
         path.relative_to(ROOT): len(path.read_text(encoding="utf-8").splitlines())
-        for path in PACKAGE_ROOT.glob("*.py")
+        for path in PACKAGE_ROOT.rglob("*.py")
         if len(path.read_text(encoding="utf-8").splitlines()) > 500
     }
     assert oversized == {}
+
+
+def test_runtime_modules_have_no_import_time_cycles() -> None:
+    modules = {_module_name(path): path for path in PACKAGE_ROOT.rglob("*.py")}
+    graph = {
+        module: _top_level_dependencies(path, modules)
+        for module, path in modules.items()
+    }
+    cycles = _dependency_cycles(graph)
+
+    assert cycles == []
+
+
+def test_runtime_modules_are_reachable_from_application_entrypoint() -> None:
+    modules = {_module_name(path): path for path in PACKAGE_ROOT.rglob("*.py")}
+    graph = {
+        module: _all_dependencies(path, modules)
+        for module, path in modules.items()
+    }
+    entrypoints = {"dwp_agent", "dwp_agent.main"}
+
+    assert entrypoints <= modules.keys()
+    assert set(modules) - _reachable_modules(graph, entrypoints) == set()
+
+
+def _module_name(path: Path) -> str:
+    relative = path.relative_to(PACKAGE_ROOT).with_suffix("")
+    parts = list(relative.parts)
+    if parts[-1] == "__init__":
+        parts.pop()
+    return ".".join(("dwp_agent", *parts))
+
+
+def _top_level_dependencies(
+    path: Path, modules: dict[str, Path]
+) -> set[str]:
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    return _dependencies(path, modules, tree.body)
+
+
+def _all_dependencies(path: Path, modules: dict[str, Path]) -> set[str]:
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    return _dependencies(path, modules, ast.walk(tree))
+
+
+def _dependencies(
+    path: Path,
+    modules: dict[str, Path],
+    nodes: Iterable[ast.AST],
+) -> set[str]:
+    module = _module_name(path)
+    package = module if path.name == "__init__.py" else module.rpartition(".")[0]
+    dependencies: set[str] = set()
+    for node in nodes:
+        if isinstance(node, ast.Import):
+            dependencies.update(
+                alias.name for alias in node.names if alias.name in modules
+            )
+            continue
+        if not isinstance(node, ast.ImportFrom):
+            continue
+        target = node.module or ""
+        if node.level:
+            package_parts = package.split(".")
+            target_parts = package_parts[: len(package_parts) - node.level + 1]
+            if target:
+                target_parts.extend(target.split("."))
+            target = ".".join(target_parts)
+        if target in modules:
+            dependencies.add(target)
+        dependencies.update(
+            child
+            for alias in node.names
+            if (child := f"{target}.{alias.name}") in modules
+        )
+    dependencies.discard(module)
+    return dependencies
+
+
+def _reachable_modules(
+    graph: dict[str, set[str]], entrypoints: set[str]
+) -> set[str]:
+    reachable: set[str] = set()
+    pending = list(entrypoints)
+    while pending:
+        module = pending.pop()
+        if module in reachable:
+            continue
+        reachable.add(module)
+        pending.extend(graph[module] - reachable)
+    return reachable
+
+
+def _dependency_cycles(graph: dict[str, set[str]]) -> list[tuple[str, ...]]:
+    visited: set[str] = set()
+    active: list[str] = []
+    active_set: set[str] = set()
+    cycles: set[tuple[str, ...]] = set()
+
+    def visit(module: str) -> None:
+        if module in visited:
+            return
+        if module in active_set:
+            start = active.index(module)
+            cycle = active[start:]
+            rotations = [
+                tuple(cycle[index:] + cycle[:index])
+                for index in range(len(cycle))
+            ]
+            cycles.add(min(rotations))
+            return
+        active.append(module)
+        active_set.add(module)
+        for dependency in sorted(graph[module]):
+            visit(dependency)
+        active.pop()
+        active_set.remove(module)
+        visited.add(module)
+
+    for module in sorted(graph):
+        visit(module)
+    return sorted(cycles)

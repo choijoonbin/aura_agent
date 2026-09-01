@@ -170,13 +170,6 @@ Ask의 `requestId`는 2분 실행 임대로 보호됩니다. 활성 임대의 �
 합산 Deadline(기본 20초, 상한 24초)을 공유하고 Stream은 전체 40초, 기본 Worker 8개와
 대기 32개로 제한됩니다. Gateway의 Agent Runtime 제한은 45초입니다.
 
-메일 기반 AI는 `MailActionProposal` 계약으로만 회신 초안, 회의 일정, 휴가 신청, 업무,
-긴급 알림을 제안합니다. 모든 제안은 메시지 근거 Hash, 신뢰도, 위험도, 대상 앱의 리소스와
-필수 권한을 포함하며 `humanConfirmationRequired=true`,
-`automaticExecutionAllowed=false`가 강제됩니다. 제안을 수락해도 Calendar, HCM, Work 등
-대상 앱에서 현재 권한과 최종 입력을 다시 검증하기 전에는 업무 데이터가 변경되지 않습니다.
-계약 버전 1과 액션별 필수 Payload는 Agent와 Platform이 독립적으로 검증하므로 미지원 버전,
-권한 혼동, 불완전한 제안은 사용자에게 노출되기 전에 거부됩니다.
 DWAI·ON Action Shelf에서 담당 앱으로 넘기는 Preview는 서버가 검증한 Run·Request·
 Correlation·Conversation 출처를 `planHash`와 감사 Event에 포함합니다. Frontend는 서버가
 반환한 Handoff v2만 전달하며 누락되거나 변조된 출처와 이전 v1 Payload를 거부합니다.
