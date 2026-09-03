@@ -7,6 +7,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
 
+from .grounded_response_status import grounded_status_for_provider
+
 
 def to_camel(value: str) -> str:
     first, *rest = value.split("_")
@@ -309,7 +311,8 @@ class AskResponse(ContractModel):
                 raise ValueError("A completed Ask response requires an allowing policy decision.")
             if self.model_route.state != ModelRouteState.COMPLETED:
                 raise ValueError("A completed Ask response requires a completed model route.")
-            if self.status_code != "ANSWER_GROUNDED":
+            expected_status = grounded_status_for_provider(self.model_route.provider)
+            if self.status_code != expected_status:
                 raise ValueError("A completed Ask response must be grounded.")
         elif self.answer is not None or self.confidence is not None or self.citations:
             raise ValueError("A non-completed Ask response cannot expose an answer or citations.")

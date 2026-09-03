@@ -176,9 +176,21 @@ def _verify_legacy_reads(encryption: PayloadEncryption) -> None:
     legacy = encryption.legacy_keyring
     run_id = "00000000-0000-0000-0000-000000001201"
     request_id = "legacy-request"
-    response = response_for(run_id=run_id, request_id=request_id)
+    response = response_for(run_id=run_id, request_id=request_id).model_copy(
+        update={
+            "model_route": AskModelRoute(
+                state=ModelRouteState.COMPLETED,
+                provider="DWP_GROUNDED_FALLBACK",
+                model="evidence-snapshot-v1",
+            ),
+            "status_code": "ANSWER_GROUNDED_FALLBACK",
+            "confidence": AnswerConfidence.LOW,
+        }
+    )
+    legacy_response_payload = response.model_dump(mode="json", by_alias=True)
+    legacy_response_payload["statusCode"] = "ANSWER_GROUNDED"
     version, nonce, ciphertext = legacy.encrypt_bytes(
-        response.model_dump_json(by_alias=True).encode("utf-8"),
+        json.dumps(legacy_response_payload).encode("utf-8"),
         legacy_run_aad("943", "legacy-user", request_id, run_id),
     )
     conversation_id = UUID("00000000-0000-0000-0000-000000001202")
@@ -189,12 +201,17 @@ def _verify_legacy_reads(encryption: PayloadEncryption) -> None:
     )
     message = ConversationMessage(
         message_id=message_id,
-        role=ConversationRole.USER,
-        content="Legacy question",
+        role=ConversationRole.ASSISTANT,
+        content=response.answer or "Legacy grounded fallback",
+        run_id=UUID(run_id),
+        status_code="ANSWER_GROUNDED_FALLBACK",
+        citations=response.citations,
         created_at=datetime.now(timezone.utc),
     )
+    legacy_message_payload = message.model_dump(mode="json", by_alias=True)
+    legacy_message_payload["statusCode"] = "ANSWER_GROUNDED"
     message_version, message_nonce, message_ciphertext = legacy.encrypt_bytes(
-        message.model_dump_json(by_alias=True).encode("utf-8"),
+        json.dumps(legacy_message_payload).encode("utf-8"),
         legacy_message_aad(message_id),
     )
     evaluation_set_id = UUID("00000000-0000-0000-0000-000000001204")
@@ -222,11 +239,13 @@ def _verify_legacy_reads(encryption: PayloadEncryption) -> None:
             """INSERT INTO ai_agent_runs (
                    run_id, tenant_id, user_id, request_id, query_hash, agent_key,
                    agent_revision, run_state, answer_state, risk_tier, policy_outcome,
-                   status_code, locale, correlation_id, response_key_version,
+                   status_code, locale, provider, model, correlation_id,
+                   response_key_version,
                    response_nonce, response_ciphertext, completed_at, lease_generation)
                VALUES (%s, 943, 'legacy-user', %s, %s, 'DWP_ASSISTANT', 1,
                        'COMPLETED', 'COMPLETED', 'L1', 'ALLOW', 'ANSWER_GROUNDED',
-                       'ko-KR', 'legacy-correlation', %s, %s, %s,
+                       'ko-KR', 'DWP_GROUNDED_FALLBACK', 'evidence-snapshot-v1',
+                       'legacy-correlation', %s, %s, %s,
                        CURRENT_TIMESTAMP, 1)""",
             (UUID(run_id), request_id, "b" * 64, version, nonce, ciphertext),
         )
@@ -244,7 +263,7 @@ def _verify_legacy_reads(encryption: PayloadEncryption) -> None:
                    message_id, conversation_id, request_id, run_id, role,
                    payload_nonce, payload_ciphertext, encryption_key_version,
                    created_at, lease_generation)
-               VALUES (%s, %s, %s, %s, 'USER', %s, %s, %s, %s, 1)""",
+               VALUES (%s, %s, %s, %s, 'ASSISTANT', %s, %s, %s, %s, 1)""",
             (
                 message_id,
                 conversation_id,

@@ -23,6 +23,7 @@ from .conversation_store import (
 )
 from .conversation_exchange import build_exchange, exchange_matches
 from .envelope import KeyContext, PayloadEncryption
+from .grounded_response_status import normalize_legacy_grounded_status
 from .payload_contexts import (
     conversation_context,
     feedback_context,
@@ -103,7 +104,12 @@ class PostgresConversationStore:
         return tuple(
             ConversationTurn(
                 role=ConversationRole(row[1]),
-                content=self._message(tenant_id, conversation_id, row).content,
+                content=self._message(
+                    tenant_id,
+                    conversation_id,
+                    row,
+                    provider=str(row[6]) if row[6] is not None else None,
+                ).content,
             )
             for row in rows
         )
@@ -267,7 +273,12 @@ class PostgresConversationStore:
         return ConversationDetail(
             summary=self._summary_from_row(tenant_id, user_id, row),
             messages=[
-                self._message(tenant_id, conversation_id, item)
+                self._message(
+                    tenant_id,
+                    conversation_id,
+                    item,
+                    provider=str(item[6]) if item[6] is not None else None,
+                )
                 for item in self._message_rows(tenant_id, user_id, conversation_id, limit=200)
             ],
         )
@@ -388,7 +399,7 @@ class PostgresConversationStore:
             rows = connection.execute(
                 """SELECT message.message_id, message.role, message.payload_envelope,
                           message.payload_nonce, message.payload_ciphertext,
-                          message.encryption_key_version
+                          message.encryption_key_version, completed_run.provider
                      FROM ai_conversation_messages message
                      JOIN ai_agent_runs completed_run
                        ON completed_run.run_id = message.run_id
@@ -403,7 +414,12 @@ class PostgresConversationStore:
         return rows
 
     def _message(
-        self, tenant_id: str, conversation_id: UUID, row: tuple
+        self,
+        tenant_id: str,
+        conversation_id: UUID,
+        row: tuple,
+        *,
+        provider: str | None = None,
     ) -> ConversationMessage:
         message_id = UUID(str(row[0]))
         payload = self.encryption.decrypt_bytes(
@@ -414,7 +430,11 @@ class PostgresConversationStore:
             legacy_ciphertext=bytes(row[4]) if row[4] is not None else None,
             legacy_aad=legacy_message_aad(message_id),
         )
-        return ConversationMessage.model_validate_json(payload)
+        message = ConversationMessage.model_validate_json(payload)
+        normalized_status = normalize_legacy_grounded_status(provider, message.status_code)
+        if normalized_status == message.status_code:
+            return message
+        return message.model_copy(update={"status_code": normalized_status})
 
     def _summary_from_row(self, tenant_id: str, user_id: str, row: tuple) -> ConversationSummary:
         conversation_id = UUID(str(row[0]))

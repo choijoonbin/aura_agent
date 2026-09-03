@@ -14,6 +14,7 @@ from .contracts import AskResponse
 from .database_migrations import apply_migrations as _apply_migrations
 from .database_migrations import migration_sort_key as _migration_sort_key
 from .envelope import PayloadEncryption
+from .grounded_response_status import normalize_legacy_ask_response_payload
 from .payload_contexts import legacy_run_aad, run_context
 from .run_store_errors import RequestIdConflict, RunInProgress, RunStoreUnavailable
 from .run_store_crypto import PayloadCipher, load_payload_encryption, load_payload_keyring
@@ -232,7 +233,7 @@ class PostgresRunStore:
             legacy_ciphertext=bytes(row[2]) if row[2] is not None else None,
             legacy_aad=legacy_run_aad(tenant_id, user_id, request_id, str(row[0])),
         )
-        return AskResponse.model_validate_json(payload)
+        return AskResponse.model_validate_json(normalize_legacy_ask_response_payload(payload))
 
     def begin(self, start: RunStart) -> RunLease | None:
         with connect(self.database_url) as connection:

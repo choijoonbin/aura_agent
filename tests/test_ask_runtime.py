@@ -188,10 +188,13 @@ def test_contended_request_does_not_create_an_orphan_conversation() -> None:
 
 
 def test_model_failure_returns_a_cited_grounded_fallback() -> None:
+    run_store = InMemoryRunStore()
+    conversation_store = InMemoryConversationStore(run_store)
     runtime = AskRuntime(
         context_broker=FakeBroker(),
         model_gateway=FailingAzureModel(),
-        run_store=InMemoryRunStore(),
+        run_store=run_store,
+        conversation_store=conversation_store,
     )
 
     response = runtime.answer(
@@ -204,13 +207,20 @@ def test_model_failure_returns_a_cited_grounded_fallback() -> None:
     )
 
     assert response.state == "COMPLETED"
-    assert response.status_code == "ANSWER_GROUNDED"
+    assert response.status_code == "ANSWER_GROUNDED_FALLBACK"
     assert response.confidence == "LOW"
     assert response.model_route.provider == "DWP_GROUNDED_FALLBACK"
     assert response.model_route.model == "evidence-snapshot-v1"
     assert response.answer is not None
     assert "[src-01]" in response.answer
     assert [citation.source_id for citation in response.citations] == ["src-01"]
+    assert response.conversation_id is not None
+    detail = conversation_store.get(
+        tenant_id="1",
+        user_id="7",
+        conversation_id=response.conversation_id,
+    )
+    assert detail.messages[-1].status_code == "ANSWER_GROUNDED_FALLBACK"
 
 
 def test_approval_expert_is_permission_gated_and_forwarded_to_runtime_components(

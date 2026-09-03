@@ -11,6 +11,7 @@ from uuid import uuid4
 from .audit import record_ask_run
 from .context_broker import ContextBrokerUnavailable, WorkspaceContextBroker
 from .grounded_fallback import grounded_evidence_fallback
+from .grounded_response_status import grounded_status_for_provider
 from .conversation_store import (
     ConversationStore,
     ConversationTurn,
@@ -278,6 +279,7 @@ class AskRuntime:
             )
 
         _progress(on_progress, "REASONING")
+        fallback_used = False
         try:
             model_answer = self.model_gateway.generate(
                 request.query,
@@ -331,6 +333,7 @@ class AskRuntime:
             )
         except ModelCallFailed:
             model_answer = grounded_evidence_fallback(context, request.locale)
+            fallback_used = True
         except GroundingViolation as error:
             return (
                 self._response(
@@ -365,7 +368,9 @@ class AskRuntime:
             citations = []
         else:
             state = AskState.COMPLETED
-            status_code = "ANSWER_GROUNDED"
+            status_code = grounded_status_for_provider(
+                "DWP_GROUNDED_FALLBACK" if fallback_used else model_answer.provider
+            )
 
         return (
             self._response(

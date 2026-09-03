@@ -1,6 +1,13 @@
+import json
+
 from dwp_agent.context_broker import GroundedContext, GroundedSource
 from dwp_agent.contracts import AskCitation, CitationSourceType
 from dwp_agent.grounded_fallback import MAX_FALLBACK_SOURCES, grounded_evidence_fallback
+from dwp_agent.grounded_response_status import (
+    GROUNDED_FALLBACK_STATUS,
+    normalize_legacy_ask_response_payload,
+    normalize_legacy_grounded_status,
+)
 
 
 def test_grounded_fallback_is_bounded_localized_and_citation_complete() -> None:
@@ -83,3 +90,22 @@ def test_grounded_fallback_prioritizes_urgent_evidence_without_exposing_metadata
     assert "importance=" not in result.answer
     assert "priority=" not in result.answer
     assert "unread=" not in result.answer
+
+
+def test_legacy_fallback_status_is_normalized_only_for_the_fallback_provider() -> None:
+    legacy_payload = json.dumps(
+        {
+            "statusCode": "ANSWER_GROUNDED",
+            "modelRoute": {"provider": "DWP_GROUNDED_FALLBACK"},
+        }
+    ).encode("utf-8")
+
+    normalized = json.loads(normalize_legacy_ask_response_payload(legacy_payload))
+
+    assert normalized["statusCode"] == GROUNDED_FALLBACK_STATUS
+    assert normalize_legacy_grounded_status(
+        "DWP_GROUNDED_FALLBACK", "ANSWER_GROUNDED"
+    ) == GROUNDED_FALLBACK_STATUS
+    assert normalize_legacy_grounded_status(
+        "AZURE_OPENAI", "ANSWER_GROUNDED"
+    ) == "ANSWER_GROUNDED"
