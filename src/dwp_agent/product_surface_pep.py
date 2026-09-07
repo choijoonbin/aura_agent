@@ -34,6 +34,11 @@ OWNER_SERVICE = "dwp-agent-runtime"
 PAGE_ROUTE = "route.dwaion.work.home.page"
 DATA_ROUTE = "route.dwaion.work.conversation.data"
 ACTION_ROUTE = "route.dwaion.work.ask.action"
+RUNS_ROUTE = "route.dwaion.work.runs.data"
+RUN_DETAIL_ROUTE = "route.dwaion.work.run-detail.data"
+ACTIVITY_EVENTS_ROUTE = "route.dwaion.work.activity-events.data"
+ACTIVITY_EVENT_ROUTE = "route.dwaion.work.activity-event.data"
+ACTIVITY_SUMMARY_ROUTE = "route.dwaion.work.activity-summary.data"
 
 _ROLLOUT_STATES = {"000", "100", "110", "111"}
 _ROLLOUT_COHORTS = {
@@ -50,6 +55,8 @@ _CONTEXT = re.compile(r"^psc-[a-f0-9]{64}$")
 _ROLLOUT_REVISION = re.compile(r"^rollout-[a-f0-9]{64}$")
 _DECISION_REVISION = re.compile(r"^psr-[a-f0-9]{64}$")
 _DATA_CANDIDATE = re.compile(r"^/v1/conversations/([^/]+)$")
+_RUN_CANDIDATE = re.compile(r"^/v1/runs/([^/]+)$")
+_ACTIVITY_EVENT_CANDIDATE = re.compile(r"^/v1/activity/events/([^/]+)$")
 _UUID = re.compile(
     r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
     r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
@@ -83,8 +90,12 @@ class ProductSurfacePepMiddleware:
 
         headers = _headers(scope)
         state = _exact_header(headers, ROLLOUT_STATE_HEADER)
-        enabled = _enabled()
-        if state is None and not enabled and not _present(headers, ROLLOUT_STATE_HEADER):
+        any_version_enabled = _v4_enabled() or _v5_enabled()
+        if (
+            state is None
+            and not any_version_enabled
+            and not _present(headers, ROLLOUT_STATE_HEADER)
+        ):
             await self.app(scope, receive, send)
             return
 
@@ -107,17 +118,27 @@ class ProductSurfacePepMiddleware:
         if state[1] != "1":
             await self.app(scope, receive, send)
             return
-        if not enabled:
+        binding = resolve_binding(method, path)
+        if binding is None:
             await _reject(
                 scope,
                 receive,
                 send,
                 503,
-                "DWAI product authorization v4 is not ready for enforcement.",
+                "Trusted DWAI route binding is invalid.",
+            )
+            return
+        if not _enabled_for(binding):
+            await _reject(
+                scope,
+                receive,
+                send,
+                503,
+                f"DWAI product authorization v{binding.introduced_version} "
+                "is not ready for enforcement.",
             )
             return
 
-        binding = resolve_binding(method, path)
         route = _exact_header(headers, ROUTE_HEADER)
         context = _exact_header(headers, CONTEXT_HEADER)
         selected_scope = _exact_header(headers, SCOPE_HEADER)
@@ -163,7 +184,7 @@ class ProductSurfacePepMiddleware:
             or roles is None
             or any(role.startswith("PROVIDER_") for role in roles)
             or permissions is None
-            or "APP.ASK:VIEW" not in permissions
+            or not binding.required_permissions.issubset(permissions)
         ):
             await _reject(scope, receive, send, 403, "The exact DWAI authority is missing.")
             return
@@ -219,9 +240,17 @@ class ProductSurfacePepMiddleware:
 
 
 class Binding:
-    def __init__(self, route_contract_key: str, route_kind: str) -> None:
+    def __init__(
+        self,
+        route_contract_key: str,
+        route_kind: str,
+        required_permissions: frozenset[str] = frozenset({"APP.ASK:VIEW"}),
+        introduced_version: int = 4,
+    ) -> None:
         self.route_contract_key = route_contract_key
         self.route_kind = route_kind
+        self.required_permissions = required_permissions
+        self.introduced_version = introduced_version
 
 
 def install_product_surface_pep(app: FastAPI) -> None:
@@ -231,24 +260,70 @@ def install_product_surface_pep(app: FastAPI) -> None:
 def owns_candidate(method: str, path: str) -> bool:
     if method == "POST" and path == "/v1/ask":
         return True
-    if method == "GET" and path == "/v1/conversations":
+    if method != "GET":
+        return False
+    if path in {
+        "/v1/conversations",
+        "/v1/runs",
+        "/v1/activity/events",
+        "/v1/activity/executions/summary",
+    }:
         return True
-    return method == "GET" and _DATA_CANDIDATE.fullmatch(path) is not None
+    return any(
+        pattern.fullmatch(path) is not None
+        for pattern in (_DATA_CANDIDATE, _RUN_CANDIDATE, _ACTIVITY_EVENT_CANDIDATE)
+    )
 
 
 def resolve_binding(method: str, path: str) -> Binding | None:
     if method == "POST" and path == "/v1/ask":
         return Binding(ACTION_ROUTE, "ACTION")
+    if method != "GET":
+        return None
     if method == "GET" and path == "/v1/conversations":
         return Binding(PAGE_ROUTE, "PAGE")
-    match = _DATA_CANDIDATE.fullmatch(path) if method == "GET" else None
+    if path == "/v1/runs":
+        return Binding(RUNS_ROUTE, "DATA", introduced_version=5)
+    if path == "/v1/activity/events":
+        return Binding(
+            ACTIVITY_EVENTS_ROUTE,
+            "DATA",
+            frozenset({"APP.ASK:VIEW", "APP.ACTIVITY:VIEW"}),
+            introduced_version=5,
+        )
+    if path == "/v1/activity/executions/summary":
+        return Binding(
+            ACTIVITY_SUMMARY_ROUTE,
+            "DATA",
+            frozenset({"APP.ASK:VIEW", "APP.ACTIVITY:VIEW"}),
+            introduced_version=5,
+        )
+    match = _DATA_CANDIDATE.fullmatch(path)
+    route = DATA_ROUTE
+    required_permissions = frozenset({"APP.ASK:VIEW"})
+    if match is None:
+        match = _RUN_CANDIDATE.fullmatch(path)
+        route = RUN_DETAIL_ROUTE
+        introduced_version = 5
+    else:
+        introduced_version = 4
+    if match is None:
+        match = _ACTIVITY_EVENT_CANDIDATE.fullmatch(path)
+        route = ACTIVITY_EVENT_ROUTE
+        required_permissions = frozenset({"APP.ASK:VIEW", "APP.ACTIVITY:VIEW"})
+        introduced_version = 5
     if match is None or _UUID.fullmatch(match.group(1)) is None:
         return None
     try:
         UUID(match.group(1))
     except ValueError:
         return None
-    return Binding(DATA_ROUTE, "DATA")
+    return Binding(
+        route,
+        "DATA",
+        required_permissions,
+        introduced_version=introduced_version,
+    )
 
 
 def self_scope_key(tenant_id: int, user_id: int) -> str:
@@ -258,13 +333,27 @@ def self_scope_key(tenant_id: int, user_id: int) -> str:
     return "scope-" + hashlib.sha256(material).hexdigest()[:32]
 
 
-def _enabled() -> bool:
-    return os.getenv("DWP_AGENT_PRODUCT_AUTHORIZATION_V4_ENABLED", "false").strip().lower() in {
+def _flag_enabled(name: str) -> bool:
+    return os.getenv(name, "false").strip().lower() in {
         "1",
         "true",
         "yes",
         "on",
     }
+
+
+def _v4_enabled() -> bool:
+    return _flag_enabled("DWP_AGENT_PRODUCT_AUTHORIZATION_V4_ENABLED")
+
+
+def _v5_enabled() -> bool:
+    return _flag_enabled("DWP_AGENT_PRODUCT_AUTHORIZATION_V5_ENABLED")
+
+
+def _enabled_for(binding: Binding) -> bool:
+    if binding.introduced_version == 5:
+        return _v5_enabled()
+    return _v4_enabled() or _v5_enabled()
 
 
 def _headers(scope: dict[str, Any]) -> dict[str, list[str]]:

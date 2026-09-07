@@ -1,13 +1,18 @@
 from __future__ import annotations
 
 from typing import Annotated
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Response, status
 
 from .policy import AskIdentity
 from .security import header_values, require_gateway_service
 from .security import verified_ask_identity
-from .user_run_contracts import AgentRunState, UserAgentRunListEnvelope
+from .user_run_contracts import (
+    AgentRunState,
+    UserAgentRunEnvelope,
+    UserAgentRunListEnvelope,
+)
 from .user_run_store import UserRunStoreUnavailable, get_user_run_store
 
 
@@ -54,3 +59,36 @@ def list_user_runs(
         ) from error
     response.headers["Cache-Control"] = "no-store"
     return UserAgentRunListEnvelope(data=runs)
+
+
+@router.get(
+    "/{run_id}",
+    response_model=UserAgentRunEnvelope,
+    response_model_by_alias=True,
+    dependencies=[Depends(require_run_access)],
+)
+def get_user_run(
+    run_id: UUID,
+    identity: Annotated[AskIdentity, Depends(verified_ask_identity)],
+    response: Response,
+) -> UserAgentRunEnvelope:
+    try:
+        run = get_user_run_store().get(
+            tenant_id=identity.tenant_id,
+            user_id=identity.user_id,
+            run_id=run_id,
+        )
+    except UserRunStoreUnavailable as error:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(error),
+            headers={"Cache-Control": "no-store"},
+        ) from error
+    if run is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Agent run is unavailable.",
+            headers={"Cache-Control": "no-store"},
+        )
+    response.headers["Cache-Control"] = "no-store"
+    return UserAgentRunEnvelope(data=run)

@@ -1,0 +1,169 @@
+{
+  "schemaVersion": 1,
+  "projectionKey": "dwaion-pep-v5-draft",
+  "registryRef": {
+    "bundleKey": "product-surfaces",
+    "version": 5,
+    "bundleStatus": "DRAFT",
+    "checksum": "c69816a06349fcbd45a0d946debfbce1d67e09b3ed87a8b056ec8a43f852109f"
+  },
+  "policyId": "P-DWAION",
+  "ownerServiceKey": "agent",
+  "ownerServiceModule": "dwp-agent-runtime",
+  "productId": "dwaion",
+  "surfaceKey": "dwaion.work",
+  "activation": {
+    "enabledByDefault": false,
+    "readinessEnvironment": "DWP_AGENT_PRODUCT_AUTHORIZATION_V5_ENABLED"
+  },
+  "accessPolicy": {
+    "accessPolicyKey": "dwaion.work-access.v1",
+    "resolvedAuthority": "APP.ASK:VIEW",
+    "scopeResolver": "SELF",
+    "activeAccessModes": ["NORMAL", "ELEVATED"]
+  },
+  "activityCapability": {
+    "capabilityContractKey": "dwaion.work.activity.read",
+    "resolvedAuthority": "APP.ACTIVITY:VIEW",
+    "requiresProductEntitlement": "APP.ASK:VIEW",
+    "scopeResolver": "SELF"
+  },
+  "routes": [
+    {
+      "routeContractKey": "route.dwaion.work.home.page",
+      "routeKind": "PAGE",
+      "accessContractKey": "dwaion.work-access.v1",
+      "resolvedAuthority": "APP.ASK:VIEW",
+      "readOnly": true,
+      "targetKind": "SELF",
+      "gatewayBinding": {
+        "method": "GET",
+        "path": "/api/agent/v1/conversations"
+      },
+      "servicePepBinding": {
+        "serviceKey": "agent",
+        "method": "GET",
+        "path": "/v1/conversations"
+      }
+    },
+    {
+      "routeContractKey": "route.dwaion.work.conversation.data",
+      "routeKind": "DATA",
+      "accessContractKey": "dwaion.work-access.v1",
+      "resolvedAuthority": "APP.ASK:VIEW",
+      "readOnly": true,
+      "targetKind": "SELF",
+      "gatewayBinding": {
+        "method": "GET",
+        "path": "/api/agent/v1/conversations/{conversationId}"
+      },
+      "servicePepBinding": {
+        "serviceKey": "agent",
+        "method": "GET",
+        "path": "/v1/conversations/{conversationId}"
+      }
+    },
+    {
+      "routeContractKey": "route.dwaion.work.ask.action",
+      "routeKind": "ACTION",
+      "accessContractKey": "dwaion.work.ask.execute",
+      "resolvedAuthority": "APP.ASK:VIEW",
+      "readOnly": false,
+      "targetKind": "SELF",
+      "gatewayBinding": {
+        "method": "POST",
+        "path": "/api/agent/v1/ask"
+      },
+      "servicePepBinding": {
+        "serviceKey": "agent",
+        "method": "POST",
+        "path": "/v1/ask"
+      }
+    },
+    {
+      "routeContractKey": "route.dwaion.work.runs.data",
+      "routeKind": "DATA",
+      "accessContractKey": "dwaion.work-access.v1",
+      "resolvedAuthority": "APP.ASK:VIEW",
+      "readOnly": true,
+      "targetKind": "SELF",
+      "gatewayBinding": {
+        "method": "GET",
+        "path": "/api/agent/v1/runs"
+      },
+      "servicePepBinding": {
+        "serviceKey": "agent",
+        "method": "GET",
+        "path": "/v1/runs"
+      }
+    },
+    {
+      "routeContractKey": "route.dwaion.work.run-detail.data",
+      "routeKind": "DATA",
+      "accessContractKey": "dwaion.work-access.v1",
+      "resolvedAuthority": "APP.ASK:VIEW",
+      "readOnly": true,
+      "targetKind": "SELF",
+      "gatewayBinding": {
+        "method": "GET",
+        "path": "/api/agent/v1/runs/{runId}"
+      },
+      "servicePepBinding": {
+        "serviceKey": "agent",
+        "method": "GET",
+        "path": "/v1/runs/{runId}"
+      }
+    },
+    {
+      "routeContractKey": "route.dwaion.work.activity-events.data",
+      "routeKind": "DATA",
+      "accessContractKey": "dwaion.work.activity.read",
+      "resolvedAuthority": "APP.ASK:VIEW+APP.ACTIVITY:VIEW",
+      "readOnly": true,
+      "targetKind": "SELF",
+      "gatewayBinding": {
+        "method": "GET",
+        "path": "/api/agent/v1/activity/events"
+      },
+      "servicePepBinding": {
+        "serviceKey": "agent",
+        "method": "GET",
+        "path": "/v1/activity/events"
+      }
+    },
+    {
+      "routeContractKey": "route.dwaion.work.activity-event.data",
+      "routeKind": "DATA",
+      "accessContractKey": "dwaion.work.activity.read",
+      "resolvedAuthority": "APP.ASK:VIEW+APP.ACTIVITY:VIEW",
+      "readOnly": true,
+      "targetKind": "SELF",
+      "gatewayBinding": {
+        "method": "GET",
+        "path": "/api/agent/v1/activity/events/{eventId}"
+      },
+      "servicePepBinding": {
+        "serviceKey": "agent",
+        "method": "GET",
+        "path": "/v1/activity/events/{eventId}"
+      }
+    },
+    {
+      "routeContractKey": "route.dwaion.work.activity-summary.data",
+      "routeKind": "DATA",
+      "accessContractKey": "dwaion.work.activity.read",
+      "resolvedAuthority": "APP.ASK:VIEW+APP.ACTIVITY:VIEW",
+      "readOnly": true,
+      "targetKind": "SELF",
+      "gatewayBinding": {
+        "method": "GET",
+        "path": "/api/agent/v1/activity/executions/summary"
+      },
+      "servicePepBinding": {
+        "serviceKey": "agent",
+        "method": "GET",
+        "path": "/v1/activity/executions/summary"
+      }
+    }
+  ]
+}

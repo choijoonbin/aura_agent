@@ -36,3 +36,10 @@ class UserAgentRunListEnvelope(ContractModel):
     message: str = "Agent activity loaded."
     success: bool = True
     data: list[UserAgentRunSummary]
+
+
+class UserAgentRunEnvelope(ContractModel):
+    status: str = "SUCCESS"
+    message: str = "Agent run loaded."
+    success: bool = True
+    data: UserAgentRunSummary

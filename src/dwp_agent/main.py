@@ -52,8 +52,11 @@ from .operational_gate_api import (
 from .governance_store import GovernanceStoreUnavailable
 from .meeting_intelligence_api import router as meeting_intelligence_router
 from .meeting_intelligence_body_limit import install_meeting_intelligence_body_limit
+from .meeting_media_api import router as meeting_media_router
+from .meeting_media_body_limit import install_meeting_media_body_limit
 from .local_governance_seed import seed_local_governance
 from .meeting_intelligence_provider import validate_meeting_intelligence_runtime_configuration
+from .meeting_media_provider import validate_meeting_media_runtime_configuration
 from .product_surface_pep import install_product_surface_pep
 from .run_store import (
     RequestIdConflict,
@@ -67,6 +70,12 @@ from .stream_runtime import (
 )
 from .system_api import build_system_router
 from .user_run_api import router as user_run_router
+from .activity_api import router as activity_router
+from .artifact_api import router as artifact_router
+from .domain_retention_api import admin_router as domain_retention_admin_router
+from .domain_retention_api import router as domain_retention_router
+from .personal_memory_api import router as personal_memory_router
+from .personal_routine_api import router as personal_routine_router
 from .voice_api import router as voice_router
 from .voice_provider import validate_voice_runtime_configuration
 from .workspace_authorization import resolve_workspace_request_authorization
@@ -88,6 +97,7 @@ async def lifespan(_: FastAPI):
     validate_runtime_configuration()
     validate_voice_runtime_configuration()
     validate_meeting_intelligence_runtime_configuration()
+    validate_meeting_media_runtime_configuration()
     initialize_database()
     seed_local_governance()
     validate_delivery_gate_runtime()
@@ -102,6 +112,7 @@ async def lifespan(_: FastAPI):
 app = FastAPI(title=SERVICE_NAME, version=SERVICE_VERSION, lifespan=lifespan)
 install_api_history(app)
 install_meeting_intelligence_body_limit(app)
+install_meeting_media_body_limit(app)
 install_product_surface_pep(app)
 install_operational_gate_problem_handler(app)
 app.include_router(
@@ -115,8 +126,15 @@ app.include_router(action_router)
 app.include_router(question_launch_router)
 app.include_router(proposal_router)
 app.include_router(user_run_router)
+app.include_router(activity_router)
 app.include_router(voice_router)
 app.include_router(meeting_intelligence_router)
+app.include_router(meeting_media_router)
+app.include_router(personal_routine_router)
+app.include_router(personal_memory_router)
+app.include_router(artifact_router)
+app.include_router(domain_retention_router)
+app.include_router(domain_retention_admin_router)
 
 
 def require_operational_delivery(

@@ -4,13 +4,14 @@ import hashlib
 import hmac
 import os
 import threading
-from dataclasses import dataclass
 from typing import Protocol
 from uuid import UUID
 
 from psycopg import connect
 
 from .contracts import AskResponse
+from .in_memory_run_store import InMemoryRunStore
+from .run_store_types import RunLease, RunStart
 from .database_migrations import apply_migrations as _apply_migrations
 from .database_migrations import migration_sort_key as _migration_sort_key
 from .envelope import PayloadEncryption
@@ -28,27 +29,6 @@ from .run_lease_persistence import (
     is_completed_run,
     require_active_run,
 )
-
-@dataclass(frozen=True)
-class RunStart:
-    run_id: str
-    tenant_id: str
-    user_id: str
-    request_id: str
-    query_hash: str
-    agent_key: str
-    agent_revision: int
-    risk_tier: str
-    policy_outcome: str
-    locale: str
-    correlation_id: str
-
-
-@dataclass(frozen=True)
-class RunLease:
-    run_id: str
-    generation: int
-
 
 class RunStore(Protocol):
     def load(
@@ -91,106 +71,6 @@ class RunStore(Protocol):
 
     def fail(self, lease: RunLease, safe_error_code: str) -> None: ...
 
-
-class InMemoryRunStore:
-    def __init__(self) -> None:
-        self._responses: dict[tuple[str, str, str], AskResponse] = {}
-        self._pending: dict[tuple[str, str, str], RunLease] = {}
-        self._run_keys: dict[str, tuple[str, str, str]] = {}
-        self._completed_leases: dict[str, RunLease] = {}
-        self._canonical_runs: dict[tuple[str, str, str], RunLease] = {}
-        self._query_hashes: dict[tuple[str, str, str], str] = {}
-        self._lock = threading.Lock()
-
-    def load(
-        self,
-        tenant_id: str,
-        user_id: str,
-        request_id: str,
-        query_hash: str,
-    ) -> AskResponse | None:
-        key = (tenant_id, user_id, request_id)
-        with self._lock:
-            existing_hash = self._query_hashes.get(key)
-            if existing_hash is not None and not hmac.compare_digest(existing_hash, query_hash):
-                raise RequestIdConflict("The request ID was already used for another query.")
-            return self._responses.get(key)
-
-    def begin(self, start: RunStart) -> RunLease | None:
-        key = (start.tenant_id, start.user_id, start.request_id)
-        with self._lock:
-            existing_hash = self._query_hashes.get(key)
-            if existing_hash is not None and not hmac.compare_digest(
-                existing_hash, start.query_hash
-            ):
-                raise RequestIdConflict("The request ID was already used for another query.")
-            if key in self._responses or key in self._pending:
-                return None
-            previous = self._canonical_runs.get(key)
-            lease = RunLease(
-                run_id=previous.run_id if previous else start.run_id,
-                generation=previous.generation + 1 if previous else 1,
-            )
-            self._pending[key] = lease
-            self._run_keys[lease.run_id] = key
-            self._canonical_runs[key] = lease
-            self._query_hashes[key] = start.query_hash
-            return lease
-
-    def require_active(
-        self,
-        lease: RunLease,
-        *,
-        tenant_id: str,
-        user_id: str,
-        request_id: str,
-    ) -> None:
-        key = (tenant_id, user_id, request_id)
-        with self._lock:
-            if self._run_keys.get(lease.run_id) != key or self._pending.get(key) != lease:
-                raise RunStoreUnavailable("Agent run lease is no longer owned.")
-
-    def is_completed(
-        self,
-        lease: RunLease,
-        *,
-        tenant_id: str,
-        user_id: str,
-        request_id: str,
-    ) -> bool:
-        key = (tenant_id, user_id, request_id)
-        with self._lock:
-            response = self._responses.get(key)
-            return bool(
-                response
-                and response.run_id == lease.run_id
-                and self._completed_leases.get(lease.run_id) == lease
-            )
-
-    def complete(
-        self,
-        response: AskResponse,
-        *,
-        lease: RunLease,
-        tenant_id: str,
-        user_id: str,
-        provider_request_hash: str | None = None,
-    ) -> None:
-        key = (tenant_id, user_id, response.request_id)
-        with self._lock:
-            if response.run_id != lease.run_id or self._pending.get(key) != lease:
-                raise RunStoreUnavailable("Agent run lease is no longer owned.")
-            self._responses[key] = response
-            self._completed_leases[lease.run_id] = lease
-            self._pending.pop(key, None)
-            self._run_keys.pop(lease.run_id, None)
-
-    def fail(self, lease: RunLease, safe_error_code: str) -> None:
-        with self._lock:
-            key = self._run_keys.get(lease.run_id)
-            if key is not None and self._pending.get(key) == lease:
-                self._run_keys.pop(lease.run_id, None)
-                self._pending.pop(key, None)
 
 class PostgresRunStore:
     def __init__(self, database_url: str, encryption: PayloadEncryption) -> None:

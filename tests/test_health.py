@@ -75,7 +75,7 @@ def test_readiness_reports_a_runtime_database_failure(
     assert health.json()["status"] == "unavailable"
 
 
-def test_public_openapi_contains_system_and_plan_preview_api_only() -> None:
+def test_public_openapi_contains_only_explicit_runtime_apis() -> None:
     response = asyncio.run(get("/openapi.json"))
 
     assert response.status_code == 200
@@ -96,11 +96,41 @@ def test_public_openapi_contains_system_and_plan_preview_api_only() -> None:
         "/v1/conversations",
         "/v1/conversations/{conversation_id}",
         "/v1/runs",
+        "/v1/runs/{run_id}",
+        "/v1/activity/events",
+        "/v1/activity/events/{event_id}",
+        "/v1/activity/executions/summary",
         "/v1/runs/{run_id}/feedback",
         "/v1/voice/transcriptions",
         "/v1/voice/speech",
         "/v1/actions",
         "/v1/actions/{action_key}/preview",
+        "/v1/routines",
+        "/v1/routines/{routine_id}",
+        "/v1/routines/{routine_id}/archive",
+        "/v1/routines/{routine_id}/consent",
+        "/v1/routines/{routine_id}/dry-runs",
+        "/v1/routines/{routine_id}/lifecycle",
+        "/v1/ai-controls",
+        "/v1/ai-controls/sources/{source_key}",
+        "/v1/ai-controls/memories",
+        "/v1/ai-controls/memories/{memory_id}",
+        "/v1/ai-controls/memories/{memory_id}/state",
+        "/v1/ai-controls/memories/{memory_id}/delete",
+        "/v1/artifacts",
+        "/v1/artifacts/{artifact_id}",
+        "/v1/artifacts/{artifact_id}/draft",
+        "/v1/artifacts/{artifact_id}/versions",
+        "/v1/artifacts/{artifact_id}/versions/{version_number}",
+        "/v1/artifacts/{artifact_id}/preflights/current",
+        "/v1/artifacts/{artifact_id}/preflights",
+        "/v1/artifacts/{artifact_id}/publish",
+        "/v1/artifacts/{artifact_id}/exports",
+        "/v1/personal-data/retention",
+        "/v1/personal-data/capabilities",
+        "/v1/personal-data/deletions",
+        "/v1/personal-data/deletions/{deletion_job_id}",
+        "/v1/admin/personal-data/retention/{domain}",
         "/v1/admin/overview",
         "/v1/admin/proposals",
         "/v1/admin/retention",

@@ -164,6 +164,54 @@ uv run python scripts/export_openapi.py --check
 
 ## 5. 보존 및 Legal Hold
 
+### 공통 활동의 DWAI·ON 원천 조회 경계
+
+- `/v1/activity/events`, `/v1/activity/events/{event_id}` 및
+  `/v1/activity/executions/summary`는 기존 Gateway 서명 Identity 경계를 사용하는
+  읽기 전용 원천 API입니다. `TENANT` Plane에서 `APP.ACTIVITY:VIEW`와 `APP.ASK:VIEW`를
+  모두 요구하고 Provider Role·Support Session·Support Access Mode를 거부합니다.
+  Platform이 Agent 원장을 직접 조회하거나 별도 Service Token으로 사용자 권한을 대체하지 않습니다.
+- 이 API는 Product Authorization v5의 정확 Gateway/Service Route Contract로 등록되어
+  있습니다. Activity 읽기 Route는 DWAI·ON 제품 권한 `APP.ASK:VIEW`와 별도
+  `APP.ACTIVITY:VIEW` capability를 모두 요구합니다. `110`/`111`에서는 Gateway가 발급한
+  정확 Route·Context·SELF Scope·현재 Decision 증거가 하나라도 없거나 다른 Route의
+  증거가 재사용되면 `503`/`403`으로 실패 차단합니다. `000`/`100`에서도 기존
+  Tenant·Owner·Source 권한 검증은 유지됩니다.
+- 기존 v4 projection은 최초 3개 DWAI.ON Route만 포함한 채 byte-immutable하게 유지됩니다.
+  신규 5개 읽기 Route는 `DWP_AGENT_PRODUCT_AUTHORIZATION_V5_ENABLED`가 명시적으로
+  준비된 경우에만 `110`/`111` enforcement를 통과하며, v4 readiness만으로는 열리지 않습니다.
+- `/v1/runs`와 `/v1/runs/{run_id}`도 동일한 SELF Route Contract 아래 등록됩니다.
+  단건 조회는 최신 목록 한도와 독립적이며, Tenant와 사용자 소유권이 맞지 않거나 삭제된
+  실행은 동일한 `404`로 처리하고 질문·답변·인용 원문을 반환하지 않습니다.
+- 자료는 불변 이벤트 이력이 아니라 `ai_agent_runs`의 **현재 실행 Snapshot**입니다.
+  `coverage.semantics=CURRENT_EXECUTION_SNAPSHOTS`, `sourceScope=DWAI_ON`을 명시하며
+  과거 Attempt별 전이 이력·Outbox·외부 업무 처리·자동 Agent 실행은 제공하지 않습니다.
+  `occurredAt`은 최초 실행 생성 시각이고 `updatedAt`은 알려진 완료 시각이며,
+  `sourceObservedAt`은 해당 현재 상태를 조회한 시각입니다. 실행 중 재시도 시작 시각을
+  추측해 생성하지 않습니다.
+- `executionId`와 Event ID는 안정된 원장 Run UUID입니다. `attempt`는 Fenced Lease
+  Generation이며 `executionVersion=2*max(1,generation)+terminalBit`는 중복·지연 응답의
+  역행을 막는 원천 버전입니다. terminalBit는 저장된 `run_state != RUNNING`만 반영하며
+  시계 경과나 조회만으로 버전을 증가시키지 않습니다. 임대가 만료된 `RUNNING`은 원장 변경 없이 `UNKNOWN`으로
+  투영하고 실행 중 집계에서 제외합니다. 재시도는 같은 Run ID와 더 높은 Generation을 사용합니다.
+- 목록은 `(created_at DESC, run_id DESC)` Keyset과 신규 생성 Watermark를 사용합니다.
+  `snapshotAt`은 신규 Run 유입만 제한하며 과거 상태의 불변 Snapshot을 보장하지 않습니다.
+  상태·검색 필터는 각 읽기 시점의 원장 현재값을 평가합니다. 완전한 시점별 Audit Export가 아닙니다.
+  페이지의 `startCursor`와 각 행의 `resumeCursor`는 Tenant·Owner·필터·Watermark·마지막
+  위치에 HMAC으로 결속되고 한 시간 후 만료됩니다. 서명 Key는 기존 Identity Secret 또는
+  Service Token에서 목적 분리해 파생하며 고정·빈 Key 대체를 하지 않습니다.
+- Summary는 페이지 제한과 무관하게 동일 사용자의 전체 해당 원장 행을 집계합니다.
+  질문·답변·대화명·Citation·암호문·임의 Correlation 문자열은 조회·복호화·응답하지 않습니다.
+  실제 감사 수신 증거를 원장에서 결속할 수 없으므로 `auditStatus=NOT_LINKED`, 감사 ID는
+  `null`입니다. 원천 장애는 `503`이고 빈 목록이나 최신 상태로 위장하지 않습니다.
+- 메모리 모드는 동일 Executor의 실제 begin/complete/fail 상태를 읽습니다. DB 설정 변경만으로
+  실행 중인 프로세스의 조회 원장을 바꾸지 않으며 Source 전환은 정상 재시작 뒤에 수행합니다.
+
+전용 `*_test`, `*_integration` 또는 `*_verify` PostgreSQL에서
+`DWP_AGENT_INTEGRATION_DATABASE_URL`을 지정하고 `tests/test_activity_source.py`를 실행합니다.
+동일 Run 재시도·오래된 Worker 완료/실패 차단·메모리/DB 동등성·페이지 밖 실행 집계·Cursor
+변조/타인 재사용·원천 권한 회수·임대 만료·Product v5 Fail-closed를 릴리스 증적으로 확인합니다.
+
 Tenant 정책은 `ai_conversation_retention_policies`가 단일 원장입니다. 기본 보존 기간은
 90일이며 30일에서 3650일 범위만 허용합니다. Legal Hold가 활성화된 Tenant는 자동
 만료와 사용자 삭제를 모두 차단합니다.
@@ -187,6 +235,14 @@ Key Material과 원문 질문·답변·Source ID·Service Token은 로그에 남
 
 ## 7. 검증 증적
 
+- 2026-09-04: clean PostgreSQL에서 `V1`~`V30` Migration을 적용하고 Agent 전체 회귀
+  `352 passed`, `23 skipped`를 확인했습니다. `V23`~`V30`의 개인 보존·삭제 Outbox,
+  명시적 동의 기반 `DRY_RUN_ONLY` 루틴, 개인 Memory·Source Preference, mutable Draft와
+  immutable Artifact Version·Reference, 최신 Preflight 결속, Export Request Receipt,
+  동의 정합성 및 불변 증거 제약을 포함합니다. Python Compileall, Runtime OpenAPI Snapshot,
+  모든 Runtime Python 모듈 500줄 이하도 통과했습니다. 검증용 Scratch DB는 삭제했습니다.
+  이는 background scheduler, managed KMS, connector verifier, 조직 DLP, 파일 Export Worker,
+  물리 삭제 실행기의 운영 활성화를 의미하지 않습니다.
 - 2026-08-27: Local/Shared Key Provider Fail-closed, Java/Python Canonical Envelope Golden
   Fixture, Startup Cryptographic Probe와 clean PostgreSQL 전체 Agent 통합 테스트
   `221 passed`, Skip 0을 확인했습니다. 이 결과는 로컬 Key Provider 회귀 증적이며
