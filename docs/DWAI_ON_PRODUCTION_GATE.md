@@ -202,8 +202,15 @@ uv run python scripts/export_openapi.py --check
   Service Token에서 목적 분리해 파생하며 고정·빈 Key 대체를 하지 않습니다.
 - Summary는 페이지 제한과 무관하게 동일 사용자의 전체 해당 원장 행을 집계합니다.
   질문·답변·대화명·Citation·암호문·임의 Correlation 문자열은 조회·복호화·응답하지 않습니다.
-  실제 감사 수신 증거를 원장에서 결속할 수 없으므로 `auditStatus=NOT_LINKED`, 감사 ID는
-  `null`입니다. 원천 장애는 `503`이고 빈 목록이나 최신 상태로 위장하지 않습니다.
+  V31은 opaque Agent audit ID와 여기서 계산한 결정적 UUIDv5 `auditRecordId`를 Run에
+  저장하지만, 이 값은 중앙 감사 레코드의 조회 주소일 뿐 실제 수신·검증 증거가 아닙니다.
+  현재 Publisher는 중앙 원장의 Ingestion Acknowledgement를 받지 않으므로 정상 Run의
+  `auditStatus`와 Run 상세의 `auditEvidence.status`는 `PENDING`입니다. 실제 중앙 Receipt는
+  Platform `/v1/workspace/activity/audit/evidence/{auditRecordId}`에서 Tenant·Actor·Source·Target을
+  다시 검사해 별도로 확인하며, 아직 수집되지 않았으면 `404`입니다. Checkpoint 무결성도
+  Platform Evidence의 `integrityStatus`만 사용하고 Agent가 `LINKED`나 `VERIFIED`를 합성하지
+  않습니다. 감사 Tuple이 없는 이전 Run만 `NOT_LINKED`/`null`로 남습니다. 원천 장애는
+  `503`이고 빈 목록이나 최신 상태로 위장하지 않습니다.
 - 메모리 모드는 동일 Executor의 실제 begin/complete/fail 상태를 읽습니다. DB 설정 변경만으로
   실행 중인 프로세스의 조회 원장을 바꾸지 않으며 Source 전환은 정상 재시작 뒤에 수행합니다.
 

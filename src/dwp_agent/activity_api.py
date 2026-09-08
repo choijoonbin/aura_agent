@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 
 from .activity_contracts import (
     ActivityEvent, ActivityEventEnvelope, ActivityPage, ActivityPageEnvelope,
@@ -73,6 +73,11 @@ def _event(row: ActivityRunSnapshot, *, now: datetime, locale: str, resume_curso
         object_label=row.agent_key, source_route=f"/dwaion/activity?run={row.run_id}",
         source_event_id=str(row.run_id), object_id=str(row.run_id), execution_id=str(row.run_id),
         execution_version=row.execution_version(now), attempt=max(1, row.generation),
+        progress=row.progress_percent,
+        audit_id=row.audit_id,
+        audit_record_id=row.audit_record_id,
+        audit_status=row.audit_link_state or "NOT_LINKED",
+        data_provenance=row.data_provenance,
         resume_cursor=resume_cursor, source_observed_at=now,
         updated_at=row.completed_at,
     )
@@ -80,7 +85,7 @@ def _event(row: ActivityRunSnapshot, *, now: datetime, locale: str, resume_curso
 
 @router.get("/events", response_model=ActivityPageEnvelope, response_model_by_alias=True)
 def list_activity_events(
-    identity: Annotated[AskIdentity, Depends(verified_ask_identity)], response: Response,
+    identity: Annotated[AskIdentity, Depends(verified_ask_identity)],
     filters: Annotated[ActivityFilters, Depends(activity_filters)],
     locale: Annotated[str, Header(alias="Accept-Language")] = "en",
     limit: Annotated[int, Query(ge=1, le=100)] = 50,
@@ -103,7 +108,6 @@ def list_activity_events(
         raise HTTPException(400, str(error)) from error
     except ActivityStoreUnavailable as error:
         raise HTTPException(503, str(error)) from error
-    response.headers["Cache-Control"] = "no-store"
     return ActivityPageEnvelope(data=ActivityPage(
         events=events, generated_at=now, snapshot_at=snapshot_at, start_cursor=start_cursor,
         next_cursor=events[-1].resume_cursor if has_more and events else None, has_more=has_more))
@@ -111,7 +115,7 @@ def list_activity_events(
 
 @router.get("/events/{event_id}", response_model=ActivityEventEnvelope, response_model_by_alias=True)
 def activity_event_detail(
-    event_id: UUID, identity: Annotated[AskIdentity, Depends(verified_ask_identity)], response: Response,
+    event_id: UUID, identity: Annotated[AskIdentity, Depends(verified_ask_identity)],
     locale: Annotated[str, Header(alias="Accept-Language")] = "en",
 ) -> ActivityEventEnvelope:
     try:
@@ -120,13 +124,12 @@ def activity_event_detail(
         raise HTTPException(503, str(error)) from error
     if row is None:
         raise HTTPException(404, "Agent execution is unavailable.")
-    response.headers["Cache-Control"] = "no-store"
     return ActivityEventEnvelope(data=_event(row, now=datetime.now(timezone.utc), locale=locale))
 
 
 @router.get("/executions/summary", response_model=ExecutionSummaryEnvelope, response_model_by_alias=True)
 def activity_execution_summary(
-    identity: Annotated[AskIdentity, Depends(verified_ask_identity)], response: Response,
+    identity: Annotated[AskIdentity, Depends(verified_ask_identity)],
     filters: Annotated[ActivityFilters, Depends(activity_filters)],
 ) -> ExecutionSummaryEnvelope:
     now = datetime.now(timezone.utc)
@@ -135,7 +138,6 @@ def activity_execution_summary(
                                                   filters=filters, now=now)
     except ActivityStoreUnavailable as error:
         raise HTTPException(503, str(error)) from error
-    response.headers["Cache-Control"] = "no-store"
     return ExecutionSummaryEnvelope(data=ExecutionSummary(
         total=sum(counts.values()), running=counts.get("RUNNING", 0), needs_input=counts.get("NEEDS_INPUT", 0),
         policy_blocked=counts.get("POLICY_BLOCKED", 0), completed=counts.get("COMPLETED", 0),

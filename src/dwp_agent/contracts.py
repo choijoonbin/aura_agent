@@ -212,7 +212,23 @@ class AskRequest(ContractModel):
     @model_validator(mode="after")
     def normalize_source_scopes(self) -> "AskRequest":
         self.source_scopes = list(dict.fromkeys(self.source_scopes))
+        selected = self.page_context.selected_work if self.page_context else None
+        if selected is not None:
+            approval = selected.source_system.startswith("APPROVAL_")
+            scope = CitationSourceType(selected.source_system) if approval else CitationSourceType.WORK_ITEM
+            agent = "DWP_APPROVAL_EXPERT" if approval else "DWP_ASSISTANT"
+            if self.source_scopes != [scope] or self.agent_key != agent:
+                raise ValueError("Selected work must use its exact source scope and read-only agent.")
         return self
+
+
+class AskSelectedWork(ContractModel):
+    source_system: Literal[
+        "PERSONAL_TASK", "SERVICE_REQUEST", "APPROVAL_TASK", "APPROVAL_REQUEST", "WORKSPACE"
+    ]
+    source_reference: UUID
+    expected_version: int = Field(ge=0, strict=True)
+    obligation_key: str | None = Field(default=None, max_length=128)
 
 
 class AskPageContext(ContractModel):
@@ -221,6 +237,18 @@ class AskPageContext(ContractModel):
     surface: str | None = Field(default=None, max_length=100)
     entity_type: str | None = Field(default=None, max_length=80)
     entity_ref: str | None = Field(default=None, max_length=256)
+    selected_work: AskSelectedWork | None = None
+
+    @model_validator(mode="after")
+    def validate_selected_work(self) -> "AskPageContext":
+        if (self.surface == "selected-work-assist") != (self.selected_work is not None):
+            raise ValueError("Selected work requires the selected-work-assist surface and binding.")
+        if self.selected_work is not None and (
+            self.entity_type != self.selected_work.source_system
+            or self.entity_ref != str(self.selected_work.source_reference)
+        ):
+            raise ValueError("Selected work must match the page entity reference.")
+        return self
 
 
 class AskPolicyDecision(ContractModel):
@@ -297,6 +325,7 @@ class AskResponse(ContractModel):
     conversation_id: UUID | None = None
     user_message_id: UUID | None = None
     assistant_message_id: UUID | None = None
+    selected_work: AskSelectedWork | None = None
 
     @model_validator(mode="after")
     def validate_answer_state(self) -> "AskResponse":
@@ -346,6 +375,8 @@ class ConversationMessage(ContractModel):
         pattern=r"^[A-Z][A-Z0-9_.-]{2,127}$",
     )
     citations: list[AskCitation] = Field(default_factory=list, max_length=20)
+    agent_key: str = Field(default="DWP_ASSISTANT", max_length=80)
+    selected_work: AskSelectedWork | None = None
     created_at: datetime
 
 

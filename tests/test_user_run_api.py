@@ -12,6 +12,7 @@ import dwp_agent.user_run_api as user_run_api_module
 from dwp_agent.contracts import AskState, PolicyOutcome, RiskTier
 from dwp_agent.main import app
 from dwp_agent.user_run_contracts import AgentRunState, UserAgentRunSummary
+from dwp_agent.user_run_store import UserRunStoreUnavailable
 
 
 SERVICE_TOKEN = "test-gateway-service-token"
@@ -96,8 +97,12 @@ def test_user_activity_is_scoped_to_verified_identity_and_bounded(
 
     assert response.status_code == 200
     assert store.received == ("42", "user-7", 100, AgentRunState.COMPLETED)
-    assert response.headers["Cache-Control"] == "no-store"
+    assert response.headers["Cache-Control"] == "private, no-store, max-age=0"
     assert response.json()["data"][0]["runId"] == str(RUN_ID)
+    assert response.json()["data"][0]["activityTitle"] == "DWAI·ON Agent execution"
+    assert response.json()["data"][0]["attempt"] == 1
+    assert response.json()["data"][0]["measurementStatus"] == "NOT_AVAILABLE"
+    assert response.json()["data"][0]["auditEvidence"]["status"] == "NOT_AVAILABLE"
     assert "query" not in response.text.lower()
     assert "ciphertext" not in response.text.lower()
 
@@ -112,6 +117,7 @@ def test_user_activity_requires_dwaion_permission(
     response = asyncio.run(request(permissions="APP.WORK:VIEW"))
 
     assert response.status_code == 403
+    assert response.headers["Cache-Control"] == "private, no-store, max-age=0"
 
 
 def test_user_run_detail_is_independent_and_owner_scoped(
@@ -124,7 +130,7 @@ def test_user_run_detail_is_independent_and_owner_scoped(
 
     assert response.status_code == 200
     assert store.received_get == ("42", "user-7", RUN_ID)
-    assert response.headers["Cache-Control"] == "no-store"
+    assert response.headers["Cache-Control"] == "private, no-store, max-age=0"
     assert response.json()["data"]["runId"] == str(RUN_ID)
     assert "query" not in response.text.lower()
     assert "ciphertext" not in response.text.lower()
@@ -140,7 +146,7 @@ def test_user_run_detail_hides_missing_or_foreign_runs(
     response = asyncio.run(request(path=f"/v1/runs/{RUN_ID}"))
 
     assert response.status_code == 404
-    assert response.headers["Cache-Control"] == "no-store"
+    assert response.headers["Cache-Control"] == "private, no-store, max-age=0"
     assert store.received_get == ("42", "user-7", RUN_ID)
 
 
@@ -156,4 +162,56 @@ def test_user_run_detail_requires_dwaion_permission(
     ))
 
     assert response.status_code == 403
+    assert response.headers["Cache-Control"] == "private, no-store, max-age=0"
     assert store.received_get is None
+
+
+def test_user_run_store_unavailable_responses_are_private_no_store(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class UnavailableUserRunStore(FakeUserRunStore):
+        def list(
+            self,
+            *,
+            tenant_id: str,
+            user_id: str,
+            limit: int,
+            run_state: AgentRunState | None,
+        ) -> list[UserAgentRunSummary]:
+            raise UserRunStoreUnavailable("Run source unavailable.")
+
+        def get(
+            self,
+            *,
+            tenant_id: str,
+            user_id: str,
+            run_id: UUID,
+        ) -> UserAgentRunSummary | None:
+            raise UserRunStoreUnavailable("Run source unavailable.")
+
+    monkeypatch.setattr(
+        user_run_api_module,
+        "get_user_run_store",
+        lambda: UnavailableUserRunStore(),
+    )
+
+    for path in ("/v1/runs", f"/v1/runs/{RUN_ID}"):
+        response = asyncio.run(request(path=path))
+        assert response.status_code == 503
+        assert response.headers["Cache-Control"] == "private, no-store, max-age=0"
+
+
+def test_user_run_validation_and_unknown_route_are_private_no_store(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        user_run_api_module, "get_user_run_store", lambda: FakeUserRunStore()
+    )
+
+    invalid_state = asyncio.run(request(path="/v1/runs?state=INVALID"))
+    unknown_route = asyncio.run(request(path="/v1/runs/not/a/route"))
+
+    assert invalid_state.status_code == 422
+    assert invalid_state.headers["Cache-Control"] == "private, no-store, max-age=0"
+    assert unknown_route.status_code == 404
+    assert unknown_route.headers["Cache-Control"] == "private, no-store, max-age=0"

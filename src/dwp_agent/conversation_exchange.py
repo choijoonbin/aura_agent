@@ -25,6 +25,8 @@ def build_exchange(
             run_id=UUID(response.run_id),
             status_code=response.status_code,
             citations=response.citations,
+            agent_key=response.agent_registry.entry_key,
+            selected_work=response.selected_work,
             created_at=created_at + timedelta(microseconds=1),
         ),
     )
@@ -49,4 +51,6 @@ def exchange_matches(
         and assistant.run_id == UUID(response.run_id)
         and assistant.status_code == response.status_code
         and assistant.citations == response.citations
+        and assistant.agent_key == response.agent_registry.entry_key
+        and assistant.selected_work == response.selected_work
     )

@@ -55,6 +55,7 @@ from .meeting_intelligence_body_limit import install_meeting_intelligence_body_l
 from .meeting_media_api import router as meeting_media_router
 from .meeting_media_body_limit import install_meeting_media_body_limit
 from .local_governance_seed import seed_local_governance
+from .local_activity_seed import seed_local_activity
 from .meeting_intelligence_provider import validate_meeting_intelligence_runtime_configuration
 from .meeting_media_provider import validate_meeting_media_runtime_configuration
 from .product_surface_pep import install_product_surface_pep
@@ -76,9 +77,11 @@ from .domain_retention_api import admin_router as domain_retention_admin_router
 from .domain_retention_api import router as domain_retention_router
 from .personal_memory_api import router as personal_memory_router
 from .personal_routine_api import router as personal_routine_router
+from .private_no_store import install_private_no_store
 from .voice_api import router as voice_router
 from .voice_provider import validate_voice_runtime_configuration
 from .workspace_authorization import resolve_workspace_request_authorization
+from .conversation_continuation import verify_conversation_agent
 from .security import header_values, require_gateway_service, verified_ask_identity
 from .runtime_policy import (
     RuntimeGovernanceNotConfigured,
@@ -100,6 +103,7 @@ async def lifespan(_: FastAPI):
     validate_meeting_media_runtime_configuration()
     initialize_database()
     seed_local_governance()
+    seed_local_activity()
     validate_delivery_gate_runtime()
     question_launch_maintenance.start()
     try:
@@ -114,6 +118,7 @@ install_api_history(app)
 install_meeting_intelligence_body_limit(app)
 install_meeting_media_body_limit(app)
 install_product_surface_pep(app)
+install_private_no_store(app)
 install_operational_gate_problem_handler(app)
 app.include_router(
     build_system_router(service_name=SERVICE_NAME, service_version=SERVICE_VERSION)
@@ -298,11 +303,13 @@ def get_conversation(
     conversation_id: UUID,
     user_id: Annotated[str, Header(alias="X-DWP-User-ID", min_length=1)],
     tenant_id: Annotated[str, Header(alias="X-DWP-Tenant-ID", min_length=1)],
+    agentKey: str | None = None,
 ) -> ConversationEnvelope:
     try:
         detail = get_conversation_store().get(
             tenant_id=tenant_id, user_id=user_id, conversation_id=conversation_id
         )
+        verify_conversation_agent(detail, agentKey)
         return ConversationEnvelope(data=detail)
     except ConversationNotFound as error:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(error)) from error

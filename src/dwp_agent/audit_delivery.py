@@ -62,7 +62,12 @@ class DurableAuditPublisher:
         if not files:
             return True
         try:
-            events = [json.loads(path.read_text(encoding="utf-8")) for path in files]
+            events = [
+                self._normalize_legacy_outcome(
+                    json.loads(path.read_text(encoding="utf-8"))
+                )
+                for path in files
+            ]
             request = urllib.request.Request(
                 self.collector_url,
                 data=json.dumps(events, separators=(",", ":")).encode("utf-8"),
@@ -82,6 +87,12 @@ class DurableAuditPublisher:
         except (OSError, ValueError, urllib.error.URLError) as error:
             LOGGER.warning("Audit collector delivery deferred; error=%s", type(error).__name__)
             return False
+
+    @staticmethod
+    def _normalize_legacy_outcome(event: object) -> object:
+        if isinstance(event, dict) and event.get("outcome") == "FAILURE":
+            return {**event, "outcome": "FAILED"}
+        return event
 
     def _start_worker(self) -> None:
         if self._started:

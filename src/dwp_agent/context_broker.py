@@ -1,60 +1,27 @@
 from __future__ import annotations
 
-import json
 import os
 import re
-from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from time import monotonic_ns
 from typing import Any
 
 import httpx
 
 from .approval_context import collect_approval_context
+from .grounded_context import ContextBrokerUnavailable, GroundedContext, GroundedSource
+from .selected_work_context import collect_selected_work
 from .contracts import AskCitation, AskPageContext, CitationSourceType
 from .policy import AskIdentity, contains_privileged_data, contains_prompt_injection
 from .workspace_authorization import WorkspaceRequestAuthorization
-
+from .run_observability import (
+    RunSourceHealthStatus,
+    SourceHealthObservation,
+)
 
 MAX_SOURCES = 12
 MAX_EVIDENCE_TEXT = 1_200
 TOKEN_PATTERN = re.compile(r"[0-9A-Za-z가-힣]{2,}")
-
-
-class ContextBrokerUnavailable(RuntimeError):
-    pass
-
-
-@dataclass(frozen=True)
-class GroundedSource:
-    citation: AskCitation
-    evidence: str
-    rank: int
-
-
-@dataclass(frozen=True)
-class GroundedContext:
-    sources: tuple[GroundedSource, ...]
-    attempted_sources: tuple[str, ...]
-    unavailable_sources: tuple[str, ...]
-
-    def model_evidence(self) -> str:
-        documents = [
-            {
-                "sourceId": source.citation.source_id,
-                "sourceType": source.citation.source_type,
-                "sourceSystem": source.citation.source_system,
-                "title": source.citation.title,
-                "occurredAt": (
-                    source.citation.occurred_at.isoformat()
-                    if source.citation.occurred_at is not None
-                    else None
-                ),
-                "evidence": source.evidence,
-            }
-            for source in self.sources
-        ]
-        return json.dumps(documents, ensure_ascii=False, separators=(",", ":"))
-
 
 class WorkspaceContextBroker:
     def __init__(
@@ -99,6 +66,12 @@ class WorkspaceContextBroker:
         page_context: AskPageContext | None = None,
         workspace_authorization: WorkspaceRequestAuthorization | None = None,
     ) -> GroundedContext:
+        if page_context is not None and page_context.selected_work is not None:
+            return collect_selected_work(
+                page_context.selected_work, identity=identity, locale=locale,
+                gateway_url=self.gateway_url, authorization=workspace_authorization,
+                transport=self.transport,
+            )
         approval_expert = agent_key.strip().upper() == "DWP_APPROVAL_EXPERT"
         if approval_expert:
             if not self.approval_url or not self.approval_service_token:
@@ -111,6 +84,7 @@ class WorkspaceContextBroker:
         candidates: list[dict[str, Any]] = []
         attempted: list[str] = []
         unavailable: list[str] = []
+        source_health: list[SourceHealthObservation] = []
         identity_headers = {
             "X-DWP-User-ID": identity.user_id,
             "X-DWP-Tenant-ID": identity.tenant_id,
@@ -127,7 +101,8 @@ class WorkspaceContextBroker:
 
         with httpx.Client(transport=self.transport, timeout=3.0) as client:
             if approval_expert:
-                approval_candidates, approval_attempted, approval_unavailable = collect_approval_context(
+                (approval_candidates, approval_attempted,
+                 approval_unavailable, approval_health) = collect_approval_context(
                     client,
                     approval_url=self.approval_url,
                     permissions=permissions,
@@ -141,19 +116,27 @@ class WorkspaceContextBroker:
                 candidates.extend(approval_candidates)
                 attempted.extend(approval_attempted)
                 unavailable.extend(approval_unavailable)
+                source_health.extend(approval_health)
             elif (
                 CitationSourceType.WORK_ITEM in requested_scopes
                 and "APP.WORK:VIEW" in permissions
             ):
                 attempted.append("WORK_ITEM")
+                started = monotonic_ns()
                 try:
                     response = client.get(
                         f"{self.platform_url}/v1/workspace/work-items",
                         headers={**identity_headers, "X-DWP-Service-Token": self.service_token},
                     )
                     candidates.extend(self._work_items(response))
+                    source_health.append(_source_observation(
+                        "WORK_ITEM", RunSourceHealthStatus.SUCCESS, _elapsed_ms(started)
+                    ))
                 except (httpx.HTTPError, ValueError, KeyError, TypeError):
                     unavailable.append("WORK_ITEM")
+                    source_health.append(_source_observation(
+                        "WORK_ITEM", RunSourceHealthStatus.UNAVAILABLE, _elapsed_ms(started)
+                    ))
 
             if (
                 not approval_expert
@@ -161,6 +144,7 @@ class WorkspaceContextBroker:
                 and "APP.MAIL:VIEW" in permissions
             ):
                 attempted.append("MAIL")
+                started = monotonic_ns()
                 try:
                     response = client.get(
                         f"{self.platform_url}/v1/mail/threads",
@@ -168,8 +152,14 @@ class WorkspaceContextBroker:
                         params={"page": 0, "pageSize": 50},
                     )
                     candidates.extend(self._mail_threads(response))
+                    source_health.append(_source_observation(
+                        "MAIL", RunSourceHealthStatus.SUCCESS, _elapsed_ms(started)
+                    ))
                 except (httpx.HTTPError, ValueError, KeyError, TypeError):
                     unavailable.append("MAIL")
+                    source_health.append(_source_observation(
+                        "MAIL", RunSourceHealthStatus.UNAVAILABLE, _elapsed_ms(started)
+                    ))
 
             if (
                 not approval_expert
@@ -183,7 +173,11 @@ class WorkspaceContextBroker:
                     or not workspace_authorization.available
                 ):
                     unavailable.append("CALENDAR")
+                    source_health.append(_source_observation(
+                        "CALENDAR", RunSourceHealthStatus.NOT_CONFIGURED, None
+                    ))
                 else:
+                    started = monotonic_ns()
                     try:
                         now = datetime.now(timezone.utc)
                         response = client.get(
@@ -201,8 +195,14 @@ class WorkspaceContextBroker:
                             },
                         )
                         candidates.extend(self._calendar_events(response))
+                        source_health.append(_source_observation(
+                            "CALENDAR", RunSourceHealthStatus.SUCCESS, _elapsed_ms(started)
+                        ))
                     except (httpx.HTTPError, ValueError, KeyError, TypeError):
                         unavailable.append("CALENDAR")
+                        source_health.append(_source_observation(
+                            "CALENDAR", RunSourceHealthStatus.UNAVAILABLE, _elapsed_ms(started)
+                        ))
 
         query_tokens = _tokens(query)
         ranked = sorted(
@@ -237,6 +237,7 @@ class WorkspaceContextBroker:
             sources=sources,
             attempted_sources=tuple(attempted),
             unavailable_sources=tuple(unavailable),
+            source_health=tuple(source_health),
         )
 
     def _work_items(self, response: httpx.Response) -> list[dict[str, Any]]:
@@ -439,3 +440,20 @@ def _datetime(value: Any) -> datetime | None:
         return datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:
         return None
+
+
+def _elapsed_ms(started: int) -> int:
+    return max(0, (monotonic_ns() - started) // 1_000_000)
+
+
+def _source_observation(
+    source_type: str,
+    status: RunSourceHealthStatus,
+    latency_ms: int | None,
+) -> SourceHealthObservation:
+    return SourceHealthObservation(
+        source_type=source_type,
+        status=status,
+        observed_at=datetime.now(timezone.utc),
+        latency_ms=latency_ms,
+    )

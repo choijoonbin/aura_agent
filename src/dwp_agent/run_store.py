@@ -12,6 +12,17 @@ from psycopg import connect
 from .contracts import AskResponse
 from .in_memory_run_store import InMemoryRunStore
 from .run_store_types import RunLease, RunStart
+from .run_observability import (
+    RunStageKey,
+    SourceHealthObservation,
+    audit_record_id,
+)
+from .postgres_run_observability import (
+    advance_stage as advance_postgres_stage,
+    finish_attempt_stage,
+    record_source_health as record_postgres_source_health,
+    start_stage,
+)
 from .database_migrations import apply_migrations as _apply_migrations
 from .database_migrations import migration_sort_key as _migration_sort_key
 from .envelope import PayloadEncryption
@@ -58,6 +69,16 @@ class RunStore(Protocol):
         user_id: str,
         request_id: str,
     ) -> bool: ...
+
+    def advance_stage(
+        self, lease: RunLease, *, tenant_id: str, user_id: str,
+        request_id: str, stage: RunStageKey,
+    ) -> None: ...
+
+    def record_source_health(
+        self, lease: RunLease, *, tenant_id: str, user_id: str,
+        request_id: str, observations: tuple[SourceHealthObservation, ...],
+    ) -> None: ...
 
     def complete(
         self,
@@ -122,9 +143,10 @@ class PostgresRunStore:
                 INSERT INTO ai_agent_runs (
                     run_id, tenant_id, user_id, request_id, query_hash,
                     agent_key, agent_revision, run_state, risk_tier, policy_outcome,
-                    locale, correlation_id, lease_expires_at, lease_generation)
+                    locale, correlation_id, lease_expires_at, lease_generation,
+                    current_audit_id, audit_record_id, audit_link_state)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, 'RUNNING', %s, %s, %s, %s,
-                        CURRENT_TIMESTAMP + INTERVAL '2 minutes', 1)
+                        CURRENT_TIMESTAMP + INTERVAL '2 minutes', 1, %s, %s, %s)
                 ON CONFLICT (tenant_id, user_id, request_id) DO NOTHING
                 RETURNING run_id, lease_generation
                 """,
@@ -140,9 +162,13 @@ class PostgresRunStore:
                     start.policy_outcome,
                     start.locale,
                     start.correlation_id,
+                    start.audit_id,
+                    audit_record_id(start.audit_id) if start.audit_id else None,
+                    "PENDING" if start.audit_id else None,
                 ),
             ).fetchone()
             if row is not None:
+                start_stage(connection, str(row[0]), int(row[1]))
                 return RunLease(run_id=str(row[0]), generation=int(row[1]))
 
             existing = connection.execute(
@@ -173,7 +199,9 @@ class PostgresRunStore:
                        response_key_version = NULL, response_nonce = NULL,
                        response_ciphertext = NULL, completed_at = NULL,
                        lease_expires_at = CURRENT_TIMESTAMP + INTERVAL '2 minutes',
-                       lease_generation = lease_generation + 1
+                       lease_generation = lease_generation + 1,
+                       current_audit_id = %s, audit_record_id = %s,
+                       audit_link_state = %s, data_provenance = 'LIVE'
                  WHERE run_id = %s
                    AND (run_state = 'FAILED'
                         OR (run_state = 'RUNNING' AND lease_expires_at <= CURRENT_TIMESTAMP))
@@ -186,14 +214,16 @@ class PostgresRunStore:
                     start.policy_outcome,
                     start.locale,
                     start.correlation_id,
+                    start.audit_id,
+                    audit_record_id(start.audit_id) if start.audit_id else None,
+                    "PENDING" if start.audit_id else None,
                     existing[0],
                 ),
             ).fetchone()
-            return (
-                RunLease(run_id=str(retry[0]), generation=int(retry[1]))
-                if retry is not None
-                else None
-            )
+            if retry is None:
+                return None
+            start_stage(connection, str(retry[0]), int(retry[1]))
+            return RunLease(run_id=str(retry[0]), generation=int(retry[1]))
 
     def require_active(
         self,
@@ -230,6 +260,34 @@ class PostgresRunStore:
             request_id=request_id,
         )
 
+    def advance_stage(
+        self,
+        lease: RunLease,
+        *,
+        tenant_id: str,
+        user_id: str,
+        request_id: str,
+        stage: RunStageKey,
+    ) -> None:
+        advance_postgres_stage(
+            self.database_url, lease, tenant_id=tenant_id, user_id=user_id,
+            request_id=request_id, stage=stage,
+        )
+
+    def record_source_health(
+        self,
+        lease: RunLease,
+        *,
+        tenant_id: str,
+        user_id: str,
+        request_id: str,
+        observations: tuple[SourceHealthObservation, ...],
+    ) -> None:
+        record_postgres_source_health(
+            self.database_url, lease, tenant_id=tenant_id, user_id=user_id,
+            request_id=request_id, observations=observations,
+        )
+
     def complete(
         self,
         response: AskResponse,
@@ -246,6 +304,7 @@ class PostgresRunStore:
             run_context(tenant_id, response.run_id),
         )
         route = response.model_route
+        record_id = audit_record_id(response.audit_id)
         with connect(self.database_url) as connection:
             updated = connection.execute(
                 """
@@ -264,10 +323,16 @@ class PostgresRunStore:
                        response_key_version = NULL,
                        response_nonce = NULL,
                        response_ciphertext = NULL,
-                       completed_at = %s, lease_expires_at = NULL
+                       completed_at = %s, lease_expires_at = NULL,
+                       current_audit_id = COALESCE(current_audit_id, %s),
+                       audit_record_id = COALESCE(audit_record_id, %s),
+                       audit_link_state = 'PENDING'
                  WHERE run_id = %s AND lease_generation = %s
+                   AND tenant_id = %s AND user_id = %s
+                   AND request_id = %s
                    AND run_state = 'RUNNING'
                    AND lease_expires_at > CURRENT_TIMESTAMP
+                   AND (current_audit_id IS NULL OR current_audit_id = %s)
                 """,
                 (
                     "COMPLETED",
@@ -282,12 +347,19 @@ class PostgresRunStore:
                     response.source_count,
                     envelope,
                     response.completed_at,
+                    response.audit_id,
+                    record_id,
                     UUID(lease.run_id),
                     lease.generation,
+                    int(tenant_id),
+                    user_id,
+                    response.request_id,
+                    response.audit_id,
                 ),
             ).rowcount
             if updated != 1:
                 raise RunStoreUnavailable("Agent run could not be completed.")
+            finish_attempt_stage(connection, lease, RunStageKey.COMPLETED)
             activate_conversation_messages(
                 connection,
                 run_id=lease.run_id,
@@ -331,7 +403,7 @@ class PostgresRunStore:
 
     def fail(self, lease: RunLease, safe_error_code: str) -> None:
         with connect(self.database_url) as connection:
-            connection.execute(
+            failed = connection.execute(
                 """
                 UPDATE ai_agent_runs
                    SET run_state = 'FAILED', safe_error_code = %s,
@@ -341,7 +413,9 @@ class PostgresRunStore:
                    AND lease_expires_at > CURRENT_TIMESTAMP
                 """,
                 (safe_error_code[:120], UUID(lease.run_id), lease.generation),
-            )
+            ).rowcount
+            if failed == 1:
+                finish_attempt_stage(connection, lease, RunStageKey.FAILED)
 
 
 _STORE: RunStore | None = None

@@ -292,9 +292,8 @@
             "title": "Correlationid"
           },
           "dataProvenance": {
-            "default": "LIVE",
-            "title": "Dataprovenance",
-            "type": "string"
+            "$ref": "#/components/schemas/RunDataProvenance",
+            "default": "LIVE"
           },
           "eventKind": {
             "default": "EXECUTION_SNAPSHOT",
@@ -1973,6 +1972,16 @@
             "title": "Route",
             "type": "string"
           },
+          "selectedWork": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AskSelectedWork"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "surface": {
             "anyOf": [
               {
@@ -2188,6 +2197,16 @@
             "title": "Runid",
             "type": "string"
           },
+          "selectedWork": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AskSelectedWork"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "sourceCount": {
             "minimum": 0.0,
             "title": "Sourcecount",
@@ -2228,6 +2247,51 @@
           "completedAt"
         ],
         "title": "AskResponse",
+        "type": "object"
+      },
+      "AskSelectedWork": {
+        "additionalProperties": false,
+        "properties": {
+          "expectedVersion": {
+            "minimum": 0.0,
+            "title": "Expectedversion",
+            "type": "integer"
+          },
+          "obligationKey": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Obligationkey"
+          },
+          "sourceReference": {
+            "format": "uuid",
+            "title": "Sourcereference",
+            "type": "string"
+          },
+          "sourceSystem": {
+            "enum": [
+              "PERSONAL_TASK",
+              "SERVICE_REQUEST",
+              "APPROVAL_TASK",
+              "APPROVAL_REQUEST",
+              "WORKSPACE"
+            ],
+            "title": "Sourcesystem",
+            "type": "string"
+          }
+        },
+        "required": [
+          "sourceSystem",
+          "sourceReference",
+          "expectedVersion"
+        ],
+        "title": "AskSelectedWork",
         "type": "object"
       },
       "AskState": {
@@ -2742,6 +2806,12 @@
       "ConversationMessage": {
         "additionalProperties": false,
         "properties": {
+          "agentKey": {
+            "default": "DWP_ASSISTANT",
+            "maxLength": 80,
+            "title": "Agentkey",
+            "type": "string"
+          },
           "citations": {
             "items": {
               "$ref": "#/components/schemas/AskCitation"
@@ -2780,6 +2850,16 @@
               }
             ],
             "title": "Runid"
+          },
+          "selectedWork": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AskSelectedWork"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "statusCode": {
             "anyOf": [
@@ -7322,6 +7402,74 @@
         "title": "RunArtifactPreflightRequest",
         "type": "object"
       },
+      "RunAuditEvidenceStatus": {
+        "enum": [
+          "LINKED",
+          "PENDING",
+          "NOT_AVAILABLE"
+        ],
+        "title": "RunAuditEvidenceStatus",
+        "type": "string"
+      },
+      "RunDataProvenance": {
+        "enum": [
+          "LIVE",
+          "SAMPLE"
+        ],
+        "title": "RunDataProvenance",
+        "type": "string"
+      },
+      "RunLeaseStatus": {
+        "enum": [
+          "ACTIVE",
+          "EXPIRED",
+          "RELEASED"
+        ],
+        "title": "RunLeaseStatus",
+        "type": "string"
+      },
+      "RunMeasurementStatus": {
+        "enum": [
+          "MEASURING",
+          "MEASURED",
+          "PARTIAL",
+          "NOT_AVAILABLE"
+        ],
+        "title": "RunMeasurementStatus",
+        "type": "string"
+      },
+      "RunSourceHealthStatus": {
+        "enum": [
+          "SUCCESS",
+          "UNAVAILABLE",
+          "NOT_CONFIGURED"
+        ],
+        "title": "RunSourceHealthStatus",
+        "type": "string"
+      },
+      "RunStageKey": {
+        "enum": [
+          "AUTHORIZING",
+          "RETRIEVING",
+          "REASONING",
+          "VERIFYING",
+          "PERSISTING",
+          "COMPLETED",
+          "FAILED"
+        ],
+        "title": "RunStageKey",
+        "type": "string"
+      },
+      "RunStageState": {
+        "enum": [
+          "ACTIVE",
+          "COMPLETED",
+          "SKIPPED",
+          "FAILED"
+        ],
+        "title": "RunStageState",
+        "type": "string"
+      },
       "SafetyPolicy": {
         "additionalProperties": false,
         "properties": {
@@ -7838,6 +7986,41 @@
         "title": "UpsertRetentionPolicyRequest",
         "type": "object"
       },
+      "UserAgentRunAuditEvidence": {
+        "additionalProperties": false,
+        "properties": {
+          "auditId": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Auditid"
+          },
+          "auditRecordId": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Auditrecordid"
+          },
+          "status": {
+            "$ref": "#/components/schemas/RunAuditEvidenceStatus",
+            "default": "NOT_AVAILABLE"
+          }
+        },
+        "title": "UserAgentRunAuditEvidence",
+        "type": "object"
+      },
       "UserAgentRunEnvelope": {
         "additionalProperties": false,
         "properties": {
@@ -7864,6 +8047,31 @@
           "data"
         ],
         "title": "UserAgentRunEnvelope",
+        "type": "object"
+      },
+      "UserAgentRunLease": {
+        "additionalProperties": false,
+        "properties": {
+          "expiresAt": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expiresat"
+          },
+          "status": {
+            "$ref": "#/components/schemas/RunLeaseStatus"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "title": "UserAgentRunLease",
         "type": "object"
       },
       "UserAgentRunListEnvelope": {
@@ -7898,9 +8106,117 @@
         "title": "UserAgentRunListEnvelope",
         "type": "object"
       },
+      "UserAgentRunSourceHealth": {
+        "additionalProperties": false,
+        "properties": {
+          "lastAttemptAt": {
+            "format": "date-time",
+            "title": "Lastattemptat",
+            "type": "string"
+          },
+          "lastSuccessAt": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Lastsuccessat"
+          },
+          "latencyMs": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Latencyms"
+          },
+          "sourceType": {
+            "$ref": "#/components/schemas/CitationSourceType"
+          },
+          "status": {
+            "$ref": "#/components/schemas/RunSourceHealthStatus"
+          }
+        },
+        "required": [
+          "sourceType",
+          "status",
+          "lastAttemptAt"
+        ],
+        "title": "UserAgentRunSourceHealth",
+        "type": "object"
+      },
+      "UserAgentRunStage": {
+        "additionalProperties": false,
+        "properties": {
+          "completedAt": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Completedat"
+          },
+          "durationMs": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Durationms"
+          },
+          "key": {
+            "$ref": "#/components/schemas/RunStageKey"
+          },
+          "sequence": {
+            "maximum": 60.0,
+            "minimum": 10.0,
+            "title": "Sequence",
+            "type": "integer"
+          },
+          "startedAt": {
+            "format": "date-time",
+            "title": "Startedat",
+            "type": "string"
+          },
+          "state": {
+            "$ref": "#/components/schemas/RunStageState"
+          }
+        },
+        "required": [
+          "key",
+          "state",
+          "sequence",
+          "startedAt"
+        ],
+        "title": "UserAgentRunStage",
+        "type": "object"
+      },
       "UserAgentRunSummary": {
         "additionalProperties": false,
         "properties": {
+          "activityTitle": {
+            "default": "DWAI·ON Agent execution",
+            "maxLength": 160,
+            "minLength": 1,
+            "title": "Activitytitle",
+            "type": "string"
+          },
           "agentKey": {
             "maxLength": 100,
             "minLength": 1,
@@ -7921,6 +8237,15 @@
                 "type": "null"
               }
             ]
+          },
+          "attempt": {
+            "default": 1,
+            "minimum": 1.0,
+            "title": "Attempt",
+            "type": "integer"
+          },
+          "auditEvidence": {
+            "$ref": "#/components/schemas/UserAgentRunAuditEvidence"
           },
           "completedAt": {
             "anyOf": [
@@ -7951,13 +8276,47 @@
             "title": "Createdat",
             "type": "string"
           },
+          "currentStage": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RunStageKey"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "dataProvenance": {
+            "$ref": "#/components/schemas/RunDataProvenance",
+            "default": "LIVE"
+          },
           "latencyMs": {
             "minimum": 0.0,
             "title": "Latencyms",
             "type": "integer"
           },
+          "lease": {
+            "$ref": "#/components/schemas/UserAgentRunLease"
+          },
+          "measurementStatus": {
+            "$ref": "#/components/schemas/RunMeasurementStatus",
+            "default": "NOT_AVAILABLE"
+          },
           "policyOutcome": {
             "$ref": "#/components/schemas/PolicyOutcome"
+          },
+          "progressPercent": {
+            "anyOf": [
+              {
+                "maximum": 100.0,
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Progresspercent"
           },
           "riskTier": {
             "$ref": "#/components/schemas/RiskTier"
@@ -7974,6 +8333,20 @@
             "minimum": 0.0,
             "title": "Sourcecount",
             "type": "integer"
+          },
+          "sourceHealth": {
+            "items": {
+              "$ref": "#/components/schemas/UserAgentRunSourceHealth"
+            },
+            "title": "Sourcehealth",
+            "type": "array"
+          },
+          "stages": {
+            "items": {
+              "$ref": "#/components/schemas/UserAgentRunStage"
+            },
+            "title": "Stages",
+            "type": "array"
           },
           "statusCode": {
             "anyOf": [
@@ -16332,6 +16705,22 @@
               "format": "uuid",
               "title": "Conversation Id",
               "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "agentKey",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Agentkey"
             }
           },
           {

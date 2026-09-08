@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Response, status
+from fastapi import APIRouter, Depends, Header, HTTPException, status
 
 from .policy import AskIdentity
 from .security import header_values, require_gateway_service
@@ -41,7 +41,6 @@ def require_run_access(
 )
 def list_user_runs(
     identity: Annotated[AskIdentity, Depends(verified_ask_identity)],
-    response: Response,
     limit: int = 50,
     state: AgentRunState | None = None,
 ) -> UserAgentRunListEnvelope:
@@ -57,7 +56,6 @@ def list_user_runs(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=str(error),
         ) from error
-    response.headers["Cache-Control"] = "no-store"
     return UserAgentRunListEnvelope(data=runs)
 
 
@@ -70,7 +68,6 @@ def list_user_runs(
 def get_user_run(
     run_id: UUID,
     identity: Annotated[AskIdentity, Depends(verified_ask_identity)],
-    response: Response,
 ) -> UserAgentRunEnvelope:
     try:
         run = get_user_run_store().get(
@@ -82,13 +79,10 @@ def get_user_run(
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=str(error),
-            headers={"Cache-Control": "no-store"},
         ) from error
     if run is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Agent run is unavailable.",
-            headers={"Cache-Control": "no-store"},
         )
-    response.headers["Cache-Control"] = "no-store"
     return UserAgentRunEnvelope(data=run)

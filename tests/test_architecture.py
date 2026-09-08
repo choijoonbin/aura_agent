@@ -75,6 +75,9 @@ def test_runtime_uses_installable_src_package() -> None:
         / "migrations"
         / "V22__govern_proactive_proposal_analysis.sql"
     ).is_file()
+    assert (
+        PACKAGE_ROOT / "migrations" / "V31__observe_agent_run_activity.sql"
+    ).is_file()
 
 
 def test_migration_versions_are_unique() -> None:

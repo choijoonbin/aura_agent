@@ -218,7 +218,8 @@ def test_api_pagination_signed_resume_cursor_watermark_and_privacy(configured):
     for run_id in run_ids:
         configured.begin(start(run_id=run_id))
     first = request("/v1/activity/events?limit=2")
-    assert first.status_code == 200 and first.headers["Cache-Control"] == "no-store"
+    assert first.status_code == 200
+    assert first.headers["Cache-Control"] == "private, no-store, max-age=0"
     page = first.json()["data"]
     assert [event["id"] for event in page["events"]] == run_ids[:2]
     assert page["hasMore"] and page["startCursor"] and page["nextCursor"]
@@ -235,11 +236,19 @@ def test_api_pagination_signed_resume_cursor_watermark_and_privacy(configured):
     assert [event["id"] for event in tail["events"]] == run_ids[2:] and not tail["hasMore"]
     one_consumed = request(f"/v1/activity/events?cursor={page['events'][0]['resumeCursor']}").json()["data"]
     assert [event["id"] for event in one_consumed["events"]] == run_ids[1:]
-    assert request(f"/v1/activity/events?state=FAILED&cursor={page['nextCursor']}").status_code == 400
+    invalid_cursor = request(
+        f"/v1/activity/events?state=FAILED&cursor={page['nextCursor']}"
+    )
+    assert invalid_cursor.status_code == 400
+    assert invalid_cursor.headers["Cache-Control"] == "private, no-store, max-age=0"
     assert request(f"/v1/activity/events?cursor={page['nextCursor']}", headers={"X-DWP-User-ID": "8"}).status_code == 400
     assert request(f"/v1/activity/events?cursor={page['nextCursor'][:-1]}!").status_code == 400
     assert request(f"/v1/activity/events/{run_ids[0]}").status_code == 200
-    assert request(f"/v1/activity/events/{run_ids[0]}", headers={"X-DWP-User-ID": "8"}).status_code == 404
+    unavailable_detail = request(
+        f"/v1/activity/events/{run_ids[0]}", headers={"X-DWP-User-ID": "8"}
+    )
+    assert unavailable_detail.status_code == 404
+    assert unavailable_detail.headers["Cache-Control"] == "private, no-store, max-age=0"
 
 
 @pytest.mark.parametrize("headers,status", [
@@ -258,6 +267,23 @@ def test_all_source_endpoints_recheck_identity_and_both_permissions(configured, 
         assert request(path, headers=headers).status_code == status
 
 
+def test_activity_projects_measured_progress_and_central_audit_link(configured):
+    audit_id = str(uuid4())
+    run = replace(start(), audit_id=audit_id)
+    lease = configured.begin(run)
+    assert lease is not None
+
+    event = request(f"/v1/activity/events/{lease.run_id}").json()["data"]
+
+    assert event["progress"] == 0
+    assert event["attempt"] == 1
+    assert event["auditId"] == audit_id
+    assert event["auditRecordId"]
+    assert event["auditStatus"] == "PENDING"
+    assert event["dataProvenance"] == "LIVE"
+    assert "private-correlation" not in str(event)
+
+
 def test_signed_identity_required_and_v5_default_fail_closed(configured, monkeypatch):
     monkeypatch.setenv("DWP_AGENT_IDENTITY_SIGNING_SECRET", "test-identity-secret")
     assert request("/v1/activity/events").status_code == 401
@@ -270,7 +296,9 @@ def test_api_unavailable_not_empty_and_validates_time_filters(configured, monkey
     def unavailable():
         raise ActivityStoreUnavailable("Source unavailable.")
     monkeypatch.setattr(api, "get_agent_activity_store", unavailable)
-    assert request("/v1/activity/events").status_code == 503
+    unavailable_events = request("/v1/activity/events")
+    assert unavailable_events.status_code == 503
+    assert unavailable_events.headers["Cache-Control"] == "private, no-store, max-age=0"
     assert request("/v1/activity/executions/summary").status_code == 503
     assert request("/v1/activity/events?from=2026-09-04T00:00:00").status_code == 422
     assert request("/v1/activity/events?limit=101").status_code == 422

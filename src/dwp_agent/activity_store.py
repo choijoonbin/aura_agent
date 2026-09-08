@@ -11,6 +11,7 @@ from psycopg import Error as PsycopgError, connect
 from .activity_contracts import ActivityRunSnapshot
 from .run_store import InMemoryRunStore, PostgresRunStore, get_run_store
 from .run_store_errors import RunStoreUnavailable
+from .run_observability import RunDataProvenance, RunStageKey
 
 
 class ActivityStoreUnavailable(RuntimeError):
@@ -31,6 +32,8 @@ class ActivityFilters:
 
     def matches(self, row: ActivityRunSnapshot, now: datetime) -> bool:
         return (
+            row.data_provenance == "LIVE"
+            and
             self.actor in {"ALL", "AGENT"}
             and self.source in {"", "DWAI_ON"}
             and self.object_type in {"", "AGENT_RUN"}
@@ -71,7 +74,7 @@ class InMemoryAgentActivityStore:
 
     def detail(self, *, tenant_id: str, user_id: str, run_id: UUID) -> ActivityRunSnapshot | None:
         return next((row for row in self.runs.activity_snapshots(tenant_id=tenant_id, user_id=user_id)
-                     if row.run_id == run_id), None)
+                     if row.run_id == run_id and row.data_provenance == "LIVE"), None)
 
     def counts(self, *, tenant_id: str, user_id: str, filters: ActivityFilters,
                now: datetime) -> dict[str, int]:
@@ -81,7 +84,17 @@ class InMemoryAgentActivityStore:
 
 _COLUMNS = """run_id, tenant_id, user_id, agent_key, agent_revision, run_state,
     risk_tier, policy_outcome, created_at, lease_generation, answer_state, status_code,
-    source_count, latency_ms, completed_at, lease_expires_at"""
+    source_count, latency_ms, completed_at, lease_expires_at, current_audit_id,
+    audit_record_id, audit_link_state, data_provenance,
+    (SELECT stage.stage_key FROM ai_agent_run_stages stage
+      WHERE stage.run_id = ai_agent_runs.run_id
+        AND stage.lease_generation = ai_agent_runs.lease_generation
+      ORDER BY stage.sequence DESC LIMIT 1),
+    (SELECT COUNT(*) * 20 FROM ai_agent_run_stages stage
+      WHERE stage.run_id = ai_agent_runs.run_id
+        AND stage.lease_generation = ai_agent_runs.lease_generation
+        AND stage.stage_key NOT IN ('COMPLETED', 'FAILED')
+        AND stage.stage_state IN ('COMPLETED', 'SKIPPED'))"""
 
 # No source payload, query, response envelope, correlation text or citation is read.
 _STATE = """CASE WHEN run_state = 'RUNNING' THEN
@@ -97,7 +110,7 @@ class PostgresAgentActivityStore:
 
     def _where(self, tenant_id: str, user_id: str, filters: ActivityFilters,
                now: datetime) -> tuple[str, list[object]]:
-        parts = ["tenant_id = %s", "user_id = %s"]
+        parts = ["tenant_id = %s", "user_id = %s", "data_provenance = 'LIVE'"]
         params: list[object] = [int(tenant_id), user_id]
         if filters.actor not in {"ALL", "AGENT"} or filters.source not in {"", "DWAI_ON"} or filters.object_type not in {"", "AGENT_RUN"}:
             parts.append("FALSE")
@@ -143,7 +156,7 @@ class PostgresAgentActivityStore:
         return [_snapshot(row) for row in rows[:limit]], len(rows) > limit
 
     def detail(self, *, tenant_id: str, user_id: str, run_id: UUID) -> ActivityRunSnapshot | None:
-        rows = self._query(f"SELECT {_COLUMNS} FROM ai_agent_runs WHERE tenant_id = %s AND user_id = %s AND run_id = %s", [int(tenant_id), user_id, run_id])
+        rows = self._query(f"SELECT {_COLUMNS} FROM ai_agent_runs WHERE tenant_id = %s AND user_id = %s AND run_id = %s AND data_provenance = 'LIVE'", [int(tenant_id), user_id, run_id])
         return _snapshot(rows[0]) if rows else None
 
     def counts(self, *, tenant_id: str, user_id: str, filters: ActivityFilters,
@@ -154,11 +167,15 @@ class PostgresAgentActivityStore:
 
 
 def _snapshot(row: tuple) -> ActivityRunSnapshot:
+    current_stage = RunStageKey(row[20]) if row[20] is not None else None
     return ActivityRunSnapshot(
         run_id=row[0], tenant_id=str(row[1]), user_id=row[2], agent_key=row[3],
         agent_revision=row[4], run_state=row[5], risk_tier=row[6], policy_outcome=row[7],
         created_at=row[8], generation=row[9], answer_state=row[10], status_code=row[11],
         source_count=row[12], latency_ms=row[13], completed_at=row[14], lease_expires_at=row[15],
+        audit_id=row[16], audit_record_id=row[17], audit_link_state=row[18],
+        data_provenance=RunDataProvenance(row[19]), current_stage=current_stage,
+        progress_percent=int(row[21]) if row[20] is not None else None,
     )
 
 

@@ -17,6 +17,7 @@ class WorkspaceRequestAuthorization:
     cookie_header: str | None = field(default=None, repr=False)
     authorization_header: str | None = field(default=None, repr=False)
     blocked: bool = False
+    session_family_id: str | None = field(default=None, repr=False)
 
     @property
     def available(self) -> bool:
@@ -49,6 +50,12 @@ def resolve_workspace_request_authorization(
         if access_mode not in _NORMAL_ACCESS_MODES:
             return WorkspaceRequestAuthorization(blocked=True)
 
+    sessions = request.headers.getlist("X-DWP-Auth-Session-ID")
+    if len(sessions) > 1 or (sessions and (
+        not sessions[0].strip() or len(sessions[0]) > 160 or _has_control(sessions[0])
+    )):
+        return WorkspaceRequestAuthorization(blocked=True)
+
     authorization_values = request.headers.getlist("Authorization")
     if len(authorization_values) > 1:
         return WorkspaceRequestAuthorization(blocked=True)
@@ -62,6 +69,7 @@ def resolve_workspace_request_authorization(
     return WorkspaceRequestAuthorization(
         cookie_header=cookie,
         authorization_header=authorization,
+        session_family_id=sessions[0] if sessions else None,
     )
 
 

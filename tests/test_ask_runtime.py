@@ -468,6 +468,10 @@ def test_context_broker_preserves_verified_permission_scope() -> None:
     assert captured[0].headers["x-dwp-permissions"] == "APP.ASK:VIEW,APP.WORK:VIEW"
     assert len(grounded.sources) == 1
     assert grounded.sources[0].citation.source_id == "src-01"
+    assert [(item.source_type, item.status) for item in grounded.source_health] == [
+        ("WORK_ITEM", "SUCCESS")
+    ]
+    assert grounded.source_health[0].latency_ms is not None
 
 
 def test_context_broker_reads_only_permission_scoped_mail_summaries() -> None:
@@ -516,6 +520,8 @@ def test_context_broker_reads_only_permission_scoped_mail_summaries() -> None:
     assert grounded.sources[0].citation.route == (
         "/mail/inbox?thread=8a0b5388-8765-4c97-a95c-4037285416d8"
     )
+    assert grounded.source_health[0].source_type == "MAIL"
+    assert grounded.source_health[0].status == "SUCCESS"
 
 
 def test_approval_expert_reads_only_permission_scoped_approval_sources() -> None:
@@ -593,6 +599,9 @@ def test_approval_expert_reads_only_permission_scoped_approval_sources() -> None
         for request in captured
     )
     assert grounded.attempted_sources == ("APPROVAL_TASK", "APPROVAL_REQUEST")
+    assert {item.source_type for item in grounded.source_health} == {
+        "APPROVAL_TASK", "APPROVAL_REQUEST"
+    }
     assert {source.citation.source_type for source in grounded.sources} == {
         CitationSourceType.APPROVAL_TASK,
         CitationSourceType.APPROVAL_REQUEST,

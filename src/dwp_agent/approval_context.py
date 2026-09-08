@@ -1,13 +1,18 @@
 from __future__ import annotations
 
 import re
-from datetime import datetime
+from datetime import datetime, timezone
+from time import monotonic_ns
 from typing import Any, Callable
 
 import httpx
 
 from .contracts import CitationSourceType
 from .policy import contains_privileged_data, contains_prompt_injection
+from .run_observability import (
+    RunSourceHealthStatus,
+    SourceHealthObservation,
+)
 
 
 MAX_EVIDENCE_TEXT = 1_200
@@ -22,10 +27,13 @@ def collect_approval_context(
     permissions: set[str],
     requested_scopes: set[CitationSourceType],
     locale: str,
-) -> tuple[list[dict[str, Any]], list[str], list[str]]:
+) -> tuple[
+    list[dict[str, Any]], list[str], list[str], list[SourceHealthObservation]
+]:
     candidates: list[dict[str, Any]] = []
     attempted: list[str] = []
     unavailable: list[str] = []
+    health: list[SourceHealthObservation] = []
     sources: tuple[
         tuple[
             CitationSourceType,
@@ -75,6 +83,7 @@ def collect_approval_context(
         if source_type not in requested_scopes or not permitted:
             continue
         attempted.append(source_type.value)
+        started = monotonic_ns()
         try:
             response = client.get(
                 f"{approval_url}{path}",
@@ -82,9 +91,17 @@ def collect_approval_context(
                 params=params,
             )
             candidates.extend(parser(response))
+            outcome = RunSourceHealthStatus.SUCCESS
         except (httpx.HTTPError, ValueError, KeyError, TypeError):
             unavailable.append(source_type.value)
-    return candidates, attempted, unavailable
+            outcome = RunSourceHealthStatus.UNAVAILABLE
+        health.append(SourceHealthObservation(
+            source_type=source_type.value,
+            status=outcome,
+            observed_at=datetime.now(timezone.utc),
+            latency_ms=max(0, (monotonic_ns() - started) // 1_000_000),
+        ))
+    return candidates, attempted, unavailable, health
 
 
 def approval_tasks(response: httpx.Response) -> list[dict[str, Any]]:

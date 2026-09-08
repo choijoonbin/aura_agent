@@ -250,3 +250,78 @@ def record_ask_run(
             "retentionClass": "EXTENDED",
         }
     )
+
+
+def record_ask_failure(
+    *,
+    run_id: str,
+    audit_id: str,
+    tenant_id: str,
+    user_id: str,
+    correlation_id: str,
+    agent_key: str,
+    agent_revision: int,
+    risk_tier: str,
+    roles: list[str] | None = None,
+) -> None:
+    occurred_at = datetime.now(timezone.utc)
+    data = {
+        "userId": user_id,
+        "state": "FAILED",
+        "statusCode": "ASK_RUNTIME_FAILED",
+        "riskTier": risk_tier,
+        "agentKey": agent_key,
+        "agentRevision": agent_revision,
+    }
+    event = {
+        "id": audit_id,
+        "source": "urn:dwp:agent-runtime",
+        "type": "agent.ask.failed",
+        "specVersion": "1.0",
+        "time": occurred_at.isoformat(),
+        "subject": f"ask/{run_id}",
+        "tenantId": tenant_id,
+        "correlationId": correlation_id,
+        "schemaVersion": "1.0",
+        "classification": "INTERNAL",
+        "data": data,
+    }
+    AUDIT_LOGGER.info(dumps(event, ensure_ascii=True, separators=(",", ":")))
+    if not AUDIT_PUBLISHER.enabled:
+        return
+    try:
+        numeric_tenant_id = int(tenant_id)
+    except ValueError:
+        AUDIT_LOGGER.error("Audit delivery skipped because tenant identity is not numeric")
+        return
+    normalized_roles = sorted({role.strip() for role in (roles or []) if role.strip()})
+    risk_score = {"L0": 10, "L1": 25, "L2": 55, "L3": 85}.get(risk_tier, 40)
+    AUDIT_PUBLISHER.publish(
+        {
+            "eventId": str(uuid5(NAMESPACE_URL, f"urn:dwp:audit:{audit_id}")),
+            "eventVersion": "1.0",
+            "occurredAt": occurred_at.isoformat(),
+            "tenantId": numeric_tenant_id,
+            "category": "AI_ACTION",
+            "action": "agent.ask.failed",
+            "outcome": "FAILED",
+            "severity": "HIGH" if risk_score >= 70 else "MEDIUM",
+            "riskScore": risk_score,
+            "actorType": "USER",
+            "actorId": user_id,
+            "actorRoles": normalized_roles,
+            "sourceService": "dwp-agent-runtime",
+            "sourceModule": "ask-runtime",
+            "sourceInstance": os.getenv("HOSTNAME", "local"),
+            "environment": os.getenv("DWP_ENVIRONMENT", "local"),
+            "targetType": "AGENT_RUN",
+            "targetId": run_id,
+            "targetDisplayName": agent_key,
+            "correlationId": correlation_id,
+            "approvalId": None,
+            "beforeState": {},
+            "afterState": {},
+            "metadata": data,
+            "retentionClass": "EXTENDED",
+        }
+    )

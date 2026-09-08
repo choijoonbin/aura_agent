@@ -1,14 +1,15 @@
 from __future__ import annotations
 
-import hashlib
-import hmac
 import json
-import os
 from datetime import datetime, timezone
 from typing import Callable
 from uuid import uuid4
 
-from .audit import record_ask_run
+from .audit import record_ask_failure, record_ask_run
+from .ask_response_guard import (
+    model_provider_label as _model_provider_label, safe_status_code as _safe_status_code,
+    safety_identifier as _safety_identifier, selected_response_guard,
+)
 from .context_broker import ContextBrokerUnavailable, WorkspaceContextBroker
 from .grounded_fallback import grounded_evidence_fallback
 from .grounded_response_status import grounded_status_for_provider
@@ -17,6 +18,7 @@ from .conversation_store import (
     ConversationTurn,
     get_conversation_store,
 )
+from .conversation_continuation import bind_conversation_request
 from .contracts import (
     AgentRegistryResolution,
     AnswerConfidence,
@@ -39,10 +41,9 @@ from .model_gateway import (
 )
 from .policy import AskIdentity, SafetyControls, evaluate_ask_policy
 from .registry import resolve_agent
-from .run_store import RunInProgress, RunStart, RunStore, get_run_store, privacy_hash
+from .run_store import RunInProgress, RunLease, RunStart, RunStore, get_run_store, privacy_hash
+from .run_observability import RunStageKey
 from .workspace_authorization import WorkspaceRequestAuthorization
-
-
 class AskRuntime:
     def __init__(
         self,
@@ -67,6 +68,7 @@ class AskRuntime:
         workspace_authorization: WorkspaceRequestAuthorization | None = None,
     ) -> AskResponse:
         _progress(on_progress, "AUTHORIZING")
+        request = bind_conversation_request(self.conversation_store, request, identity)
         query_hash = privacy_hash(
             json.dumps(
                 request.model_dump(mode="json", by_alias=True, exclude={"request_id"}),
@@ -83,7 +85,9 @@ class AskRuntime:
         )
         if existing is not None:
             _progress(on_progress, "COMPLETED")
-            return existing
+            return selected_response_guard(
+                self.context_broker, request, identity, existing, workspace_authorization
+            )
 
         run_id = str(uuid4())
         audit_id = str(uuid4())
@@ -108,6 +112,7 @@ class AskRuntime:
             policy_outcome=policy.outcome,
             locale=request.locale,
             correlation_id=identity.correlation_id,
+            audit_id=audit_id,
         )
         lease = self.run_store.begin(started)
         if lease is None:
@@ -118,14 +123,30 @@ class AskRuntime:
                 query_hash,
             )
             if replay is not None:
-                return replay
+                return selected_response_guard(
+                    self.context_broker, request, identity, replay, workspace_authorization
+                )
             raise RunInProgress("The Ask request is already running.")
         run_id = lease.run_id
+
+        def tracked_progress(stage: str) -> None:
+            self.run_store.advance_stage(
+                lease,
+                tenant_id=identity.tenant_id,
+                user_id=identity.user_id,
+                request_id=request.request_id,
+                stage=RunStageKey(stage),
+            )
+            _progress(on_progress, stage)
 
         provider_request_hash: str | None = None
         try:
             if (
-                registry.entry_key == "DWP_ASSISTANT"
+                (registry.entry_key == "DWP_ASSISTANT" or (
+                    registry.entry_key == "DWP_APPROVAL_EXPERT"
+                    and request.page_context is not None
+                    and request.page_context.selected_work is not None
+                ))
                 and "APP.ASK:VIEW"
                 in {permission.upper() for permission in identity.permissions}
             ):
@@ -172,15 +193,19 @@ class AskRuntime:
                     request=request,
                     identity=identity,
                     run_id=run_id,
+                    lease=lease,
                     audit_id=audit_id,
                     registry=registry,
                     policy=policy,
                     conversation_history=conversation_history,
-                    on_progress=on_progress,
+                    on_progress=tracked_progress,
                     workspace_authorization=workspace_authorization,
                 )
 
-            _progress(on_progress, "PERSISTING")
+            response = selected_response_guard(
+                self.context_broker, request, identity, response, workspace_authorization
+            )
+            tracked_progress("PERSISTING")
             if conversation_id is not None:
                 user_message_id, assistant_message_id = self.conversation_store.append_exchange(
                     tenant_id=identity.tenant_id,
@@ -214,7 +239,17 @@ class AskRuntime:
             _progress(on_progress, "COMPLETED")
             return response
         except Exception:
-            self.run_store.fail(lease, "ASK_RUNTIME_FAILED")
+            if not self.run_store.is_completed(
+                lease, tenant_id=identity.tenant_id, user_id=identity.user_id,
+                request_id=request.request_id,
+            ):
+                self.run_store.fail(lease, "ASK_RUNTIME_FAILED")
+                record_ask_failure(
+                    run_id=run_id, audit_id=audit_id, tenant_id=identity.tenant_id,
+                    user_id=identity.user_id, correlation_id=identity.correlation_id,
+                    agent_key=registry.entry_key, agent_revision=registry.revision,
+                    risk_tier=str(policy.risk_tier), roles=list(identity.roles),
+                )
             raise
 
     def _grounded_answer(
@@ -223,6 +258,7 @@ class AskRuntime:
         request: AskRequest,
         identity: AskIdentity,
         run_id: str,
+        lease: RunLease,
         audit_id: str,
         registry: AgentRegistryResolution,
         policy: AskPolicyDecision,
@@ -257,8 +293,15 @@ class AskRuntime:
                 None,
             )
 
+        self.run_store.record_source_health(
+            lease,
+            tenant_id=identity.tenant_id, user_id=identity.user_id,
+            request_id=request.request_id,
+            observations=context.source_health,
+        )
+
         if not context.sources:
-            status_code = (
+            status_code = context.status_code or (
                 "CONTEXT_SOURCE_UNAVAILABLE"
                 if context.attempted_sources and context.unavailable_sources
                 else "NO_GROUNDED_SOURCE"
@@ -443,32 +486,8 @@ class AskRuntime:
             agent_registry=registry,
             status_code=status_code,
             completed_at=datetime.now(timezone.utc),
+            selected_work=request.page_context.selected_work if request.page_context else None,
         )
-
-
-def _safety_identifier(identity: AskIdentity) -> str:
-    secret = os.getenv("DWP_AGENT_SAFETY_SECRET", "").strip()
-    if not secret:
-        secret = os.getenv("DWP_AGENT_PRIVACY_HASH_SECRET", "").strip()
-    if not secret:
-        raise ModelConfigurationRequired("Agent safety identifier secret is required.")
-    digest = hmac.new(
-        secret.encode("utf-8"),
-        f"{identity.tenant_id}:{identity.user_id}".encode("utf-8"),
-        hashlib.sha256,
-    ).hexdigest()
-    return f"dwp_{digest[:48]}"
-
-
-def _model_provider_label(model_gateway: object) -> str:
-    provider = getattr(model_gateway, "provider_label", "OPENAI")
-    return str(provider).strip().upper()[:40] or "OPENAI"
-
-
-def _safe_status_code(error: Exception) -> str:
-    value = str(error).strip().upper() or type(error).__name__.upper()
-    safe = "".join(character if character.isalnum() or character in "_.-" else "_" for character in value)
-    return safe[:120]
 
 
 def _progress(callback: Callable[[str], None] | None, stage: str) -> None:

@@ -16,6 +16,7 @@ class RunStart:
     policy_outcome: str
     locale: str
     correlation_id: str
+    audit_id: str | None = None
 
 
 @dataclass(frozen=True)

@@ -7,6 +7,7 @@ from uuid import UUID
 from pydantic import Field
 
 from .contracts import ContractModel
+from .run_observability import RunDataProvenance, RunStageKey
 
 
 @dataclass(frozen=True)
@@ -29,6 +30,12 @@ class ActivityRunSnapshot:
     latency_ms: int = 0
     completed_at: datetime | None = None
     lease_expires_at: datetime | None = None
+    current_stage: RunStageKey | None = None
+    progress_percent: int | None = None
+    audit_id: str | None = None
+    audit_record_id: UUID | None = None
+    audit_link_state: str | None = None
+    data_provenance: RunDataProvenance = RunDataProvenance.LIVE
 
     def activity_state(self, now: datetime) -> str:
         if self.run_state == "RUNNING":
@@ -84,7 +91,7 @@ class ActivityEvent(ContractModel):
     work_status: str | None = None
     correlation_id: str | None = None
     audit_record_id: UUID | None = None
-    data_provenance: str = "LIVE"
+    data_provenance: RunDataProvenance = RunDataProvenance.LIVE
     source_access: str = "AVAILABLE"
     audit_access: str = "RESTRICTED"
     audit_status: str = "NOT_LINKED"
