@@ -4,7 +4,7 @@ from datetime import datetime
 from enum import StrEnum
 from uuid import UUID
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 
 from .contracts import ContractModel
 
@@ -56,6 +56,11 @@ class PersonalDataGovernanceCapabilities(ContractModel):
     deletion_request_available: bool = True
     deletion_execution_available: bool = False
     deletion_completion_claim_available: bool = False
+    active_store_physical_purge_available: bool = False
+    active_store_crypto_shred_available: bool = False
+    backup_disposition_available: bool = False
+    deletion_execution_scope: str = "AGENT_ACTIVE_POSTGRES_DOMAINS_ONLY"
+    backup_disposition_state: str = "EXTERNAL_RETENTION_BOUNDARY"
     source_system_data_affected: bool = False
     audit_metadata_may_be_retained: bool = True
     proposal_clear_managed_separately: bool = True
@@ -90,6 +95,14 @@ class DeletionJobState(StrEnum):
     FAILED = "FAILED"
 
 
+class DeletionTargetState(StrEnum):
+    REQUESTED = "REQUESTED"
+    RUNNING = "RUNNING"
+    COMPLETED = "COMPLETED"
+    BLOCKED_LEGAL_HOLD = "BLOCKED_LEGAL_HOLD"
+    FAILED = "FAILED"
+
+
 class RequestDeletionRequest(HighRiskMutationCommand):
     domains: list[DomainKey] = Field(min_length=1, max_length=4)
 
@@ -101,6 +114,52 @@ class RequestDeletionRequest(HighRiskMutationCommand):
         return value
 
 
+class DataDispositionReceipt(ContractModel):
+    disposition_id: UUID
+    domain: DomainKey
+    generation: int = Field(ge=1)
+    purged_row_count: int = Field(ge=0)
+    purged_table_counts: dict[str, int] = Field(default_factory=dict)
+    disposition_scope: str = "AGENT_ACTIVE_POSTGRES_DOMAIN_ONLY"
+    disposition_method: str = "PHYSICAL_ROW_PURGE_OF_ENCRYPTED_RECORDS"
+    active_store_envelopes_destroyed: bool
+    source_system_data_affected: bool = False
+    backup_disposition_state: str = "EXTERNAL_RETENTION_BOUNDARY"
+    receipt_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    completed_at: datetime
+
+    @field_validator("purged_table_counts")
+    @classmethod
+    def valid_table_counts(cls, value: dict[str, int]) -> dict[str, int]:
+        if any(not name.startswith("ai_") or count < 0 for name, count in value.items()):
+            raise ValueError("Disposition table counts are invalid.")
+        return value
+
+    @model_validator(mode="after")
+    def coherent_scope(self) -> "DataDispositionReceipt":
+        if sum(self.purged_table_counts.values()) != self.purged_row_count:
+            raise ValueError("Disposition table counts do not match the purged row count.")
+        if (
+            self.disposition_scope != "AGENT_ACTIVE_POSTGRES_DOMAIN_ONLY"
+            or self.disposition_method != "PHYSICAL_ROW_PURGE_OF_ENCRYPTED_RECORDS"
+            or not self.active_store_envelopes_destroyed
+            or self.source_system_data_affected
+            or self.backup_disposition_state != "EXTERNAL_RETENTION_BOUNDARY"
+        ):
+            raise ValueError("Disposition receipt exceeds the active-store boundary.")
+        return self
+
+
+class DeletionTargetReceipt(ContractModel):
+    domain: DomainKey
+    state: DeletionTargetState
+    affected_count: int | None = Field(default=None, ge=0)
+    safe_error_code: str | None = Field(
+        default=None, pattern=r"^[A-Z][A-Z0-9_.-]{1,127}$"
+    )
+    disposition: DataDispositionReceipt | None = None
+
+
 class DeletionJob(ContractModel):
     deletion_job_id: UUID
     state: DeletionJobState
@@ -110,6 +169,8 @@ class DeletionJob(ContractModel):
     deletion_performed: bool = False
     deletion_execution_available: bool = False
     blocked_domains: list[DomainKey] = Field(default_factory=list)
+    attempt_count: int = Field(default=0, ge=0)
+    targets: list[DeletionTargetReceipt] = Field(default_factory=list, max_length=4)
 
 
 class DeletionJobEnvelope(ContractModel):

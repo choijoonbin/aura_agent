@@ -20,6 +20,7 @@ from dwp_agent.contracts import (
 )
 from dwp_agent.conversation_store import (
     ConversationNotFound,
+    ConversationRetentionLocked,
     ConversationStoreUnavailable,
     InMemoryConversationStore,
 )
@@ -119,6 +120,15 @@ def test_conversation_store_is_user_scoped_idempotent_and_feedback_capable() -> 
     run_store.complete(result, lease=lease, tenant_id="1", user_id="7")
     detail = store.get(tenant_id="1", user_id="7", conversation_id=conversation_id)
     assert detail.summary.message_count == 2
+    assert detail.summary.agent_key == "DWP_ASSISTANT"
+    assert detail.summary.source_systems == ["DWP Calendar"]
+    assert detail.summary.evidence_count == 1
+    assert detail.summary.summary_excerpt == result.answer
+    assert detail.summary.last_answer_status == "ANSWER_GROUNDED"
+    assert detail.summary.retention_until is not None
+    assert detail.summary.retention_until > detail.summary.created_at
+    assert detail.summary.legal_hold is False
+    assert store.list(tenant_id="1", user_id="7") == [detail.summary]
     assert [message.role for message in detail.messages] == ["USER", "ASSISTANT"]
     assert detail.messages[1].citations[0].excerpt
     receipt = store.feedback(
@@ -131,6 +141,47 @@ def test_conversation_store_is_user_scoped_idempotent_and_feedback_capable() -> 
 
     with pytest.raises(ConversationNotFound):
         store.get(tenant_id="1", user_id="8", conversation_id=conversation_id)
+
+
+def test_in_memory_legal_hold_metadata_blocks_deletion() -> None:
+    result = response()
+    run_store = InMemoryRunStore()
+    lease = begin(run_store, result)
+    store = InMemoryConversationStore(run_store, legal_hold=True)
+    conversation_id = store.ensure(
+        tenant_id="1",
+        user_id="7",
+        conversation_id=None,
+        locale="ko",
+        initial_query="법적 보존 대화",
+    )
+    pair = store.append_exchange(
+        tenant_id="1",
+        user_id="7",
+        conversation_id=conversation_id,
+        request_id=result.request_id,
+        query="법적 보존 대화",
+        response=result,
+        lease=lease,
+    )
+    run_store.complete(
+        result.model_copy(
+            update={
+                "conversation_id": conversation_id,
+                "user_message_id": pair[0],
+                "assistant_message_id": pair[1],
+            }
+        ),
+        lease=lease,
+        tenant_id="1",
+        user_id="7",
+    )
+
+    assert store.get(
+        tenant_id="1", user_id="7", conversation_id=conversation_id
+    ).summary.legal_hold is True
+    with pytest.raises(ConversationRetentionLocked):
+        store.delete(tenant_id="1", user_id="7", conversation_id=conversation_id)
 
 
 def test_stale_in_memory_exchange_is_hidden_and_replaced_by_the_new_owner() -> None:

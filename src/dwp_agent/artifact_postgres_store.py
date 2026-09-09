@@ -23,14 +23,17 @@ from .artifact_contracts import (
     RunArtifactPreflightRequest,
 )
 from .artifact_dlp import assess_artifact
+from .artifact_export_queries import ArtifactExportQueries
 from .artifact_postgres_base import ArtifactPostgresBase, _ARTIFACT_SELECT
 from .artifact_read_queries import ArtifactReadQueries
+from .artifact_source_verification import ArtifactSourceVerification
 from .governed_domain_core import (
     GovernedDomainConflict,
     GovernedDomainNotFound,
     GovernedDomainUnavailable,
     retention_deadline,
 )
+from .governed_worker_runtime import governed_worker_available
 from .personal_domain_security import PersonalDomainIdentity
 from .transactional_outbox import enqueue_internal_intent
 
@@ -51,10 +54,17 @@ def _translated(function: Callable[..., T]) -> Callable[..., T]:
     return wrapped
 
 
-class PostgresArtifactStore(ArtifactReadQueries, ArtifactPostgresBase):
+class PostgresArtifactStore(
+    ArtifactSourceVerification,
+    ArtifactExportQueries,
+    ArtifactReadQueries,
+    ArtifactPostgresBase,
+):
     list_versions = _translated(ArtifactReadQueries.list_versions)
     get_version = _translated(ArtifactReadQueries.get_version)
     current_preflight = _translated(ArtifactReadQueries.current_preflight)
+    export_job = _translated(ArtifactExportQueries.export_job)
+    export_file = _translated(ArtifactExportQueries.export_file)
 
     @_translated
     def list(self, identity: PersonalDomainIdentity) -> list[GovernedArtifact]:
@@ -137,7 +147,11 @@ class PostgresArtifactStore(ArtifactReadQueries, ArtifactPostgresBase):
                 ),
             )
             self._replace_draft_sources(
-                connection, identity, artifact_id, request.sources
+                connection,
+                identity,
+                artifact_id,
+                request.sources,
+                verified_source_references=request._verified_source_references,
             )
             result = self._artifact(
                 connection,
@@ -215,7 +229,10 @@ class PostgresArtifactStore(ArtifactReadQueries, ArtifactPostgresBase):
                 return ArtifactVersionReceipt.model_validate(replay)
             row = self._locked_artifact(connection, identity, artifact_id)
             self._expected(row, request.expected_revision)
-            sources = self._draft_sources(connection, identity.tenant_id, artifact_id)
+            source_records = self._draft_source_records(
+                connection, identity.tenant_id, artifact_id
+            )
+            sources = [record[0] for record in source_records]
             self._require_source_access(identity, sources)
             content = self._artifact(connection, row).content
             version = int(row["current_version_number"]) + 1
@@ -244,8 +261,17 @@ class PostgresArtifactStore(ArtifactReadQueries, ArtifactPostgresBase):
                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""",
                 (artifact_id, version, identity.tenant_id, identity.user_id, envelope, fingerprint, len(sources), identity.user_id, now),
             )
-            for source in sources:
-                self._insert_version_source(connection, identity, artifact_id, version, source)
+            for source, verification_state, verified_at, evidence_fingerprint in source_records:
+                self._insert_version_source(
+                    connection,
+                    identity,
+                    artifact_id,
+                    version,
+                    source,
+                    verification_state=verification_state,
+                    verified_at=verified_at,
+                    evidence_fingerprint=evidence_fingerprint,
+                )
             revision = int(row["revision"]) + 1
             connection.execute(
                 """UPDATE ai_artifacts
@@ -285,8 +311,12 @@ class PostgresArtifactStore(ArtifactReadQueries, ArtifactPostgresBase):
             version = self._version_row(connection, identity, artifact_id, request.version_number)
             sources = self._version_sources(connection, identity, artifact_id, request.version_number)
             self._require_source_access(identity, sources)
+            all_sources_verified = self._all_version_sources_verified(
+                connection, artifact_id, request.version_number
+            )
             assessment = assess_artifact(
-                self._version_content(version), all_sources_verified=not sources
+                self._version_content(version),
+                all_sources_verified=all_sources_verified,
             )
             preflight_id = uuid4()
             now = connection.execute(
@@ -389,7 +419,10 @@ class PostgresArtifactStore(ArtifactReadQueries, ArtifactPostgresBase):
         with connect(self.database_url, row_factory=dict_row) as connection:
             replay = self._replay(connection, identity, request.command_id, "EXPORT", proof)
             if replay is not None:
-                return ArtifactExportReceipt.model_validate(replay)
+                canonical = ArtifactExportReceipt.model_validate(replay)
+                return self.export_job(
+                    identity, artifact_id, canonical.export_job_id
+                )
             artifact = self._locked_artifact(connection, identity, artifact_id)
             self._expected(artifact, request.expected_revision)
             if artifact["artifact_state"] != ArtifactState.PUBLISHED.value or artifact["published_version_number"] != request.version_number:
@@ -409,9 +442,9 @@ class PostgresArtifactStore(ArtifactReadQueries, ArtifactPostgresBase):
                 """INSERT INTO ai_artifact_export_jobs (
                        export_job_id, artifact_id, version_number, preflight_id,
                        tenant_id, user_id, command_id, export_format,
-                       retention_until)
-                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""",
-                (export_job_id, artifact_id, request.version_number, request.preflight_id, identity.tenant_id, identity.user_id, request.command_id, request.export_format.value, deadline),
+                       artifact_revision, retention_until)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                (export_job_id, artifact_id, request.version_number, request.preflight_id, identity.tenant_id, identity.user_id, request.command_id, request.export_format.value, revision, deadline),
             )
             connection.execute(
                 """UPDATE ai_artifacts SET revision = %s, updated_at = CURRENT_TIMESTAMP
@@ -442,43 +475,14 @@ class PostgresArtifactStore(ArtifactReadQueries, ArtifactPostgresBase):
                 artifact_revision=revision,
                 version_number=request.version_number,
                 export_format=request.export_format,
+                execution_available=governed_worker_available("ARTIFACT_EXPORT"),
+                requested_at=now,
             )
             self._record_command(connection, identity, artifact_id, "EXPORT", request, proof, result)
             self._event(connection, identity, artifact_id, request.command_id, "EXPORT_REQUESTED", artifact["artifact_state"], artifact["artifact_state"], revision, proof.request_fingerprint, request.reason_code, request.change_reason)
             return result
 
-    def _insert_version_source(self, connection: Any, identity: PersonalDomainIdentity, artifact_id: UUID, version: int, source: Any) -> None:
-        source_link_id = uuid4()
-        payload = source.model_dump(mode="json", by_alias=True)
-        fingerprint = self.fingerprints.value(tenant_id=identity.tenant_id, purpose="artifact-source-reference", payload=payload)
-        envelope = self.codec.encrypt_json(
-            payload, tenant_id=identity.tenant_id, resource_type="artifact-version-source",
-            resource_id=str(source_link_id), field="reference",
-        )
-        connection.execute(
-            """INSERT INTO ai_artifact_version_sources (
-                   source_link_id, artifact_id, version_number, source_type,
-                   reference_fingerprint, reference_envelope, verification_state)
-               VALUES (%s, %s, %s, %s, %s, %s, 'UNVERIFIED')""",
-            (source_link_id, artifact_id, version, source.source_type.value, fingerprint, envelope),
-        )
-
     @staticmethod
     def _require_current_version(artifact: Any, version_number: int) -> None:
         if int(artifact["current_version_number"]) != version_number:
             raise GovernedDomainConflict("The immutable artifact version is no longer current.")
-
-    @staticmethod
-    def _require_passing_preflight(connection: Any, identity: PersonalDomainIdentity, version: Any, preflight_id: UUID) -> None:
-        row = connection.execute(
-            """SELECT outcome, content_fingerprint, expires_at
-                 FROM ai_artifact_preflight_runs
-                WHERE preflight_id = %s AND artifact_id = %s AND version_number = %s
-                  AND tenant_id = %s AND user_id = %s""",
-            (preflight_id, version["artifact_id"], version["version_number"], identity.tenant_id, identity.user_id),
-        ).fetchone()
-        now = connection.execute(
-            "SELECT CURRENT_TIMESTAMP AS now"
-        ).fetchone()["now"]
-        if row is None or row["outcome"] != "PASS" or row["content_fingerprint"] != version["content_fingerprint"] or row["expires_at"] <= now:
-            raise GovernedDomainConflict("A current passing DLP preflight is required.")

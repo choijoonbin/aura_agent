@@ -35,10 +35,14 @@ from dwp_agent.policy import SafetyControls
 from dwp_agent.product_surface_pep import (
     ACCESS_POLICY_KEY,
     ACTION_ROUTE,
+    ASK_STREAM_ROUTE,
     ACTIVITY_EVENTS_ROUTE,
     ACTIVITY_EVENT_ROUTE,
     ACTIVITY_SUMMARY_ROUTE,
+    CONVERSATION_DELETE_ROUTE,
+    CONVERSATION_RENAME_ROUTE,
     DATA_ROUTE,
+    EXPECTED_REVISION_HEADER,
     OWNER_SERVICE,
     PAGE_ROUTE,
     PRODUCT_KEY,
@@ -48,8 +52,10 @@ from dwp_agent.product_surface_pep import (
     SURFACE_KEY,
     owns_candidate,
     resolve_binding,
+    scope_key,
     self_scope_key,
 )
+from dwp_agent.product_surface_pep_bindings import ROUTE_BINDING_SPECS
 from dwp_agent.user_run_contracts import AgentRunState, UserAgentRunSummary
 
 
@@ -71,9 +77,17 @@ class RuntimeSpy:
         self.workspace_authorization = None
 
     def answer(
-        self, request, *, identity, safety_controls, workspace_authorization
+        self,
+        request,
+        *,
+        identity,
+        safety_controls,
+        workspace_authorization,
+        on_progress=None,
     ) -> AskResponse:
         self.calls += 1
+        if on_progress is not None:
+            on_progress("AUTHORIZING")
         self.workspace_authorization = workspace_authorization
         return _ask_response(request.request_id, identity.correlation_id)
 
@@ -83,6 +97,7 @@ def product_surface_runtime(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("DWP_AGENT_SERVICE_TOKEN", SERVICE_TOKEN)
     monkeypatch.setenv("DWP_AGENT_PRODUCT_AUTHORIZATION_V4_ENABLED", "true")
     monkeypatch.setenv("DWP_AGENT_PRODUCT_AUTHORIZATION_V5_ENABLED", "true")
+    monkeypatch.setenv("DWP_AGENT_PRODUCT_AUTHORIZATION_V6_ENABLED", "true")
     monkeypatch.delenv("DWP_AGENT_IDENTITY_SIGNING_SECRET", raising=False)
     store = ConversationStoreStub()
     monkeypatch.setattr(main_module, "get_conversation_store", lambda: store)
@@ -99,12 +114,21 @@ def product_surface_runtime(monkeypatch: pytest.MonkeyPatch):
 
 class ConversationStoreStub:
     def __init__(self) -> None:
+        self.rename_calls = 0
+        self.delete_calls = 0
         timestamp = datetime.now(timezone.utc)
         self.summary = ConversationSummary(
             conversation_id=CONVERSATION_ID,
             title="오늘 업무",
             locale="ko",
             message_count=1,
+            agent_key=None,
+            source_systems=[],
+            evidence_count=0,
+            summary_excerpt=None,
+            last_answer_status=None,
+            retention_until=timestamp,
+            legal_hold=False,
             created_at=timestamp,
             updated_at=timestamp,
             last_message_at=timestamp,
@@ -132,6 +156,27 @@ class ConversationStoreStub:
         assert user_id == str(USER_ID)
         assert conversation_id == CONVERSATION_ID
         return self.detail
+
+    def rename(
+        self,
+        *,
+        tenant_id: str,
+        user_id: str,
+        conversation_id: UUID,
+        title: str,
+    ):
+        assert tenant_id == str(TENANT_ID)
+        assert user_id == str(USER_ID)
+        assert conversation_id == CONVERSATION_ID
+        assert title == "변경한 제목"
+        self.rename_calls += 1
+        return self.detail
+
+    def delete(self, *, tenant_id: str, user_id: str, conversation_id: UUID):
+        assert tenant_id == str(TENANT_ID)
+        assert user_id == str(USER_ID)
+        assert conversation_id == CONVERSATION_ID
+        self.delete_calls += 1
 
 
 class ActivityStoreStub:
@@ -230,6 +275,68 @@ def test_rejects_stale_authority_revision_at_agent_owner_pep() -> None:
     assert runtime.calls == 0
 
 
+def test_v6_state_changes_reject_stale_authority_before_runtime_or_store(
+    product_surface_runtime: ConversationStoreStub,
+) -> None:
+    runtime = RuntimeSpy()
+    main_module.app.dependency_overrides[main_module.get_ask_runtime] = lambda: runtime
+
+    stream = _request(
+        "POST",
+        "/v1/ask/stream",
+        headers=_headers(ASK_STREAM_ROUTE, expected_revision=STALE_REVISION),
+        json_body={"requestId": "request-stream-stale", "query": "오늘 할 일을 알려 주세요."},
+    )
+    rename = _request(
+        "PATCH",
+        f"/v1/conversations/{CONVERSATION_ID}",
+        headers=_headers(CONVERSATION_RENAME_ROUTE, expected_revision=STALE_REVISION),
+        json_body={"title": "변경한 제목"},
+    )
+    delete = _request(
+        "DELETE",
+        f"/v1/conversations/{CONVERSATION_ID}",
+        headers=_headers(CONVERSATION_DELETE_ROUTE, expected_revision=STALE_REVISION),
+    )
+
+    assert [stream.status_code, rename.status_code, delete.status_code] == [409, 409, 409]
+    assert runtime.calls == 0
+    assert product_surface_runtime.rename_calls == 0
+    assert product_surface_runtime.delete_calls == 0
+
+
+def test_v6_state_changes_execute_only_with_exact_route_and_current_revision(
+    product_surface_runtime: ConversationStoreStub,
+) -> None:
+    runtime = RuntimeSpy()
+    main_module.app.dependency_overrides[main_module.get_ask_runtime] = lambda: runtime
+
+    stream = _request(
+        "POST",
+        "/v1/ask/stream",
+        headers=_headers(ASK_STREAM_ROUTE),
+        json_body={"requestId": "request-stream-exact", "query": "오늘 할 일을 알려 주세요."},
+    )
+    rename = _request(
+        "PATCH",
+        f"/v1/conversations/{CONVERSATION_ID}",
+        headers=_headers(CONVERSATION_RENAME_ROUTE),
+        json_body={"title": "변경한 제목"},
+    )
+    delete = _request(
+        "DELETE",
+        f"/v1/conversations/{CONVERSATION_ID}",
+        headers=_headers(CONVERSATION_DELETE_ROUTE),
+    )
+
+    assert [stream.status_code, rename.status_code, delete.status_code] == [200, 200, 204]
+    assert runtime.calls == 1
+    assert product_surface_runtime.rename_calls == 1
+    assert product_surface_runtime.delete_calls == 1
+    for response in (stream, rename, delete):
+        assert response.headers[RESPONSE_REVISION_HEADER] == DECISION_REVISION
+
+
 def test_rejects_normal_support_confused_deputy_at_agent_owner_pep(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -273,7 +380,9 @@ def test_rejects_internal_header_spoof_at_agent_owner_boundary(
     assert calls == []
 
 
-def test_executes_page_data_action_through_agent_owner_pep() -> None:
+def test_executes_page_data_action_through_agent_owner_pep(
+    product_surface_runtime: ConversationStoreStub,
+) -> None:
     runtime = RuntimeSpy()
     main_module.app.dependency_overrides[main_module.get_ask_runtime] = lambda: runtime
 
@@ -296,6 +405,9 @@ def test_executes_page_data_action_through_agent_owner_pep() -> None:
     assert page.status_code == 200
     assert data.status_code == 200
     assert action.status_code == 200
+    assert page.json()["data"][0] == product_surface_runtime.summary.model_dump(
+        mode="json", by_alias=True
+    )
     assert runtime.calls == 1
     assert runtime.workspace_authorization.available is True
     assert runtime.workspace_authorization.outbound_headers() == {
@@ -412,6 +524,7 @@ def test_v4_readiness_cannot_open_v5_routes(
     activity = ActivityStoreStub()
     monkeypatch.setattr(activity_api_module, "get_agent_activity_store", lambda: activity)
     monkeypatch.delenv("DWP_AGENT_PRODUCT_AUTHORIZATION_V5_ENABLED")
+    monkeypatch.delenv("DWP_AGENT_PRODUCT_AUTHORIZATION_V6_ENABLED")
 
     response = _request(
         "GET",
@@ -422,6 +535,22 @@ def test_v4_readiness_cannot_open_v5_routes(
     assert response.status_code == 503
     assert "authorization v5" in response.text
     assert activity.calls == []
+
+
+def test_v5_readiness_cannot_open_v6_state_changes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("DWP_AGENT_PRODUCT_AUTHORIZATION_V6_ENABLED")
+
+    response = _request(
+        "POST",
+        "/v1/ask/stream",
+        headers=_headers(ASK_STREAM_ROUTE),
+        json_body={"requestId": "request-v6-disabled", "query": "오늘 할 일을 알려 주세요."},
+    )
+
+    assert response.status_code == 503
+    assert "authorization v6" in response.text
 
 
 def test_v4_draft_contract_exposes_exact_dwaion_consumer_metadata() -> None:
@@ -524,6 +653,186 @@ def test_v5_draft_contract_exposes_exact_dwaion_read_consumer_metadata() -> None
     }
 
 
+def test_v6_draft_contract_closes_actual_dwaion_state_change_routes() -> None:
+    projection = json.loads(
+        (ROOT / "contracts/product-authorization/dwaion-pep-v6.draft.json").read_text()
+    )
+
+    assert projection["registryRef"] == {
+        "bundleKey": "product-surfaces",
+        "version": 6,
+        "bundleStatus": "DRAFT",
+        "checksum": "7cf8602aa2da5f7a0464b23cfd84a8f381e2d3eb85333ed8a8e483865b2b0abe",
+    }
+    assert projection["activation"] == {
+        "enabledByDefault": False,
+        "readinessEnvironment": "DWP_AGENT_PRODUCT_AUTHORIZATION_V6_ENABLED",
+    }
+    routes = {route["routeContractKey"]: route for route in projection["routes"]}
+    assert {
+        key: (
+            routes[key]["gatewayBinding"]["method"],
+            routes[key]["gatewayBinding"]["path"],
+            routes[key]["servicePepBinding"]["path"],
+            routes[key]["accessContractKey"],
+        )
+        for key in (
+            ASK_STREAM_ROUTE,
+            CONVERSATION_RENAME_ROUTE,
+            CONVERSATION_DELETE_ROUTE,
+        )
+    } == {
+        ASK_STREAM_ROUTE: (
+            "POST",
+            "/api/agent/v1/ask/stream",
+            "/v1/ask/stream",
+            "dwaion.work.ask.execute",
+        ),
+        CONVERSATION_RENAME_ROUTE: (
+            "PATCH",
+            "/api/agent/v1/conversations/{conversationId}",
+            "/v1/conversations/{conversationId}",
+            "dwaion.work.ask.execute",
+        ),
+        CONVERSATION_DELETE_ROUTE: (
+            "DELETE",
+            "/api/agent/v1/conversations/{conversationId}",
+            "/v1/conversations/{conversationId}",
+            "dwaion.work.ask.execute",
+        ),
+    }
+    assert len(routes) == 88
+    assert len([route for route in routes.values() if route["routeKind"] == "ACTION"]) == 52
+    assert set(routes) == {spec["route_contract_key"] for spec in ROUTE_BINDING_SPECS}
+
+
+def test_openapi_documents_conditional_revision_for_governed_state_changes() -> None:
+    schema = main_module.app.openapi()
+
+    for path, method in (
+        ("/v1/ask", "post"),
+        ("/v1/ask/stream", "post"),
+        ("/v1/conversations/{conversation_id}", "patch"),
+        ("/v1/conversations/{conversation_id}", "delete"),
+    ):
+        matching = [
+            parameter
+            for parameter in schema["paths"][path][method]["parameters"]
+            if parameter.get("in") == "header"
+            and parameter.get("name") == EXPECTED_REVISION_HEADER
+        ]
+        assert len(matching) == 1
+        assert matching[0]["required"] is False
+        assert "110/111" in matching[0]["description"]
+        assert "000/100" in matching[0]["description"]
+        nullable_string = next(
+            item for item in matching[0]["schema"]["anyOf"] if item.get("type") == "string"
+        )
+        assert nullable_string["minLength"] == 1
+        assert nullable_string["maxLength"] == 200
+
+
+def test_openapi_documents_every_registered_dwaion_action() -> None:
+    schema = main_module.app.openapi()
+    for spec in ROUTE_BINDING_SPECS:
+        if spec["route_kind"] != "ACTION":
+            continue
+        expected_shape = _path_shape(spec["path_template"])
+        paths = [path for path in schema["paths"] if _path_shape(path) == expected_shape]
+        assert len(paths) == 1, spec
+        operation = schema["paths"][paths[0]][spec["method"].lower()]
+        matching = [
+            parameter
+            for parameter in operation["parameters"]
+            if parameter.get("in") == "header"
+            and parameter.get("name") == EXPECTED_REVISION_HEADER
+        ]
+        assert len(matching) == 1, spec
+
+
+def test_v6_high_risk_mutation_bindings_reject_stale_and_wrong_scopes() -> None:
+    proposal_id = "50000000-0000-4000-8000-000000000017"
+    artifact_id = "60000000-0000-4000-8000-000000000017"
+    evaluation_id = "70000000-0000-4000-8000-000000000017"
+    management_scope = scope_key(
+        TENANT_ID,
+        USER_ID,
+        surface_key="dwaion.management",
+        source="APP_RESOURCE_SET:RS_DWAION",
+        kind="RESOURCE_SET",
+    )
+    cases = (
+        (
+            "POST",
+            f"/v1/proposals/{proposal_id}/decisions",
+            "route.dwaion.work.proposal-decision.action",
+            self_scope_key(TENANT_ID, USER_ID),
+            "APP.ASK:VIEW",
+        ),
+        (
+            "POST",
+            f"/v1/artifacts/{artifact_id}/exports",
+            "route.dwaion.work.artifact-export.action",
+            self_scope_key(TENANT_ID, USER_ID),
+            "APP.ASK:VIEW,APP.DWAION_ARTIFACTS:EXPORT",
+        ),
+        (
+            "PATCH",
+            f"/v1/admin/evaluations/{evaluation_id}/lifecycle",
+            "route.dwaion.management.evaluation-lifecycle.action",
+            management_scope,
+            "ADMIN.DWAION_EVALUATION:MANAGE",
+        ),
+        (
+            "POST",
+            "/v1/admin/gates/PRODUCTION_READINESS/decision",
+            "route.dwaion.management.gate-decision.action",
+            management_scope,
+            "ADMIN.DWAION_GATES:APPROVE",
+        ),
+    )
+    for method, path, route, selected_scope, permissions in cases:
+        headers = {
+            **_headers(route, scope=selected_scope, expected_revision=STALE_REVISION),
+            "X-DWP-Permissions": permissions,
+        }
+        response = _request(method, path, headers=headers, json_body={})
+        assert response.status_code == 409, (method, path, response.text)
+
+    wrong_work_scope = _request(
+        "POST",
+        f"/v1/proposals/{proposal_id}/decisions",
+        headers={
+            **_headers(
+                "route.dwaion.work.proposal-decision.action",
+                scope=management_scope,
+            ),
+            "X-DWP-Permissions": "APP.ASK:VIEW",
+        },
+        json_body={},
+    )
+    wrong_management_scope = _request(
+        "POST",
+        "/v1/admin/gates/PRODUCTION_READINESS/decision",
+        headers={
+            **_headers(
+                "route.dwaion.management.gate-decision.action",
+                scope=self_scope_key(TENANT_ID, USER_ID),
+            ),
+            "X-DWP-Permissions": "ADMIN.DWAION_GATES:APPROVE",
+        },
+        json_body={},
+    )
+    assert wrong_work_scope.status_code == 403
+    assert wrong_management_scope.status_code == 403
+
+
+def _path_shape(path: str) -> str:
+    import re
+
+    return re.sub(r"\{[^{}]+\}", "{}", path)
+
+
 def test_malformed_candidate_and_rollout_evidence_fail_closed() -> None:
     malformed_candidate = _request(
         "GET",
@@ -561,9 +870,20 @@ def test_candidate_scope_is_exact_and_leaves_legacy_siblings_ungoverned() -> Non
     assert owns_candidate("GET", "/v1/activity/executions/summary") is True
     assert resolve_binding("GET", "/v1/activity/events/not-a-uuid") is None
     assert resolve_binding("GET", "/v1/runs/not-a-uuid") is None
-    assert owns_candidate("POST", "/v1/ask/stream") is False
-    assert owns_candidate("PATCH", f"/v1/conversations/{CONVERSATION_ID}") is False
-    assert owns_candidate("DELETE", f"/v1/conversations/{CONVERSATION_ID}") is False
+    assert owns_candidate("POST", "/v1/ask/stream") is True
+    assert resolve_binding("POST", "/v1/ask/stream").route_contract_key == ASK_STREAM_ROUTE
+    assert owns_candidate("PATCH", f"/v1/conversations/{CONVERSATION_ID}") is True
+    assert (
+        resolve_binding("PATCH", f"/v1/conversations/{CONVERSATION_ID}").route_contract_key
+        == CONVERSATION_RENAME_ROUTE
+    )
+    assert owns_candidate("DELETE", f"/v1/conversations/{CONVERSATION_ID}") is True
+    assert (
+        resolve_binding("DELETE", f"/v1/conversations/{CONVERSATION_ID}").route_contract_key
+        == CONVERSATION_DELETE_ROUTE
+    )
+    assert owns_candidate("PATCH", "/v1/conversations/not-a-uuid") is True
+    assert resolve_binding("PATCH", "/v1/conversations/not-a-uuid") is None
 
 
 def _headers(

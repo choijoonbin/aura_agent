@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
 from typing import Callable
 from uuid import uuid4
 
@@ -10,6 +9,7 @@ from .ask_response_guard import (
     model_provider_label as _model_provider_label, safe_status_code as _safe_status_code,
     safety_identifier as _safety_identifier, selected_response_guard,
 )
+from .ask_runtime_response import build_ask_response as _response
 from .context_broker import ContextBrokerUnavailable, WorkspaceContextBroker
 from .grounded_fallback import grounded_evidence_fallback
 from .grounded_response_status import grounded_status_for_provider
@@ -21,7 +21,6 @@ from .conversation_store import (
 from .conversation_continuation import bind_conversation_request
 from .contracts import (
     AgentRegistryResolution,
-    AnswerConfidence,
     AskCitation,
     AskModelRoute,
     AskPolicyDecision,
@@ -40,6 +39,7 @@ from .model_gateway import (
     OpenAIResponsesGateway,
 )
 from .policy import AskIdentity, SafetyControls, evaluate_ask_policy
+from .personal_memory_runtime import PersonalMemoryRuntime
 from .registry import resolve_agent
 from .run_store import RunInProgress, RunLease, RunStart, RunStore, get_run_store, privacy_hash
 from .run_observability import RunStageKey
@@ -52,11 +52,13 @@ class AskRuntime:
         model_gateway: OpenAIResponsesGateway | None = None,
         run_store: RunStore | None = None,
         conversation_store: ConversationStore | None = None,
+        personalization_runtime: PersonalMemoryRuntime | None = None,
     ) -> None:
         self.context_broker = context_broker or WorkspaceContextBroker()
         self.model_gateway = model_gateway or OpenAIResponsesGateway()
         self.run_store = run_store or get_run_store()
         self.conversation_store = conversation_store or get_conversation_store(self.run_store)
+        self.personalization_runtime = personalization_runtime or PersonalMemoryRuntime()
 
     def answer(
         self,
@@ -163,7 +165,7 @@ class AskRuntime:
                     conversation_id=conversation_id,
                 )
             if registry.resolution != RegistryResolutionStatus.ACTIVE:
-                response = self._response(
+                response = _response(
                     request=request,
                     identity=identity,
                     run_id=run_id,
@@ -177,7 +179,7 @@ class AskRuntime:
                     ),
                 )
             elif policy.outcome != PolicyOutcome.ALLOW or not policy.model_allowed:
-                response = self._response(
+                response = _response(
                     request=request,
                     identity=identity,
                     run_id=run_id,
@@ -279,7 +281,7 @@ class AskRuntime:
             )
         except ContextBrokerUnavailable:
             return (
-                self._response(
+                _response(
                     request=request,
                     identity=identity,
                     run_id=run_id,
@@ -307,7 +309,7 @@ class AskRuntime:
                 else "NO_GROUNDED_SOURCE"
             )
             return (
-                self._response(
+                _response(
                     request=request,
                     identity=identity,
                     run_id=run_id,
@@ -322,6 +324,9 @@ class AskRuntime:
             )
 
         _progress(on_progress, "REASONING")
+        personalization = self.personalization_runtime.resolve(
+            identity, agent_key=registry.entry_key
+        )
         fallback_used = False
         try:
             model_answer = self.model_gateway.generate(
@@ -333,10 +338,11 @@ class AskRuntime:
                 conversation_history=conversation_history,
                 page_context=request.page_context,
                 agent_key=registry.entry_key,
+                personal_preferences=personalization.preferences,
             )
         except ModelConfigurationRequired:
             return (
-                self._response(
+                _response(
                     request=request,
                     identity=identity,
                     run_id=run_id,
@@ -351,12 +357,13 @@ class AskRuntime:
                         provider=_model_provider_label(self.model_gateway),
                         model=self.model_gateway.model.strip() or None,
                     ),
+                    personalization=personalization.evidence(model_applied=False),
                 ),
                 None,
             )
         except ModelRefused:
             return (
-                self._response(
+                _response(
                     request=request,
                     identity=identity,
                     run_id=run_id,
@@ -371,6 +378,7 @@ class AskRuntime:
                         provider=_model_provider_label(self.model_gateway),
                         model=self.model_gateway.model.strip() or None,
                     ),
+                    personalization=personalization.evidence(model_applied=False),
                 ),
                 None,
             )
@@ -379,7 +387,7 @@ class AskRuntime:
             fallback_used = True
         except GroundingViolation as error:
             return (
-                self._response(
+                _response(
                     request=request,
                     identity=identity,
                     run_id=run_id,
@@ -394,6 +402,7 @@ class AskRuntime:
                         provider=_model_provider_label(self.model_gateway),
                         model=self.model_gateway.model.strip() or None,
                     ),
+                    personalization=personalization.evidence(model_applied=False),
                 ),
                 None,
             )
@@ -416,7 +425,7 @@ class AskRuntime:
             )
 
         return (
-            self._response(
+            _response(
                 request=request,
                 identity=identity,
                 run_id=run_id,
@@ -438,6 +447,7 @@ class AskRuntime:
                     total_tokens=model_answer.total_tokens,
                     latency_ms=model_answer.latency_ms,
                 ),
+                personalization=personalization.evidence(model_applied=not fallback_used),
             ),
             model_answer.provider_request_hash,
         )
@@ -453,42 +463,6 @@ class AskRuntime:
             user_id=identity.user_id,
             correlation_id=identity.correlation_id,
         )
-
-    def _response(
-        self,
-        *,
-        request: AskRequest,
-        identity: AskIdentity,
-        run_id: str,
-        audit_id: str,
-        registry: AgentRegistryResolution,
-        policy: AskPolicyDecision,
-        state: AskState,
-        status_code: str,
-        model_route: AskModelRoute,
-        answer: str | None = None,
-        confidence: AnswerConfidence | None = None,
-        citations: list[AskCitation] | None = None,
-        source_count: int = 0,
-    ) -> AskResponse:
-        return AskResponse(
-            run_id=run_id,
-            audit_id=audit_id,
-            request_id=request.request_id,
-            correlation_id=identity.correlation_id,
-            state=state,
-            answer=answer,
-            confidence=confidence,
-            citations=citations or [],
-            source_count=source_count,
-            policy=policy,
-            model_route=model_route,
-            agent_registry=registry,
-            status_code=status_code,
-            completed_at=datetime.now(timezone.utc),
-            selected_work=request.page_context.selected_work if request.page_context else None,
-        )
-
 
 def _progress(callback: Callable[[str], None] | None, stage: str) -> None:
     if callback is not None:

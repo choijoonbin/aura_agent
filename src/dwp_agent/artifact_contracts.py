@@ -4,7 +4,7 @@ from datetime import datetime
 from enum import StrEnum
 from uuid import UUID
 
-from pydantic import Field, field_validator
+from pydantic import Field, PrivateAttr, field_validator, model_validator
 
 from .contracts import CitationSourceType, ContractModel
 from .governed_domain_contracts import HighRiskMutationCommand, MutationCommand
@@ -35,6 +35,15 @@ class ExportFormat(StrEnum):
     PDF = "PDF"
 
 
+class ArtifactExportState(StrEnum):
+    PENDING = "PENDING"
+    CLAIMED = "CLAIMED"
+    SUCCEEDED = "SUCCEEDED"
+    PARTIAL = "PARTIAL"
+    FAILED = "FAILED"
+    CANCELLED = "CANCELLED"
+
+
 class ArtifactSourceReference(ContractModel):
     source_type: CitationSourceType
     reference: str = Field(
@@ -44,11 +53,37 @@ class ArtifactSourceReference(ContractModel):
     )
 
 
+class ArtifactConversationSource(ContractModel):
+    conversation_id: UUID
+    assistant_message_id: UUID
+
+
 class ArtifactSourceEvidence(ContractModel):
     source: ArtifactSourceReference
     verification_state: str = "UNVERIFIED"
     freshness: str = "UNKNOWN"
     verified_at: datetime | None = None
+    verification_evidence_fingerprint: str | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
+
+    @model_validator(mode="after")
+    def coherent_verification(self) -> "ArtifactSourceEvidence":
+        sealed = self.verification_state == "SERVER_VERIFIED"
+        if sealed and (
+            self.verified_at is None
+            or self.verification_evidence_fingerprint is None
+            or self.freshness != "SNAPSHOT_AT_CONVERSATION"
+        ):
+            raise ValueError("Source verification evidence is incomplete or unsealed.")
+        if not sealed and (
+            self.verification_state != "UNVERIFIED"
+            or self.verified_at is not None
+            or self.verification_evidence_fingerprint is not None
+            or self.freshness != "UNKNOWN"
+        ):
+            raise ValueError("Source verification state is unsupported.")
+        return self
 
 
 class ArtifactCapabilities(ContractModel):
@@ -58,12 +93,24 @@ class ArtifactCapabilities(ContractModel):
     deterministic_preflight_available: bool = True
     enterprise_dlp_connector_available: bool = False
     source_verification_available: bool = False
+    source_verification_scope: str = "UNAVAILABLE"
+    manual_source_verification_available: bool = False
     source_freshness_available: bool = False
     personal_publish_state_available: bool = True
     recipient_sharing_available: bool = False
     external_sharing_available: bool = False
     export_request_available: bool = True
     export_execution_available: bool = False
+    supported_export_formats: list[ExportFormat] = Field(
+        default_factory=lambda: list(ExportFormat)
+    )
+    export_storage_scope: str = "POSTGRES_ENCRYPTED"
+
+
+class ArtifactCapabilitiesEnvelope(ContractModel):
+    status: str = "SUCCESS"
+    success: bool = True
+    data: ArtifactCapabilities
 
 
 class ArtifactDraftContent(ContractModel):
@@ -81,9 +128,12 @@ class ArtifactDraftContent(ContractModel):
 
 
 class CreateArtifactRequest(MutationCommand):
+    _verified_source_references: frozenset[str] = PrivateAttr(default_factory=frozenset)
+
     artifact_type: ArtifactType
     content: ArtifactDraftContent
     sources: list[ArtifactSourceReference] = Field(default_factory=list, max_length=20)
+    source_conversation: ArtifactConversationSource | None = None
 
     @field_validator("sources")
     @classmethod
@@ -94,6 +144,14 @@ class CreateArtifactRequest(MutationCommand):
         if len(keys) != len(value):
             raise ValueError("Artifact source references must be unique.")
         return value
+
+    @model_validator(mode="after")
+    def validate_source_provenance(self) -> "CreateArtifactRequest":
+        if self.source_conversation is not None and self.sources:
+            raise ValueError(
+                "Conversation-bound artifact sources must be derived by the server."
+            )
+        return self
 
 
 class AutosaveArtifactRequest(MutationCommand):
@@ -207,10 +265,38 @@ class ArtifactExportReceipt(ContractModel):
     artifact_revision: int = Field(ge=1)
     version_number: int = Field(ge=1)
     export_format: ExportFormat
-    state: str = "PENDING"
+    state: ArtifactExportState = ArtifactExportState.PENDING
     execution_available: bool = False
     file_available: bool = False
     external_write_performed: bool = False
+    media_type: str | None = None
+    file_name: str | None = None
+    byte_size: int | None = Field(default=None, ge=1)
+    content_fingerprint: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    requested_at: datetime | None = None
+    completed_at: datetime | None = None
+    safe_error_code: str | None = Field(
+        default=None, pattern=r"^[A-Z][A-Z0-9_.-]{1,127}$"
+    )
+
+    @model_validator(mode="after")
+    def coherent_file_state(self) -> "ArtifactExportReceipt":
+        metadata = (
+            self.media_type,
+            self.file_name,
+            self.byte_size,
+            self.content_fingerprint,
+        )
+        if self.file_available != (self.state == ArtifactExportState.SUCCEEDED):
+            raise ValueError("Only a succeeded export can expose a file.")
+        if self.file_available and any(value is None for value in metadata):
+            raise ValueError("A succeeded export requires complete file metadata.")
+        if not self.file_available and any(value is not None for value in metadata):
+            raise ValueError("A non-file export cannot expose file metadata.")
+        if self.state in {ArtifactExportState.SUCCEEDED, ArtifactExportState.FAILED}:
+            if self.completed_at is None:
+                raise ValueError("A terminal export requires completedAt.")
+        return self
 
 
 class ArtifactEnvelope(ContractModel):

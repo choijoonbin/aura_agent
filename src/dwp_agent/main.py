@@ -43,6 +43,7 @@ from .operations_api import router as operations_router
 from .question_launch_api import router as question_launch_router
 from .proposal_api import router as proposal_router
 from .question_launch_store import MAINTENANCE as question_launch_maintenance
+from .governed_worker_runtime import MAINTENANCE as governed_worker_maintenance
 from .governance_api import router as governance_router
 from .governance_safety_api import router as governance_safety_router
 from .operational_gate_api import (
@@ -58,7 +59,11 @@ from .local_governance_seed import seed_local_governance
 from .local_activity_seed import seed_local_activity
 from .meeting_intelligence_provider import validate_meeting_intelligence_runtime_configuration
 from .meeting_media_provider import validate_meeting_media_runtime_configuration
-from .product_surface_pep import install_product_surface_pep
+from .product_surface_pep import (
+    document_expected_decision_revision,
+    install_product_surface_openapi_contract,
+    install_product_surface_pep,
+)
 from .run_store import (
     RequestIdConflict,
     RunInProgress,
@@ -106,9 +111,11 @@ async def lifespan(_: FastAPI):
     seed_local_activity()
     validate_delivery_gate_runtime()
     question_launch_maintenance.start()
+    governed_worker_maintenance.start()
     try:
         yield
     finally:
+        governed_worker_maintenance.close()
         question_launch_maintenance.close()
         shutdown_ask_stream_pool()
 
@@ -199,7 +206,7 @@ def runtime_safety_controls(request: AskRequest, identity: AskIdentity) -> Safet
     response_model=AskEnvelope,
     response_model_by_alias=True,
     tags=["ask"],
-    dependencies=[Depends(require_gateway_service), Depends(require_ask_access)],
+    dependencies=[Depends(require_gateway_service), Depends(require_ask_access), Depends(document_expected_decision_revision)],
 )
 def ask(
     request: AskRequest,
@@ -247,7 +254,7 @@ def ask(
 @app.post(
     "/v1/ask/stream",
     tags=["ask"],
-    dependencies=[Depends(require_gateway_service), Depends(require_ask_access)],
+    dependencies=[Depends(require_gateway_service), Depends(require_ask_access), Depends(document_expected_decision_revision)],
 )
 def ask_stream(
     request: AskRequest,
@@ -320,7 +327,7 @@ def get_conversation(
     response_model=ConversationEnvelope,
     response_model_by_alias=True,
     tags=["conversations"],
-    dependencies=[Depends(require_gateway_service), Depends(require_ask_access)],
+    dependencies=[Depends(require_gateway_service), Depends(require_ask_access), Depends(document_expected_decision_revision)],
 )
 def rename_conversation(
     conversation_id: UUID,
@@ -344,7 +351,7 @@ def rename_conversation(
     "/v1/conversations/{conversation_id}",
     status_code=status.HTTP_204_NO_CONTENT,
     tags=["conversations"],
-    dependencies=[Depends(require_gateway_service), Depends(require_ask_access)],
+    dependencies=[Depends(require_gateway_service), Depends(require_ask_access), Depends(document_expected_decision_revision)],
 )
 def delete_conversation(
     conversation_id: UUID,
@@ -488,3 +495,6 @@ def _stream_error_code(error: Exception) -> str:
     if isinstance(error, RunStoreUnavailable):
         return "AGENT_STORE_UNAVAILABLE"
     return "ASK_STREAM_FAILED"
+
+
+install_product_surface_openapi_contract(app)

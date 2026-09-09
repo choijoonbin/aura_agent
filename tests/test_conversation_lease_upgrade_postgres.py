@@ -10,11 +10,12 @@ from uuid import UUID, uuid4
 
 import pytest
 from psycopg import connect
-from psycopg.errors import RestrictViolation
+from psycopg.errors import ForeignKeyViolation, RestrictViolation
 
 from dwp_agent.contracts import ConversationMessage, ConversationRole
 from dwp_agent.conversation_store import ConversationNotFound
 from dwp_agent.database_migrations import apply_migrations, migration_sort_key
+from dwp_agent.governed_worker_runtime import GovernedWorkerMaintenance
 from dwp_agent.postgres_conversation_store import PostgresConversationStore
 
 
@@ -38,7 +39,7 @@ class FixtureEncryption:
 
 
 @pytest.mark.integration
-def test_v18_upgrades_legacy_messages_to_strict_completed_lease_visibility() -> None:
+def test_legacy_database_upgrades_through_applied_v33_to_latest() -> None:
     _require_dedicated_database()
     _apply_migrations_through(17)
     tenant_id = str(910_000_000 + uuid4().int % 80_000_000)
@@ -58,7 +59,18 @@ def test_v18_upgrades_legacy_messages_to_strict_completed_lease_visibility() -> 
         empty_conversation_id=empty_conversation_id,
         encryption=encryption,
     )
+    _apply_pending_migrations_through(33)
+    with connect(DATABASE_URL) as connection:
+        applied_v33 = connection.execute(
+            "SELECT checksum FROM sys_schema_history WHERE version = 'V33'"
+        ).fetchone()
+    assert applied_v33 == (
+        "b90332db6a11ae2b3fa91d2874146402f499d76f9665a89eea29ba15d58085a4",
+    )
+    with pytest.raises(RuntimeError, match="schema is unavailable"):
+        GovernedWorkerMaintenance._require_database_schema(DATABASE_URL)
     apply_migrations(DATABASE_URL)
+    GovernedWorkerMaintenance._require_database_schema(DATABASE_URL)
 
     with connect(DATABASE_URL) as connection:
         messages = connection.execute(
@@ -131,7 +143,7 @@ def test_v18_upgrades_legacy_messages_to_strict_completed_lease_visibility() -> 
 
     connection = connect(DATABASE_URL)
     try:
-        with pytest.raises(RestrictViolation):
+        with pytest.raises((ForeignKeyViolation, RestrictViolation)):
             connection.execute(
                 "DELETE FROM ai_agent_runs WHERE run_id = %s",
                 (completed_run_id,),
@@ -155,6 +167,32 @@ def _apply_migrations_through(maximum_version: int) -> None:
             version, description = migration.stem.split("__", 1)
             if int(version.removeprefix("V")) > maximum_version:
                 break
+            sql = migration.read_text(encoding="utf-8")
+            connection.execute(sql)
+            connection.execute(
+                """INSERT INTO sys_schema_history (version, description, checksum)
+                   VALUES (%s, %s, %s)""",
+                (
+                    version,
+                    description.replace("_", " "),
+                    hashlib.sha256(sql.encode("utf-8")).hexdigest(),
+                ),
+            )
+
+
+def _apply_pending_migrations_through(maximum_version: int) -> None:
+    migrations = sorted(MIGRATION_ROOT.glob("V*__*.sql"), key=migration_sort_key)
+    with connect(DATABASE_URL) as connection:
+        applied = {
+            row[0]
+            for row in connection.execute("SELECT version FROM sys_schema_history")
+        }
+        for migration in migrations:
+            version, description = migration.stem.split("__", 1)
+            if int(version.removeprefix("V")) > maximum_version:
+                break
+            if version in applied:
+                continue
             sql = migration.read_text(encoding="utf-8")
             connection.execute(sql)
             connection.execute(

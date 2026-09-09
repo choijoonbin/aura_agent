@@ -111,22 +111,55 @@ class PostgresTransactionalOutboxStore:
         topics: tuple[str, ...],
         lease_seconds: int = 30,
     ) -> OutboxLease | None:
+        return self._claim(
+            tenant_id=tenant_id,
+            topics=topics,
+            lease_seconds=lease_seconds,
+        )
+
+    def claim_any(
+        self,
+        *,
+        topics: tuple[str, ...],
+        lease_seconds: int = 30,
+    ) -> OutboxLease | None:
+        """Claim the next internal intent across tenants for a trusted worker."""
+        return self._claim(
+            tenant_id=None,
+            topics=topics,
+            lease_seconds=lease_seconds,
+        )
+
+    def _claim(
+        self,
+        *,
+        tenant_id: int | None,
+        topics: tuple[str, ...],
+        lease_seconds: int,
+    ) -> OutboxLease | None:
         if not topics or len(topics) > 20 or not 5 <= lease_seconds <= 300:
             raise ValueError("Outbox claim bounds are invalid.")
         with connect(self.database_url, row_factory=dict_row) as connection:
+            tenant_filter = "tenant_id = %s AND " if tenant_id is not None else ""
+            parameters: tuple[object, ...] = (
+                (tenant_id, list(topics))
+                if tenant_id is not None
+                else (list(topics),)
+            )
             row = connection.execute(
-                """SELECT outbox_id, tenant_id, user_id, topic, aggregate_type,
-                          aggregate_id, payload_envelope, generation
-                     FROM ai_transactional_outbox
-                    WHERE tenant_id = %s AND topic = ANY(%s)
-                      AND ((state = 'PENDING' AND available_at <= CURRENT_TIMESTAMP)
-                        OR (state = 'CLAIMED' AND lease_expires_at <= CURRENT_TIMESTAMP))
-                    ORDER BY available_at, created_at, outbox_id
-                    FOR UPDATE SKIP LOCKED LIMIT 1""",
-                (tenant_id, list(topics)),
+                f"""SELECT outbox_id, tenant_id, user_id, topic, aggregate_type,
+                           aggregate_id, payload_envelope, generation
+                      FROM ai_transactional_outbox
+                     WHERE {tenant_filter}topic = ANY(%s)
+                       AND ((state = 'PENDING' AND available_at <= CURRENT_TIMESTAMP)
+                         OR (state = 'CLAIMED' AND lease_expires_at <= CURRENT_TIMESTAMP))
+                     ORDER BY available_at, created_at, outbox_id
+                     FOR UPDATE SKIP LOCKED LIMIT 1""",
+                parameters,
             ).fetchone()
             if row is None:
                 return None
+            claimed_tenant_id = int(row["tenant_id"])
             token = uuid4()
             generation = int(row["generation"]) + 1
             updated = connection.execute(
@@ -140,28 +173,28 @@ class PostgresTransactionalOutboxStore:
                 (generation, token, lease_seconds, row["outbox_id"]),
             ).fetchone()
             token_fingerprint = self.fingerprints.value(
-                tenant_id=tenant_id,
+                tenant_id=claimed_tenant_id,
                 purpose="outbox-lease-token",
                 payload={"token": str(token), "generation": generation},
             )
             self._event(
                 connection,
                 outbox_id=row["outbox_id"],
-                tenant_id=tenant_id,
+                tenant_id=claimed_tenant_id,
                 event_type="CLAIMED",
                 generation=generation,
                 token_fingerprint=token_fingerprint,
             )
             payload = self.codec.decrypt_json(
                 row["payload_envelope"],
-                tenant_id=tenant_id,
+                tenant_id=claimed_tenant_id,
                 resource_type="transactional-outbox",
                 resource_id=str(row["outbox_id"]),
                 field="payload",
             )
             return OutboxLease(
                 outbox_id=row["outbox_id"],
-                tenant_id=tenant_id,
+                tenant_id=claimed_tenant_id,
                 user_id=row["user_id"],
                 topic=row["topic"],
                 aggregate_type=row["aggregate_type"],

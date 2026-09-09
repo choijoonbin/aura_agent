@@ -20,8 +20,10 @@ from .conversation_store import (
     ConversationStoreUnavailable,
     ConversationTurn,
     _title,
+    conversation_answer_metadata,
 )
 from .conversation_exchange import build_exchange, exchange_matches
+from .conversation_summary_query import LATEST_VISIBLE_ASSISTANT_JOIN, SUMMARY_COLUMNS
 from .envelope import KeyContext, PayloadEncryption
 from .grounded_response_status import normalize_legacy_grounded_status
 from .payload_contexts import (
@@ -230,14 +232,11 @@ class PostgresConversationStore:
     def list(self, *, tenant_id: str, user_id: str, limit: int = 30) -> list[ConversationSummary]:
         with connect(self.database_url) as connection:
             rows = connection.execute(
-                """SELECT conversation.conversation_id, conversation.locale,
-                          conversation.message_count, conversation.created_at,
-                          conversation.updated_at, conversation.last_message_at,
-                          conversation.title_envelope, conversation.title_nonce,
-                          conversation.title_ciphertext, conversation.encryption_key_version
+                f"""SELECT {SUMMARY_COLUMNS}
                      FROM ai_conversations conversation
                      LEFT JOIN ai_conversation_retention_policies policy
                        ON policy.tenant_id = conversation.tenant_id
+                     {LATEST_VISIBLE_ASSISTANT_JOIN}
                     WHERE conversation.tenant_id = %s AND conversation.user_id = %s
                       AND conversation.message_count > 0
                       AND (conversation.retention_until > CURRENT_TIMESTAMP
@@ -253,14 +252,11 @@ class PostgresConversationStore:
     ) -> ConversationDetail:
         with connect(self.database_url) as connection:
             row = connection.execute(
-                """SELECT conversation.conversation_id, conversation.locale,
-                          conversation.message_count, conversation.created_at,
-                          conversation.updated_at, conversation.last_message_at,
-                          conversation.title_envelope, conversation.title_nonce,
-                          conversation.title_ciphertext, conversation.encryption_key_version
+                f"""SELECT {SUMMARY_COLUMNS}
                      FROM ai_conversations conversation
                      LEFT JOIN ai_conversation_retention_policies policy
                        ON policy.tenant_id = conversation.tenant_id
+                     {LATEST_VISIBLE_ASSISTANT_JOIN}
                     WHERE conversation.conversation_id = %s
                       AND conversation.tenant_id = %s AND conversation.user_id = %s
                       AND conversation.message_count > 0
@@ -402,13 +398,16 @@ class PostgresConversationStore:
                           message.encryption_key_version, completed_run.provider
                      FROM ai_conversation_messages message
                      JOIN ai_agent_runs completed_run
-                       ON completed_run.run_id = message.run_id
+                      ON completed_run.run_id = message.run_id
+                      AND completed_run.tenant_id = %s
+                      AND completed_run.user_id = %s
+                      AND completed_run.request_id = message.request_id
                       AND completed_run.run_state = 'COMPLETED'
                       AND completed_run.lease_generation = message.lease_generation
                     WHERE message.conversation_id = %s
                     ORDER BY message.created_at DESC, message.message_id DESC
                     LIMIT %s""",
-                (conversation_id, max(1, min(limit, 200))),
+                (int(tenant_id), user_id, conversation_id, max(1, min(limit, 200))),
             ).fetchall()
         rows.reverse()
         return rows
@@ -444,15 +443,22 @@ class PostgresConversationStore:
             legacy_version=str(row[9]) if row[9] is not None else None,
             legacy_nonce=bytes(row[7]) if row[7] is not None else None,
             legacy_ciphertext=bytes(row[8]) if row[8] is not None else None,
-            legacy_aad=legacy_conversation_aad(
-                tenant_id, user_id, conversation_id, "title"
-            ),
+            legacy_aad=legacy_conversation_aad(tenant_id, user_id, conversation_id, "title"),
         )
+        last_assistant = None
+        if row[12] is not None:
+            provider = str(row[18]) if row[18] is not None else None
+            last_assistant = self._message(
+                tenant_id, conversation_id, tuple(row[12:19]), provider=provider
+            )
         return ConversationSummary(
             conversation_id=conversation_id,
             title=title,
             locale=str(row[1]),
             message_count=int(row[2]),
+            **conversation_answer_metadata([] if last_assistant is None else [last_assistant]),
+            retention_until=row[10],
+            legal_hold=bool(row[11]),
             created_at=row[3],
             updated_at=row[4],
             last_message_at=row[5],

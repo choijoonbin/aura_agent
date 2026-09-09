@@ -38,8 +38,11 @@ from dwp_agent.personal_memory_contracts import (
     CreateMemoryRequest,
     DeleteMemoryRequest,
     ExplicitMemoryValue,
+    MemoryState,
+    RuntimeMemorySelection,
     UpdateAiSourcePreferenceRequest,
     UpdateMemoryPreferenceRequest,
+    UpdateMemoryRuntimePreferenceRequest,
     UpdateMemoryRequest,
 )
 from dwp_agent.personal_memory_postgres_store import PostgresPersonalMemoryStore
@@ -94,7 +97,7 @@ def migrated_database() -> None:
     _truncate()
 
 
-def test_migrations_apply_through_v30_with_database_invariants() -> None:
+def test_migrations_apply_through_v34_with_database_invariants() -> None:
     with connect(DATABASE_URL) as connection:
         versions = connection.execute(
             "SELECT version FROM sys_schema_history ORDER BY installed_at"
@@ -104,10 +107,16 @@ def test_migrations_apply_through_v30_with_database_invariants() -> None:
                  FROM pg_constraint
                 WHERE conrelid = 'ai_personal_routines'::regclass"""
         ).fetchall()
+        worker_tables = connection.execute(
+            """SELECT to_regclass('ai_artifact_export_outputs'),
+                      to_regclass('ai_artifact_export_events'),
+                      to_regclass('ai_data_disposition_receipts')"""
+        ).fetchone()
 
     assert {row[0] for row in versions} >= {
-        "V23", "V24", "V25", "V26", "V27", "V28", "V29", "V30"
+        "V23", "V24", "V25", "V26", "V27", "V28", "V29", "V30", "V31", "V32", "V33", "V34"
     }
+    assert worker_tables is not None and all(worker_tables)
     definitions = " ".join(row[0] for row in routine_constraints)
     assert "DRY_RUN_ONLY" in definitions
     assert "next_run_at IS NULL" in definitions
@@ -348,7 +357,8 @@ def test_memory_is_explicit_idempotent_tombstoned_and_session_bound() -> None:
     )
     assert controls.memory_enabled is True
     assert controls.memory_effective is False
-    assert controls.runtime_application_available is False
+    assert controls.runtime_application_state.value == "UNSET"
+    assert controls.runtime_application_available is True
     assert controls.team_memory_available is False
     assert controls.automatic_memory_inference is False
     created = store.create(identity, create)
@@ -374,6 +384,112 @@ def test_memory_is_explicit_idempotent_tombstoned_and_session_bound() -> None:
         ).fetchone()[0]
     assert envelope.startswith("dwp2.")
     assert "concise numbered" not in envelope.lower()
+
+
+def test_runtime_memory_requires_separate_consent_and_is_owner_expiry_scoped() -> None:
+    tenant = _tenant()
+    identity = _identity(tenant)
+    other = replace(identity, user_id="member-2")
+    retention = PostgresDomainRetentionStore(DATABASE_URL)
+    store = PostgresPersonalMemoryStore(DATABASE_URL)
+    _seed_policy(retention, identity, DomainKey.MEMORY)
+
+    for owner in (identity, other):
+        store.update_controls(
+            owner,
+            UpdateMemoryPreferenceRequest(
+                command_id=uuid4(),
+                expected_revision=0,
+                reason_code="USER_MEMORY_ENABLE",
+                change_reason="Store only explicit presentation preferences.",
+                memory_state="ENABLED",
+            ),
+        )
+        runtime_command = UpdateMemoryRuntimePreferenceRequest(
+            command_id=uuid4(),
+            expected_revision=1,
+            reason_code="USER_RUNTIME_PERSONALIZATION",
+            change_reason="Apply active explicit presentation preferences to my answers.",
+            runtime_application_state="ENABLED",
+        )
+        enabled = store.update_runtime_controls(owner, runtime_command)
+        assert store.update_runtime_controls(owner, runtime_command) == enabled
+        with pytest.raises(GovernedDomainConflict):
+            store.update_runtime_controls(replace(owner, auth_session_id="other-session"), runtime_command)
+
+    old_tone = store.create(
+        identity,
+        CreateMemoryRequest(
+            command_id=uuid4(), expected_revision=0, reason_code="USER_MEMORY_CREATE",
+            kind="TONE", memory=ExplicitMemoryValue(value="Use a warm tone"),
+        ),
+    )
+    store.create(
+        identity,
+        CreateMemoryRequest(
+            command_id=uuid4(), expected_revision=0, reason_code="USER_MEMORY_CREATE",
+            kind="TONE", memory=ExplicitMemoryValue(value="Use a concise professional tone"),
+        ),
+    )
+    expired = store.create(
+        identity,
+        CreateMemoryRequest(
+            command_id=uuid4(), expected_revision=0, reason_code="USER_MEMORY_CREATE",
+            kind="OUTPUT_FORMAT", memory=ExplicitMemoryValue(value="Use tables"),
+        ),
+    )
+    store.create(
+        other,
+        CreateMemoryRequest(
+            command_id=uuid4(), expected_revision=0, reason_code="USER_MEMORY_CREATE",
+            kind="WORKING_STYLE", memory=ExplicitMemoryValue(value="Other user's preference"),
+        ),
+    )
+    with connect(DATABASE_URL) as connection:
+        connection.execute(
+            "UPDATE ai_user_memories SET retention_until = CURRENT_TIMESTAMP - INTERVAL '1 day' WHERE memory_id = %s",
+            (expired.memory_id,),
+        )
+        connection.execute(
+            "UPDATE ai_user_memories SET memory_state = %s WHERE memory_id = %s",
+            (MemoryState.DISABLED.value, old_tone.memory_id),
+        )
+
+    selection = store.runtime_preferences(tenant_id=tenant, user_id=identity.user_id)
+
+    assert selection.storage_enabled is True
+    assert selection.runtime_enabled is True
+    assert [(item.kind.value, item.memory.value) for item in selection.memories] == [
+        ("TONE", "Use a concise professional tone")
+    ]
+
+    disabled = store.update_controls(
+        identity,
+        UpdateMemoryPreferenceRequest(
+            command_id=uuid4(),
+            expected_revision=2,
+            reason_code="USER_MEMORY_DISABLE",
+            change_reason="Stop storing and applying my explicit preferences.",
+            memory_state="DISABLED",
+        ),
+    )
+    assert disabled.runtime_application_state.value == "DISABLED"
+    assert disabled.memory_effective is False
+    reenabled = store.update_controls(
+        identity,
+        UpdateMemoryPreferenceRequest(
+            command_id=uuid4(),
+            expected_revision=3,
+            reason_code="USER_MEMORY_REENABLE",
+            change_reason="Resume storage without silently restoring answer application.",
+            memory_state="ENABLED",
+        ),
+    )
+    assert reenabled.runtime_application_state.value == "DISABLED"
+    assert reenabled.memory_effective is False
+    assert store.runtime_preferences(
+        tenant_id=tenant, user_id=identity.user_id
+    ) == RuntimeMemorySelection(True, False, ())
 
 
 def test_sensitive_memory_is_rejected_without_persisting_command_or_event() -> None:
@@ -834,6 +950,7 @@ def _truncate() -> None:
         connection.execute(
             """TRUNCATE TABLE
                    ai_artifact_events, ai_artifact_commands,
+                   ai_artifact_export_events, ai_artifact_export_outputs,
                    ai_artifact_export_jobs, ai_artifact_preflight_runs,
                    ai_artifact_version_sources, ai_artifact_versions,
                    ai_artifact_draft_sources, ai_artifact_drafts, ai_artifacts,
@@ -845,6 +962,7 @@ def _truncate() -> None:
                    ai_user_memory_preferences, ai_transactional_outbox_events,
                    ai_transactional_outbox,
                    ai_data_deletion_events, ai_data_deletion_targets,
+                   ai_data_disposition_receipts,
                    ai_data_deletion_jobs, ai_domain_retention_events,
                    ai_domain_retention_policies CASCADE"""
         )

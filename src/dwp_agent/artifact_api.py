@@ -6,11 +6,13 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Response, status
 
 from .artifact_contracts import (
+    ArtifactCapabilitiesEnvelope,
     ArtifactEnvelope,
     ArtifactExportEnvelope,
     ArtifactListEnvelope,
     ArtifactPreflightEnvelope,
     ArtifactPublicationEnvelope,
+    ArtifactSourceReference,
     ArtifactVersionEnvelope,
     ArtifactVersionDetailEnvelope,
     ArtifactVersionSummaryListEnvelope,
@@ -21,11 +23,22 @@ from .artifact_contracts import (
     PublishArtifactRequest,
     RunArtifactPreflightRequest,
 )
+from .artifact_runtime_capabilities import artifact_runtime_capabilities
 from .artifact_store import get_artifact_store
+from .contracts import ConversationRole
+from .conversation_store import (
+    ConversationNotFound,
+    ConversationStoreUnavailable,
+    get_conversation_store,
+)
 from .governed_domain_core import (
     GovernedDomainConflict,
     GovernedDomainNotFound,
     GovernedDomainUnavailable,
+)
+from .grounded_response_status import (
+    GROUNDED_ANSWER_STATUS,
+    GROUNDED_FALLBACK_STATUS,
 )
 from .personal_domain_security import (
     PersonalDomainIdentity,
@@ -51,6 +64,16 @@ def list_artifacts(
     _access(identity, "VIEW")
     _no_store(response)
     return _run(lambda: ArtifactListEnvelope(data=get_artifact_store().list(identity)))
+
+
+@router.get("/capabilities", response_model=ArtifactCapabilitiesEnvelope)
+def get_artifact_capabilities(
+    identity: Annotated[PersonalDomainIdentity, Depends(require_personal_domain_identity)],
+    response: Response,
+) -> ArtifactCapabilitiesEnvelope:
+    _access(identity, "VIEW")
+    _no_store(response)
+    return ArtifactCapabilitiesEnvelope(data=artifact_runtime_capabilities())
 
 
 @router.get("/{artifact_id}", response_model=ArtifactEnvelope)
@@ -130,6 +153,51 @@ def get_current_artifact_preflight(
     )
 
 
+@router.get(
+    "/{artifact_id}/exports/{export_job_id}",
+    response_model=ArtifactExportEnvelope,
+)
+def get_artifact_export(
+    artifact_id: UUID,
+    export_job_id: UUID,
+    identity: Annotated[PersonalDomainIdentity, Depends(require_personal_domain_identity)],
+    response: Response,
+) -> ArtifactExportEnvelope:
+    _access(identity, "EXPORT")
+    _no_store(response)
+    return _run(
+        lambda: ArtifactExportEnvelope(
+            data=get_artifact_store().export_job(
+                identity, artifact_id, export_job_id
+            )
+        )
+    )
+
+
+@router.get("/{artifact_id}/exports/{export_job_id}/download")
+def download_artifact_export(
+    artifact_id: UUID,
+    export_job_id: UUID,
+    identity: Annotated[PersonalDomainIdentity, Depends(require_personal_domain_identity)],
+) -> Response:
+    _access(identity, "EXPORT")
+    file = _run(
+        lambda: get_artifact_store().export_file(
+            identity, artifact_id, export_job_id
+        )
+    )
+    return Response(
+        content=file.content,
+        media_type=file.media_type,
+        headers={
+            "Cache-Control": "no-store",
+            "Content-Disposition": f'attachment; filename="{file.file_name}"',
+            "X-Content-Type-Options": "nosniff",
+            "X-DWP-Content-Fingerprint": file.content_fingerprint,
+        },
+    )
+
+
 @router.post("", status_code=status.HTTP_201_CREATED, response_model=ArtifactEnvelope)
 def create_artifact(
     request: CreateArtifactRequest,
@@ -139,7 +207,11 @@ def create_artifact(
     _access(identity, "CREATE")
     _no_store(response)
     return _run(
-        lambda: ArtifactEnvelope(data=get_artifact_store().create(identity, request))
+        lambda: ArtifactEnvelope(
+            data=get_artifact_store().create(
+                identity, _resolve_conversation_sources(identity, request)
+            )
+        )
     )
 
 
@@ -229,6 +301,76 @@ def export_artifact(
 
 def _access(identity: PersonalDomainIdentity, capability: str) -> None:
     identity.require("APP.ASK:VIEW", f"APP.DWAION_ARTIFACTS:{capability}")
+
+
+def _resolve_conversation_sources(
+    identity: PersonalDomainIdentity,
+    request: CreateArtifactRequest,
+) -> CreateArtifactRequest:
+    binding = request.source_conversation
+    if binding is None:
+        return request
+    try:
+        conversation = get_conversation_store().get(
+            tenant_id=str(identity.tenant_id),
+            user_id=identity.user_id,
+            conversation_id=binding.conversation_id,
+        )
+    except ConversationNotFound as error:
+        raise GovernedDomainNotFound(str(error)) from error
+    except ConversationStoreUnavailable as error:
+        raise GovernedDomainUnavailable(
+            "Conversation provenance is unavailable."
+        ) from error
+
+    if conversation.summary.conversation_id != binding.conversation_id:
+        raise GovernedDomainNotFound(
+            "Conversation was not found in the verified user scope."
+        )
+    message = next(
+        (
+            item
+            for item in conversation.messages
+            if item.message_id == binding.assistant_message_id
+        ),
+        None,
+    )
+    if message is None or message.role != ConversationRole.ASSISTANT:
+        raise GovernedDomainNotFound(
+            "The assistant message was not found in the verified conversation scope."
+        )
+    if message.status_code not in {
+        GROUNDED_ANSWER_STATUS,
+        GROUNDED_FALLBACK_STATUS,
+    }:
+        raise GovernedDomainConflict(
+            "Only a grounded assistant answer can create a conversation-bound artifact."
+        )
+    if not message.citations:
+        raise GovernedDomainConflict(
+            "A conversation-bound artifact requires grounded citations."
+        )
+    if request.content.body != message.content:
+        raise GovernedDomainConflict(
+            "Artifact content must match the bound assistant answer exactly."
+        )
+
+    sources = [
+        ArtifactSourceReference(
+            source_type=citation.source_type,
+            reference=(
+                f"conversation:{binding.conversation_id}:"
+                f"message:{binding.assistant_message_id}:"
+                f"citation:{citation.source_id}"
+            ),
+        )
+        for citation in message.citations
+    ]
+    resolved = request.model_copy(update={"sources": sources, "source_conversation": None})
+    resolved._verified_source_references = frozenset(
+        source.reference for source in sources
+    )
+    return resolved
 
 
 def _run(operation: Callable[[], T]) -> T:

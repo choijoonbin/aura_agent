@@ -5,22 +5,11 @@ from enum import StrEnum
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
+from pydantic import Field, JsonValue, model_validator
 
+from .ask_personalization_contracts import AskPersonalization, AskPersonalizationState
+from .contract_model import ContractModel, to_camel
 from .grounded_response_status import grounded_status_for_provider
-
-
-def to_camel(value: str) -> str:
-    first, *rest = value.split("_")
-    return first + "".join(part.capitalize() for part in rest)
-
-
-class ContractModel(BaseModel):
-    model_config = ConfigDict(
-        alias_generator=to_camel,
-        populate_by_name=True,
-        extra="forbid",
-    )
 
 
 class RiskTier(StrEnum):
@@ -326,6 +315,7 @@ class AskResponse(ContractModel):
     user_message_id: UUID | None = None
     assistant_message_id: UUID | None = None
     selected_work: AskSelectedWork | None = None
+    personalization: AskPersonalization = Field(default_factory=AskPersonalization)
 
     @model_validator(mode="after")
     def validate_answer_state(self) -> "AskResponse":
@@ -360,6 +350,32 @@ class ConversationSummary(ContractModel):
     title: str = Field(min_length=1, max_length=160)
     locale: str = Field(pattern=r"^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$")
     message_count: int = Field(ge=0)
+    agent_key: str | None = Field(
+        max_length=80,
+        description="Agent recorded on the latest visible assistant answer.",
+    )
+    source_systems: list[str] = Field(
+        max_length=20,
+        description="Distinct source systems cited by the latest visible assistant answer.",
+    )
+    evidence_count: int = Field(
+        ge=0,
+        description="Citation count on the latest visible assistant answer.",
+    )
+    summary_excerpt: str | None = Field(
+        max_length=320,
+        description="Whitespace-normalized excerpt of the latest visible assistant answer.",
+    )
+    last_answer_status: str | None = Field(
+        pattern=r"^[A-Z][A-Z0-9_.-]{2,127}$",
+        description="Persisted status code of the latest visible assistant answer.",
+    )
+    retention_until: datetime | None = Field(
+        description="Conversation retention deadline, or null when the store has no deadline.",
+    )
+    legal_hold: bool = Field(
+        description="Whether the governing tenant policy currently blocks deletion.",
+    )
     created_at: datetime
     updated_at: datetime
     last_message_at: datetime

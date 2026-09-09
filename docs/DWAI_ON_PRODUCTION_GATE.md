@@ -161,6 +161,38 @@ uv run python scripts/export_openapi.py --check
 - 사용자 분석 명령은 인증 Session과 Locale Payload를 HMAC으로 결속하고, 세대별 Lease와
   암호화된 Canonical Receipt로 동시 요청·응답 유실·재시도를 직렬화합니다. Source Event
   식별자는 Locale과 분리하며, Inbox Clear는 완료 Receipt와 활성 Lease를 함께 Fencing합니다.
+- 개인 선호의 암호화 저장 동의와 답변 적용 동의는 서로 다른 명시적 명령입니다. 기존 사용자는
+  답변 적용이 `UNSET`으로 유지되며 저장을 껐다가 다시 켜도 답변 적용은 자동 복원되지 않습니다.
+  `DWP_ASSISTANT`는 현재 사용자에게 `APP.DWAION_MEMORY:VIEW`가 있고 두 동의가 모두 켜진 경우에만
+  활성·미만료 선호를 유형별 최신 한 건씩 읽습니다. 선호는 비신뢰 표현 데이터로만 모델에 전달하며
+  사실·근거·권한·정책·안전 경계를 변경할 수 없습니다. 개인화 저장소 장애는 본 답변을 실패시키지
+  않고 `UNAVAILABLE`, 근거 기반 대체 답변은 `BYPASSED`로 공개하되 선호 원문은 응답하지 않습니다.
+- 선택 업무 도움은 Frontend가 전달한 업무 본문을 신뢰하지 않고 담당 Owner API에서 Tenant·사용자·
+  인증 Session·Source ID·Source Version·권한 Obligation을 다시 조회합니다. 모델 호출 전후에 동일한
+  Authority Snapshot을 확인하며, 처리 중 권한 회수·사용자 전환·Version 변경·원천 `403/404/409/503`이
+  발생하면 늦게 도착한 답변을 게시하지 않습니다. Stream의 `requestId`·`correlationId`·
+  `conversationId`와 선택 업무 Context가 정확히 결속된 경우에만 같은 대화를 이어가며, Agent는
+  업무 Form을 자동 적용·저장·제출하거나 Owner 원장을 변경하지 않습니다.
+- Artifact 내보내기는 `DWP_GOVERNED_WORKERS_ENABLED=true`가 명시된 Agent 인스턴스의
+  fresh worker heartbeat가 있을 때만 실행 capability를 공개합니다. 요청은 outbox와 export job의
+  독립 세대·임대에 결속되고, Worker는 게시된 불변 Version·DLP Preflight·Source 증거를 다시
+  검증한 뒤 `MARKDOWN`, `DOCX`, `PDF` 실제 바이트와 Manifest를 PostgreSQL에 Envelope 암호화해
+  저장합니다. Download는 Tenant·사용자·Artifact·Job 소유권과 keyed content fingerprint를 다시
+  검증합니다. `sourceVerificationAvailable`의 범위는 서버가 직접 대화·Assistant message·Citation을
+  결속한 `SERVER_BOUND_CONVERSATION_CITATIONS_ONLY`이며, 사용자가 입력한 Source Reference를
+  `VERIFIED`로 승격하지 않습니다. 조직 Enterprise DLP Connector는 별도 외부 Gate입니다.
+- 개인 데이터 삭제 Worker도 같은 명시적 설정과 fresh heartbeat가 있을 때만 실행 capability를
+  공개합니다. Request 시점과 각 Domain 처리 직전에 Legal Hold를 다시 확인하고, Outbox·Job의
+  Fenced Lease를 모두 소유한 경우에만 Agent 활성 PostgreSQL의 `ROUTINE`, `MEMORY`, `ARTIFACT`,
+  `ARTIFACT_EXPORT` 행과 암호화 Envelope를 제거합니다. 완료 증거는 Domain별 행 수, keyed receipt
+  fingerprint와 `EXTERNAL_RETENTION_BOUNDARY`를 기록합니다. 이 영수증은 Agent 활성 저장소의
+  물리 행 제거 증거이며 Owner 원천 시스템 또는 Database Backup의 물리 삭제 증거가 아닙니다.
+  따라서 heartbeat가 살아 있을 때 `activeStorePhysicalPurgeAvailable`만 `true`이고, 사용자별
+  별도 암호화 키를 폐기하는 방식이 아니므로 `activeStoreCryptoShredAvailable`은 계속 `false`입니다.
+- Routine의 일정 계산과 Dry Run 검증은 실제 Background 실행 증거가 아닙니다. Background에서
+  사용자 권위를 재평가할 위임 자격, Source Connector, 제안 전달 및 알림 Delivery가 운영 승인되기
+  전에는 `activationAvailable`, `schedulingAvailable`, `backgroundExecutionAvailable`,
+  `proposalDeliveryAvailable`, `notificationDeliveryAvailable`을 계속 `false`로 유지합니다.
 
 ## 5. 보존 및 Legal Hold
 
@@ -180,6 +212,13 @@ uv run python scripts/export_openapi.py --check
 - 기존 v4 projection은 최초 3개 DWAI.ON Route만 포함한 채 byte-immutable하게 유지됩니다.
   신규 5개 읽기 Route는 `DWP_AGENT_PRODUCT_AUTHORIZATION_V5_ENABLED`가 명시적으로
   준비된 경우에만 `110`/`111` enforcement를 통과하며, v4 readiness만으로는 열리지 않습니다.
+- v6에는 실제 사용자 변경 경로인 `POST /v1/ask/stream`,
+  `PATCH /v1/conversations/{conversation_id}`, `DELETE /v1/conversations/{conversation_id}`가
+  각각 독립 ACTION Route로 등록됩니다. `110`/`111`에서는 Gateway가 평가한 정확 Route·Context·
+  SELF Scope와 브라우저가 보낸 `X-DWP-Expected-Decision-Revision`이 현재 Decision Revision과
+  일치해야 하며, Agent owner PEP가 동일 증거를 다시 검사한 뒤에만 runtime/store를 호출합니다.
+  세 경로는 `DWP_AGENT_PRODUCT_AUTHORIZATION_V6_ENABLED`가 명시적으로 준비되어야 열리고,
+  v4/v5 readiness만으로 신규 v6 ACTION을 열 수 없습니다.
 - `/v1/runs`와 `/v1/runs/{run_id}`도 동일한 SELF Route Contract 아래 등록됩니다.
   단건 조회는 최신 목록 한도와 독립적이며, Tenant와 사용자 소유권이 맞지 않거나 삭제된
   실행은 동일한 `404`로 처리하고 질문·답변·인용 원문을 반환하지 않습니다.
@@ -242,6 +281,43 @@ Key Material과 원문 질문·답변·Source ID·Service Token은 로그에 남
 
 ## 7. 검증 증적
 
+- 2026-09-09: 이미 적용된 `V33`의 checksum
+  `b90332db6a11ae2b3fa91d2874146402f499d76f9665a89eea29ba15d58085a4`를 불변으로 보존하고,
+  강화된 Domain·Operation·Owner 삭제 Fence를 append-only `V34`로 분리했습니다. 실제 기존
+  `V33` DB에서 `V34`까지 순방향 Upgrade하는 회귀를 별도 통과했고, Local Agent DB를 초기화하지
+  않은 채 같은 Upgrade를 적용한 후 Startup 완료와 `/health` 200을 확인했습니다.
+- 2026-09-09: clean PostgreSQL 네 개에서 `V1`~`V34` 34개를 적용하고 Agent 전체 회귀
+  `499 passed`, Python Compileall, Runtime OpenAPI Snapshot, 모듈 크기·Import Cycle·Entrypoint
+  Reachability와 Diff Check를 확인했습니다. Artifact Worker는 만료되지 않은 DLP Preflight와
+  서버 결속 Citation을 실행 시점에 다시 검사하고 `MARKDOWN`·`DOCX`·`PDF` 바이트/Manifest를
+  암호화 저장하며, Stale Lease·Outbox 재전달·Terminal 멱등·Tenant/User 격리·Hash 변조를
+  독립 검증했습니다. 삭제 Worker는 Domain-scoped DB Guard, Legal Hold 재검사, Retry Budget,
+  저장된 disposition receipt의 binding/keyed fingerprint 재검증과 변조 거부,
+  `ROUTINE`·`MEMORY`·`ARTIFACT_EXPORT`·`ARTIFACT` 활성 행 제거 영수증을 검증했습니다.
+  Routine background 실행은 위임 자격·Source Connector·Proposal/Notification Delivery가 없어
+  계속 Fail-closed입니다. 조직 DLP, 사용자가 입력한 Source 검증, Owner 원천 삭제, Backup 삭제,
+  사용자별 Key Crypto-shred도 완료로 기록하지 않습니다. 또한 현재 `:8100` Local Listener는
+  별도 로컬 체크아웃의 `DTHub Agent Local`을 구동해 이 저장소의
+  `/v1/conversations` 계약이 없으므로, 해당 Browser 화면은 현재 `dwp_agent` 변경본의 배포 검증
+  증거로 사용할 수 없습니다.
+- 2026-09-08: clean PostgreSQL 네 개에서 `V1`~`V32`를 적용하고 Agent 전체 회귀
+  `462 passed`, Python Compileall, Runtime OpenAPI Snapshot을 확인했습니다. `V32`의 기존 사용자
+  `UNSET` 기본값, 저장·답변 적용 독립 동의, Tenant·사용자·Session·Revision 멱등 명령, 활성·미만료
+  유형별 최신 선호 선택, 프롬프트 인젝션형 선호 차단, 비신뢰 표현 전용 모델 전달과 값 없는 답변별
+  적용 증거를 포함합니다. 이 결과는 로컬 `local-inline` Key Provider 회귀이며 관리형 KMS, 조직 DLP,
+  물리 삭제 Worker 또는 외부 실행기를 운영 활성화했다는 의미가 아닙니다.
+- 같은 기준점의 Frontend는 생성 Agent 계약 동기화, `497`개 파일의 `3,805`개 단위 테스트,
+  Node 24 Production Build와 Bundle Budget을 통과했습니다. 개인 AI 제어와 답변 증거 E2E는 저장·적용
+  동의 분리, 안전한 대체 답변, 음성·실행·제안 승인 경계, `320/390/768px`, 200% 확대,
+  Dark/Forced Colors 및 자동 접근성 검사를 포함해 `29 passed`이며, 구형 Runtime 응답에서는 답변
+  적용을 `UNSET`·비활성으로 Fail-closed 처리합니다.
+- 2026-09-08: 선택 업무 연계의 Agent 집중 회귀 `61 passed`, clean PostgreSQL에서 `V1`~`V32`를
+  적용한 Runtime 회귀 `16 passed`를 확인했습니다. 실제 Public Stream과 서명된 위임 Identity를 통해
+  Tenant·사용자·Session·권한·Source ID·Version·Obligation을 검증하고, 모델 호출 전후 권한 회수·
+  원천 장애·Stale Version에서 답변 0건, 경쟁·재생 요청의 대화 연속성과 상관관계 ID 결속을
+  검증했습니다. Frontend Chromium·Mobile E2E는 `47 passed`, 프로젝트 조건부 `3 skipped`이며
+  선택 업무 열기·연속 질문·Actor 전환·늦은 응답 폐기·`320px`·200% 확대를 포함합니다. 같은
+  공유 트리의 Node 24 전체 비증분 TypeScript 검사는 오류 0건으로 통과했습니다.
 - 2026-09-04: clean PostgreSQL에서 `V1`~`V30` Migration을 적용하고 Agent 전체 회귀
   `352 passed`, `23 skipped`를 확인했습니다. `V23`~`V30`의 개인 보존·삭제 Outbox,
   명시적 동의 기반 `DRY_RUN_ONLY` 루틴, 개인 Memory·Source Preference, mutable Draft와
@@ -288,7 +364,27 @@ Key Material과 원문 질문·답변·Source ID·Service Token은 로그에 남
 - 2026-08-20: SKAX 위임 운영자에게 실제 집계 지표와 보존 정책 조회, 일반 Tenant
   관리자에게 메뉴 비노출과 Gateway 차단 확인
 
-## 8. 근거 기준
+## 8. 외부 운영 환경 수용 조건
+
+위 회귀는 코드와 로컬 통합 환경의 배포 준비 증적입니다. 다음 항목은 실제 운영 환경과 승인된
+자격 증명 없이는 완료로 기록하지 않으며, 충족 전 외부 Provider 연동은 Fail-closed 상태를 유지합니다.
+
+1. 운영 DNS, TLS 인증서 Chain·SAN, HSTS와 Gateway의 실제 `/api/agent/v1/ask/stream` Route를
+   승인된 Canary에서 확인합니다.
+2. 비밀값을 저장하거나 출력하지 않는 통제된 운영 사용자로 Tenant·사용자·Session·권한 결속을
+   확인하고, Provider 응답의 `requestId`·`correlationId`·`conversationId`·선택 업무 Reference가
+   요청과 정확히 일치하는지 검증합니다.
+3. 외부 Provider·Trace·Audit에 Owner 업무 본문, 개인 선호 원문 또는 PII가 복제되지 않고 최소화된
+   Reference와 Redacted Rationale만 남는지 확인합니다.
+4. Stream 처리 중 권한 회수와 Source Version 변경을 실제로 수행해 늦은 답변이 폐기되는지,
+   `401/403/404/409/503` 이후 이전 제안이나 답변이 재활성화되지 않는지 검증합니다.
+5. 후속 질문이 동일한 Owner·Source·Version 범위에서 매번 재인가되고, 어떤 업무 Form도 자동 적용·
+   저장·제출되지 않는지 확인합니다.
+6. 증적에는 Timestamp, Commit, Environment, 비식별 Run ID를 기록하되 Secret·질문 원문·응답 원문·
+   PII는 포함하지 않습니다. 관리형 KMS, 조직 DLP, 물리 삭제 Worker와 외부 실행기도 각각의 운영
+   승인 및 관측 증적이 있어야 활성화할 수 있습니다.
+
+## 9. 근거 기준
 
 - [OWASP LLM Prompt Injection Prevention](https://genai.owasp.org/llmrisk/llm01-prompt-injection/)
 - [OWASP Excessive Agency](https://genai.owasp.org/llmrisk/llm062025-excessive-agency/)

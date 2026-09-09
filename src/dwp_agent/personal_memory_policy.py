@@ -4,6 +4,7 @@ import re
 
 from .governed_domain_core import GovernedDomainConflict
 from .personal_memory_contracts import ExplicitMemoryValue
+from .policy import contains_prompt_injection
 
 
 _BLOCKED_PATTERNS = (
@@ -31,7 +32,7 @@ _PAYMENT_CARD_CANDIDATE = re.compile(r"(?<!\d)(?:\d[ -]?){12,18}\d(?!\d)")
 
 def require_safe_explicit_memory(memory: ExplicitMemoryValue) -> None:
     value = memory.value
-    if any(pattern.search(value) for pattern in _BLOCKED_PATTERNS):
+    if contains_prompt_injection(value) or any(pattern.search(value) for pattern in _BLOCKED_PATTERNS):
         _reject()
     for candidate in _PAYMENT_CARD_CANDIDATE.findall(value):
         digits = "".join(character for character in candidate if character.isdigit())

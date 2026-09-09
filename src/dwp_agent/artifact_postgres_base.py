@@ -8,6 +8,7 @@ from .artifact_contracts import (
     ArtifactSourceReference,
     GovernedArtifact,
 )
+from .artifact_runtime_capabilities import artifact_runtime_capabilities
 from .governed_domain_core import (
     CommandProof,
     GovernedDomainConflict,
@@ -212,6 +213,7 @@ class ArtifactPostgresBase:
             published_version_number=row["published_version_number"],
             content=content,
             sources=self._draft_sources(connection, row["tenant_id"], row["artifact_id"]),
+            capabilities=artifact_runtime_capabilities(),
             created_at=row["created_at"],
             updated_at=row["updated_at"],
         )
@@ -219,21 +221,38 @@ class ArtifactPostgresBase:
     def _draft_sources(
         self, connection: Any, tenant_id: int, artifact_id: UUID
     ) -> list[ArtifactSourceReference]:
+        return [
+            record[0]
+            for record in self._draft_source_records(
+                connection, tenant_id, artifact_id
+            )
+        ]
+
+    def _draft_source_records(
+        self, connection: Any, tenant_id: int, artifact_id: UUID
+    ) -> list[tuple[ArtifactSourceReference, str, Any, str | None]]:
         rows = connection.execute(
-            """SELECT source_link_id, source_type, reference_envelope
+            """SELECT source_link_id, source_type, reference_envelope,
+                      verification_state, verified_at,
+                      verification_evidence_fingerprint
                  FROM ai_artifact_draft_sources
                 WHERE artifact_id = %s ORDER BY source_type, reference_fingerprint""",
             (artifact_id,),
         ).fetchall()
         return [
-            ArtifactSourceReference.model_validate(
-                self.codec.decrypt_json(
-                    row["reference_envelope"],
-                    tenant_id=tenant_id,
-                    resource_type="artifact-draft-source",
-                    resource_id=str(row["source_link_id"]),
-                    field="reference",
-                )
+            (
+                ArtifactSourceReference.model_validate(
+                    self.codec.decrypt_json(
+                        row["reference_envelope"],
+                        tenant_id=tenant_id,
+                        resource_type="artifact-draft-source",
+                        resource_id=str(row["source_link_id"]),
+                        field="reference",
+                    )
+                ),
+                row["verification_state"],
+                row["verified_at"],
+                row["verification_evidence_fingerprint"],
             )
             for row in rows
         ]
@@ -244,11 +263,16 @@ class ArtifactPostgresBase:
         identity: PersonalDomainIdentity,
         artifact_id: UUID,
         sources: list[ArtifactSourceReference],
+        *,
+        verified_source_references: frozenset[str] = frozenset(),
     ) -> None:
         connection.execute(
             "DELETE FROM ai_artifact_draft_sources WHERE artifact_id = %s",
             (artifact_id,),
         )
+        verified_at = connection.execute(
+            "SELECT CURRENT_TIMESTAMP AS now"
+        ).fetchone()["now"]
         for source in sources:
             source_link_id = uuid4()
             payload = source.model_dump(mode="json", by_alias=True)
@@ -264,12 +288,34 @@ class ArtifactPostgresBase:
                 resource_id=str(source_link_id),
                 field="reference",
             )
+            verified = source.reference in verified_source_references
+            evidence_fingerprint = None
+            if verified:
+                evidence_fingerprint = self.fingerprints.value(
+                    tenant_id=identity.tenant_id,
+                    purpose="artifact-source-verification",
+                    payload={
+                        "source": payload,
+                        "verification": "SERVER_VERIFIED_CONVERSATION_CITATION",
+                    },
+                )
             connection.execute(
                 """INSERT INTO ai_artifact_draft_sources (
                        source_link_id, artifact_id, source_type,
-                       reference_fingerprint, reference_envelope)
-                   VALUES (%s, %s, %s, %s, %s)""",
-                (source_link_id, artifact_id, source.source_type.value, fingerprint, envelope),
+                       reference_fingerprint, reference_envelope,
+                       verification_state, verified_at,
+                       verification_evidence_fingerprint)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
+                (
+                    source_link_id,
+                    artifact_id,
+                    source.source_type.value,
+                    fingerprint,
+                    envelope,
+                    "SERVER_VERIFIED" if verified else "UNVERIFIED",
+                    verified_at if verified else None,
+                    evidence_fingerprint,
+                ),
             )
 
     def _version_row(

@@ -15,6 +15,7 @@ from dwp_agent.personal_memory_contracts import PersonalAiControls
 class _MemoryStore:
     def __init__(self) -> None:
         self.calls = 0
+        self.runtime_updates = 0
 
     def controls(self, _identity):
         self.calls += 1
@@ -23,6 +24,17 @@ class _MemoryStore:
             revision=0,
             memory_enabled=False,
             memory_effective=False,
+        )
+
+    def update_runtime_controls(self, _identity, request):
+        self.runtime_updates += 1
+        return PersonalAiControls(
+            memory_state="ENABLED",
+            runtime_application_state=request.runtime_application_state,
+            revision=request.expected_revision + 1,
+            memory_enabled=True,
+            runtime_application_enabled=request.runtime_application_state == "ENABLED",
+            memory_effective=request.runtime_application_state == "ENABLED",
         )
 
 
@@ -110,6 +122,7 @@ def _headers(*permissions: str, **overrides: str) -> dict[str, str]:
         ("/v1/ai-controls", "APP.DWAION_MEMORY:VIEW"),
         ("/v1/routines", "APP.DWAION_ROUTINES:VIEW"),
         ("/v1/artifacts", "APP.DWAION_ARTIFACTS:VIEW"),
+        ("/v1/artifacts/capabilities", "APP.DWAION_ARTIFACTS:VIEW"),
         ("/v1/personal-data/retention", "APP.DWAION_PRIVACY:VIEW"),
         ("/v1/personal-data/capabilities", "APP.DWAION_PRIVACY:VIEW"),
     ),
@@ -123,6 +136,33 @@ def test_exact_personal_domain_grant_allows_each_read_surface(
 
     assert response.status_code == 200
     assert response.headers["cache-control"] == "no-store"
+
+
+def test_capability_responses_preserve_local_and_external_boundaries(
+    client: tuple[TestClient, _MemoryStore, _ArtifactStore],
+) -> None:
+    http, _, _ = client
+
+    artifact = http.get(
+        "/v1/artifacts/capabilities",
+        headers=_headers("APP.ASK:VIEW", "APP.DWAION_ARTIFACTS:VIEW"),
+    ).json()["data"]
+    deletion = http.get(
+        "/v1/personal-data/capabilities",
+        headers=_headers("APP.ASK:VIEW", "APP.DWAION_PRIVACY:VIEW"),
+    ).json()["data"]
+
+    assert artifact["sourceVerificationAvailable"] is True
+    assert artifact["sourceVerificationScope"] == (
+        "SERVER_BOUND_CONVERSATION_CITATIONS_ONLY"
+    )
+    assert artifact["manualSourceVerificationAvailable"] is False
+    assert artifact["enterpriseDlpConnectorAvailable"] is False
+    assert artifact["exportExecutionAvailable"] is False
+    assert deletion["activeStorePhysicalPurgeAvailable"] is False
+    assert deletion["activeStoreCryptoShredAvailable"] is False
+    assert deletion["backupDispositionAvailable"] is False
+    assert deletion["sourceSystemDataAffected"] is False
 
 
 @pytest.mark.parametrize(
@@ -154,6 +194,37 @@ def test_app_ask_alone_cannot_open_new_personal_domains(
 
     assert response.status_code == 403
     assert memory.calls == 0
+
+
+def test_runtime_personalization_requires_manage_permission_and_explicit_command(
+    client: tuple[TestClient, _MemoryStore, _ArtifactStore],
+) -> None:
+    http, memory, _ = client
+    payload = {
+        "commandId": "22ff2c24-7d3e-4c98-b43e-44f23518d989",
+        "expectedRevision": 1,
+        "reasonCode": "USER_RUNTIME_PERSONALIZATION",
+        "changeReason": "Apply only my active explicit presentation preferences to answers.",
+        "runtimeApplicationState": "ENABLED",
+    }
+
+    denied = http.put(
+        "/v1/ai-controls/runtime",
+        headers=_headers("APP.ASK:VIEW", "APP.DWAION_MEMORY:VIEW"),
+        json=payload,
+    )
+    allowed = http.put(
+        "/v1/ai-controls/runtime",
+        headers=_headers(
+            "APP.ASK:VIEW", "APP.DWAION_MEMORY:VIEW", "APP.DWAION_MEMORY:MANAGE"
+        ),
+        json=payload,
+    )
+
+    assert denied.status_code == 403
+    assert allowed.status_code == 200
+    assert allowed.json()["data"]["runtimeApplicationEnabled"] is True
+    assert memory.runtime_updates == 1
 
 
 def test_auth_session_is_required_and_bound_before_store_use(

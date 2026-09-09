@@ -1,0 +1,1948 @@
+{
+  "schemaVersion": 1,
+  "projectionKey": "dwaion-pep-v6-draft",
+  "registryRef": {
+    "bundleKey": "product-surfaces",
+    "version": 6,
+    "bundleStatus": "DRAFT",
+    "checksum": "7cf8602aa2da5f7a0464b23cfd84a8f381e2d3eb85333ed8a8e483865b2b0abe"
+  },
+  "policyId": "P-DWAION",
+  "ownerServiceKey": "agent",
+  "ownerServiceModule": "dwp-agent-runtime",
+  "productId": "dwaion",
+  "surfaceKey": "dwaion.work",
+  "surfaces": [
+    "dwaion.work",
+    "dwaion.management"
+  ],
+  "activation": {
+    "enabledByDefault": false,
+    "readinessEnvironment": "DWP_AGENT_PRODUCT_AUTHORIZATION_V6_ENABLED"
+  },
+  "accessPolicy": {
+    "accessPolicyKey": "dwaion.work-access.v1",
+    "resolvedAuthority": "APP.ASK:VIEW",
+    "scopeResolver": "SELF",
+    "activeAccessModes": [
+      "NORMAL",
+      "ELEVATED"
+    ]
+  },
+  "activityCapability": {
+    "capabilityContractKey": "dwaion.work.activity.read",
+    "resolvedAuthority": "APP.ACTIVITY:VIEW",
+    "requiresProductEntitlement": "APP.ASK:VIEW",
+    "scopeResolver": "SELF"
+  },
+  "capabilities": [
+    {
+      "capabilityContractKey": "dwaion.action.approval.create",
+      "resolvedAuthority": "ACTION.APPROVAL_REQUEST:CREATE",
+      "surfaceKey": "dwaion.work",
+      "scopeResolver": "SELF",
+      "riskTier": "MEDIUM"
+    },
+    {
+      "capabilityContractKey": "dwaion.action.calendar.create",
+      "resolvedAuthority": "APP.CALENDAR:CREATE",
+      "surfaceKey": "dwaion.work",
+      "scopeResolver": "SELF",
+      "riskTier": "MEDIUM"
+    },
+    {
+      "capabilityContractKey": "dwaion.action.mail.create",
+      "resolvedAuthority": "APP.MAIL:CREATE",
+      "surfaceKey": "dwaion.work",
+      "scopeResolver": "SELF",
+      "riskTier": "MEDIUM"
+    },
+    {
+      "capabilityContractKey": "dwaion.action.service.read",
+      "resolvedAuthority": "APP.EMPLOYEE_SERVICES:VIEW",
+      "surfaceKey": "dwaion.work",
+      "scopeResolver": "SELF",
+      "riskTier": "LOW"
+    },
+    {
+      "capabilityContractKey": "dwaion.actions.manage",
+      "resolvedAuthority": "ADMIN.DWAION_ACTIONS:MANAGE",
+      "surfaceKey": "dwaion.management",
+      "scopeResolver": "APP_RESOURCE_SET:RS_DWAION",
+      "riskTier": "HIGH"
+    },
+    {
+      "capabilityContractKey": "dwaion.actions.read",
+      "resolvedAuthority": "ADMIN.DWAION_ACTIONS:VIEW",
+      "surfaceKey": "dwaion.management",
+      "scopeResolver": "APP_RESOURCE_SET:RS_DWAION",
+      "riskTier": "LOW"
+    },
+    {
+      "capabilityContractKey": "dwaion.actions.update",
+      "resolvedAuthority": "ADMIN.DWAION_ACTIONS:UPDATE",
+      "surfaceKey": "dwaion.management",
+      "scopeResolver": "APP_RESOURCE_SET:RS_DWAION",
+      "riskTier": "HIGH"
+    },
+    {
+      "capabilityContractKey": "dwaion.agents.approve",
+      "resolvedAuthority": "ADMIN.DWAION_AGENTS:APPROVE",
+      "surfaceKey": "dwaion.management",
+      "scopeResolver": "APP_RESOURCE_SET:RS_DWAION",
+      "riskTier": "HIGH"
+    },
+    {
+      "capabilityContractKey": "dwaion.agents.create",
+      "resolvedAuthority": "ADMIN.DWAION_AGENTS:CREATE",
+      "surfaceKey": "dwaion.management",
+      "scopeResolver": "APP_RESOURCE_SET:RS_DWAION",
+      "riskTier": "HIGH"
+    },
+    {
+      "capabilityContractKey": "dwaion.agents.manage",
+      "resolvedAuthority": "ADMIN.DWAION_AGENTS:MANAGE",
+      "surfaceKey": "dwaion.management",
+      "scopeResolver": "APP_RESOURCE_SET:RS_DWAION",
+      "riskTier": "HIGH"
+    },
+    {
+      "capabilityContractKey": "dwaion.agents.read",
+      "resolvedAuthority": "ADMIN.DWAION_AGENTS:VIEW",
+      "surfaceKey": "dwaion.management",
+      "scopeResolver": "APP_RESOURCE_SET:RS_DWAION",
+      "riskTier": "LOW"
+    },
+    {
+      "capabilityContractKey": "dwaion.agents.update",
+      "resolvedAuthority": "ADMIN.DWAION_AGENTS:UPDATE",
+      "surfaceKey": "dwaion.management",
+      "scopeResolver": "APP_RESOURCE_SET:RS_DWAION",
+      "riskTier": "HIGH"
+    },
+    {
+      "capabilityContractKey": "dwaion.audit.export",
+      "resolvedAuthority": "ADMIN.DWAION_AUDIT:EXPORT",
+      "surfaceKey": "dwaion.management",
+      "scopeResolver": "APP_RESOURCE_SET:RS_DWAION",
+      "riskTier": "HIGH"
+    },
+    {
+      "capabilityContractKey": "dwaion.audit.read",
+      "resolvedAuthority": "ADMIN.DWAION_AUDIT:VIEW",
+      "surfaceKey": "dwaion.management",
+      "scopeResolver": "APP_RESOURCE_SET:RS_DWAION",
+      "riskTier": "LOW"
+    },
+    {
+      "capabilityContractKey": "dwaion.evaluation.create",
+      "resolvedAuthority": "ADMIN.DWAION_EVALUATION:CREATE",
+      "surfaceKey": "dwaion.management",
+      "scopeResolver": "APP_RESOURCE_SET:RS_DWAION",
+      "riskTier": "MEDIUM"
+    },
+    {
+      "capabilityContractKey": "dwaion.evaluation.export",
+      "resolvedAuthority": "ADMIN.DWAION_EVALUATION:EXPORT",
+      "surfaceKey": "dwaion.management",
+      "scopeResolver": "APP_RESOURCE_SET:RS_DWAION",
+      "riskTier": "HIGH"
+    },
+    {
+      "capabilityContractKey": "dwaion.evaluation.manage",
+      "resolvedAuthority": "ADMIN.DWAION_EVALUATION:MANAGE",
+      "surfaceKey": "dwaion.management",
+      "scopeResolver": "APP_RESOURCE_SET:RS_DWAION",
+      "riskTier": "HIGH"
+    },
+    {
+      "capabilityContractKey": "dwaion.evaluation.read",
+      "resolvedAuthority": "ADMIN.DWAION_EVALUATION:VIEW",
+      "surfaceKey": "dwaion.management",
+      "scopeResolver": "APP_RESOURCE_SET:RS_DWAION",
+      "riskTier": "LOW"
+    },
+    {
+      "capabilityContractKey": "dwaion.evaluation.update",
+      "resolvedAuthority": "ADMIN.DWAION_EVALUATION:UPDATE",
+      "surfaceKey": "dwaion.management",
+      "scopeResolver": "APP_RESOURCE_SET:RS_DWAION",
+      "riskTier": "HIGH"
+    },
+    {
+      "capabilityContractKey": "dwaion.gates.approve",
+      "resolvedAuthority": "ADMIN.DWAION_GATES:APPROVE",
+      "surfaceKey": "dwaion.management",
+      "scopeResolver": "APP_RESOURCE_SET:RS_DWAION",
+      "riskTier": "HIGH"
+    },
+    {
+      "capabilityContractKey": "dwaion.gates.manage",
+      "resolvedAuthority": "ADMIN.DWAION_GATES:MANAGE",
+      "surfaceKey": "dwaion.management",
+      "scopeResolver": "APP_RESOURCE_SET:RS_DWAION",
+      "riskTier": "HIGH"
+    },
+    {
+      "capabilityContractKey": "dwaion.gates.read",
+      "resolvedAuthority": "ADMIN.DWAION_GATES:VIEW",
+      "surfaceKey": "dwaion.management",
+      "scopeResolver": "APP_RESOURCE_SET:RS_DWAION",
+      "riskTier": "LOW"
+    },
+    {
+      "capabilityContractKey": "dwaion.gates.update",
+      "resolvedAuthority": "ADMIN.DWAION_GATES:UPDATE",
+      "surfaceKey": "dwaion.management",
+      "scopeResolver": "APP_RESOURCE_SET:RS_DWAION",
+      "riskTier": "HIGH"
+    },
+    {
+      "capabilityContractKey": "dwaion.operations.manage",
+      "resolvedAuthority": "ADMIN.DWAION_OPERATIONS:MANAGE",
+      "surfaceKey": "dwaion.management",
+      "scopeResolver": "APP_RESOURCE_SET:RS_DWAION",
+      "riskTier": "HIGH"
+    },
+    {
+      "capabilityContractKey": "dwaion.operations.read",
+      "resolvedAuthority": "ADMIN.DWAION_OPERATIONS:VIEW",
+      "surfaceKey": "dwaion.management",
+      "scopeResolver": "APP_RESOURCE_SET:RS_DWAION",
+      "riskTier": "LOW"
+    },
+    {
+      "capabilityContractKey": "dwaion.retention.manage",
+      "resolvedAuthority": "ADMIN.DWAION_RETENTION:MANAGE",
+      "surfaceKey": "dwaion.management",
+      "scopeResolver": "APP_RESOURCE_SET:RS_DWAION",
+      "riskTier": "HIGH"
+    },
+    {
+      "capabilityContractKey": "dwaion.retention.read",
+      "resolvedAuthority": "ADMIN.DWAION_RETENTION:VIEW",
+      "surfaceKey": "dwaion.management",
+      "scopeResolver": "APP_RESOURCE_SET:RS_DWAION",
+      "riskTier": "LOW"
+    },
+    {
+      "capabilityContractKey": "dwaion.retention.update",
+      "resolvedAuthority": "ADMIN.DWAION_RETENTION:UPDATE",
+      "surfaceKey": "dwaion.management",
+      "scopeResolver": "APP_RESOURCE_SET:RS_DWAION",
+      "riskTier": "HIGH"
+    },
+    {
+      "capabilityContractKey": "dwaion.safety.manage",
+      "resolvedAuthority": "ADMIN.DWAION_SAFETY:MANAGE",
+      "surfaceKey": "dwaion.management",
+      "scopeResolver": "APP_RESOURCE_SET:RS_DWAION",
+      "riskTier": "HIGH"
+    },
+    {
+      "capabilityContractKey": "dwaion.safety.read",
+      "resolvedAuthority": "ADMIN.DWAION_SAFETY:VIEW",
+      "surfaceKey": "dwaion.management",
+      "scopeResolver": "APP_RESOURCE_SET:RS_DWAION",
+      "riskTier": "LOW"
+    },
+    {
+      "capabilityContractKey": "dwaion.safety.update",
+      "resolvedAuthority": "ADMIN.DWAION_SAFETY:UPDATE",
+      "surfaceKey": "dwaion.management",
+      "scopeResolver": "APP_RESOURCE_SET:RS_DWAION",
+      "riskTier": "HIGH"
+    },
+    {
+      "capabilityContractKey": "dwaion.sources.manage",
+      "resolvedAuthority": "ADMIN.DWAION_SOURCES:MANAGE",
+      "surfaceKey": "dwaion.management",
+      "scopeResolver": "APP_RESOURCE_SET:RS_DWAION",
+      "riskTier": "HIGH"
+    },
+    {
+      "capabilityContractKey": "dwaion.sources.read",
+      "resolvedAuthority": "ADMIN.DWAION_SOURCES:VIEW",
+      "surfaceKey": "dwaion.management",
+      "scopeResolver": "APP_RESOURCE_SET:RS_DWAION",
+      "riskTier": "LOW"
+    },
+    {
+      "capabilityContractKey": "dwaion.sources.update",
+      "resolvedAuthority": "ADMIN.DWAION_SOURCES:UPDATE",
+      "surfaceKey": "dwaion.management",
+      "scopeResolver": "APP_RESOURCE_SET:RS_DWAION",
+      "riskTier": "HIGH"
+    },
+    {
+      "capabilityContractKey": "dwaion.work.activity.read",
+      "resolvedAuthority": "APP.ACTIVITY:VIEW",
+      "surfaceKey": "dwaion.work",
+      "scopeResolver": "SELF",
+      "riskTier": "LOW"
+    },
+    {
+      "capabilityContractKey": "dwaion.work.artifacts.create",
+      "resolvedAuthority": "APP.DWAION_ARTIFACTS:CREATE",
+      "surfaceKey": "dwaion.work",
+      "scopeResolver": "SELF",
+      "riskTier": "MEDIUM"
+    },
+    {
+      "capabilityContractKey": "dwaion.work.artifacts.export",
+      "resolvedAuthority": "APP.DWAION_ARTIFACTS:EXPORT",
+      "surfaceKey": "dwaion.work",
+      "scopeResolver": "SELF",
+      "riskTier": "HIGH"
+    },
+    {
+      "capabilityContractKey": "dwaion.work.artifacts.read",
+      "resolvedAuthority": "APP.DWAION_ARTIFACTS:VIEW",
+      "surfaceKey": "dwaion.work",
+      "scopeResolver": "SELF",
+      "riskTier": "LOW"
+    },
+    {
+      "capabilityContractKey": "dwaion.work.artifacts.update",
+      "resolvedAuthority": "APP.DWAION_ARTIFACTS:UPDATE",
+      "surfaceKey": "dwaion.work",
+      "scopeResolver": "SELF",
+      "riskTier": "HIGH"
+    },
+    {
+      "capabilityContractKey": "dwaion.work.ask.execute",
+      "resolvedAuthority": "APP.ASK:VIEW",
+      "surfaceKey": "dwaion.work",
+      "scopeResolver": "SELF",
+      "riskTier": "MEDIUM"
+    },
+    {
+      "capabilityContractKey": "dwaion.work.memory.manage",
+      "resolvedAuthority": "APP.DWAION_MEMORY:MANAGE",
+      "surfaceKey": "dwaion.work",
+      "scopeResolver": "SELF",
+      "riskTier": "HIGH"
+    },
+    {
+      "capabilityContractKey": "dwaion.work.memory.read",
+      "resolvedAuthority": "APP.DWAION_MEMORY:VIEW",
+      "surfaceKey": "dwaion.work",
+      "scopeResolver": "SELF",
+      "riskTier": "LOW"
+    },
+    {
+      "capabilityContractKey": "dwaion.work.privacy.manage",
+      "resolvedAuthority": "APP.DWAION_PRIVACY:MANAGE",
+      "surfaceKey": "dwaion.work",
+      "scopeResolver": "SELF",
+      "riskTier": "HIGH"
+    },
+    {
+      "capabilityContractKey": "dwaion.work.privacy.read",
+      "resolvedAuthority": "APP.DWAION_PRIVACY:VIEW",
+      "surfaceKey": "dwaion.work",
+      "scopeResolver": "SELF",
+      "riskTier": "LOW"
+    },
+    {
+      "capabilityContractKey": "dwaion.work.routines.manage",
+      "resolvedAuthority": "APP.DWAION_ROUTINES:MANAGE",
+      "surfaceKey": "dwaion.work",
+      "scopeResolver": "SELF",
+      "riskTier": "HIGH"
+    },
+    {
+      "capabilityContractKey": "dwaion.work.routines.read",
+      "resolvedAuthority": "APP.DWAION_ROUTINES:VIEW",
+      "surfaceKey": "dwaion.work",
+      "scopeResolver": "SELF",
+      "riskTier": "LOW"
+    }
+  ],
+  "routes": [
+    {
+      "routeContractKey": "route.dwaion.management.action-policy-update.action",
+      "routeKind": "ACTION",
+      "surfaceKey": "dwaion.management",
+      "accessContractKey": "dwaion.actions.update",
+      "resolvedAuthority": "ADMIN.DWAION_ACTIONS:UPDATE",
+      "readOnly": false,
+      "targetKind": "CONFIG_SCOPE",
+      "gatewayBinding": {
+        "method": "PATCH",
+        "path": "/api/agent/v1/admin/actions/{actionKey}"
+      },
+      "servicePepBinding": {
+        "serviceKey": "agent",
+        "method": "PATCH",
+        "path": "/v1/admin/actions/{actionKey}"
+      }
+    },
+    {
+      "routeContractKey": "route.dwaion.management.actions-bootstrap.action",
+      "routeKind": "ACTION",
+      "surfaceKey": "dwaion.management",
+      "accessContractKey": "dwaion.actions.manage",
+      "resolvedAuthority": "ADMIN.DWAION_ACTIONS:MANAGE",
+      "readOnly": false,
+      "targetKind": "CONFIG_SCOPE",
+      "gatewayBinding": {
+        "method": "POST",
+        "path": "/api/agent/v1/admin/actions/bootstrap"
+      },
+      "servicePepBinding": {
+        "serviceKey": "agent",
+        "method": "POST",
+        "path": "/v1/admin/actions/bootstrap"
+      }
+    },
+    {
+      "routeContractKey": "route.dwaion.management.actions.page",
+      "routeKind": "PAGE",
+      "surfaceKey": "dwaion.management",
+      "accessContractKey": "dwaion.actions.read",
+      "resolvedAuthority": "ADMIN.DWAION_ACTIONS:VIEW",
+      "readOnly": true,
+      "targetKind": "CONFIG_SCOPE",
+      "gatewayBinding": {
+        "method": "GET",
+        "path": "/api/agent/v1/admin/actions"
+      },
+      "servicePepBinding": {
+        "serviceKey": "agent",
+        "method": "GET",
+        "path": "/v1/admin/actions"
+      }
+    },
+    {
+      "routeContractKey": "route.dwaion.management.audit-export.data",
+      "routeKind": "DATA",
+      "surfaceKey": "dwaion.management",
+      "accessContractKey": "dwaion.audit.export",
+      "resolvedAuthority": "ADMIN.DWAION_AUDIT:EXPORT",
+      "readOnly": true,
+      "targetKind": "CONFIG_SCOPE",
+      "gatewayBinding": {
+        "method": "GET",
+        "path": "/api/agent/v1/admin/audit/export"
+      },
+      "servicePepBinding": {
+        "serviceKey": "agent",
+        "method": "GET",
+        "path": "/v1/admin/audit/export"
+      }
+    },
+    {
+      "routeContractKey": "route.dwaion.management.audit.page",
+      "routeKind": "PAGE",
+      "surfaceKey": "dwaion.management",
+      "accessContractKey": "ANY(dwaion.retention.read,dwaion.audit.read)",
+      "resolvedAuthority": "ANY(ADMIN.DWAION_RETENTION:VIEW,ADMIN.DWAION_AUDIT:VIEW)",
+      "readOnly": true,
+      "targetKind": "CONFIG_SCOPE",
+      "gatewayBinding": {
+        "method": "GET",
+        "path": "/api/agent/v1/admin/audit"
+      },
+      "servicePepBinding": {
+        "serviceKey": "agent",
+        "method": "GET",
+        "path": "/v1/admin/audit"
+      }
+    },
+    {
+      "routeContractKey": "route.dwaion.management.domain-retention-update.action",
+      "routeKind": "ACTION",
+      "surfaceKey": "dwaion.management",
+      "accessContractKey": "dwaion.retention.manage",
+      "resolvedAuthority": "ADMIN.DWAION_RETENTION:MANAGE",
+      "readOnly": false,
+      "targetKind": "CONFIG_SCOPE",
+      "gatewayBinding": {
+        "method": "PUT",
+        "path": "/api/agent/v1/admin/personal-data/retention/{domain}"
+      },
+      "servicePepBinding": {
+        "serviceKey": "agent",
+        "method": "PUT",
+        "path": "/v1/admin/personal-data/retention/{domain}"
+      }
+    },
+    {
+      "routeContractKey": "route.dwaion.management.evaluation-case-create.action",
+      "routeKind": "ACTION",
+      "surfaceKey": "dwaion.management",
+      "accessContractKey": "dwaion.evaluation.update",
+      "resolvedAuthority": "ADMIN.DWAION_EVALUATION:UPDATE",
+      "readOnly": false,
+      "targetKind": "CONFIG_SCOPE",
+      "gatewayBinding": {
+        "method": "POST",
+        "path": "/api/agent/v1/admin/evaluations/{evaluationSetId}/cases"
+      },
+      "servicePepBinding": {
+        "serviceKey": "agent",
+        "method": "POST",
+        "path": "/v1/admin/evaluations/{evaluationSetId}/cases"
+      }
+    },
+    {
+      "routeContractKey": "route.dwaion.management.evaluation-create.action",
+      "routeKind": "ACTION",
+      "surfaceKey": "dwaion.management",
+      "accessContractKey": "dwaion.evaluation.create",
+      "resolvedAuthority": "ADMIN.DWAION_EVALUATION:CREATE",
+      "readOnly": false,
+      "targetKind": "CONFIG_SCOPE",
+      "gatewayBinding": {
+        "method": "POST",
+        "path": "/api/agent/v1/admin/evaluations"
+      },
+      "servicePepBinding": {
+        "serviceKey": "agent",
+        "method": "POST",
+        "path": "/v1/admin/evaluations"
+      }
+    },
+    {
+      "routeContractKey": "route.dwaion.management.evaluation-detail.data",
+      "routeKind": "DATA",
+      "surfaceKey": "dwaion.management",
+      "accessContractKey": "dwaion.evaluation.read",
+      "resolvedAuthority": "ADMIN.DWAION_EVALUATION:VIEW",
+      "readOnly": true,
+      "targetKind": "CONFIG_SCOPE",
+      "gatewayBinding": {
+        "method": "GET",
+        "path": "/api/agent/v1/admin/evaluations/{evaluationSetId}"
+      },
+      "servicePepBinding": {
+        "serviceKey": "agent",
+        "method": "GET",
+        "path": "/v1/admin/evaluations/{evaluationSetId}"
+      }
+    },
+    {
+      "routeContractKey": "route.dwaion.management.evaluation-export.data",
+      "routeKind": "DATA",
+      "surfaceKey": "dwaion.management",
+      "accessContractKey": "dwaion.evaluation.export",
+      "resolvedAuthority": "ADMIN.DWAION_EVALUATION:EXPORT",
+      "readOnly": true,
+      "targetKind": "CONFIG_SCOPE",
+      "gatewayBinding": {
+        "method": "GET",
+        "path": "/api/agent/v1/admin/evaluations/{evaluationSetId}/runs/{evaluationRunId}/export"
+      },
+      "servicePepBinding": {
+        "serviceKey": "agent",
+        "method": "GET",
+        "path": "/v1/admin/evaluations/{evaluationSetId}/runs/{evaluationRunId}/export"
+      }
+    },
+    {
+      "routeContractKey": "route.dwaion.management.evaluation-lifecycle.action",
+      "routeKind": "ACTION",
+      "surfaceKey": "dwaion.management",
+      "accessContractKey": "dwaion.evaluation.manage",
+      "resolvedAuthority": "ADMIN.DWAION_EVALUATION:MANAGE",
+      "readOnly": false,
+      "targetKind": "CONFIG_SCOPE",
+      "gatewayBinding": {
+        "method": "PATCH",
+        "path": "/api/agent/v1/admin/evaluations/{evaluationSetId}/lifecycle"
+      },
+      "servicePepBinding": {
+        "serviceKey": "agent",
+        "method": "PATCH",
+        "path": "/v1/admin/evaluations/{evaluationSetId}/lifecycle"
+      }
+    },
+    {
+      "routeContractKey": "route.dwaion.management.evaluation-run.action",
+      "routeKind": "ACTION",
+      "surfaceKey": "dwaion.management",
+      "accessContractKey": "dwaion.evaluation.manage",
+      "resolvedAuthority": "ADMIN.DWAION_EVALUATION:MANAGE",
+      "readOnly": false,
+      "targetKind": "CONFIG_SCOPE",
+      "gatewayBinding": {
+        "method": "POST",
+        "path": "/api/agent/v1/admin/evaluations/{evaluationSetId}/runs"
+      },
+      "servicePepBinding": {
+        "serviceKey": "agent",
+        "method": "POST",
+        "path": "/v1/admin/evaluations/{evaluationSetId}/runs"
+      }
+    },
+    {
+      "routeContractKey": "route.dwaion.management.evaluation-run.data",
+      "routeKind": "DATA",
+      "surfaceKey": "dwaion.management",
+      "accessContractKey": "dwaion.evaluation.read",
+      "resolvedAuthority": "ADMIN.DWAION_EVALUATION:VIEW",
+      "readOnly": true,
+      "targetKind": "CONFIG_SCOPE",
+      "gatewayBinding": {
+        "method": "GET",
+        "path": "/api/agent/v1/admin/evaluations/{evaluationSetId}/runs/{evaluationRunId}"
+      },
+      "servicePepBinding": {
+        "serviceKey": "agent",
+        "method": "GET",
+        "path": "/v1/admin/evaluations/{evaluationSetId}/runs/{evaluationRunId}"
+      }
+    },
+    {
+      "routeContractKey": "route.dwaion.management.evaluation-runs.data",
+      "routeKind": "DATA",
+      "surfaceKey": "dwaion.management",
+      "accessContractKey": "dwaion.evaluation.read",
+      "resolvedAuthority": "ADMIN.DWAION_EVALUATION:VIEW",
+      "readOnly": true,
+      "targetKind": "CONFIG_SCOPE",
+      "gatewayBinding": {
+        "method": "GET",
+        "path": "/api/agent/v1/admin/evaluations/{evaluationSetId}/runs"
+      },
+      "servicePepBinding": {
+        "serviceKey": "agent",
+        "method": "GET",
+        "path": "/v1/admin/evaluations/{evaluationSetId}/runs"
+      }
+    },
+    {
+      "routeContractKey": "route.dwaion.management.evaluation.page",
+      "routeKind": "PAGE",
+      "surfaceKey": "dwaion.management",
+      "accessContractKey": "dwaion.evaluation.read",
+      "resolvedAuthority": "ADMIN.DWAION_EVALUATION:VIEW",
+      "readOnly": true,
+      "targetKind": "CONFIG_SCOPE",
+      "gatewayBinding": {
+        "method": "GET",
+        "path": "/api/agent/v1/admin/evaluations"
+      },
+      "servicePepBinding": {
+        "serviceKey": "agent",
+        "method": "GET",
+        "path": "/v1/admin/evaluations"
+      }
+    },
+    {
+      "routeContractKey": "route.dwaion.management.gate-configure.action",
+      "routeKind": "ACTION",
+      "surfaceKey": "dwaion.management",
+      "accessContractKey": "dwaion.gates.update",
+      "resolvedAuthority": "ADMIN.DWAION_GATES:UPDATE",
+      "readOnly": false,
+      "targetKind": "CONFIG_SCOPE",
+      "gatewayBinding": {
+        "method": "PATCH",
+        "path": "/api/agent/v1/admin/gates/{gateKey}"
+      },
+      "servicePepBinding": {
+        "serviceKey": "agent",
+        "method": "PATCH",
+        "path": "/v1/admin/gates/{gateKey}"
+      }
+    },
+    {
+      "routeContractKey": "route.dwaion.management.gate-decision.action",
+      "routeKind": "ACTION",
+      "surfaceKey": "dwaion.management",
+      "accessContractKey": "dwaion.gates.approve",
+      "resolvedAuthority": "ADMIN.DWAION_GATES:APPROVE",
+      "readOnly": false,
+      "targetKind": "CONFIG_SCOPE",
+      "gatewayBinding": {
+        "method": "POST",
+        "path": "/api/agent/v1/admin/gates/{gateKey}/decision"
+      },
+      "servicePepBinding": {
+        "serviceKey": "agent",
+        "method": "POST",
+        "path": "/v1/admin/gates/{gateKey}/decision"
+      }
+    },
+    {
+      "routeContractKey": "route.dwaion.management.gate-detail.data",
+      "routeKind": "DATA",
+      "surfaceKey": "dwaion.management",
+      "accessContractKey": "dwaion.gates.read",
+      "resolvedAuthority": "ADMIN.DWAION_GATES:VIEW",
+      "readOnly": true,
+      "targetKind": "CONFIG_SCOPE",
+      "gatewayBinding": {
+        "method": "GET",
+        "path": "/api/agent/v1/admin/gates/{gateKey}"
+      },
+      "servicePepBinding": {
+        "serviceKey": "agent",
+        "method": "GET",
+        "path": "/v1/admin/gates/{gateKey}"
+      }
+    },
+    {
+      "routeContractKey": "route.dwaion.management.gate-evidence.action",
+      "routeKind": "ACTION",
+      "surfaceKey": "dwaion.management",
+      "accessContractKey": "dwaion.gates.update",
+      "resolvedAuthority": "ADMIN.DWAION_GATES:UPDATE",
+      "readOnly": false,
+      "targetKind": "CONFIG_SCOPE",
+      "gatewayBinding": {
+        "method": "POST",
+        "path": "/api/agent/v1/admin/gates/{gateKey}/evidence"
+      },
+      "servicePepBinding": {
+        "serviceKey": "agent",
+        "method": "POST",
+        "path": "/v1/admin/gates/{gateKey}/evidence"
+      }
+    },
+    {
+      "routeContractKey": "route.dwaion.management.gate-validation.action",
+      "routeKind": "ACTION",
+      "surfaceKey": "dwaion.management",
+      "accessContractKey": "dwaion.gates.manage",
+      "resolvedAuthority": "ADMIN.DWAION_GATES:MANAGE",
+      "readOnly": false,
+      "targetKind": "CONFIG_SCOPE",
+      "gatewayBinding": {
+        "method": "POST",
+        "path": "/api/agent/v1/admin/gates/{gateKey}/validation"
+      },
+      "servicePepBinding": {
+        "serviceKey": "agent",
+        "method": "POST",
+        "path": "/v1/admin/gates/{gateKey}/validation"
+      }
+    },
+    {
+      "routeContractKey": "route.dwaion.management.gates-bootstrap.action",
+      "routeKind": "ACTION",
+      "surfaceKey": "dwaion.management",
+      "accessContractKey": "dwaion.gates.manage",
+      "resolvedAuthority": "ADMIN.DWAION_GATES:MANAGE",
+      "readOnly": false,
+      "targetKind": "CONFIG_SCOPE",
+      "gatewayBinding": {
+        "method": "POST",
+        "path": "/api/agent/v1/admin/gates/bootstrap"
+      },
+      "servicePepBinding": {
+        "serviceKey": "agent",
+        "method": "POST",
+        "path": "/v1/admin/gates/bootstrap"
+      }
+    },
+    {
+      "routeContractKey": "route.dwaion.management.gates.page",
+      "routeKind": "PAGE",
+      "surfaceKey": "dwaion.management",
+      "accessContractKey": "dwaion.gates.read",
+      "resolvedAuthority": "ADMIN.DWAION_GATES:VIEW",
+      "readOnly": true,
+      "targetKind": "CONFIG_SCOPE",
+      "gatewayBinding": {
+        "method": "GET",
+        "path": "/api/agent/v1/admin/gates"
+      },
+      "servicePepBinding": {
+        "serviceKey": "agent",
+        "method": "GET",
+        "path": "/v1/admin/gates"
+      }
+    },
+    {
+      "routeContractKey": "route.dwaion.management.overview.page",
+      "routeKind": "PAGE",
+      "surfaceKey": "dwaion.management",
+      "accessContractKey": "dwaion.operations.read",
+      "resolvedAuthority": "ADMIN.DWAION_OPERATIONS:VIEW",
+      "readOnly": true,
+      "targetKind": "CONFIG_SCOPE",
+      "gatewayBinding": {
+        "method": "GET",
+        "path": "/api/agent/v1/admin/overview"
+      },
+      "servicePepBinding": {
+        "serviceKey": "agent",
+        "method": "GET",
+        "path": "/v1/admin/overview"
+      }
+    },
+    {
+      "routeContractKey": "route.dwaion.management.retention-bootstrap.action",
+      "routeKind": "ACTION",
+      "surfaceKey": "dwaion.management",
+      "accessContractKey": "dwaion.retention.manage",
+      "resolvedAuthority": "ADMIN.DWAION_RETENTION:MANAGE",
+      "readOnly": false,
+      "targetKind": "CONFIG_SCOPE",
+      "gatewayBinding": {
+        "method": "POST",
+        "path": "/api/agent/v1/admin/retention/bootstrap"
+      },
+      "servicePepBinding": {
+        "serviceKey": "agent",
+        "method": "POST",
+        "path": "/v1/admin/retention/bootstrap"
+      }
+    },
+    {
+      "routeContractKey": "route.dwaion.management.retention-update.action",
+      "routeKind": "ACTION",
+      "surfaceKey": "dwaion.management",
+      "accessContractKey": "dwaion.retention.update",
+      "resolvedAuthority": "ADMIN.DWAION_RETENTION:UPDATE",
+      "readOnly": false,
+      "targetKind": "CONFIG_SCOPE",
+      "gatewayBinding": {
+        "method": "PATCH",
+        "path": "/api/agent/v1/admin/retention"
+      },
+      "servicePepBinding": {
+        "serviceKey": "agent",
+        "method": "PATCH",
+        "path": "/v1/admin/retention"
+      }
+    },
+    {
+      "routeContractKey": "route.dwaion.management.retention.data",
+      "routeKind": "DATA",
+      "surfaceKey": "dwaion.management",
+      "accessContractKey": "dwaion.retention.read",
+      "resolvedAuthority": "ADMIN.DWAION_RETENTION:VIEW",
+      "readOnly": true,
+      "targetKind": "CONFIG_SCOPE",
+      "gatewayBinding": {
+        "method": "GET",
+        "path": "/api/agent/v1/admin/retention"
+      },
+      "servicePepBinding": {
+        "serviceKey": "agent",
+        "method": "GET",
+        "path": "/v1/admin/retention"
+      }
+    },
+    {
+      "routeContractKey": "route.dwaion.management.safety-bootstrap.action",
+      "routeKind": "ACTION",
+      "surfaceKey": "dwaion.management",
+      "accessContractKey": "dwaion.safety.manage",
+      "resolvedAuthority": "ADMIN.DWAION_SAFETY:MANAGE",
+      "readOnly": false,
+      "targetKind": "CONFIG_SCOPE",
+      "gatewayBinding": {
+        "method": "POST",
+        "path": "/api/agent/v1/admin/safety/bootstrap"
+      },
+      "servicePepBinding": {
+        "serviceKey": "agent",
+        "method": "POST",
+        "path": "/v1/admin/safety/bootstrap"
+      }
+    },
+    {
+      "routeContractKey": "route.dwaion.management.safety-update.action",
+      "routeKind": "ACTION",
+      "surfaceKey": "dwaion.management",
+      "accessContractKey": "dwaion.safety.update",
+      "resolvedAuthority": "ADMIN.DWAION_SAFETY:UPDATE",
+      "readOnly": false,
+      "targetKind": "CONFIG_SCOPE",
+      "gatewayBinding": {
+        "method": "PATCH",
+        "path": "/api/agent/v1/admin/safety"
+      },
+      "servicePepBinding": {
+        "serviceKey": "agent",
+        "method": "PATCH",
+        "path": "/v1/admin/safety"
+      }
+    },
+    {
+      "routeContractKey": "route.dwaion.management.safety.page",
+      "routeKind": "PAGE",
+      "surfaceKey": "dwaion.management",
+      "accessContractKey": "dwaion.safety.read",
+      "resolvedAuthority": "ADMIN.DWAION_SAFETY:VIEW",
+      "readOnly": true,
+      "targetKind": "CONFIG_SCOPE",
+      "gatewayBinding": {
+        "method": "GET",
+        "path": "/api/agent/v1/admin/safety"
+      },
+      "servicePepBinding": {
+        "serviceKey": "agent",
+        "method": "GET",
+        "path": "/v1/admin/safety"
+      }
+    },
+    {
+      "routeContractKey": "route.dwaion.management.source-update.action",
+      "routeKind": "ACTION",
+      "surfaceKey": "dwaion.management",
+      "accessContractKey": "dwaion.sources.update",
+      "resolvedAuthority": "ADMIN.DWAION_SOURCES:UPDATE",
+      "readOnly": false,
+      "targetKind": "CONFIG_SCOPE",
+      "gatewayBinding": {
+        "method": "PATCH",
+        "path": "/api/agent/v1/admin/sources/{sourceKey}"
+      },
+      "servicePepBinding": {
+        "serviceKey": "agent",
+        "method": "PATCH",
+        "path": "/v1/admin/sources/{sourceKey}"
+      }
+    },
+    {
+      "routeContractKey": "route.dwaion.management.sources-bootstrap.action",
+      "routeKind": "ACTION",
+      "surfaceKey": "dwaion.management",
+      "accessContractKey": "dwaion.sources.manage",
+      "resolvedAuthority": "ADMIN.DWAION_SOURCES:MANAGE",
+      "readOnly": false,
+      "targetKind": "CONFIG_SCOPE",
+      "gatewayBinding": {
+        "method": "POST",
+        "path": "/api/agent/v1/admin/sources/bootstrap"
+      },
+      "servicePepBinding": {
+        "serviceKey": "agent",
+        "method": "POST",
+        "path": "/v1/admin/sources/bootstrap"
+      }
+    },
+    {
+      "routeContractKey": "route.dwaion.management.sources.page",
+      "routeKind": "PAGE",
+      "surfaceKey": "dwaion.management",
+      "accessContractKey": "dwaion.sources.read",
+      "resolvedAuthority": "ADMIN.DWAION_SOURCES:VIEW",
+      "readOnly": true,
+      "targetKind": "CONFIG_SCOPE",
+      "gatewayBinding": {
+        "method": "GET",
+        "path": "/api/agent/v1/admin/sources"
+      },
+      "servicePepBinding": {
+        "serviceKey": "agent",
+        "method": "GET",
+        "path": "/v1/admin/sources"
+      }
+    },
+    {
+      "routeContractKey": "route.dwaion.work.action-preview.action",
+      "routeKind": "ACTION",
+      "surfaceKey": "dwaion.work",
+      "accessContractKey": "dwaion.work.ask.execute",
+      "resolvedAuthority": "APP.ASK:VIEW",
+      "readOnly": false,
+      "targetKind": "SELF",
+      "gatewayBinding": {
+        "method": "POST",
+        "path": "/api/agent/v1/actions/{actionKey}/preview"
+      },
+      "servicePepBinding": {
+        "serviceKey": "agent",
+        "method": "POST",
+        "path": "/v1/actions/{actionKey}/preview"
+      }
+    },
+    {
+      "routeContractKey": "route.dwaion.work.actions.page",
+      "routeKind": "PAGE",
+      "surfaceKey": "dwaion.work",
+      "accessContractKey": "ANY(dwaion.action.calendar.create,dwaion.action.mail.create,dwaion.action.service.read,dwaion.action.approval.create)",
+      "resolvedAuthority": "ANY(APP.CALENDAR:CREATE,APP.MAIL:CREATE,APP.EMPLOYEE_SERVICES:VIEW,ACTION.APPROVAL_REQUEST:CREATE)",
+      "readOnly": true,
+      "targetKind": "SELF",
+      "gatewayBinding": {
+        "method": "GET",
+        "path": "/api/agent/v1/actions"
+      },
+      "servicePepBinding": {
+        "serviceKey": "agent",
+        "method": "GET",
+        "path": "/v1/actions"
+      }
+    },
+    {
+      "routeContractKey": "route.dwaion.work.activity-event.data",
+      "routeKind": "DATA",
+      "surfaceKey": "dwaion.work",
+      "accessContractKey": "dwaion.work.activity.read",
+      "resolvedAuthority": "APP.ACTIVITY:VIEW",
+      "readOnly": true,
+      "targetKind": "SELF",
+      "gatewayBinding": {
+        "method": "GET",
+        "path": "/api/agent/v1/activity/events/{eventId}"
+      },
+      "servicePepBinding": {
+        "serviceKey": "agent",
+        "method": "GET",
+        "path": "/v1/activity/events/{eventId}"
+      }
+    },
+    {
+      "routeContractKey": "route.dwaion.work.activity-events.data",
+      "routeKind": "DATA",
+      "surfaceKey": "dwaion.work",
+      "accessContractKey": "dwaion.work.activity.read",
+      "resolvedAuthority": "APP.ACTIVITY:VIEW",
+      "readOnly": true,
+      "targetKind": "SELF",
+      "gatewayBinding": {
+        "method": "GET",
+        "path": "/api/agent/v1/activity/events"
+      },
+      "servicePepBinding": {
+        "serviceKey": "agent",
+        "method": "GET",
+        "path": "/v1/activity/events"
+      }
+    },
+    {
+      "routeContractKey": "route.dwaion.work.activity-summary.data",
+      "routeKind": "DATA",
+      "surfaceKey": "dwaion.work",
+      "accessContractKey": "dwaion.work.activity.read",
+      "resolvedAuthority": "APP.ACTIVITY:VIEW",
+      "readOnly": true,
+      "targetKind": "SELF",
+      "gatewayBinding": {
+        "method": "GET",
+        "path": "/api/agent/v1/activity/executions/summary"
+      },
+      "servicePepBinding": {
+        "serviceKey": "agent",
+        "method": "GET",
+        "path": "/v1/activity/executions/summary"
+      }
+    },
+    {
+      "routeContractKey": "route.dwaion.work.artifact-autosave.action",
+      "routeKind": "ACTION",
+      "surfaceKey": "dwaion.work",
+      "accessContractKey": "dwaion.work.artifacts.update",
+      "resolvedAuthority": "APP.DWAION_ARTIFACTS:UPDATE",
+      "readOnly": false,
+      "targetKind": "SELF",
+      "gatewayBinding": {
+        "method": "PUT",
+        "path": "/api/agent/v1/artifacts/{artifactId}/draft"
+      },
+      "servicePepBinding": {
+        "serviceKey": "agent",
+        "method": "PUT",
+        "path": "/v1/artifacts/{artifactId}/draft"
+      }
+    },
+    {
+      "routeContractKey": "route.dwaion.work.artifact-create.action",
+      "routeKind": "ACTION",
+      "surfaceKey": "dwaion.work",
+      "accessContractKey": "dwaion.work.artifacts.create",
+      "resolvedAuthority": "APP.DWAION_ARTIFACTS:CREATE",
+      "readOnly": false,
+      "targetKind": "SELF",
+      "gatewayBinding": {
+        "method": "POST",
+        "path": "/api/agent/v1/artifacts"
+      },
+      "servicePepBinding": {
+        "serviceKey": "agent",
+        "method": "POST",
+        "path": "/v1/artifacts"
+      }
+    },
+    {
+      "routeContractKey": "route.dwaion.work.artifact-detail.data",
+      "routeKind": "DATA",
+      "surfaceKey": "dwaion.work",
+      "accessContractKey": "dwaion.work.artifacts.read",
+      "resolvedAuthority": "APP.DWAION_ARTIFACTS:VIEW",
+      "readOnly": true,
+      "targetKind": "SELF",
+      "gatewayBinding": {
+        "method": "GET",
+        "path": "/api/agent/v1/artifacts/{artifactId}"
+      },
+      "servicePepBinding": {
+        "serviceKey": "agent",
+        "method": "GET",
+        "path": "/v1/artifacts/{artifactId}"
+      }
+    },
+    {
+      "routeContractKey": "route.dwaion.work.artifact-export.action",
+      "routeKind": "ACTION",
+      "surfaceKey": "dwaion.work",
+      "accessContractKey": "dwaion.work.artifacts.export",
+      "resolvedAuthority": "APP.DWAION_ARTIFACTS:EXPORT",
+      "readOnly": false,
+      "targetKind": "SELF",
+      "gatewayBinding": {
+        "method": "POST",
+        "path": "/api/agent/v1/artifacts/{artifactId}/exports"
+      },
+      "servicePepBinding": {
+        "serviceKey": "agent",
+        "method": "POST",
+        "path": "/v1/artifacts/{artifactId}/exports"
+      }
+    },
+    {
+      "routeContractKey": "route.dwaion.work.artifact-preflight.action",
+      "routeKind": "ACTION",
+      "surfaceKey": "dwaion.work",
+      "accessContractKey": "dwaion.work.artifacts.update",
+      "resolvedAuthority": "APP.DWAION_ARTIFACTS:UPDATE",
+      "readOnly": false,
+      "targetKind": "SELF",
+      "gatewayBinding": {
+        "method": "POST",
+        "path": "/api/agent/v1/artifacts/{artifactId}/preflights"
+      },
+      "servicePepBinding": {
+        "serviceKey": "agent",
+        "method": "POST",
+        "path": "/v1/artifacts/{artifactId}/preflights"
+      }
+    },
+    {
+      "routeContractKey": "route.dwaion.work.artifact-preflight.data",
+      "routeKind": "DATA",
+      "surfaceKey": "dwaion.work",
+      "accessContractKey": "dwaion.work.artifacts.read",
+      "resolvedAuthority": "APP.DWAION_ARTIFACTS:VIEW",
+      "readOnly": true,
+      "targetKind": "SELF",
+      "gatewayBinding": {
+        "method": "GET",
+        "path": "/api/agent/v1/artifacts/{artifactId}/preflights/current"
+      },
+      "servicePepBinding": {
+        "serviceKey": "agent",
+        "method": "GET",
+        "path": "/v1/artifacts/{artifactId}/preflights/current"
+      }
+    },
+    {
+      "routeContractKey": "route.dwaion.work.artifact-publish.action",
+      "routeKind": "ACTION",
+      "surfaceKey": "dwaion.work",
+      "accessContractKey": "dwaion.work.artifacts.update",
+      "resolvedAuthority": "APP.DWAION_ARTIFACTS:UPDATE",
+      "readOnly": false,
+      "targetKind": "SELF",
+      "gatewayBinding": {
+        "method": "POST",
+        "path": "/api/agent/v1/artifacts/{artifactId}/publish"
+      },
+      "servicePepBinding": {
+        "serviceKey": "agent",
+        "method": "POST",
+        "path": "/v1/artifacts/{artifactId}/publish"
+      }
+    },
+    {
+      "routeContractKey": "route.dwaion.work.artifact-version-create.action",
+      "routeKind": "ACTION",
+      "surfaceKey": "dwaion.work",
+      "accessContractKey": "dwaion.work.artifacts.update",
+      "resolvedAuthority": "APP.DWAION_ARTIFACTS:UPDATE",
+      "readOnly": false,
+      "targetKind": "SELF",
+      "gatewayBinding": {
+        "method": "POST",
+        "path": "/api/agent/v1/artifacts/{artifactId}/versions"
+      },
+      "servicePepBinding": {
+        "serviceKey": "agent",
+        "method": "POST",
+        "path": "/v1/artifacts/{artifactId}/versions"
+      }
+    },
+    {
+      "routeContractKey": "route.dwaion.work.artifact-version.data",
+      "routeKind": "DATA",
+      "surfaceKey": "dwaion.work",
+      "accessContractKey": "dwaion.work.artifacts.read",
+      "resolvedAuthority": "APP.DWAION_ARTIFACTS:VIEW",
+      "readOnly": true,
+      "targetKind": "SELF",
+      "gatewayBinding": {
+        "method": "GET",
+        "path": "/api/agent/v1/artifacts/{artifactId}/versions/{versionNumber}"
+      },
+      "servicePepBinding": {
+        "serviceKey": "agent",
+        "method": "GET",
+        "path": "/v1/artifacts/{artifactId}/versions/{versionNumber}"
+      }
+    },
+    {
+      "routeContractKey": "route.dwaion.work.artifact-versions.data",
+      "routeKind": "DATA",
+      "surfaceKey": "dwaion.work",
+      "accessContractKey": "dwaion.work.artifacts.read",
+      "resolvedAuthority": "APP.DWAION_ARTIFACTS:VIEW",
+      "readOnly": true,
+      "targetKind": "SELF",
+      "gatewayBinding": {
+        "method": "GET",
+        "path": "/api/agent/v1/artifacts/{artifactId}/versions"
+      },
+      "servicePepBinding": {
+        "serviceKey": "agent",
+        "method": "GET",
+        "path": "/v1/artifacts/{artifactId}/versions"
+      }
+    },
+    {
+      "routeContractKey": "route.dwaion.work.artifacts.page",
+      "routeKind": "PAGE",
+      "surfaceKey": "dwaion.work",
+      "accessContractKey": "dwaion.work.artifacts.read",
+      "resolvedAuthority": "APP.DWAION_ARTIFACTS:VIEW",
+      "readOnly": true,
+      "targetKind": "SELF",
+      "gatewayBinding": {
+        "method": "GET",
+        "path": "/api/agent/v1/artifacts"
+      },
+      "servicePepBinding": {
+        "serviceKey": "agent",
+        "method": "GET",
+        "path": "/v1/artifacts"
+      }
+    },
+    {
+      "routeContractKey": "route.dwaion.work.ask-stream.action",
+      "routeKind": "ACTION",
+      "surfaceKey": "dwaion.work",
+      "accessContractKey": "dwaion.work.ask.execute",
+      "resolvedAuthority": "APP.ASK:VIEW",
+      "readOnly": false,
+      "targetKind": "SELF",
+      "gatewayBinding": {
+        "method": "POST",
+        "path": "/api/agent/v1/ask/stream"
+      },
+      "servicePepBinding": {
+        "serviceKey": "agent",
+        "method": "POST",
+        "path": "/v1/ask/stream"
+      }
+    },
+    {
+      "routeContractKey": "route.dwaion.work.ask.action",
+      "routeKind": "ACTION",
+      "surfaceKey": "dwaion.work",
+      "accessContractKey": "dwaion.work.ask.execute",
+      "resolvedAuthority": "APP.ASK:VIEW",
+      "readOnly": false,
+      "targetKind": "SELF",
+      "gatewayBinding": {
+        "method": "POST",
+        "path": "/api/agent/v1/ask"
+      },
+      "servicePepBinding": {
+        "serviceKey": "agent",
+        "method": "POST",
+        "path": "/v1/ask"
+      }
+    },
+    {
+      "routeContractKey": "route.dwaion.work.conversation-delete.action",
+      "routeKind": "ACTION",
+      "surfaceKey": "dwaion.work",
+      "accessContractKey": "dwaion.work.ask.execute",
+      "resolvedAuthority": "APP.ASK:VIEW",
+      "readOnly": false,
+      "targetKind": "SELF",
+      "gatewayBinding": {
+        "method": "DELETE",
+        "path": "/api/agent/v1/conversations/{conversationId}"
+      },
+      "servicePepBinding": {
+        "serviceKey": "agent",
+        "method": "DELETE",
+        "path": "/v1/conversations/{conversationId}"
+      }
+    },
+    {
+      "routeContractKey": "route.dwaion.work.conversation-rename.action",
+      "routeKind": "ACTION",
+      "surfaceKey": "dwaion.work",
+      "accessContractKey": "dwaion.work.ask.execute",
+      "resolvedAuthority": "APP.ASK:VIEW",
+      "readOnly": false,
+      "targetKind": "SELF",
+      "gatewayBinding": {
+        "method": "PATCH",
+        "path": "/api/agent/v1/conversations/{conversationId}"
+      },
+      "servicePepBinding": {
+        "serviceKey": "agent",
+        "method": "PATCH",
+        "path": "/v1/conversations/{conversationId}"
+      }
+    },
+    {
+      "routeContractKey": "route.dwaion.work.conversation.data",
+      "routeKind": "DATA",
+      "surfaceKey": "dwaion.work",
+      "accessContractKey": "dwaion.work-access.v1",
+      "resolvedAuthority": "APP.ASK:VIEW",
+      "readOnly": true,
+      "targetKind": "SELF",
+      "gatewayBinding": {
+        "method": "GET",
+        "path": "/api/agent/v1/conversations/{conversationId}"
+      },
+      "servicePepBinding": {
+        "serviceKey": "agent",
+        "method": "GET",
+        "path": "/v1/conversations/{conversationId}"
+      }
+    },
+    {
+      "routeContractKey": "route.dwaion.work.feedback.action",
+      "routeKind": "ACTION",
+      "surfaceKey": "dwaion.work",
+      "accessContractKey": "dwaion.work.ask.execute",
+      "resolvedAuthority": "APP.ASK:VIEW",
+      "readOnly": false,
+      "targetKind": "SELF",
+      "gatewayBinding": {
+        "method": "PUT",
+        "path": "/api/agent/v1/runs/{runId}/feedback"
+      },
+      "servicePepBinding": {
+        "serviceKey": "agent",
+        "method": "PUT",
+        "path": "/v1/runs/{runId}/feedback"
+      }
+    },
+    {
+      "routeContractKey": "route.dwaion.work.home.page",
+      "routeKind": "PAGE",
+      "surfaceKey": "dwaion.work",
+      "accessContractKey": "dwaion.work-access.v1",
+      "resolvedAuthority": "APP.ASK:VIEW",
+      "readOnly": true,
+      "targetKind": "SELF",
+      "gatewayBinding": {
+        "method": "GET",
+        "path": "/api/agent/v1/conversations"
+      },
+      "servicePepBinding": {
+        "serviceKey": "agent",
+        "method": "GET",
+        "path": "/v1/conversations"
+      }
+    },
+    {
+      "routeContractKey": "route.dwaion.work.memory-create.action",
+      "routeKind": "ACTION",
+      "surfaceKey": "dwaion.work",
+      "accessContractKey": "dwaion.work.memory.manage",
+      "resolvedAuthority": "APP.DWAION_MEMORY:MANAGE",
+      "readOnly": false,
+      "targetKind": "SELF",
+      "gatewayBinding": {
+        "method": "POST",
+        "path": "/api/agent/v1/ai-controls/memories"
+      },
+      "servicePepBinding": {
+        "serviceKey": "agent",
+        "method": "POST",
+        "path": "/v1/ai-controls/memories"
+      }
+    },
+    {
+      "routeContractKey": "route.dwaion.work.memory-delete.action",
+      "routeKind": "ACTION",
+      "surfaceKey": "dwaion.work",
+      "accessContractKey": "dwaion.work.memory.manage",
+      "resolvedAuthority": "APP.DWAION_MEMORY:MANAGE",
+      "readOnly": false,
+      "targetKind": "SELF",
+      "gatewayBinding": {
+        "method": "POST",
+        "path": "/api/agent/v1/ai-controls/memories/{memoryId}/delete"
+      },
+      "servicePepBinding": {
+        "serviceKey": "agent",
+        "method": "POST",
+        "path": "/v1/ai-controls/memories/{memoryId}/delete"
+      }
+    },
+    {
+      "routeContractKey": "route.dwaion.work.memory-preference-update.action",
+      "routeKind": "ACTION",
+      "surfaceKey": "dwaion.work",
+      "accessContractKey": "dwaion.work.memory.manage",
+      "resolvedAuthority": "APP.DWAION_MEMORY:MANAGE",
+      "readOnly": false,
+      "targetKind": "SELF",
+      "gatewayBinding": {
+        "method": "PUT",
+        "path": "/api/agent/v1/ai-controls"
+      },
+      "servicePepBinding": {
+        "serviceKey": "agent",
+        "method": "PUT",
+        "path": "/v1/ai-controls"
+      }
+    },
+    {
+      "routeContractKey": "route.dwaion.work.memory-runtime-update.action",
+      "routeKind": "ACTION",
+      "surfaceKey": "dwaion.work",
+      "accessContractKey": "dwaion.work.memory.manage",
+      "resolvedAuthority": "APP.DWAION_MEMORY:MANAGE",
+      "readOnly": false,
+      "targetKind": "SELF",
+      "gatewayBinding": {
+        "method": "PUT",
+        "path": "/api/agent/v1/ai-controls/runtime"
+      },
+      "servicePepBinding": {
+        "serviceKey": "agent",
+        "method": "PUT",
+        "path": "/v1/ai-controls/runtime"
+      }
+    },
+    {
+      "routeContractKey": "route.dwaion.work.memory-state.action",
+      "routeKind": "ACTION",
+      "surfaceKey": "dwaion.work",
+      "accessContractKey": "dwaion.work.memory.manage",
+      "resolvedAuthority": "APP.DWAION_MEMORY:MANAGE",
+      "readOnly": false,
+      "targetKind": "SELF",
+      "gatewayBinding": {
+        "method": "POST",
+        "path": "/api/agent/v1/ai-controls/memories/{memoryId}/state"
+      },
+      "servicePepBinding": {
+        "serviceKey": "agent",
+        "method": "POST",
+        "path": "/v1/ai-controls/memories/{memoryId}/state"
+      }
+    },
+    {
+      "routeContractKey": "route.dwaion.work.memory-update.action",
+      "routeKind": "ACTION",
+      "surfaceKey": "dwaion.work",
+      "accessContractKey": "dwaion.work.memory.manage",
+      "resolvedAuthority": "APP.DWAION_MEMORY:MANAGE",
+      "readOnly": false,
+      "targetKind": "SELF",
+      "gatewayBinding": {
+        "method": "PUT",
+        "path": "/api/agent/v1/ai-controls/memories/{memoryId}"
+      },
+      "servicePepBinding": {
+        "serviceKey": "agent",
+        "method": "PUT",
+        "path": "/v1/ai-controls/memories/{memoryId}"
+      }
+    },
+    {
+      "routeContractKey": "route.dwaion.work.personal-controls.page",
+      "routeKind": "PAGE",
+      "surfaceKey": "dwaion.work",
+      "accessContractKey": "dwaion.work.memory.read",
+      "resolvedAuthority": "APP.DWAION_MEMORY:VIEW",
+      "readOnly": true,
+      "targetKind": "SELF",
+      "gatewayBinding": {
+        "method": "GET",
+        "path": "/api/agent/v1/ai-controls"
+      },
+      "servicePepBinding": {
+        "serviceKey": "agent",
+        "method": "GET",
+        "path": "/v1/ai-controls"
+      }
+    },
+    {
+      "routeContractKey": "route.dwaion.work.personal-data-capabilities.data",
+      "routeKind": "DATA",
+      "surfaceKey": "dwaion.work",
+      "accessContractKey": "dwaion.work.privacy.read",
+      "resolvedAuthority": "APP.DWAION_PRIVACY:VIEW",
+      "readOnly": true,
+      "targetKind": "SELF",
+      "gatewayBinding": {
+        "method": "GET",
+        "path": "/api/agent/v1/personal-data/capabilities"
+      },
+      "servicePepBinding": {
+        "serviceKey": "agent",
+        "method": "GET",
+        "path": "/v1/personal-data/capabilities"
+      }
+    },
+    {
+      "routeContractKey": "route.dwaion.work.personal-deletion-request.action",
+      "routeKind": "ACTION",
+      "surfaceKey": "dwaion.work",
+      "accessContractKey": "dwaion.work.privacy.manage",
+      "resolvedAuthority": "APP.DWAION_PRIVACY:MANAGE",
+      "readOnly": false,
+      "targetKind": "SELF",
+      "gatewayBinding": {
+        "method": "POST",
+        "path": "/api/agent/v1/personal-data/deletions"
+      },
+      "servicePepBinding": {
+        "serviceKey": "agent",
+        "method": "POST",
+        "path": "/v1/personal-data/deletions"
+      }
+    },
+    {
+      "routeContractKey": "route.dwaion.work.personal-deletion.data",
+      "routeKind": "DATA",
+      "surfaceKey": "dwaion.work",
+      "accessContractKey": "dwaion.work.privacy.read",
+      "resolvedAuthority": "APP.DWAION_PRIVACY:VIEW",
+      "readOnly": true,
+      "targetKind": "SELF",
+      "gatewayBinding": {
+        "method": "GET",
+        "path": "/api/agent/v1/personal-data/deletions/{deletionJobId}"
+      },
+      "servicePepBinding": {
+        "serviceKey": "agent",
+        "method": "GET",
+        "path": "/v1/personal-data/deletions/{deletionJobId}"
+      }
+    },
+    {
+      "routeContractKey": "route.dwaion.work.personal-memories.data",
+      "routeKind": "DATA",
+      "surfaceKey": "dwaion.work",
+      "accessContractKey": "dwaion.work.memory.read",
+      "resolvedAuthority": "APP.DWAION_MEMORY:VIEW",
+      "readOnly": true,
+      "targetKind": "SELF",
+      "gatewayBinding": {
+        "method": "GET",
+        "path": "/api/agent/v1/ai-controls/memories"
+      },
+      "servicePepBinding": {
+        "serviceKey": "agent",
+        "method": "GET",
+        "path": "/v1/ai-controls/memories"
+      }
+    },
+    {
+      "routeContractKey": "route.dwaion.work.personal-retention.data",
+      "routeKind": "DATA",
+      "surfaceKey": "dwaion.work",
+      "accessContractKey": "dwaion.work.privacy.read",
+      "resolvedAuthority": "APP.DWAION_PRIVACY:VIEW",
+      "readOnly": true,
+      "targetKind": "SELF",
+      "gatewayBinding": {
+        "method": "GET",
+        "path": "/api/agent/v1/personal-data/retention"
+      },
+      "servicePepBinding": {
+        "serviceKey": "agent",
+        "method": "GET",
+        "path": "/v1/personal-data/retention"
+      }
+    },
+    {
+      "routeContractKey": "route.dwaion.work.proposal-analyze.action",
+      "routeKind": "ACTION",
+      "surfaceKey": "dwaion.work",
+      "accessContractKey": "dwaion.work.ask.execute",
+      "resolvedAuthority": "APP.ASK:VIEW",
+      "readOnly": false,
+      "targetKind": "SELF",
+      "gatewayBinding": {
+        "method": "POST",
+        "path": "/api/agent/v1/proposals/analyze"
+      },
+      "servicePepBinding": {
+        "serviceKey": "agent",
+        "method": "POST",
+        "path": "/v1/proposals/analyze"
+      }
+    },
+    {
+      "routeContractKey": "route.dwaion.work.proposal-clear.action",
+      "routeKind": "ACTION",
+      "surfaceKey": "dwaion.work",
+      "accessContractKey": "dwaion.work.ask.execute",
+      "resolvedAuthority": "APP.ASK:VIEW",
+      "readOnly": false,
+      "targetKind": "SELF",
+      "gatewayBinding": {
+        "method": "POST",
+        "path": "/api/agent/v1/proposals/clear"
+      },
+      "servicePepBinding": {
+        "serviceKey": "agent",
+        "method": "POST",
+        "path": "/v1/proposals/clear"
+      }
+    },
+    {
+      "routeContractKey": "route.dwaion.work.proposal-decision.action",
+      "routeKind": "ACTION",
+      "surfaceKey": "dwaion.work",
+      "accessContractKey": "dwaion.work.ask.execute",
+      "resolvedAuthority": "APP.ASK:VIEW",
+      "readOnly": false,
+      "targetKind": "SELF",
+      "gatewayBinding": {
+        "method": "POST",
+        "path": "/api/agent/v1/proposals/{proposalId}/decisions"
+      },
+      "servicePepBinding": {
+        "serviceKey": "agent",
+        "method": "POST",
+        "path": "/v1/proposals/{proposalId}/decisions"
+      }
+    },
+    {
+      "routeContractKey": "route.dwaion.work.proposal-preferences-update.action",
+      "routeKind": "ACTION",
+      "surfaceKey": "dwaion.work",
+      "accessContractKey": "dwaion.work.ask.execute",
+      "resolvedAuthority": "APP.ASK:VIEW",
+      "readOnly": false,
+      "targetKind": "SELF",
+      "gatewayBinding": {
+        "method": "PUT",
+        "path": "/api/agent/v1/proposals/preferences"
+      },
+      "servicePepBinding": {
+        "serviceKey": "agent",
+        "method": "PUT",
+        "path": "/v1/proposals/preferences"
+      }
+    },
+    {
+      "routeContractKey": "route.dwaion.work.proposal-preferences.data",
+      "routeKind": "DATA",
+      "surfaceKey": "dwaion.work",
+      "accessContractKey": "dwaion.work-access.v1",
+      "resolvedAuthority": "APP.ASK:VIEW",
+      "readOnly": true,
+      "targetKind": "SELF",
+      "gatewayBinding": {
+        "method": "GET",
+        "path": "/api/agent/v1/proposals/preferences"
+      },
+      "servicePepBinding": {
+        "serviceKey": "agent",
+        "method": "GET",
+        "path": "/v1/proposals/preferences"
+      }
+    },
+    {
+      "routeContractKey": "route.dwaion.work.proposals.page",
+      "routeKind": "PAGE",
+      "surfaceKey": "dwaion.work",
+      "accessContractKey": "dwaion.work-access.v1",
+      "resolvedAuthority": "APP.ASK:VIEW",
+      "readOnly": true,
+      "targetKind": "SELF",
+      "gatewayBinding": {
+        "method": "GET",
+        "path": "/api/agent/v1/proposals"
+      },
+      "servicePepBinding": {
+        "serviceKey": "agent",
+        "method": "GET",
+        "path": "/v1/proposals"
+      }
+    },
+    {
+      "routeContractKey": "route.dwaion.work.question-launch-consume.action",
+      "routeKind": "ACTION",
+      "surfaceKey": "dwaion.work",
+      "accessContractKey": "dwaion.work.ask.execute",
+      "resolvedAuthority": "APP.ASK:VIEW",
+      "readOnly": false,
+      "targetKind": "SELF",
+      "gatewayBinding": {
+        "method": "POST",
+        "path": "/api/agent/v1/question-launches/consume"
+      },
+      "servicePepBinding": {
+        "serviceKey": "agent",
+        "method": "POST",
+        "path": "/v1/question-launches/consume"
+      }
+    },
+    {
+      "routeContractKey": "route.dwaion.work.question-launch-create.action",
+      "routeKind": "ACTION",
+      "surfaceKey": "dwaion.work",
+      "accessContractKey": "dwaion.work.ask.execute",
+      "resolvedAuthority": "APP.ASK:VIEW",
+      "readOnly": false,
+      "targetKind": "SELF",
+      "gatewayBinding": {
+        "method": "POST",
+        "path": "/api/agent/v1/question-launches"
+      },
+      "servicePepBinding": {
+        "serviceKey": "agent",
+        "method": "POST",
+        "path": "/v1/question-launches"
+      }
+    },
+    {
+      "routeContractKey": "route.dwaion.work.routine-archive.action",
+      "routeKind": "ACTION",
+      "surfaceKey": "dwaion.work",
+      "accessContractKey": "dwaion.work.routines.manage",
+      "resolvedAuthority": "APP.DWAION_ROUTINES:MANAGE",
+      "readOnly": false,
+      "targetKind": "SELF",
+      "gatewayBinding": {
+        "method": "POST",
+        "path": "/api/agent/v1/routines/{routineId}/archive"
+      },
+      "servicePepBinding": {
+        "serviceKey": "agent",
+        "method": "POST",
+        "path": "/v1/routines/{routineId}/archive"
+      }
+    },
+    {
+      "routeContractKey": "route.dwaion.work.routine-consent.action",
+      "routeKind": "ACTION",
+      "surfaceKey": "dwaion.work",
+      "accessContractKey": "dwaion.work.routines.manage",
+      "resolvedAuthority": "APP.DWAION_ROUTINES:MANAGE",
+      "readOnly": false,
+      "targetKind": "SELF",
+      "gatewayBinding": {
+        "method": "POST",
+        "path": "/api/agent/v1/routines/{routineId}/consent"
+      },
+      "servicePepBinding": {
+        "serviceKey": "agent",
+        "method": "POST",
+        "path": "/v1/routines/{routineId}/consent"
+      }
+    },
+    {
+      "routeContractKey": "route.dwaion.work.routine-create.action",
+      "routeKind": "ACTION",
+      "surfaceKey": "dwaion.work",
+      "accessContractKey": "dwaion.work.routines.manage",
+      "resolvedAuthority": "APP.DWAION_ROUTINES:MANAGE",
+      "readOnly": false,
+      "targetKind": "SELF",
+      "gatewayBinding": {
+        "method": "POST",
+        "path": "/api/agent/v1/routines"
+      },
+      "servicePepBinding": {
+        "serviceKey": "agent",
+        "method": "POST",
+        "path": "/v1/routines"
+      }
+    },
+    {
+      "routeContractKey": "route.dwaion.work.routine-detail.data",
+      "routeKind": "DATA",
+      "surfaceKey": "dwaion.work",
+      "accessContractKey": "dwaion.work.routines.read",
+      "resolvedAuthority": "APP.DWAION_ROUTINES:VIEW",
+      "readOnly": true,
+      "targetKind": "SELF",
+      "gatewayBinding": {
+        "method": "GET",
+        "path": "/api/agent/v1/routines/{routineId}"
+      },
+      "servicePepBinding": {
+        "serviceKey": "agent",
+        "method": "GET",
+        "path": "/v1/routines/{routineId}"
+      }
+    },
+    {
+      "routeContractKey": "route.dwaion.work.routine-dry-run.action",
+      "routeKind": "ACTION",
+      "surfaceKey": "dwaion.work",
+      "accessContractKey": "dwaion.work.routines.manage",
+      "resolvedAuthority": "APP.DWAION_ROUTINES:MANAGE",
+      "readOnly": false,
+      "targetKind": "SELF",
+      "gatewayBinding": {
+        "method": "POST",
+        "path": "/api/agent/v1/routines/{routineId}/dry-runs"
+      },
+      "servicePepBinding": {
+        "serviceKey": "agent",
+        "method": "POST",
+        "path": "/v1/routines/{routineId}/dry-runs"
+      }
+    },
+    {
+      "routeContractKey": "route.dwaion.work.routine-lifecycle.action",
+      "routeKind": "ACTION",
+      "surfaceKey": "dwaion.work",
+      "accessContractKey": "dwaion.work.routines.manage",
+      "resolvedAuthority": "APP.DWAION_ROUTINES:MANAGE",
+      "readOnly": false,
+      "targetKind": "SELF",
+      "gatewayBinding": {
+        "method": "POST",
+        "path": "/api/agent/v1/routines/{routineId}/lifecycle"
+      },
+      "servicePepBinding": {
+        "serviceKey": "agent",
+        "method": "POST",
+        "path": "/v1/routines/{routineId}/lifecycle"
+      }
+    },
+    {
+      "routeContractKey": "route.dwaion.work.routine-update.action",
+      "routeKind": "ACTION",
+      "surfaceKey": "dwaion.work",
+      "accessContractKey": "dwaion.work.routines.manage",
+      "resolvedAuthority": "APP.DWAION_ROUTINES:MANAGE",
+      "readOnly": false,
+      "targetKind": "SELF",
+      "gatewayBinding": {
+        "method": "PUT",
+        "path": "/api/agent/v1/routines/{routineId}"
+      },
+      "servicePepBinding": {
+        "serviceKey": "agent",
+        "method": "PUT",
+        "path": "/v1/routines/{routineId}"
+      }
+    },
+    {
+      "routeContractKey": "route.dwaion.work.routines.page",
+      "routeKind": "PAGE",
+      "surfaceKey": "dwaion.work",
+      "accessContractKey": "dwaion.work.routines.read",
+      "resolvedAuthority": "APP.DWAION_ROUTINES:VIEW",
+      "readOnly": true,
+      "targetKind": "SELF",
+      "gatewayBinding": {
+        "method": "GET",
+        "path": "/api/agent/v1/routines"
+      },
+      "servicePepBinding": {
+        "serviceKey": "agent",
+        "method": "GET",
+        "path": "/v1/routines"
+      }
+    },
+    {
+      "routeContractKey": "route.dwaion.work.run-detail.data",
+      "routeKind": "DATA",
+      "surfaceKey": "dwaion.work",
+      "accessContractKey": "dwaion.work-access.v1",
+      "resolvedAuthority": "APP.ASK:VIEW",
+      "readOnly": true,
+      "targetKind": "SELF",
+      "gatewayBinding": {
+        "method": "GET",
+        "path": "/api/agent/v1/runs/{runId}"
+      },
+      "servicePepBinding": {
+        "serviceKey": "agent",
+        "method": "GET",
+        "path": "/v1/runs/{runId}"
+      }
+    },
+    {
+      "routeContractKey": "route.dwaion.work.runs.data",
+      "routeKind": "DATA",
+      "surfaceKey": "dwaion.work",
+      "accessContractKey": "dwaion.work-access.v1",
+      "resolvedAuthority": "APP.ASK:VIEW",
+      "readOnly": true,
+      "targetKind": "SELF",
+      "gatewayBinding": {
+        "method": "GET",
+        "path": "/api/agent/v1/runs"
+      },
+      "servicePepBinding": {
+        "serviceKey": "agent",
+        "method": "GET",
+        "path": "/v1/runs"
+      }
+    },
+    {
+      "routeContractKey": "route.dwaion.work.source-preference-update.action",
+      "routeKind": "ACTION",
+      "surfaceKey": "dwaion.work",
+      "accessContractKey": "dwaion.work.memory.manage",
+      "resolvedAuthority": "APP.DWAION_MEMORY:MANAGE",
+      "readOnly": false,
+      "targetKind": "SELF",
+      "gatewayBinding": {
+        "method": "PUT",
+        "path": "/api/agent/v1/ai-controls/sources/{sourceKey}"
+      },
+      "servicePepBinding": {
+        "serviceKey": "agent",
+        "method": "PUT",
+        "path": "/v1/ai-controls/sources/{sourceKey}"
+      }
+    },
+    {
+      "routeContractKey": "route.dwaion.work.voice-synthesize.action",
+      "routeKind": "ACTION",
+      "surfaceKey": "dwaion.work",
+      "accessContractKey": "dwaion.work.ask.execute",
+      "resolvedAuthority": "APP.ASK:VIEW",
+      "readOnly": false,
+      "targetKind": "SELF",
+      "gatewayBinding": {
+        "method": "POST",
+        "path": "/api/agent/v1/voice/speech"
+      },
+      "servicePepBinding": {
+        "serviceKey": "agent",
+        "method": "POST",
+        "path": "/v1/voice/speech"
+      }
+    },
+    {
+      "routeContractKey": "route.dwaion.work.voice-transcribe.action",
+      "routeKind": "ACTION",
+      "surfaceKey": "dwaion.work",
+      "accessContractKey": "dwaion.work.ask.execute",
+      "resolvedAuthority": "APP.ASK:VIEW",
+      "readOnly": false,
+      "targetKind": "SELF",
+      "gatewayBinding": {
+        "method": "POST",
+        "path": "/api/agent/v1/voice/transcriptions"
+      },
+      "servicePepBinding": {
+        "serviceKey": "agent",
+        "method": "POST",
+        "path": "/v1/voice/transcriptions"
+      }
+    }
+  ]
+}

@@ -252,11 +252,20 @@ class PersonalMemoryPostgresBase:
             if row
             else MemoryPreferenceState.UNSET
         )
+        runtime_state = (
+            MemoryPreferenceState(row["runtime_application_state"])
+            if row
+            else MemoryPreferenceState.UNSET
+        )
+        storage_enabled = state == MemoryPreferenceState.ENABLED
+        runtime_enabled = runtime_state == MemoryPreferenceState.ENABLED
         return PersonalAiControls(
             memory_state=state,
+            runtime_application_state=runtime_state,
             revision=int(row["revision"]) if row else 0,
-            memory_enabled=state == MemoryPreferenceState.ENABLED,
-            memory_effective=False,
+            memory_enabled=storage_enabled,
+            runtime_application_enabled=runtime_enabled,
+            memory_effective=storage_enabled and runtime_enabled,
             source_preferences=source_preferences,
             updated_at=row["updated_at"] if row else None,
         )

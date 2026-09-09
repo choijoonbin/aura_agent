@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import threading
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Protocol
 from uuid import UUID, uuid4
 
@@ -88,8 +88,16 @@ class ConversationStore(Protocol):
 
 
 class InMemoryConversationStore:
-    def __init__(self, run_store: RunStore | None = None) -> None:
+    def __init__(
+        self,
+        run_store: RunStore | None = None,
+        *,
+        retention_days: int = 90,
+        legal_hold: bool = False,
+    ) -> None:
         self._run_store = run_store or get_run_store()
+        self._retention_days = max(1, retention_days)
+        self._legal_hold = legal_hold
         self._summaries: dict[tuple[str, str, UUID], ConversationSummary] = {}
         self._messages: dict[tuple[str, str, UUID], list[ConversationMessage]] = {}
         self._request_pairs: dict[tuple[str, str, UUID, str], tuple[UUID, UUID]] = {}
@@ -121,6 +129,13 @@ class InMemoryConversationStore:
                 title=_title(initial_query),
                 locale=locale,
                 message_count=0,
+                agent_key=None,
+                source_systems=[],
+                evidence_count=0,
+                summary_excerpt=None,
+                last_answer_status=None,
+                retention_until=created_at + timedelta(days=self._retention_days),
+                legal_hold=self._legal_hold,
                 created_at=created_at,
                 updated_at=created_at,
                 last_message_at=created_at,
@@ -252,7 +267,11 @@ class InMemoryConversationStore:
     def delete(self, *, tenant_id: str, user_id: str, conversation_id: UUID) -> None:
         with self._lock:
             key = (tenant_id, user_id, conversation_id)
-            self._summary(tenant_id, user_id, conversation_id)
+            summary = self._summary(tenant_id, user_id, conversation_id)
+            if summary.legal_hold:
+                raise ConversationRetentionLocked(
+                    "Conversation deletion is blocked by the tenant legal-hold policy."
+                )
             del self._summaries[key]
             for message in self._messages.pop(key, []):
                 self._message_claims.pop(message.message_id, None)
@@ -336,10 +355,46 @@ class InMemoryConversationStore:
         return summary.model_copy(
             update={
                 "message_count": len(messages),
+                **conversation_answer_metadata(messages),
                 "updated_at": max(summary.updated_at, last_message_at),
                 "last_message_at": last_message_at,
             }
         )
+
+
+def conversation_answer_metadata(
+    messages: list[ConversationMessage],
+) -> dict[str, object]:
+    assistant = next(
+        (message for message in reversed(messages) if message.role == ConversationRole.ASSISTANT),
+        None,
+    )
+    if assistant is None:
+        return {
+            "agent_key": None,
+            "source_systems": [],
+            "evidence_count": 0,
+            "summary_excerpt": None,
+            "last_answer_status": None,
+        }
+    source_systems = list(
+        dict.fromkeys(citation.source_system for citation in assistant.citations)
+    )
+    return {
+        "agent_key": assistant.agent_key,
+        "source_systems": source_systems,
+        "evidence_count": len(assistant.citations),
+        "summary_excerpt": _excerpt(assistant.content),
+        "last_answer_status": assistant.status_code,
+    }
+
+
+def _excerpt(value: str, limit: int = 320) -> str:
+    normalized = " ".join(value.split())
+    if len(normalized) <= limit:
+        return normalized
+    return normalized[: limit - 3].rstrip() + "..."
+
 
 _STORE: ConversationStore | None = None
 _MEMORY_STORES: dict[int, tuple[RunStore, InMemoryConversationStore]] = {}

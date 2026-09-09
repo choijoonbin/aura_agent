@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
 from uuid import UUID
@@ -58,6 +59,17 @@ class UpdateMemoryPreferenceRequest(HighRiskMutationCommand):
         return value
 
 
+class UpdateMemoryRuntimePreferenceRequest(HighRiskMutationCommand):
+    runtime_application_state: MemoryPreferenceState
+
+    @field_validator("runtime_application_state")
+    @classmethod
+    def explicit_state(cls, value: MemoryPreferenceState) -> MemoryPreferenceState:
+        if value == MemoryPreferenceState.UNSET:
+            raise ValueError("Runtime personalization must be explicitly enabled or disabled.")
+        return value
+
+
 class UpdateAiSourcePreferenceRequest(HighRiskMutationCommand):
     enabled: bool
 
@@ -96,13 +108,22 @@ class PersonalMemory(ContractModel):
     updated_at: datetime
 
 
+@dataclass(frozen=True)
+class RuntimeMemorySelection:
+    storage_enabled: bool
+    runtime_enabled: bool
+    memories: tuple[PersonalMemory, ...]
+
+
 class PersonalAiControls(ContractModel):
     memory_state: MemoryPreferenceState
+    runtime_application_state: MemoryPreferenceState = MemoryPreferenceState.UNSET
     revision: int = Field(ge=0)
     memory_enabled: bool
+    runtime_application_enabled: bool = False
     memory_effective: bool
     explicit_memory_storage_available: bool = True
-    runtime_application_available: bool = False
+    runtime_application_available: bool = True
     team_memory_available: bool = False
     automatic_memory_inference: bool = False
     sensitive_memory_allowed: bool = False

@@ -1101,6 +1101,11 @@
             "title": "Exportrequestavailable",
             "type": "boolean"
           },
+          "exportStorageScope": {
+            "default": "POSTGRES_ENCRYPTED",
+            "title": "Exportstoragescope",
+            "type": "string"
+          },
           "externalSharingAvailable": {
             "default": false,
             "title": "Externalsharingavailable",
@@ -1109,6 +1114,11 @@
           "immutableVersionsAvailable": {
             "default": true,
             "title": "Immutableversionsavailable",
+            "type": "boolean"
+          },
+          "manualSourceVerificationAvailable": {
+            "default": false,
+            "title": "Manualsourceverificationavailable",
             "type": "boolean"
           },
           "personalPublishStateAvailable": {
@@ -1131,6 +1141,18 @@
             "title": "Sourceverificationavailable",
             "type": "boolean"
           },
+          "sourceVerificationScope": {
+            "default": "UNAVAILABLE",
+            "title": "Sourceverificationscope",
+            "type": "string"
+          },
+          "supportedExportFormats": {
+            "items": {
+              "$ref": "#/components/schemas/ExportFormat"
+            },
+            "title": "Supportedexportformats",
+            "type": "array"
+          },
           "versionRestoreAvailable": {
             "default": false,
             "title": "Versionrestoreavailable",
@@ -1138,6 +1160,50 @@
           }
         },
         "title": "ArtifactCapabilities",
+        "type": "object"
+      },
+      "ArtifactCapabilitiesEnvelope": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/ArtifactCapabilities"
+          },
+          "status": {
+            "default": "SUCCESS",
+            "title": "Status",
+            "type": "string"
+          },
+          "success": {
+            "default": true,
+            "title": "Success",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "title": "ArtifactCapabilitiesEnvelope",
+        "type": "object"
+      },
+      "ArtifactConversationSource": {
+        "additionalProperties": false,
+        "properties": {
+          "assistantMessageId": {
+            "format": "uuid",
+            "title": "Assistantmessageid",
+            "type": "string"
+          },
+          "conversationId": {
+            "format": "uuid",
+            "title": "Conversationid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "conversationId",
+          "assistantMessageId"
+        ],
+        "title": "ArtifactConversationSource",
         "type": "object"
       },
       "ArtifactDraftContent": {
@@ -1228,6 +1294,42 @@
             "title": "Artifactrevision",
             "type": "integer"
           },
+          "byteSize": {
+            "anyOf": [
+              {
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bytesize"
+          },
+          "completedAt": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Completedat"
+          },
+          "contentFingerprint": {
+            "anyOf": [
+              {
+                "pattern": "^[0-9a-f]{64}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Contentfingerprint"
+          },
           "executionAvailable": {
             "default": false,
             "title": "Executionavailable",
@@ -1251,10 +1353,55 @@
             "title": "Fileavailable",
             "type": "boolean"
           },
+          "fileName": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Filename"
+          },
+          "mediaType": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mediatype"
+          },
+          "requestedAt": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Requestedat"
+          },
+          "safeErrorCode": {
+            "anyOf": [
+              {
+                "pattern": "^[A-Z][A-Z0-9_.-]{1,127}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Safeerrorcode"
+          },
           "state": {
-            "default": "PENDING",
-            "title": "State",
-            "type": "string"
+            "$ref": "#/components/schemas/ArtifactExportState",
+            "default": "PENDING"
           },
           "versionNumber": {
             "minimum": 1.0,
@@ -1271,6 +1418,18 @@
         ],
         "title": "ArtifactExportReceipt",
         "type": "object"
+      },
+      "ArtifactExportState": {
+        "enum": [
+          "PENDING",
+          "CLAIMED",
+          "SUCCEEDED",
+          "PARTIAL",
+          "FAILED",
+          "CANCELLED"
+        ],
+        "title": "ArtifactExportState",
+        "type": "string"
       },
       "ArtifactListEnvelope": {
         "additionalProperties": false,
@@ -1483,6 +1642,18 @@
           },
           "source": {
             "$ref": "#/components/schemas/ArtifactSourceReference"
+          },
+          "verificationEvidenceFingerprint": {
+            "anyOf": [
+              {
+                "pattern": "^[0-9a-f]{64}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Verificationevidencefingerprint"
           },
           "verificationState": {
             "default": "UNVERIFIED",
@@ -2002,6 +2173,44 @@
         "title": "AskPageContext",
         "type": "object"
       },
+      "AskPersonalization": {
+        "additionalProperties": false,
+        "properties": {
+          "appliedKinds": {
+            "items": {
+              "enum": [
+                "RESPONSE_LENGTH",
+                "OUTPUT_FORMAT",
+                "TONE",
+                "WORKING_STYLE"
+              ],
+              "type": "string"
+            },
+            "maxItems": 4,
+            "title": "Appliedkinds",
+            "type": "array"
+          },
+          "state": {
+            "$ref": "#/components/schemas/AskPersonalizationState",
+            "default": "NOT_EVALUATED"
+          }
+        },
+        "title": "AskPersonalization",
+        "type": "object"
+      },
+      "AskPersonalizationState": {
+        "enum": [
+          "NOT_EVALUATED",
+          "NOT_PERMITTED",
+          "DISABLED",
+          "EMPTY",
+          "APPLIED",
+          "BYPASSED",
+          "UNAVAILABLE"
+        ],
+        "title": "AskPersonalizationState",
+        "type": "string"
+      },
       "AskPolicyDecision": {
         "additionalProperties": false,
         "properties": {
@@ -2185,6 +2394,9 @@
           },
           "modelRoute": {
             "$ref": "#/components/schemas/AskModelRoute"
+          },
+          "personalization": {
+            "$ref": "#/components/schemas/AskPersonalization"
           },
           "policy": {
             "$ref": "#/components/schemas/AskPolicyDecision"
@@ -2894,6 +3106,19 @@
       "ConversationSummary": {
         "additionalProperties": false,
         "properties": {
+          "agentKey": {
+            "anyOf": [
+              {
+                "maxLength": 80,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Agent recorded on the latest visible assistant answer.",
+            "title": "Agentkey"
+          },
           "conversationId": {
             "format": "uuid",
             "title": "Conversationid",
@@ -2904,10 +3129,34 @@
             "title": "Createdat",
             "type": "string"
           },
+          "evidenceCount": {
+            "description": "Citation count on the latest visible assistant answer.",
+            "minimum": 0.0,
+            "title": "Evidencecount",
+            "type": "integer"
+          },
+          "lastAnswerStatus": {
+            "anyOf": [
+              {
+                "pattern": "^[A-Z][A-Z0-9_.-]{2,127}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Persisted status code of the latest visible assistant answer.",
+            "title": "Lastanswerstatus"
+          },
           "lastMessageAt": {
             "format": "date-time",
             "title": "Lastmessageat",
             "type": "string"
+          },
+          "legalHold": {
+            "description": "Whether the governing tenant policy currently blocks deletion.",
+            "title": "Legalhold",
+            "type": "boolean"
           },
           "locale": {
             "pattern": "^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$",
@@ -2918,6 +3167,41 @@
             "minimum": 0.0,
             "title": "Messagecount",
             "type": "integer"
+          },
+          "retentionUntil": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Conversation retention deadline, or null when the store has no deadline.",
+            "title": "Retentionuntil"
+          },
+          "sourceSystems": {
+            "description": "Distinct source systems cited by the latest visible assistant answer.",
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 20,
+            "title": "Sourcesystems",
+            "type": "array"
+          },
+          "summaryExcerpt": {
+            "anyOf": [
+              {
+                "maxLength": 320,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Whitespace-normalized excerpt of the latest visible assistant answer.",
+            "title": "Summaryexcerpt"
           },
           "title": {
             "maxLength": 160,
@@ -2936,6 +3220,13 @@
           "title",
           "locale",
           "messageCount",
+          "agentKey",
+          "sourceSystems",
+          "evidenceCount",
+          "summaryExcerpt",
+          "lastAnswerStatus",
+          "retentionUntil",
+          "legalHold",
           "createdAt",
           "updatedAt",
           "lastMessageAt"
@@ -3050,6 +3341,16 @@
             "pattern": "^[A-Z][A-Z0-9_.-]{1,63}$",
             "title": "Reasoncode",
             "type": "string"
+          },
+          "sourceConversation": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ArtifactConversationSource"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "sources": {
             "items": {
@@ -3326,6 +3627,81 @@
         "title": "DataClassification",
         "type": "string"
       },
+      "DataDispositionReceipt": {
+        "additionalProperties": false,
+        "properties": {
+          "activeStoreEnvelopesDestroyed": {
+            "title": "Activestoreenvelopesdestroyed",
+            "type": "boolean"
+          },
+          "backupDispositionState": {
+            "default": "EXTERNAL_RETENTION_BOUNDARY",
+            "title": "Backupdispositionstate",
+            "type": "string"
+          },
+          "completedAt": {
+            "format": "date-time",
+            "title": "Completedat",
+            "type": "string"
+          },
+          "dispositionId": {
+            "format": "uuid",
+            "title": "Dispositionid",
+            "type": "string"
+          },
+          "dispositionMethod": {
+            "default": "PHYSICAL_ROW_PURGE_OF_ENCRYPTED_RECORDS",
+            "title": "Dispositionmethod",
+            "type": "string"
+          },
+          "dispositionScope": {
+            "default": "AGENT_ACTIVE_POSTGRES_DOMAIN_ONLY",
+            "title": "Dispositionscope",
+            "type": "string"
+          },
+          "domain": {
+            "$ref": "#/components/schemas/DomainKey"
+          },
+          "generation": {
+            "minimum": 1.0,
+            "title": "Generation",
+            "type": "integer"
+          },
+          "purgedRowCount": {
+            "minimum": 0.0,
+            "title": "Purgedrowcount",
+            "type": "integer"
+          },
+          "purgedTableCounts": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "Purgedtablecounts",
+            "type": "object"
+          },
+          "receiptFingerprint": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Receiptfingerprint",
+            "type": "string"
+          },
+          "sourceSystemDataAffected": {
+            "default": false,
+            "title": "Sourcesystemdataaffected",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "dispositionId",
+          "domain",
+          "generation",
+          "purgedRowCount",
+          "activeStoreEnvelopesDestroyed",
+          "receiptFingerprint",
+          "completedAt"
+        ],
+        "title": "DataDispositionReceipt",
+        "type": "object"
+      },
       "DataSourcePolicy": {
         "additionalProperties": false,
         "properties": {
@@ -3573,6 +3949,12 @@
       "DeletionJob": {
         "additionalProperties": false,
         "properties": {
+          "attemptCount": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Attemptcount",
+            "type": "integer"
+          },
           "blockedDomains": {
             "items": {
               "$ref": "#/components/schemas/DomainKey"
@@ -3621,6 +4003,14 @@
           },
           "state": {
             "$ref": "#/components/schemas/DeletionJobState"
+          },
+          "targets": {
+            "items": {
+              "$ref": "#/components/schemas/DeletionTargetReceipt"
+            },
+            "maxItems": 4,
+            "title": "Targets",
+            "type": "array"
           }
         },
         "required": [
@@ -3665,6 +4055,68 @@
           "FAILED"
         ],
         "title": "DeletionJobState",
+        "type": "string"
+      },
+      "DeletionTargetReceipt": {
+        "additionalProperties": false,
+        "properties": {
+          "affectedCount": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Affectedcount"
+          },
+          "disposition": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DataDispositionReceipt"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "domain": {
+            "$ref": "#/components/schemas/DomainKey"
+          },
+          "safeErrorCode": {
+            "anyOf": [
+              {
+                "pattern": "^[A-Z][A-Z0-9_.-]{1,127}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Safeerrorcode"
+          },
+          "state": {
+            "$ref": "#/components/schemas/DeletionTargetState"
+          }
+        },
+        "required": [
+          "domain",
+          "state"
+        ],
+        "title": "DeletionTargetReceipt",
+        "type": "object"
+      },
+      "DeletionTargetState": {
+        "enum": [
+          "REQUESTED",
+          "RUNNING",
+          "COMPLETED",
+          "BLOCKED_LEGAL_HOLD",
+          "FAILED"
+        ],
+        "title": "DeletionTargetState",
         "type": "string"
       },
       "DlpFinding": {
@@ -5710,9 +6162,18 @@
             "type": "integer"
           },
           "runtimeApplicationAvailable": {
-            "default": false,
+            "default": true,
             "title": "Runtimeapplicationavailable",
             "type": "boolean"
+          },
+          "runtimeApplicationEnabled": {
+            "default": false,
+            "title": "Runtimeapplicationenabled",
+            "type": "boolean"
+          },
+          "runtimeApplicationState": {
+            "$ref": "#/components/schemas/MemoryPreferenceState",
+            "default": "UNSET"
           },
           "sensitiveMemoryAllowed": {
             "default": false,
@@ -5779,6 +6240,16 @@
       "PersonalDataGovernanceCapabilities": {
         "additionalProperties": false,
         "properties": {
+          "activeStoreCryptoShredAvailable": {
+            "default": false,
+            "title": "Activestorecryptoshredavailable",
+            "type": "boolean"
+          },
+          "activeStorePhysicalPurgeAvailable": {
+            "default": false,
+            "title": "Activestorephysicalpurgeavailable",
+            "type": "boolean"
+          },
           "analysisReceiptClearAvailable": {
             "default": false,
             "title": "Analysisreceiptclearavailable",
@@ -5789,6 +6260,16 @@
             "title": "Auditmetadatamayberetained",
             "type": "boolean"
           },
+          "backupDispositionAvailable": {
+            "default": false,
+            "title": "Backupdispositionavailable",
+            "type": "boolean"
+          },
+          "backupDispositionState": {
+            "default": "EXTERNAL_RETENTION_BOUNDARY",
+            "title": "Backupdispositionstate",
+            "type": "string"
+          },
           "deletionCompletionClaimAvailable": {
             "default": false,
             "title": "Deletioncompletionclaimavailable",
@@ -5798,6 +6279,11 @@
             "default": false,
             "title": "Deletionexecutionavailable",
             "type": "boolean"
+          },
+          "deletionExecutionScope": {
+            "default": "AGENT_ACTIVE_POSTGRES_DOMAINS_ONLY",
+            "title": "Deletionexecutionscope",
+            "type": "string"
           },
           "deletionRequestAvailable": {
             "default": true,
@@ -7781,6 +8267,44 @@
         "title": "UpdateMemoryRequest",
         "type": "object"
       },
+      "UpdateMemoryRuntimePreferenceRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "changeReason": {
+            "maxLength": 1000,
+            "minLength": 5,
+            "title": "Changereason",
+            "type": "string"
+          },
+          "commandId": {
+            "format": "uuid",
+            "title": "Commandid",
+            "type": "string"
+          },
+          "expectedRevision": {
+            "minimum": 0.0,
+            "title": "Expectedrevision",
+            "type": "integer"
+          },
+          "reasonCode": {
+            "pattern": "^[A-Z][A-Z0-9_.-]{1,63}$",
+            "title": "Reasoncode",
+            "type": "string"
+          },
+          "runtimeApplicationState": {
+            "$ref": "#/components/schemas/MemoryPreferenceState"
+          }
+        },
+        "required": [
+          "commandId",
+          "expectedRevision",
+          "reasonCode",
+          "changeReason",
+          "runtimeApplicationState"
+        ],
+        "title": "UpdateMemoryRuntimePreferenceRequest",
+        "type": "object"
+      },
       "UpdateProposalAnalysisPreferenceRequest": {
         "additionalProperties": false,
         "properties": {
@@ -9087,6 +9611,25 @@
               ],
               "title": "X-Dwp-Permissions"
             }
+          },
+          {
+            "description": "Required for product-authorization rollout states 110/111. The gateway rejects a missing or stale value before the state-changing request reaches the Agent owner service; rollout states 000/100 ignore it.",
+            "in": "header",
+            "name": "X-DWP-Expected-Decision-Revision",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Expected-Decision-Revision"
+            }
           }
         ],
         "requestBody": {
@@ -9945,6 +10488,25 @@
               ],
               "title": "X-Dwp-Permissions"
             }
+          },
+          {
+            "description": "Required for product-authorization rollout states 110/111. The gateway rejects a missing or stale value before the state-changing request reaches the Agent owner service; rollout states 000/100 ignore it.",
+            "in": "header",
+            "name": "X-DWP-Expected-Decision-Revision",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Expected-Decision-Revision"
+            }
           }
         ],
         "requestBody": {
@@ -10042,6 +10604,25 @@
                 }
               ],
               "title": "X-Dwp-Permissions"
+            }
+          },
+          {
+            "description": "Required for product-authorization rollout states 110/111. The gateway rejects a missing or stale value before the state-changing request reaches the Agent owner service; rollout states 000/100 ignore it.",
+            "in": "header",
+            "name": "X-DWP-Expected-Decision-Revision",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Expected-Decision-Revision"
             }
           }
         ],
@@ -10449,6 +11030,25 @@
               ],
               "title": "X-Dwp-Permissions"
             }
+          },
+          {
+            "description": "Required for product-authorization rollout states 110/111. The gateway rejects a missing or stale value before the state-changing request reaches the Agent owner service; rollout states 000/100 ignore it.",
+            "in": "header",
+            "name": "X-DWP-Expected-Decision-Revision",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Expected-Decision-Revision"
+            }
           }
         ],
         "requestBody": {
@@ -10637,6 +11237,25 @@
               ],
               "title": "X-Dwp-Permissions"
             }
+          },
+          {
+            "description": "Required for product-authorization rollout states 110/111. The gateway rejects a missing or stale value before the state-changing request reaches the Agent owner service; rollout states 000/100 ignore it.",
+            "in": "header",
+            "name": "X-DWP-Expected-Decision-Revision",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Expected-Decision-Revision"
+            }
           }
         ],
         "requestBody": {
@@ -10735,6 +11354,25 @@
                 }
               ],
               "title": "X-Dwp-Permissions"
+            }
+          },
+          {
+            "description": "Required for product-authorization rollout states 110/111. The gateway rejects a missing or stale value before the state-changing request reaches the Agent owner service; rollout states 000/100 ignore it.",
+            "in": "header",
+            "name": "X-DWP-Expected-Decision-Revision",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Expected-Decision-Revision"
             }
           }
         ],
@@ -10981,6 +11619,25 @@
                 }
               ],
               "title": "X-Dwp-Display-Name-B64"
+            }
+          },
+          {
+            "description": "Required for product-authorization rollout states 110/111. The gateway rejects a missing or stale value before the state-changing request reaches the Agent owner service; rollout states 000/100 ignore it.",
+            "in": "header",
+            "name": "X-DWP-Expected-Decision-Revision",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Expected-Decision-Revision"
             }
           }
         ],
@@ -11394,6 +12051,25 @@
               ],
               "title": "X-Dwp-Permissions"
             }
+          },
+          {
+            "description": "Required for product-authorization rollout states 110/111. The gateway rejects a missing or stale value before the state-changing request reaches the Agent owner service; rollout states 000/100 ignore it.",
+            "in": "header",
+            "name": "X-DWP-Expected-Decision-Revision",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Expected-Decision-Revision"
+            }
           }
         ],
         "requestBody": {
@@ -11674,6 +12350,25 @@
               ],
               "title": "X-Dwp-Permissions"
             }
+          },
+          {
+            "description": "Required for product-authorization rollout states 110/111. The gateway rejects a missing or stale value before the state-changing request reaches the Agent owner service; rollout states 000/100 ignore it.",
+            "in": "header",
+            "name": "X-DWP-Expected-Decision-Revision",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Expected-Decision-Revision"
+            }
           }
         ],
         "requestBody": {
@@ -11819,6 +12514,25 @@
                 }
               ],
               "title": "X-Dwp-Permissions"
+            }
+          },
+          {
+            "description": "Required for product-authorization rollout states 110/111. The gateway rejects a missing or stale value before the state-changing request reaches the Agent owner service; rollout states 000/100 ignore it.",
+            "in": "header",
+            "name": "X-DWP-Expected-Decision-Revision",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Expected-Decision-Revision"
             }
           }
         ],
@@ -11966,6 +12680,25 @@
               ],
               "title": "X-Dwp-Permissions"
             }
+          },
+          {
+            "description": "Required for product-authorization rollout states 110/111. The gateway rejects a missing or stale value before the state-changing request reaches the Agent owner service; rollout states 000/100 ignore it.",
+            "in": "header",
+            "name": "X-DWP-Expected-Decision-Revision",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Expected-Decision-Revision"
+            }
           }
         ],
         "requestBody": {
@@ -12111,6 +12844,25 @@
                 }
               ],
               "title": "X-Dwp-Permissions"
+            }
+          },
+          {
+            "description": "Required for product-authorization rollout states 110/111. The gateway rejects a missing or stale value before the state-changing request reaches the Agent owner service; rollout states 000/100 ignore it.",
+            "in": "header",
+            "name": "X-DWP-Expected-Decision-Revision",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Expected-Decision-Revision"
             }
           }
         ],
@@ -12378,6 +13130,25 @@
                 }
               ],
               "title": "X-Dwp-Display-Name-B64"
+            }
+          },
+          {
+            "description": "Required for product-authorization rollout states 110/111. The gateway rejects a missing or stale value before the state-changing request reaches the Agent owner service; rollout states 000/100 ignore it.",
+            "in": "header",
+            "name": "X-DWP-Expected-Decision-Revision",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Expected-Decision-Revision"
             }
           }
         ],
@@ -12680,6 +13451,25 @@
               ],
               "title": "X-Dwp-Permissions"
             }
+          },
+          {
+            "description": "Required for product-authorization rollout states 110/111. The gateway rejects a missing or stale value before the state-changing request reaches the Agent owner service; rollout states 000/100 ignore it.",
+            "in": "header",
+            "name": "X-DWP-Expected-Decision-Revision",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Expected-Decision-Revision"
+            }
           }
         ],
         "requestBody": {
@@ -12768,6 +13558,25 @@
                 }
               ],
               "title": "X-Dwp-Permissions"
+            }
+          },
+          {
+            "description": "Required for product-authorization rollout states 110/111. The gateway rejects a missing or stale value before the state-changing request reaches the Agent owner service; rollout states 000/100 ignore it.",
+            "in": "header",
+            "name": "X-DWP-Expected-Decision-Revision",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Expected-Decision-Revision"
             }
           }
         ],
@@ -12935,6 +13744,25 @@
               ],
               "title": "X-Dwp-Permissions"
             }
+          },
+          {
+            "description": "Required for product-authorization rollout states 110/111. The gateway rejects a missing or stale value before the state-changing request reaches the Agent owner service; rollout states 000/100 ignore it.",
+            "in": "header",
+            "name": "X-DWP-Expected-Decision-Revision",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Expected-Decision-Revision"
+            }
           }
         ],
         "requestBody": {
@@ -13023,6 +13851,25 @@
                 }
               ],
               "title": "X-Dwp-Permissions"
+            }
+          },
+          {
+            "description": "Required for product-authorization rollout states 110/111. The gateway rejects a missing or stale value before the state-changing request reaches the Agent owner service; rollout states 000/100 ignore it.",
+            "in": "header",
+            "name": "X-DWP-Expected-Decision-Revision",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Expected-Decision-Revision"
             }
           }
         ],
@@ -13192,6 +14039,25 @@
               ],
               "title": "X-Dwp-Permissions"
             }
+          },
+          {
+            "description": "Required for product-authorization rollout states 110/111. The gateway rejects a missing or stale value before the state-changing request reaches the Agent owner service; rollout states 000/100 ignore it.",
+            "in": "header",
+            "name": "X-DWP-Expected-Decision-Revision",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Expected-Decision-Revision"
+            }
           }
         ],
         "requestBody": {
@@ -13288,6 +14154,25 @@
                 }
               ],
               "title": "X-Dwp-Permissions"
+            }
+          },
+          {
+            "description": "Required for product-authorization rollout states 110/111. The gateway rejects a missing or stale value before the state-changing request reaches the Agent owner service; rollout states 000/100 ignore it.",
+            "in": "header",
+            "name": "X-DWP-Expected-Decision-Revision",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Expected-Decision-Revision"
             }
           }
         ],
@@ -13577,6 +14462,25 @@
               ],
               "title": "X-Dwp-Display-Name-B64"
             }
+          },
+          {
+            "description": "Required for product-authorization rollout states 110/111. The gateway rejects a missing or stale value before the state-changing request reaches the Agent owner service; rollout states 000/100 ignore it.",
+            "in": "header",
+            "name": "X-DWP-Expected-Decision-Revision",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Expected-Decision-Revision"
+            }
           }
         ],
         "requestBody": {
@@ -13865,6 +14769,25 @@
               ],
               "title": "X-Dwp-Display-Name-B64"
             }
+          },
+          {
+            "description": "Required for product-authorization rollout states 110/111. The gateway rejects a missing or stale value before the state-changing request reaches the Agent owner service; rollout states 000/100 ignore it.",
+            "in": "header",
+            "name": "X-DWP-Expected-Decision-Revision",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Expected-Decision-Revision"
+            }
           }
         ],
         "requestBody": {
@@ -14024,6 +14947,25 @@
                 }
               ],
               "title": "X-Dwp-Display-Name-B64"
+            }
+          },
+          {
+            "description": "Required for product-authorization rollout states 110/111. The gateway rejects a missing or stale value before the state-changing request reaches the Agent owner service; rollout states 000/100 ignore it.",
+            "in": "header",
+            "name": "X-DWP-Expected-Decision-Revision",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Expected-Decision-Revision"
             }
           }
         ],
@@ -14185,6 +15127,25 @@
               ],
               "title": "X-Dwp-Display-Name-B64"
             }
+          },
+          {
+            "description": "Required for product-authorization rollout states 110/111. The gateway rejects a missing or stale value before the state-changing request reaches the Agent owner service; rollout states 000/100 ignore it.",
+            "in": "header",
+            "name": "X-DWP-Expected-Decision-Revision",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Expected-Decision-Revision"
+            }
           }
         ],
         "requestBody": {
@@ -14345,6 +15306,25 @@
               ],
               "title": "X-Dwp-Display-Name-B64"
             }
+          },
+          {
+            "description": "Required for product-authorization rollout states 110/111. The gateway rejects a missing or stale value before the state-changing request reaches the Agent owner service; rollout states 000/100 ignore it.",
+            "in": "header",
+            "name": "X-DWP-Expected-Decision-Revision",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Expected-Decision-Revision"
+            }
           }
         ],
         "requestBody": {
@@ -14380,6 +15360,175 @@
           }
         },
         "summary": "Change Personal Memory State",
+        "tags": [
+          "personal-ai-controls"
+        ]
+      }
+    },
+    "/v1/ai-controls/runtime": {
+      "put": {
+        "operationId": "update_personal_ai_runtime_controls_v1_ai_controls_runtime_put",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-DWP-Auth-Session-ID",
+            "required": true,
+            "schema": {
+              "maxLength": 160,
+              "minLength": 1,
+              "title": "X-Dwp-Auth-Session-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-User-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Dwp-User-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Tenant-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Dwp-Tenant-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Correlation-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Correlation-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Roles",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Roles"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Permissions",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Permissions"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Person-Public-ID",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 36,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Person-Public-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Display-Name-B64",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 400,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Display-Name-B64"
+            }
+          },
+          {
+            "description": "Required for product-authorization rollout states 110/111. The gateway rejects a missing or stale value before the state-changing request reaches the Agent owner service; rollout states 000/100 ignore it.",
+            "in": "header",
+            "name": "X-DWP-Expected-Decision-Revision",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Expected-Decision-Revision"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateMemoryRuntimePreferenceRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PersonalAiControlsEnvelope"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Update Personal Ai Runtime Controls",
         "tags": [
           "personal-ai-controls"
         ]
@@ -14502,6 +15651,25 @@
                 }
               ],
               "title": "X-Dwp-Display-Name-B64"
+            }
+          },
+          {
+            "description": "Required for product-authorization rollout states 110/111. The gateway rejects a missing or stale value before the state-changing request reaches the Agent owner service; rollout states 000/100 ignore it.",
+            "in": "header",
+            "name": "X-DWP-Expected-Decision-Revision",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Expected-Decision-Revision"
             }
           }
         ],
@@ -14791,6 +15959,25 @@
               ],
               "title": "X-Dwp-Display-Name-B64"
             }
+          },
+          {
+            "description": "Required for product-authorization rollout states 110/111. The gateway rejects a missing or stale value before the state-changing request reaches the Agent owner service; rollout states 000/100 ignore it.",
+            "in": "header",
+            "name": "X-DWP-Expected-Decision-Revision",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Expected-Decision-Revision"
+            }
           }
         ],
         "requestBody": {
@@ -14826,6 +16013,146 @@
           }
         },
         "summary": "Create Artifact",
+        "tags": [
+          "governed-artifacts"
+        ]
+      }
+    },
+    "/v1/artifacts/capabilities": {
+      "get": {
+        "operationId": "get_artifact_capabilities_v1_artifacts_capabilities_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-DWP-Auth-Session-ID",
+            "required": true,
+            "schema": {
+              "maxLength": 160,
+              "minLength": 1,
+              "title": "X-Dwp-Auth-Session-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-User-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Dwp-User-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Tenant-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Dwp-Tenant-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Correlation-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Correlation-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Roles",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Roles"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Permissions",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Permissions"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Person-Public-ID",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 36,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Person-Public-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Display-Name-B64",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 400,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Display-Name-B64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ArtifactCapabilitiesEnvelope"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Artifact Capabilities",
         "tags": [
           "governed-artifacts"
         ]
@@ -15101,6 +16428,25 @@
               ],
               "title": "X-Dwp-Display-Name-B64"
             }
+          },
+          {
+            "description": "Required for product-authorization rollout states 110/111. The gateway rejects a missing or stale value before the state-changing request reaches the Agent owner service; rollout states 000/100 ignore it.",
+            "in": "header",
+            "name": "X-DWP-Expected-Decision-Revision",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Expected-Decision-Revision"
+            }
           }
         ],
         "requestBody": {
@@ -15261,6 +16607,25 @@
               ],
               "title": "X-Dwp-Display-Name-B64"
             }
+          },
+          {
+            "description": "Required for product-authorization rollout states 110/111. The gateway rejects a missing or stale value before the state-changing request reaches the Agent owner service; rollout states 000/100 ignore it.",
+            "in": "header",
+            "name": "X-DWP-Expected-Decision-Revision",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Expected-Decision-Revision"
+            }
           }
         ],
         "requestBody": {
@@ -15296,6 +16661,324 @@
           }
         },
         "summary": "Export Artifact",
+        "tags": [
+          "governed-artifacts"
+        ]
+      }
+    },
+    "/v1/artifacts/{artifact_id}/exports/{export_job_id}": {
+      "get": {
+        "operationId": "get_artifact_export_v1_artifacts__artifact_id__exports__export_job_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "artifact_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Artifact Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "export_job_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Export Job Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Auth-Session-ID",
+            "required": true,
+            "schema": {
+              "maxLength": 160,
+              "minLength": 1,
+              "title": "X-Dwp-Auth-Session-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-User-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Dwp-User-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Tenant-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Dwp-Tenant-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Correlation-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Correlation-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Roles",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Roles"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Permissions",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Permissions"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Person-Public-ID",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 36,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Person-Public-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Display-Name-B64",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 400,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Display-Name-B64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ArtifactExportEnvelope"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Artifact Export",
+        "tags": [
+          "governed-artifacts"
+        ]
+      }
+    },
+    "/v1/artifacts/{artifact_id}/exports/{export_job_id}/download": {
+      "get": {
+        "operationId": "download_artifact_export_v1_artifacts__artifact_id__exports__export_job_id__download_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "artifact_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Artifact Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "export_job_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Export Job Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Auth-Session-ID",
+            "required": true,
+            "schema": {
+              "maxLength": 160,
+              "minLength": 1,
+              "title": "X-Dwp-Auth-Session-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-User-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Dwp-User-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Tenant-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Dwp-Tenant-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Correlation-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Correlation-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Roles",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Roles"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Permissions",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Permissions"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Person-Public-ID",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 36,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Person-Public-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Display-Name-B64",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 400,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Display-Name-B64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Download Artifact Export",
         "tags": [
           "governed-artifacts"
         ]
@@ -15420,6 +17103,25 @@
                 }
               ],
               "title": "X-Dwp-Display-Name-B64"
+            }
+          },
+          {
+            "description": "Required for product-authorization rollout states 110/111. The gateway rejects a missing or stale value before the state-changing request reaches the Agent owner service; rollout states 000/100 ignore it.",
+            "in": "header",
+            "name": "X-DWP-Expected-Decision-Revision",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Expected-Decision-Revision"
             }
           }
         ],
@@ -15730,6 +17432,25 @@
                 }
               ],
               "title": "X-Dwp-Display-Name-B64"
+            }
+          },
+          {
+            "description": "Required for product-authorization rollout states 110/111. The gateway rejects a missing or stale value before the state-changing request reaches the Agent owner service; rollout states 000/100 ignore it.",
+            "in": "header",
+            "name": "X-DWP-Expected-Decision-Revision",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Expected-Decision-Revision"
             }
           }
         ],
@@ -16068,6 +17789,25 @@
               ],
               "title": "X-Dwp-Display-Name-B64"
             }
+          },
+          {
+            "description": "Required for product-authorization rollout states 110/111. The gateway rejects a missing or stale value before the state-changing request reaches the Agent owner service; rollout states 000/100 ignore it.",
+            "in": "header",
+            "name": "X-DWP-Expected-Decision-Revision",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Expected-Decision-Revision"
+            }
           }
         ],
         "requestBody": {
@@ -16289,6 +18029,26 @@
             }
           },
           {
+            "description": "Required for product-authorization rollout states 110/111. The gateway rejects a missing or stale value before the state-changing request reaches the Agent owner service; rollout states 000/100 ignore it.",
+            "in": "header",
+            "name": "X-DWP-Expected-Decision-Revision",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Required for product-authorization rollout states 110/111. The gateway rejects a missing or stale value before the state-changing request reaches the Agent owner service; rollout states 000/100 ignore it.",
+              "title": "X-Dwp-Expected-Decision-Revision"
+            }
+          },
+          {
             "in": "header",
             "name": "X-DWP-User-ID",
             "required": true,
@@ -16425,6 +18185,26 @@
                 }
               ],
               "title": "X-Dwp-Permissions"
+            }
+          },
+          {
+            "description": "Required for product-authorization rollout states 110/111. The gateway rejects a missing or stale value before the state-changing request reaches the Agent owner service; rollout states 000/100 ignore it.",
+            "in": "header",
+            "name": "X-DWP-Expected-Decision-Revision",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Required for product-authorization rollout states 110/111. The gateway rejects a missing or stale value before the state-changing request reaches the Agent owner service; rollout states 000/100 ignore it.",
+              "title": "X-Dwp-Expected-Decision-Revision"
             }
           },
           {
@@ -16672,6 +18452,26 @@
               ],
               "title": "X-Dwp-Permissions"
             }
+          },
+          {
+            "description": "Required for product-authorization rollout states 110/111. The gateway rejects a missing or stale value before the state-changing request reaches the Agent owner service; rollout states 000/100 ignore it.",
+            "in": "header",
+            "name": "X-DWP-Expected-Decision-Revision",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Required for product-authorization rollout states 110/111. The gateway rejects a missing or stale value before the state-changing request reaches the Agent owner service; rollout states 000/100 ignore it.",
+              "title": "X-Dwp-Expected-Decision-Revision"
+            }
           }
         ],
         "responses": {
@@ -16834,6 +18634,26 @@
                 }
               ],
               "title": "X-Dwp-Permissions"
+            }
+          },
+          {
+            "description": "Required for product-authorization rollout states 110/111. The gateway rejects a missing or stale value before the state-changing request reaches the Agent owner service; rollout states 000/100 ignore it.",
+            "in": "header",
+            "name": "X-DWP-Expected-Decision-Revision",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Required for product-authorization rollout states 110/111. The gateway rejects a missing or stale value before the state-changing request reaches the Agent owner service; rollout states 000/100 ignore it.",
+              "title": "X-Dwp-Expected-Decision-Revision"
             }
           }
         ],
@@ -17124,6 +18944,25 @@
                 }
               ],
               "title": "X-Dwp-Display-Name-B64"
+            }
+          },
+          {
+            "description": "Required for product-authorization rollout states 110/111. The gateway rejects a missing or stale value before the state-changing request reaches the Agent owner service; rollout states 000/100 ignore it.",
+            "in": "header",
+            "name": "X-DWP-Expected-Decision-Revision",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Expected-Decision-Revision"
             }
           }
         ],
@@ -17919,6 +19758,25 @@
               ],
               "title": "X-Dwp-Display-Name-B64"
             }
+          },
+          {
+            "description": "Required for product-authorization rollout states 110/111. The gateway rejects a missing or stale value before the state-changing request reaches the Agent owner service; rollout states 000/100 ignore it.",
+            "in": "header",
+            "name": "X-DWP-Expected-Decision-Revision",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Expected-Decision-Revision"
+            }
           }
         ],
         "requestBody": {
@@ -18073,6 +19931,25 @@
                 }
               ],
               "title": "X-Dwp-Display-Name-B64"
+            }
+          },
+          {
+            "description": "Required for product-authorization rollout states 110/111. The gateway rejects a missing or stale value before the state-changing request reaches the Agent owner service; rollout states 000/100 ignore it.",
+            "in": "header",
+            "name": "X-DWP-Expected-Decision-Revision",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Expected-Decision-Revision"
             }
           }
         ],
@@ -18372,6 +20249,25 @@
               ],
               "title": "X-Dwp-Display-Name-B64"
             }
+          },
+          {
+            "description": "Required for product-authorization rollout states 110/111. The gateway rejects a missing or stale value before the state-changing request reaches the Agent owner service; rollout states 000/100 ignore it.",
+            "in": "header",
+            "name": "X-DWP-Expected-Decision-Revision",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Expected-Decision-Revision"
+            }
           }
         ],
         "requestBody": {
@@ -18537,6 +20433,25 @@
               ],
               "title": "X-Dwp-Display-Name-B64"
             }
+          },
+          {
+            "description": "Required for product-authorization rollout states 110/111. The gateway rejects a missing or stale value before the state-changing request reaches the Agent owner service; rollout states 000/100 ignore it.",
+            "in": "header",
+            "name": "X-DWP-Expected-Decision-Revision",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Expected-Decision-Revision"
+            }
           }
         ],
         "requestBody": {
@@ -18645,6 +20560,25 @@
               ],
               "title": "X-Dwp-Identity-Plane"
             }
+          },
+          {
+            "description": "Required for product-authorization rollout states 110/111. The gateway rejects a missing or stale value before the state-changing request reaches the Agent owner service; rollout states 000/100 ignore it.",
+            "in": "header",
+            "name": "X-DWP-Expected-Decision-Revision",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Expected-Decision-Revision"
+            }
           }
         ],
         "requestBody": {
@@ -18752,6 +20686,25 @@
                 }
               ],
               "title": "X-Dwp-Identity-Plane"
+            }
+          },
+          {
+            "description": "Required for product-authorization rollout states 110/111. The gateway rejects a missing or stale value before the state-changing request reaches the Agent owner service; rollout states 000/100 ignore it.",
+            "in": "header",
+            "name": "X-DWP-Expected-Decision-Revision",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Expected-Decision-Revision"
             }
           }
         ],
@@ -19040,6 +20993,25 @@
                 }
               ],
               "title": "X-Dwp-Display-Name-B64"
+            }
+          },
+          {
+            "description": "Required for product-authorization rollout states 110/111. The gateway rejects a missing or stale value before the state-changing request reaches the Agent owner service; rollout states 000/100 ignore it.",
+            "in": "header",
+            "name": "X-DWP-Expected-Decision-Revision",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Expected-Decision-Revision"
             }
           }
         ],
@@ -19349,6 +21321,25 @@
               ],
               "title": "X-Dwp-Display-Name-B64"
             }
+          },
+          {
+            "description": "Required for product-authorization rollout states 110/111. The gateway rejects a missing or stale value before the state-changing request reaches the Agent owner service; rollout states 000/100 ignore it.",
+            "in": "header",
+            "name": "X-DWP-Expected-Decision-Revision",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Expected-Decision-Revision"
+            }
           }
         ],
         "requestBody": {
@@ -19508,6 +21499,25 @@
                 }
               ],
               "title": "X-Dwp-Display-Name-B64"
+            }
+          },
+          {
+            "description": "Required for product-authorization rollout states 110/111. The gateway rejects a missing or stale value before the state-changing request reaches the Agent owner service; rollout states 000/100 ignore it.",
+            "in": "header",
+            "name": "X-DWP-Expected-Decision-Revision",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Expected-Decision-Revision"
             }
           }
         ],
@@ -19669,6 +21679,25 @@
               ],
               "title": "X-Dwp-Display-Name-B64"
             }
+          },
+          {
+            "description": "Required for product-authorization rollout states 110/111. The gateway rejects a missing or stale value before the state-changing request reaches the Agent owner service; rollout states 000/100 ignore it.",
+            "in": "header",
+            "name": "X-DWP-Expected-Decision-Revision",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Expected-Decision-Revision"
+            }
           }
         ],
         "requestBody": {
@@ -19829,6 +21858,25 @@
               ],
               "title": "X-Dwp-Display-Name-B64"
             }
+          },
+          {
+            "description": "Required for product-authorization rollout states 110/111. The gateway rejects a missing or stale value before the state-changing request reaches the Agent owner service; rollout states 000/100 ignore it.",
+            "in": "header",
+            "name": "X-DWP-Expected-Decision-Revision",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Expected-Decision-Revision"
+            }
           }
         ],
         "requestBody": {
@@ -19988,6 +22036,25 @@
                 }
               ],
               "title": "X-Dwp-Display-Name-B64"
+            }
+          },
+          {
+            "description": "Required for product-authorization rollout states 110/111. The gateway rejects a missing or stale value before the state-changing request reaches the Agent owner service; rollout states 000/100 ignore it.",
+            "in": "header",
+            "name": "X-DWP-Expected-Decision-Revision",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Expected-Decision-Revision"
             }
           }
         ],
@@ -20372,6 +22439,25 @@
               ],
               "title": "X-Dwp-Permissions"
             }
+          },
+          {
+            "description": "Required for product-authorization rollout states 110/111. The gateway rejects a missing or stale value before the state-changing request reaches the Agent owner service; rollout states 000/100 ignore it.",
+            "in": "header",
+            "name": "X-DWP-Expected-Decision-Revision",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Expected-Decision-Revision"
+            }
           }
         ],
         "requestBody": {
@@ -20510,6 +22596,25 @@
                 }
               ],
               "title": "X-Dwp-Display-Name-B64"
+            }
+          },
+          {
+            "description": "Required for product-authorization rollout states 110/111. The gateway rejects a missing or stale value before the state-changing request reaches the Agent owner service; rollout states 000/100 ignore it.",
+            "in": "header",
+            "name": "X-DWP-Expected-Decision-Revision",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Expected-Decision-Revision"
             }
           }
         ],
@@ -20666,6 +22771,25 @@
                 }
               ],
               "title": "X-Dwp-Display-Name-B64"
+            }
+          },
+          {
+            "description": "Required for product-authorization rollout states 110/111. The gateway rejects a missing or stale value before the state-changing request reaches the Agent owner service; rollout states 000/100 ignore it.",
+            "in": "header",
+            "name": "X-DWP-Expected-Decision-Revision",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Expected-Decision-Revision"
             }
           }
         ],

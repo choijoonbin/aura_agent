@@ -25,6 +25,7 @@ from .personal_memory_contracts import (
     MemoryListEnvelope,
     PersonalAiControlsEnvelope,
     UpdateMemoryPreferenceRequest,
+    UpdateMemoryRuntimePreferenceRequest,
     UpdateAiSourcePreferenceRequest,
     UpdateMemoryRequest,
 )
@@ -65,6 +66,21 @@ def update_personal_ai_controls(
     return _run(
         lambda: PersonalAiControlsEnvelope(
             data=get_personal_memory_store().update_controls(identity, request)
+        )
+    )
+
+
+@router.put("/runtime", response_model=PersonalAiControlsEnvelope)
+def update_personal_ai_runtime_controls(
+    request: UpdateMemoryRuntimePreferenceRequest,
+    identity: Annotated[PersonalDomainIdentity, Depends(require_personal_domain_identity)],
+    response: Response,
+) -> PersonalAiControlsEnvelope:
+    _access(identity, write=True)
+    _no_store(response)
+    return _run(
+        lambda: PersonalAiControlsEnvelope(
+            data=get_personal_memory_store().update_runtime_controls(identity, request)
         )
     )
 

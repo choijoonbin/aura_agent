@@ -28,6 +28,7 @@ from .governed_domain_core import (
     retention_deadline,
 )
 from .personal_domain_security import PersonalDomainIdentity
+from .deletion_job_queries import read_deletion_job
 from .transactional_outbox import enqueue_internal_intent
 
 
@@ -210,14 +211,12 @@ class PostgresDomainRetentionStore:
                     require_command_replay(
                         replay["session_fingerprint"], replay["request_fingerprint"], proof
                     )
-                    return DeletionJob.model_validate(
-                        self.codec.decrypt_json(
-                            replay["result_envelope"],
-                            tenant_id=identity.tenant_id,
-                            resource_type="data-deletion-job",
-                            resource_id=str(replay["deletion_job_id"]),
-                            field="result",
-                        )
+                    return read_deletion_job(
+                        connection,
+                        deletion_job_id=replay["deletion_job_id"],
+                        tenant_id=identity.tenant_id,
+                        user_id=identity.user_id,
+                        fingerprints=self.fingerprints,
                     )
                 policy_rows = connection.execute(
                     """SELECT domain_key, retention_days, legal_hold
@@ -237,7 +236,7 @@ class PostgresDomainRetentionStore:
                 blocked = [domain for domain in request.domains if policies[domain.value]["legal_hold"]]
                 state = (
                     DeletionJobState.BLOCKED_LEGAL_HOLD
-                    if blocked
+                    if len(blocked) == len(request.domains)
                     else DeletionJobState.REQUESTED
                 )
                 job_id = uuid4()
@@ -246,7 +245,9 @@ class PostgresDomainRetentionStore:
                     state=state,
                     domains=request.domains,
                     requested_at=now,
-                    completed_at=now if blocked else None,
+                    completed_at=(
+                        now if len(blocked) == len(request.domains) else None
+                    ),
                     deletion_performed=False,
                     blocked_domains=blocked,
                 )
@@ -312,7 +313,7 @@ class PostgresDomainRetentionStore:
                         state.value,
                     ),
                 )
-                if not blocked:
+                if len(blocked) < len(request.domains):
                     enqueue_internal_intent(
                         connection,
                         codec=self.codec,
@@ -325,12 +326,20 @@ class PostgresDomainRetentionStore:
                         payload={
                             "deletionJobId": str(job_id),
                             "domains": [domain.value for domain in request.domains],
-                            "proposalOnly": True,
+                            "activeStoreDispositionRequested": True,
                             "externalWritePerformed": False,
+                            "sourceSystemDataAffected": False,
+                            "backupDispositionState": "EXTERNAL_RETENTION_BOUNDARY",
                         },
                         retention_until=deadline,
                     )
-                return result
+                return read_deletion_job(
+                    connection,
+                    deletion_job_id=job_id,
+                    tenant_id=identity.tenant_id,
+                    user_id=identity.user_id,
+                    fingerprints=self.fingerprints,
+                )
         except (GovernedDomainConflict, GovernedDomainUnavailable):
             raise
         except (PsycopgError, ValueError, TypeError) as error:
@@ -343,22 +352,12 @@ class PostgresDomainRetentionStore:
     ) -> DeletionJob:
         try:
             with connect(self.database_url, row_factory=dict_row) as connection:
-                row = connection.execute(
-                    """SELECT deletion_job_id, result_envelope
-                         FROM ai_data_deletion_jobs
-                        WHERE deletion_job_id = %s AND tenant_id = %s AND user_id = %s""",
-                    (deletion_job_id, identity.tenant_id, identity.user_id),
-                ).fetchone()
-                if row is None:
-                    raise GovernedDomainNotFound("The deletion request is unavailable.")
-                return DeletionJob.model_validate(
-                    self.codec.decrypt_json(
-                        row["result_envelope"],
-                        tenant_id=identity.tenant_id,
-                        resource_type="data-deletion-job",
-                        resource_id=str(deletion_job_id),
-                        field="result",
-                    )
+                return read_deletion_job(
+                    connection,
+                    deletion_job_id=deletion_job_id,
+                    tenant_id=identity.tenant_id,
+                    user_id=identity.user_id,
+                    fingerprints=self.fingerprints,
                 )
         except GovernedDomainNotFound:
             raise

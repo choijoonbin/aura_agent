@@ -15,7 +15,7 @@ from psycopg import connect
 from dwp_agent import ask_runtime as ask_runtime_module
 from dwp_agent.ask_runtime import AskRuntime
 from dwp_agent.context_broker import GroundedContext
-from dwp_agent.conversation_store import ConversationNotFound
+from dwp_agent.conversation_store import ConversationNotFound, ConversationRetentionLocked
 from dwp_agent.contracts import (
     AgentRegistryResolution,
     AskModelRoute,
@@ -266,6 +266,31 @@ def test_conversation_visibility_is_fenced_by_the_completed_lease_generation() -
             "리스 가시성",
             "ASK_POLICY_DENIED",
         ]
+        assert detail.summary.agent_key == "DWP_ASSISTANT"
+        assert detail.summary.source_systems == []
+        assert detail.summary.evidence_count == 0
+        assert detail.summary.summary_excerpt == "ASK_POLICY_DENIED"
+        assert detail.summary.last_answer_status == "ASK_POLICY_DENIED"
+        assert detail.summary.retention_until is not None
+        assert detail.summary.legal_hold is False
+        listed = conversation_store.list(tenant_id=tenant_id, user_id=user_id)
+        assert listed == [detail.summary]
+        with connect(database_url) as connection:
+            connection.execute(
+                """UPDATE ai_conversation_retention_policies
+                      SET legal_hold = TRUE
+                    WHERE tenant_id = %s""",
+                (int(tenant_id),),
+            )
+        assert conversation_store.list(
+            tenant_id=tenant_id, user_id=user_id
+        )[0].legal_hold is True
+        with pytest.raises(ConversationRetentionLocked):
+            conversation_store.delete(
+                tenant_id=tenant_id,
+                user_id=user_id,
+                conversation_id=conversation_id,
+            )
         assert run_store.load(tenant_id, user_id, request_id, first.query_hash) == active_response
         with connect(database_url) as connection:
             row = connection.execute(

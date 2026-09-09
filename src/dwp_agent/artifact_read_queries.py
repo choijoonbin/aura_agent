@@ -171,7 +171,8 @@ class ArtifactReadQueries:
         version_number: int,
     ) -> list[ArtifactSourceEvidence]:
         rows = connection.execute(
-            """SELECT source_link_id, verification_state, reference_envelope
+            """SELECT source_link_id, verification_state, reference_envelope,
+                      verified_at, verification_evidence_fingerprint
                  FROM ai_artifact_version_sources
                 WHERE artifact_id = %s AND version_number = %s
                 ORDER BY source_type, reference_fingerprint""",
@@ -189,6 +190,15 @@ class ArtifactReadQueries:
                     )
                 ),
                 verification_state=row["verification_state"],
+                freshness=(
+                    "SNAPSHOT_AT_CONVERSATION"
+                    if row["verification_state"] == "SERVER_VERIFIED"
+                    else "UNKNOWN"
+                ),
+                verified_at=row["verified_at"],
+                verification_evidence_fingerprint=row[
+                    "verification_evidence_fingerprint"
+                ],
             )
             for row in rows
         ]

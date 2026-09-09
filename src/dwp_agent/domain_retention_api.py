@@ -26,6 +26,7 @@ from .personal_domain_security import (
     personal_domain_dependencies,
     require_personal_domain_identity,
 )
+from .governed_worker_runtime import governed_worker_available
 
 
 router = APIRouter(
@@ -61,8 +62,14 @@ def get_personal_data_governance_capabilities(
 ) -> PersonalDataGovernanceCapabilitiesEnvelope:
     identity.require("APP.ASK:VIEW", "APP.DWAION_PRIVACY:VIEW")
     response.headers["Cache-Control"] = "no-store"
+    execution_available = governed_worker_available("DATA_DELETION")
     return PersonalDataGovernanceCapabilitiesEnvelope(
-        data=PersonalDataGovernanceCapabilities()
+        data=PersonalDataGovernanceCapabilities(
+            deletion_execution_available=execution_available,
+            deletion_completion_claim_available=execution_available,
+            active_store_physical_purge_available=execution_available,
+            active_store_crypto_shred_available=False,
+        )
     )
 
 

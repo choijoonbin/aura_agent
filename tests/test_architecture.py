@@ -78,6 +78,12 @@ def test_runtime_uses_installable_src_package() -> None:
     assert (
         PACKAGE_ROOT / "migrations" / "V31__observe_agent_run_activity.sql"
     ).is_file()
+    assert (
+        PACKAGE_ROOT / "migrations" / "V33__execute_governed_personal_data_work.sql"
+    ).is_file()
+    assert (
+        PACKAGE_ROOT / "migrations" / "V34__fence_governed_disposition_domains.sql"
+    ).is_file()
 
 
 def test_migration_versions_are_unique() -> None:

@@ -1,16 +1,24 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import os
 import re
-from collections.abc import Awaitable, Callable
-from datetime import datetime, timezone
-from typing import Any
+from typing import Annotated, Any
 from uuid import UUID
 
-from fastapi import FastAPI
-from starlette.responses import JSONResponse
+from fastapi import FastAPI, Header
+from .product_surface_pep_bindings import ROUTE_BINDING_SPECS
+from .product_surface_pep_http import (
+    AsgiReceive,
+    AsgiSend,
+    exact_header as _exact_header,
+    future_instant as _future_instant,
+    header_tokens as _header_tokens,
+    headers as _headers,
+    positive_identifier as _positive_identifier,
+    present as _present,
+    reject as _reject,
+)
 
 
 ROUTE_HEADER = "X-DWP-Route-Contract-Key"
@@ -34,6 +42,9 @@ OWNER_SERVICE = "dwp-agent-runtime"
 PAGE_ROUTE = "route.dwaion.work.home.page"
 DATA_ROUTE = "route.dwaion.work.conversation.data"
 ACTION_ROUTE = "route.dwaion.work.ask.action"
+ASK_STREAM_ROUTE = "route.dwaion.work.ask-stream.action"
+CONVERSATION_RENAME_ROUTE = "route.dwaion.work.conversation-rename.action"
+CONVERSATION_DELETE_ROUTE = "route.dwaion.work.conversation-delete.action"
 RUNS_ROUTE = "route.dwaion.work.runs.data"
 RUN_DETAIL_ROUTE = "route.dwaion.work.run-detail.data"
 ACTIVITY_EVENTS_ROUTE = "route.dwaion.work.activity-events.data"
@@ -42,29 +53,16 @@ ACTIVITY_SUMMARY_ROUTE = "route.dwaion.work.activity-summary.data"
 
 _ROLLOUT_STATES = {"000", "100", "110", "111"}
 _ROLLOUT_COHORTS = {
-    "baseline",
-    "holdout",
-    "full",
-    "eligible-10",
-    "eligible-25",
-    "eligible-50",
-    "eligible-90",
+    "baseline", "holdout", "full", "eligible-10", "eligible-25", "eligible-50", "eligible-90"
 }
 _WORK_ACCESS_MODES = {"NORMAL", "ELEVATED"}
 _CONTEXT = re.compile(r"^psc-[a-f0-9]{64}$")
 _ROLLOUT_REVISION = re.compile(r"^rollout-[a-f0-9]{64}$")
 _DECISION_REVISION = re.compile(r"^psr-[a-f0-9]{64}$")
-_DATA_CANDIDATE = re.compile(r"^/v1/conversations/([^/]+)$")
-_RUN_CANDIDATE = re.compile(r"^/v1/runs/([^/]+)$")
-_ACTIVITY_EVENT_CANDIDATE = re.compile(r"^/v1/activity/events/([^/]+)$")
 _UUID = re.compile(
     r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
     r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
 )
-
-AsgiReceive = Callable[[], Awaitable[dict[str, Any]]]
-AsgiSend = Callable[[dict[str, Any]], Awaitable[None]]
-
 
 class ProductSurfacePepMiddleware:
     """Owner PEP for the exact DWAI PAGE, DATA and ACTION draft candidates."""
@@ -90,7 +88,7 @@ class ProductSurfacePepMiddleware:
 
         headers = _headers(scope)
         state = _exact_header(headers, ROLLOUT_STATE_HEADER)
-        any_version_enabled = _v4_enabled() or _v5_enabled()
+        any_version_enabled = _v4_enabled() or _v5_enabled() or _v6_enabled()
         if (
             state is None
             and not any_version_enabled
@@ -184,11 +182,14 @@ class ProductSurfacePepMiddleware:
             or roles is None
             or any(role.startswith("PROVIDER_") for role in roles)
             or permissions is None
-            or not binding.required_permissions.issubset(permissions)
+            or not any(
+                required.issubset(permissions)
+                for required in binding.required_permission_sets
+            )
         ):
             await _reject(scope, receive, send, 403, "The exact DWAI authority is missing.")
             return
-        if selected_scope != self_scope_key(tenant_id, user_id):
+        if not binding.accepts_scope(selected_scope, tenant_id, user_id):
             await _reject(
                 scope,
                 receive,
@@ -244,102 +245,238 @@ class Binding:
         self,
         route_contract_key: str,
         route_kind: str,
-        required_permissions: frozenset[str] = frozenset({"APP.ASK:VIEW"}),
+        required_permission_sets: tuple[frozenset[str], ...] = (
+            frozenset({"APP.ASK:VIEW"}),
+        ),
         introduced_version: int = 4,
+        surface_key: str = SURFACE_KEY,
+        scope_kind: str = "SELF",
     ) -> None:
         self.route_contract_key = route_contract_key
         self.route_kind = route_kind
-        self.required_permissions = required_permissions
+        self.required_permission_sets = required_permission_sets
         self.introduced_version = introduced_version
+        self.surface_key = surface_key
+        self.scope_kind = scope_kind
+
+    def accepts_scope(
+        self,
+        selected_scope: str,
+        tenant_id: int,
+        user_id: int,
+    ) -> bool:
+        if self.scope_kind == "SELF":
+            return selected_scope == self_scope_key(
+                tenant_id,
+                user_id,
+                surface_key=self.surface_key,
+            )
+        return selected_scope in {
+            scope_key(
+                tenant_id,
+                user_id,
+                surface_key=self.surface_key,
+                source=source,
+                kind="RESOURCE_SET",
+            )
+            for source in ("APP_RESOURCE_SET:RS_DWAION", "RS_DWAION")
+        }
+
+
+class BindingPattern:
+    def __init__(self, spec: dict[str, Any]) -> None:
+        self.method = str(spec["method"])
+        self.path_template = str(spec["path_template"])
+        self.parameter_names = tuple(re.findall(r"\{([^{}]+)\}", self.path_template))
+        expression = re.escape(self.path_template)
+        for name in self.parameter_names:
+            expression = expression.replace(re.escape("{" + name + "}"), "([^/]+)")
+        self.candidate = re.compile("^" + expression + "$")
+        self.validators = dict(spec["parameter_validators"])
+        self.binding = Binding(
+            str(spec["route_contract_key"]),
+            str(spec["route_kind"]),
+            tuple(
+                frozenset(values)
+                for values in spec["required_permission_sets"]
+            ),
+            int(spec["introduced_version"]),
+            str(spec["surface_key"]),
+            str(spec["scope_kind"]),
+        )
+
+    def match(self, method: str, path: str) -> re.Match[str] | None:
+        if method != self.method:
+            return None
+        return self.candidate.fullmatch(path)
+
+    def parameters_are_valid(self, match: re.Match[str]) -> bool:
+        return all(
+            _valid_path_parameter(
+                match.group(index + 1),
+                self.validators.get(name, "segment"),
+            )
+            for index, name in enumerate(self.parameter_names)
+        )
+
+
+_BINDING_PATTERNS = tuple(BindingPattern(spec) for spec in ROUTE_BINDING_SPECS)
 
 
 def install_product_surface_pep(app: FastAPI) -> None:
     app.add_middleware(ProductSurfacePepMiddleware)
 
 
+def install_product_surface_openapi_contract(app: FastAPI) -> None:
+    """Document the optimistic authority revision for every governed ACTION."""
+
+    original_openapi = app.openapi
+
+    def governed_openapi() -> dict[str, Any]:
+        if app.openapi_schema is not None:
+            return app.openapi_schema
+        schema = original_openapi()
+        paths = schema.get("paths", {})
+        for pattern in _BINDING_PATTERNS:
+            if pattern.binding.route_kind != "ACTION":
+                continue
+            candidates = [
+                path
+                for path in paths
+                if _path_shape(path) == _path_shape(pattern.path_template)
+            ]
+            if len(candidates) != 1:
+                raise RuntimeError(
+                    "Governed DWAI OpenAPI ACTION binding did not resolve exactly once: "
+                    f"{pattern.method} {pattern.path_template}"
+                )
+            operation = paths[candidates[0]].get(pattern.method.lower())
+            if not isinstance(operation, dict):
+                raise RuntimeError(
+                    "Governed DWAI OpenAPI ACTION method is missing: "
+                    f"{pattern.method} {pattern.path_template}"
+                )
+            parameters = operation.setdefault("parameters", [])
+            matches = [
+                parameter
+                for parameter in parameters
+                if parameter.get("in") == "header"
+                and parameter.get("name") == EXPECTED_REVISION_HEADER
+            ]
+            if not matches:
+                parameters.append(_expected_revision_openapi_parameter())
+            elif len(matches) != 1:
+                raise RuntimeError(
+                    "Governed DWAI OpenAPI revision header is duplicated: "
+                    f"{pattern.method} {pattern.path_template}"
+                )
+        app.openapi_schema = schema
+        return schema
+
+    app.openapi = governed_openapi
+
+
+def document_expected_decision_revision(
+    expected_revision: Annotated[
+        str | None,
+        Header(
+            alias=EXPECTED_REVISION_HEADER,
+            min_length=1,
+            max_length=200,
+            description=(
+                "Required for product-authorization rollout states 110/111. The gateway "
+                "rejects a missing or stale value before the state-changing request reaches "
+                "the Agent owner service; rollout states 000/100 ignore it."
+            ),
+        ),
+    ] = None,
+) -> None:
+    """Expose the gateway-consumed optimistic authority revision in OpenAPI."""
+    del expected_revision
+
+
+def _expected_revision_openapi_parameter() -> dict[str, Any]:
+    return {
+        "name": EXPECTED_REVISION_HEADER,
+        "in": "header",
+        "required": False,
+        "description": (
+            "Required for product-authorization rollout states 110/111. The gateway "
+            "rejects a missing or stale value before the state-changing request reaches "
+            "the Agent owner service; rollout states 000/100 ignore it."
+        ),
+        "schema": {
+            "anyOf": [
+                {"type": "string", "minLength": 1, "maxLength": 200},
+                {"type": "null"},
+            ],
+            "title": "X-Dwp-Expected-Decision-Revision",
+        },
+    }
+
+
+def _path_shape(path: str) -> str:
+    return re.sub(r"\{[^{}]+\}", "{}", path)
+
+
 def owns_candidate(method: str, path: str) -> bool:
-    if method == "POST" and path == "/v1/ask":
-        return True
-    if method != "GET":
-        return False
-    if path in {
-        "/v1/conversations",
-        "/v1/runs",
-        "/v1/activity/events",
-        "/v1/activity/executions/summary",
-    }:
-        return True
-    return any(
-        pattern.fullmatch(path) is not None
-        for pattern in (_DATA_CANDIDATE, _RUN_CANDIDATE, _ACTIVITY_EVENT_CANDIDATE)
-    )
+    return any(pattern.match(method, path) is not None for pattern in _BINDING_PATTERNS)
 
 
 def resolve_binding(method: str, path: str) -> Binding | None:
-    if method == "POST" and path == "/v1/ask":
-        return Binding(ACTION_ROUTE, "ACTION")
-    if method != "GET":
-        return None
-    if method == "GET" and path == "/v1/conversations":
-        return Binding(PAGE_ROUTE, "PAGE")
-    if path == "/v1/runs":
-        return Binding(RUNS_ROUTE, "DATA", introduced_version=5)
-    if path == "/v1/activity/events":
-        return Binding(
-            ACTIVITY_EVENTS_ROUTE,
-            "DATA",
-            frozenset({"APP.ASK:VIEW", "APP.ACTIVITY:VIEW"}),
-            introduced_version=5,
-        )
-    if path == "/v1/activity/executions/summary":
-        return Binding(
-            ACTIVITY_SUMMARY_ROUTE,
-            "DATA",
-            frozenset({"APP.ASK:VIEW", "APP.ACTIVITY:VIEW"}),
-            introduced_version=5,
-        )
-    match = _DATA_CANDIDATE.fullmatch(path)
-    route = DATA_ROUTE
-    required_permissions = frozenset({"APP.ASK:VIEW"})
-    if match is None:
-        match = _RUN_CANDIDATE.fullmatch(path)
-        route = RUN_DETAIL_ROUTE
-        introduced_version = 5
-    else:
-        introduced_version = 4
-    if match is None:
-        match = _ACTIVITY_EVENT_CANDIDATE.fullmatch(path)
-        route = ACTIVITY_EVENT_ROUTE
-        required_permissions = frozenset({"APP.ASK:VIEW", "APP.ACTIVITY:VIEW"})
-        introduced_version = 5
-    if match is None or _UUID.fullmatch(match.group(1)) is None:
-        return None
-    try:
-        UUID(match.group(1))
-    except ValueError:
-        return None
-    return Binding(
-        route,
-        "DATA",
-        required_permissions,
-        introduced_version=introduced_version,
+    for pattern in _BINDING_PATTERNS:
+        match = pattern.match(method, path)
+        if match is None:
+            continue
+        return pattern.binding if pattern.parameters_are_valid(match) else None
+    return None
+
+
+def self_scope_key(
+    tenant_id: int,
+    user_id: int,
+    *,
+    surface_key: str = SURFACE_KEY,
+) -> str:
+    return scope_key(
+        tenant_id,
+        user_id,
+        surface_key=surface_key,
+        source="SELF",
+        kind="SELF",
     )
 
 
-def self_scope_key(tenant_id: int, user_id: int) -> str:
-    material = (
-        f"{tenant_id}\n{user_id}\n{PRODUCT_KEY}\n{SURFACE_KEY}\nSELF\nSELF"
-    ).encode()
+def scope_key(
+    tenant_id: int,
+    user_id: int,
+    *,
+    surface_key: str,
+    source: str,
+    kind: str,
+) -> str:
+    material = f"{tenant_id}\n{user_id}\n{PRODUCT_KEY}\n{surface_key}\n{source}\n{kind}".encode()
     return "scope-" + hashlib.sha256(material).hexdigest()[:32]
 
 
+def _valid_path_parameter(value: str, validator: str) -> bool:
+    if validator == "uuid":
+        if _UUID.fullmatch(value) is None:
+            return False
+        try:
+            UUID(value)
+        except ValueError:
+            return False
+        return True
+    if validator == "positive-int":
+        return re.fullmatch(r"[1-9][0-9]*", value) is not None
+    if validator == "key":
+        return re.fullmatch(r"[A-Za-z][A-Za-z0-9_.-]{0,127}", value) is not None
+    return bool(value and len(value) <= 200)
+
+
 def _flag_enabled(name: str) -> bool:
-    return os.getenv(name, "false").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
+    return os.getenv(name, "false").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _v4_enabled() -> bool:
@@ -350,98 +487,13 @@ def _v5_enabled() -> bool:
     return _flag_enabled("DWP_AGENT_PRODUCT_AUTHORIZATION_V5_ENABLED")
 
 
+def _v6_enabled() -> bool:
+    return _flag_enabled("DWP_AGENT_PRODUCT_AUTHORIZATION_V6_ENABLED")
+
+
 def _enabled_for(binding: Binding) -> bool:
+    if binding.introduced_version == 6:
+        return _v6_enabled()
     if binding.introduced_version == 5:
-        return _v5_enabled()
-    return _v4_enabled() or _v5_enabled()
-
-
-def _headers(scope: dict[str, Any]) -> dict[str, list[str]]:
-    result: dict[str, list[str]] = {}
-    for raw_name, raw_value in scope.get("headers", []):
-        try:
-            name = raw_name.decode("latin-1").lower()
-            value = raw_value.decode("latin-1")
-        except UnicodeDecodeError:
-            continue
-        result.setdefault(name, []).append(value)
-    return result
-
-
-def _exact_header(headers: dict[str, list[str]], name: str) -> str | None:
-    values = headers.get(name.lower(), [])
-    if len(values) != 1:
-        return None
-    value = values[0]
-    if (
-        not value
-        or value != value.strip()
-        or len(value) > 200
-        or "," in value
-        or "\r" in value
-        or "\n" in value
-    ):
-        return None
-    return value
-
-
-def _present(headers: dict[str, list[str]], name: str) -> bool:
-    return bool(headers.get(name.lower()))
-
-
-def _header_tokens(headers: dict[str, list[str]], name: str) -> set[str] | None:
-    values = headers.get(name.lower(), [])
-    if not values:
-        return set()
-    if len(values) != 1:
-        return None
-    value = values[0]
-    if (
-        not value
-        or value != value.strip()
-        or len(value) > 4_000
-        or "\r" in value
-        or "\n" in value
-    ):
-        return None
-    tokens = value.split(",")
-    if any(
-        not token or token != token.strip() or token != token.upper()
-        for token in tokens
-    ):
-        return None
-    canonical = set(tokens)
-    return canonical if len(canonical) == len(tokens) else None
-
-
-def _positive_identifier(value: str | None) -> int | None:
-    if value is None or re.fullmatch(r"[1-9][0-9]*", value) is None:
-        return None
-    return int(value)
-
-
-def _future_instant(value: str | None) -> datetime | None:
-    if value is None:
-        return None
-    try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    if parsed.tzinfo is None or parsed <= datetime.now(timezone.utc):
-        return None
-    return parsed
-
-
-async def _reject(
-    scope: dict[str, Any],
-    receive: AsgiReceive,
-    send: AsgiSend,
-    status_code: int,
-    detail: str,
-) -> None:
-    response = JSONResponse(
-        status_code=status_code,
-        content={"detail": detail},
-        headers={"Cache-Control": "no-store"},
-    )
-    await response(scope, receive, send)
+        return _v5_enabled() or _v6_enabled()
+    return _v4_enabled() or _v5_enabled() or _v6_enabled()
