@@ -55,6 +55,26 @@ def artifact_collaboration_runtime_capabilities() -> TeamArtifactCapabilities:
                 "encryption keys, fingerprints, and ACL broker before using comments."
             ),
         ),
+        staged_review=WorkflowCapability(
+            available=available,
+            configured=available,
+            reason_code=(None if available else "ARTIFACT_STAGED_REVIEW_NOT_AVAILABLE"),
+            recovery_hint=(
+                None
+                if available
+                else "Configure the governed artifact collaboration database, encryption keys, "
+                "fingerprints, and ACL broker before using staged review."
+            ),
+        ),
+        signed_worm_receipt=WorkflowCapability(
+            available=False,
+            configured=False,
+            reason_code="ARTIFACT_SIGNED_WORM_RECEIPT_NOT_CONFIGURED",
+            recovery_hint=(
+                "Configure an attested immutable-ledger provider and tenant signing key "
+                "before issuing signed WORM receipts."
+            ),
+        ),
         automatic_masking=WorkflowCapability(
             available=False,
             configured=False,

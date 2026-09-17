@@ -5,6 +5,7 @@ from uuid import UUID, uuid4
 
 from .artifact_contracts import (
     ArtifactDraftContent,
+    ArtifactMetadata,
     ArtifactSourceReference,
     GovernedArtifact,
 )
@@ -54,6 +55,16 @@ class ArtifactPostgresBase:
                 "request": request.model_dump(mode="json", by_alias=True),
             },
         )
+
+    @staticmethod
+    def _require_future_review_sla(metadata: ArtifactMetadata, now: Any) -> None:
+        if metadata.review_sla_due_at is not None and metadata.review_sla_due_at <= now:
+            raise GovernedDomainConflict("The artifact review SLA must be in the future.")
+
+    @staticmethod
+    def _require_current_version(artifact: Any, version_number: int) -> None:
+        if int(artifact["current_version_number"]) != version_number:
+            raise GovernedDomainConflict("The immutable artifact version is no longer current.")
 
     def _replay(
         self,
@@ -213,6 +224,12 @@ class ArtifactPostgresBase:
             published_version_number=row["published_version_number"],
             content=content,
             sources=self._draft_sources(connection, row["tenant_id"], row["artifact_id"]),
+            author_subject_id=row["user_id"],
+            metadata=ArtifactMetadata(
+                tags=list(row["tags"] or []),
+                project_key=row["project_key"],
+                review_sla_due_at=row["review_sla_due_at"],
+            ),
             capabilities=artifact_runtime_capabilities(),
             created_at=row["created_at"],
             updated_at=row["updated_at"],
@@ -405,7 +422,8 @@ class ArtifactPostgresBase:
 _ARTIFACT_SELECT = """SELECT a.artifact_id, a.tenant_id, a.user_id,
        a.artifact_type, a.artifact_state, a.revision,
        a.current_draft_revision AS draft_revision, a.current_version_number,
-       a.published_version_number, a.created_at, a.updated_at,
+       a.published_version_number, a.tags, a.project_key,
+       a.review_sla_due_at, a.created_at, a.updated_at,
        d.content_envelope, d.content_fingerprint
   FROM ai_artifacts a
   JOIN ai_artifact_drafts d ON d.artifact_id = a.artifact_id"""

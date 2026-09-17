@@ -85,6 +85,36 @@ class UpsertRetentionPolicyRequest(HighRiskMutationCommand):
     retention_days: int = Field(ge=1, le=3_650)
     deletion_grace_days: int = Field(ge=0, le=90)
     legal_hold: bool = False
+    legal_hold_directive: "LegalHoldDirective | None" = None
+
+    @model_validator(mode="after")
+    def coherent_legal_hold(self) -> "UpsertRetentionPolicyRequest":
+        if not self.legal_hold and self.legal_hold_directive is not None:
+            raise ValueError("A released legal hold cannot include an active directive.")
+        return self
+
+
+class LegalHoldDirective(ContractModel):
+    authority_reference: str = Field(min_length=1, max_length=160)
+    dpo_subject_id: str = Field(
+        min_length=1,
+        max_length=160,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9@._:-]{0,159}$",
+    )
+    reason_code: str = Field(pattern=r"^[A-Z][A-Z0-9_.-]{1,63}$")
+    effective_at: datetime
+    expires_at: datetime | None = None
+
+    @model_validator(mode="after")
+    def coherent_lifecycle(self) -> "LegalHoldDirective":
+        if self.effective_at.utcoffset() is None:
+            raise ValueError("effectiveAt must include a time-zone offset.")
+        if self.expires_at is not None:
+            if self.expires_at.utcoffset() is None:
+                raise ValueError("expiresAt must include a time-zone offset.")
+            if self.expires_at <= self.effective_at:
+                raise ValueError("expiresAt must be later than effectiveAt.")
+        return self
 
 
 class RetentionPolicyEnvelope(ContractModel):
@@ -108,6 +138,24 @@ class DeletionTargetState(StrEnum):
     COMPLETED = "COMPLETED"
     BLOCKED_LEGAL_HOLD = "BLOCKED_LEGAL_HOLD"
     FAILED = "FAILED"
+
+
+class DeletionStageKey(StrEnum):
+    REQUEST_ACCEPTED = "REQUEST_ACCEPTED"
+    TARGETS_SCHEDULED = "TARGETS_SCHEDULED"
+    ACTIVE_STORE_DISPOSITION = "ACTIVE_STORE_DISPOSITION"
+    BACKUP_BOUNDARY = "BACKUP_BOUNDARY"
+    RECEIPT_FINALIZATION = "RECEIPT_FINALIZATION"
+
+
+class DeletionStageState(StrEnum):
+    PENDING = "PENDING"
+    RUNNING = "RUNNING"
+    COMPLETED = "COMPLETED"
+    PARTIAL = "PARTIAL"
+    BLOCKED = "BLOCKED"
+    FAILED = "FAILED"
+    UNAVAILABLE = "UNAVAILABLE"
 
 
 class RequestDeletionRequest(HighRiskMutationCommand):
@@ -161,6 +209,42 @@ class DataDispositionReceipt(ContractModel):
         return self
 
 
+class LegalHoldEvidence(ContractModel):
+    available: bool
+    domain: DomainKey
+    hold_id: UUID | None = None
+    state: str | None = Field(default=None, pattern=r"^(ACTIVE|RELEASED)$")
+    authority_reference: str | None = Field(default=None, max_length=160)
+    dpo_subject_id: str | None = Field(default=None, max_length=160)
+    reason_code: str = Field(pattern=r"^[A-Z][A-Z0-9_.-]{1,127}$")
+    effective_at: datetime | None = None
+    expires_at: datetime | None = None
+
+    @model_validator(mode="after")
+    def coherent_evidence(self) -> "LegalHoldEvidence":
+        required = (
+            self.hold_id,
+            self.state,
+            self.authority_reference,
+            self.dpo_subject_id,
+            self.effective_at,
+        )
+        if self.available != all(value is not None for value in required):
+            raise ValueError("Legal-hold availability and evidence must agree.")
+        return self
+
+
+class DeletionStage(ContractModel):
+    key: DeletionStageKey
+    state: DeletionStageState
+    detail_code: str = Field(pattern=r"^[A-Z][A-Z0-9_.-]{1,127}$")
+    observed_at: datetime | None = None
+    evidence_reference: str | None = Field(default=None, max_length=240)
+    evidence_fingerprint: str | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
+
+
 class DeletionTargetReceipt(ContractModel):
     domain: DomainKey
     state: DeletionTargetState
@@ -169,6 +253,7 @@ class DeletionTargetReceipt(ContractModel):
         default=None, pattern=r"^[A-Z][A-Z0-9_.-]{1,127}$"
     )
     disposition: DataDispositionReceipt | None = None
+    legal_hold_evidence: LegalHoldEvidence | None = None
 
 
 class DeletionJob(ContractModel):
@@ -182,6 +267,16 @@ class DeletionJob(ContractModel):
     blocked_domains: list[DomainKey] = Field(default_factory=list)
     attempt_count: int = Field(default=0, ge=0)
     targets: list[DeletionTargetReceipt] = Field(default_factory=list, max_length=4)
+    stages: list[DeletionStage] = Field(default_factory=list, max_length=5)
+    legal_holds: list[LegalHoldEvidence] = Field(default_factory=list, max_length=4)
+
+    @model_validator(mode="after")
+    def coherent_evidence(self) -> "DeletionJob":
+        if self.stages and [stage.key for stage in self.stages] != list(DeletionStageKey):
+            raise ValueError("Deletion evidence must contain the ordered five-stage boundary.")
+        if len({hold.domain for hold in self.legal_holds}) != len(self.legal_holds):
+            raise ValueError("Deletion legal-hold evidence must be unique by domain.")
+        return self
 
 
 class DeletionJobEnvelope(ContractModel):

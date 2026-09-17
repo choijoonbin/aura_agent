@@ -12,8 +12,7 @@ from .artifact_contracts import (
     ArtifactExportReceipt,
     ArtifactPreflightReceipt,
     ArtifactPublicationReceipt,
-    ArtifactState,
-    ArtifactVersionReceipt,
+    ArtifactState, ArtifactVersionReceipt,
     AutosaveArtifactRequest,
     CreateArtifactRequest,
     CreateArtifactVersionRequest,
@@ -101,6 +100,7 @@ class PostgresArtifactStore(
             now = connection.execute(
                 "SELECT CURRENT_TIMESTAMP AS now"
             ).fetchone()["now"]
+            self._require_future_review_sla(request.metadata, now)
             artifact_id = uuid4()
             payload = request.content.model_dump(mode="json", by_alias=True)
             envelope = self.codec.encrypt_json(
@@ -118,13 +118,17 @@ class PostgresArtifactStore(
             connection.execute(
                 """INSERT INTO ai_artifacts (
                        artifact_id, tenant_id, user_id, artifact_type,
+                       tags, project_key, review_sla_due_at,
                        retention_until, created_at, updated_at)
-                   VALUES (%s, %s, %s, %s, %s, %s, %s)""",
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
                 (
                     artifact_id,
                     identity.tenant_id,
                     identity.user_id,
                     request.artifact_type.value,
+                    request.metadata.tags,
+                    request.metadata.project_key,
+                    request.metadata.review_sla_due_at,
                     retention_deadline(now, days),
                     now,
                     now,
@@ -178,6 +182,8 @@ class PostgresArtifactStore(
                 return GovernedArtifact.model_validate(replay)
             row = self._locked_artifact(connection, identity, artifact_id)
             self._expected(row, request.expected_revision)
+            now = connection.execute("SELECT CURRENT_TIMESTAMP AS now").fetchone()["now"]
+            self._require_future_review_sla(request.metadata, now)
             payload = request.content.model_dump(mode="json", by_alias=True)
             envelope = self.codec.encrypt_json(
                 payload,
@@ -205,9 +211,20 @@ class PostgresArtifactStore(
             connection.execute(
                 """UPDATE ai_artifacts
                       SET artifact_state = 'DRAFT', revision = %s,
-                          current_draft_revision = %s, updated_at = CURRENT_TIMESTAMP
+                          current_draft_revision = %s, tags = %s,
+                          project_key = %s, review_sla_due_at = %s,
+                          updated_at = CURRENT_TIMESTAMP
                     WHERE artifact_id = %s AND tenant_id = %s AND user_id = %s""",
-                (revision, draft_revision, artifact_id, identity.tenant_id, identity.user_id),
+                (
+                    revision,
+                    draft_revision,
+                    request.metadata.tags,
+                    request.metadata.project_key,
+                    request.metadata.review_sla_due_at,
+                    artifact_id,
+                    identity.tenant_id,
+                    identity.user_id,
+                ),
             )
             self._replace_draft_sources(connection, identity, artifact_id, request.sources)
             result = self._artifact(connection, self._locked_artifact(connection, identity, artifact_id, lock=False))
@@ -481,8 +498,3 @@ class PostgresArtifactStore(
             self._record_command(connection, identity, artifact_id, "EXPORT", request, proof, result)
             self._event(connection, identity, artifact_id, request.command_id, "EXPORT_REQUESTED", artifact["artifact_state"], artifact["artifact_state"], revision, proof.request_fingerprint, request.reason_code, request.change_reason)
             return result
-
-    @staticmethod
-    def _require_current_version(artifact: Any, version_number: int) -> None:
-        if int(artifact["current_version_number"]) != version_number:
-            raise GovernedDomainConflict("The immutable artifact version is no longer current.")

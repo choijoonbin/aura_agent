@@ -5,9 +5,11 @@ from datetime import UTC, datetime
 from .artifact_collaboration_contracts import (
     TeamArtifactMember,
     TeamArtifactPreflight,
+    TeamArtifactSignatureEvidence,
     TeamArtifactWorkspace,
 )
 from .artifact_contracts import ArtifactSourceReference
+from .dwaion_workflow_contracts import WorkflowCapability
 from .governed_domain_core import (
     GovernedDomainConflict,
     GovernedDomainNotFound,
@@ -317,6 +319,8 @@ class ArtifactCollaborationAccess:
                 (row["workspace_id"],),
             ).fetchall()
         ]
+        review_stages = self._review_stages(connection, row["workspace_id"])
+        governance_gates = self._governance_gates(connection, row)
         return TeamArtifactWorkspace(
             workspace_id=row["workspace_id"],
             artifact_id=row["artifact_id"],
@@ -330,12 +334,28 @@ class ArtifactCollaborationAccess:
                 self._conflict(conflict_row) if conflict_row is not None else None
             ),
             shares=shares,
+            review_stages=review_stages,
+            governance_gates=governance_gates,
+            signature_evidence=TeamArtifactSignatureEvidence(
+                capability=WorkflowCapability(
+                    available=False,
+                    configured=False,
+                    reason_code="ARTIFACT_SIGNED_WORM_RECEIPT_NOT_CONFIGURED",
+                    recovery_hint=(
+                        "Configure an attested immutable-ledger provider and tenant signing key "
+                        "before issuing signed WORM receipts."
+                    ),
+                )
+            ),
+            review_sla_due_at=row["review_sla_due_at"],
             created_at=row["created_at"],
             updated_at=row["updated_at"],
         )
 
+
 WORKSPACE_SELECT = """SELECT w.workspace_id, w.artifact_id, w.team_id,
        w.tenant_id, w.owner_user_id, w.workspace_state, w.revision,
        w.source_artifact_revision, w.content_envelope, w.content_sha256,
-       w.created_at, w.updated_at, w.revoked_at
-  FROM ai_artifact_team_workspaces w"""
+       w.created_at, w.updated_at, w.revoked_at, a.review_sla_due_at
+  FROM ai_artifact_team_workspaces w
+  JOIN ai_artifacts a ON a.artifact_id = w.artifact_id"""

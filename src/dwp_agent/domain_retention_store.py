@@ -27,12 +27,13 @@ from .governed_domain_core import (
     require_command_replay,
     retention_deadline,
 )
+from .legal_hold_store import LegalHoldCommands
 from .personal_domain_security import PersonalDomainIdentity
 from .deletion_job_queries import read_deletion_job
 from .transactional_outbox import enqueue_internal_intent
 
 
-class PostgresDomainRetentionStore:
+class PostgresDomainRetentionStore(LegalHoldCommands):
     def __init__(self, database_url: str) -> None:
         self.database_url = database_url
         try:
@@ -168,6 +169,12 @@ class PostgresDomainRetentionStore:
                         Jsonb(policy.model_dump(mode="json", by_alias=True)),
                         revision,
                     ),
+                )
+                self._sync_legal_hold(
+                    connection,
+                    identity,
+                    domain,
+                    request,
                 )
                 return policy
         except (GovernedDomainConflict, GovernedDomainUnavailable):

@@ -15,8 +15,12 @@ from .artifact_collaboration_comment_store import (
 )
 from .artifact_collaboration_content_store import ArtifactCollaborationContent
 from .artifact_collaboration_edit_store import ArtifactCollaborationEditCommands
+from .artifact_collaboration_governance_store import (
+    ArtifactCollaborationGovernanceEvidence,
+)
 from .artifact_collaboration_preflight_store import ArtifactCollaborationPreflightCommands
 from .artifact_collaboration_provider import ArtifactCollaborationProvider
+from .artifact_collaboration_review_store import ArtifactCollaborationReviewCommands
 from .artifact_collaboration_share_store import ArtifactCollaborationShareCommands
 from .governed_domain_core import (
     GovernedDomainUnavailable,
@@ -31,6 +35,8 @@ class PostgresArtifactCollaborationStore(
     ArtifactCollaborationEditCommands,
     ArtifactCollaborationShareCommands,
     ArtifactCollaborationCommentCommands,
+    ArtifactCollaborationReviewCommands,
+    ArtifactCollaborationGovernanceEvidence,
     ArtifactCollaborationAccess,
     ArtifactCollaborationContent,
 ):

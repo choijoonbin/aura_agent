@@ -253,6 +253,13 @@ class ArtifactCollaborationPreflightCommands:
                     identity,
                     preflight,
                 )
+                self._initialize_review_stages(
+                    connection,
+                    workspace_id,
+                    artifact_id,
+                    identity,
+                    content_fingerprint,
+                )
                 self._version(
                     connection,
                     workspace_id,

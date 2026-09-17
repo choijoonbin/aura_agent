@@ -127,6 +127,33 @@ class ArtifactDraftContent(ContractModel):
         return normalized
 
 
+class ArtifactMetadata(ContractModel):
+    tags: list[str] = Field(default_factory=list, max_length=20)
+    project_key: str | None = Field(
+        default=None,
+        max_length=80,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,79}$",
+    )
+    review_sla_due_at: datetime | None = None
+
+    @field_validator("tags")
+    @classmethod
+    def normalize_tags(cls, value: list[str]) -> list[str]:
+        normalized = [" ".join(tag.split()) for tag in value]
+        if any(not tag or len(tag) > 40 for tag in normalized):
+            raise ValueError("Artifact tags must contain between 1 and 40 characters.")
+        if len({tag.casefold() for tag in normalized}) != len(normalized):
+            raise ValueError("Artifact tags must be unique.")
+        return normalized
+
+    @field_validator("review_sla_due_at")
+    @classmethod
+    def aware_review_sla(cls, value: datetime | None) -> datetime | None:
+        if value is not None and value.utcoffset() is None:
+            raise ValueError("reviewSlaDueAt must include a time-zone offset.")
+        return value
+
+
 class CreateArtifactRequest(MutationCommand):
     _verified_source_references: frozenset[str] = PrivateAttr(default_factory=frozenset)
 
@@ -134,6 +161,7 @@ class CreateArtifactRequest(MutationCommand):
     content: ArtifactDraftContent
     sources: list[ArtifactSourceReference] = Field(default_factory=list, max_length=20)
     source_conversation: ArtifactConversationSource | None = None
+    metadata: ArtifactMetadata = Field(default_factory=ArtifactMetadata)
 
     @field_validator("sources")
     @classmethod
@@ -157,6 +185,7 @@ class CreateArtifactRequest(MutationCommand):
 class AutosaveArtifactRequest(MutationCommand):
     content: ArtifactDraftContent
     sources: list[ArtifactSourceReference] = Field(default_factory=list, max_length=20)
+    metadata: ArtifactMetadata = Field(default_factory=ArtifactMetadata)
 
     @field_validator("sources")
     @classmethod
@@ -198,6 +227,8 @@ class GovernedArtifact(ContractModel):
     published_version_number: int | None = Field(default=None, ge=1)
     content: ArtifactDraftContent
     sources: list[ArtifactSourceReference] = Field(max_length=20)
+    author_subject_id: str | None = Field(default=None, min_length=1, max_length=160)
+    metadata: ArtifactMetadata = Field(default_factory=ArtifactMetadata)
     capabilities: ArtifactCapabilities = Field(default_factory=ArtifactCapabilities)
     created_at: datetime
     updated_at: datetime

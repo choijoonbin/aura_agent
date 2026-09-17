@@ -7,6 +7,18 @@ from uuid import UUID
 from pydantic import Field, field_validator, model_validator
 
 from .artifact_contracts import ArtifactDraftContent, ArtifactSourceReference
+from .artifact_collaboration_governance_contracts import (
+    TeamArtifactGovernanceGate,
+    TeamArtifactGovernanceGateKey,
+    TeamArtifactGovernanceGateState,
+    TeamArtifactCapabilities,
+    TeamArtifactReviewDecision,
+    TeamArtifactReviewStage,
+    TeamArtifactReviewStageKey,
+    TeamArtifactReviewStageState,
+    TeamArtifactSignatureEvidence,
+    unavailable_artifact_signature_evidence,
+)
 from .contracts import ContractModel
 from .dwaion_workflow_contracts import WorkflowCapability
 from .governed_domain_contracts import HighRiskMutationCommand, MutationCommand
@@ -256,23 +268,8 @@ class ResolveTeamArtifactCommentRequest(HighRiskMutationCommand):
     pass
 
 
-class TeamArtifactCapabilities(ContractModel):
-    team_workspace_available: bool
-    acl_preflight_available: bool
-    access_request_available: bool
-    collaboration_available: bool
-    conflict_resolution_available: bool
-    internal_sharing_available: bool
-    external_sharing_available: bool = False
-    share_expiry_available: bool
-    share_revocation_available: bool
-    inline_comments: WorkflowCapability
-    automatic_masking: WorkflowCapability
-    synthetic_replacement: WorkflowCapability
-    review_notification: WorkflowCapability
-    review_rejection: WorkflowCapability
-    provider_state: str
-    recovery_hint: str | None = None
+class DecideTeamArtifactReviewStageRequest(HighRiskMutationCommand):
+    decision: TeamArtifactReviewDecision
 
 
 class TeamArtifactCommentReply(ContractModel):
@@ -381,6 +378,14 @@ class TeamArtifactWorkspace(ContractModel):
     members: list[TeamArtifactMember] = Field(min_length=1, max_length=100)
     open_conflict: TeamArtifactConflict | None = None
     shares: list[TeamArtifactShare] = Field(default_factory=list, max_length=100)
+    review_stages: list[TeamArtifactReviewStage] = Field(default_factory=list, max_length=3)
+    governance_gates: list[TeamArtifactGovernanceGate] = Field(
+        default_factory=list, max_length=4
+    )
+    signature_evidence: TeamArtifactSignatureEvidence = Field(
+        default_factory=unavailable_artifact_signature_evidence
+    )
+    review_sla_due_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -393,6 +398,14 @@ class TeamArtifactWorkspace(ContractModel):
         ]
         if len(owners) != 1:
             raise ValueError("A team artifact workspace requires exactly one owner.")
+        if self.review_stages and [stage.stage_order for stage in self.review_stages] != list(
+            range(1, len(self.review_stages) + 1)
+        ):
+            raise ValueError("Artifact review stages must be contiguous and ordered.")
+        if self.governance_gates and {
+            gate.key for gate in self.governance_gates
+        } != set(TeamArtifactGovernanceGateKey):
+            raise ValueError("Artifact governance evidence must include all four gates.")
         return self
 
 

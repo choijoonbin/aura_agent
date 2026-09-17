@@ -10,6 +10,7 @@ from .artifact_collaboration_contracts import (
     CreateTeamArtifactCommentRequest,
     CreateTeamArtifactShareRequest,
     CreateTeamArtifactWorkspaceRequest,
+    DecideTeamArtifactReviewStageRequest,
     ReplyTeamArtifactCommentRequest,
     ResolveTeamArtifactConflictRequest,
     ResolveTeamArtifactCommentRequest,
@@ -275,6 +276,31 @@ def resolve_team_artifact_comment(
                 identity,
                 artifact_id,
                 comment_id,
+                request,
+            )
+        )
+    )
+
+
+@router.post(
+    "/{artifact_id}/workspace/review-stages/{stage_id}/decision",
+    response_model=TeamArtifactWorkspaceEnvelope,
+)
+def decide_team_artifact_review_stage(
+    artifact_id: UUID,
+    stage_id: UUID,
+    request: DecideTeamArtifactReviewStageRequest,
+    identity: Annotated[PersonalDomainIdentity, Depends(require_personal_domain_identity)],
+    response: Response,
+) -> TeamArtifactWorkspaceEnvelope:
+    _access(identity, "UPDATE")
+    _no_store(response)
+    return _run(
+        lambda: TeamArtifactWorkspaceEnvelope(
+            data=get_artifact_collaboration_store().decide_review_stage(
+                identity,
+                artifact_id,
+                stage_id,
                 request,
             )
         )
