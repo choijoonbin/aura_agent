@@ -15,10 +15,13 @@ from pydantic import ValidationError
 from dwp_agent import artifact_collaboration_api
 from dwp_agent.artifact_collaboration_contracts import (
     CreateTeamArtifactAccessRequest,
+    CreateTeamArtifactCommentRequest,
     ResolveTeamArtifactConflictRequest,
+    ResolveTeamArtifactCommentRequest,
     RunTeamArtifactPreflightRequest,
     SubmitTeamArtifactEditRequest,
     TeamArtifactCapabilities,
+    TeamArtifactComment,
     TeamArtifactAccessRequest,
     TeamArtifactMemberRequest,
     TeamArtifactShare,
@@ -316,6 +319,12 @@ def _capabilities() -> TeamArtifactCapabilities:
         external_sharing_available=False,
         share_expiry_available=False,
         share_revocation_available=False,
+        inline_comments=WorkflowCapability(
+            available=False,
+            configured=False,
+            reason_code="ARTIFACT_INLINE_COMMENTS_NOT_AVAILABLE",
+            recovery_hint="Configure comments.",
+        ),
         automatic_masking=WorkflowCapability(
             available=False,
             configured=False,
@@ -390,6 +399,12 @@ def test_capability_api_is_private_permissioned_and_truthful(
     assert allowed.json()["data"]["providerState"] == "NOT_CONFIGURED"
     assert allowed.json()["data"]["accessRequestAvailable"] is False
     assert allowed.json()["data"]["externalSharingAvailable"] is False
+    assert allowed.json()["data"]["inlineComments"] == {
+        "available": False,
+        "configured": False,
+        "reasonCode": "ARTIFACT_INLINE_COMMENTS_NOT_AVAILABLE",
+        "recoveryHint": "Configure comments.",
+    }
     assert allowed.json()["data"]["automaticMasking"] == {
         "available": False,
         "configured": False,
@@ -397,6 +412,88 @@ def test_capability_api_is_private_permissioned_and_truthful(
         "recoveryHint": "Configure masking.",
     }
     assert allowed.json()["data"]["reviewRejection"]["available"] is False
+
+
+def test_comment_contracts_reject_blank_content_and_require_resolution_reason() -> None:
+    common = {
+        "commandId": str(uuid4()),
+        "expectedRevision": 1,
+        "reasonCode": "TEAM_ARTIFACT_COMMENT",
+    }
+    with pytest.raises(ValidationError):
+        CreateTeamArtifactCommentRequest.model_validate({**common, "body": "   "})
+    with pytest.raises(ValidationError):
+        ResolveTeamArtifactCommentRequest.model_validate(common)
+
+    created = CreateTeamArtifactCommentRequest.model_validate(
+        {**common, "body": "  Review this evidence.  ", "anchor": "  section  2 "}
+    )
+    assert created.body == "Review this evidence."
+    assert created.anchor == "section 2"
+
+
+def test_comment_api_is_permissioned_and_returns_server_comment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(
+        "DWP_AGENT_SERVICE_TOKEN", "artifact-collaboration-service-token"
+    )
+    monkeypatch.delenv("DWP_AGENT_IDENTITY_SIGNING_SECRET", raising=False)
+    artifact_id = uuid4()
+    workspace_id = uuid4()
+    comment_id = uuid4()
+    now = datetime.now(UTC)
+
+    class FakeStore:
+        def create_comment(self, identity, requested_artifact_id, request):
+            assert identity.user_id == "member-1"
+            assert requested_artifact_id == artifact_id
+            assert request.expected_revision == 4
+            return TeamArtifactComment(
+                commentId=comment_id,
+                workspaceId=workspace_id,
+                artifactId=artifact_id,
+                authorSubjectId=identity.user_id,
+                body=request.body,
+                anchor=request.anchor,
+                state="OPEN",
+                revision=1,
+                createdAt=now,
+                updatedAt=now,
+            )
+
+    monkeypatch.setattr(
+        artifact_collaboration_api,
+        "get_artifact_collaboration_store",
+        lambda: FakeStore(),
+    )
+    app = FastAPI()
+    app.include_router(artifact_collaboration_api.router)
+    client = TestClient(app)
+    payload = {
+        "commandId": str(uuid4()),
+        "expectedRevision": 4,
+        "reasonCode": "TEAM_ARTIFACT_COMMENT",
+        "body": "Review the cited evidence.",
+        "anchor": "Evidence section",
+    }
+
+    denied = client.post(
+        f"/v1/artifact-collaboration/{artifact_id}/workspace/comments",
+        headers=_headers("APP.ASK:VIEW", "APP.DWAION_ARTIFACTS:VIEW"),
+        json=payload,
+    )
+    created = client.post(
+        f"/v1/artifact-collaboration/{artifact_id}/workspace/comments",
+        headers=_headers("APP.ASK:VIEW", "APP.DWAION_ARTIFACTS:UPDATE"),
+        json=payload,
+    )
+
+    assert denied.status_code == 403
+    assert created.status_code == 201
+    assert created.headers["cache-control"] == "no-store"
+    assert created.json()["data"]["commentId"] == str(comment_id)
+    assert created.json()["data"]["body"] == "Review the cited evidence."
 
 
 def test_access_request_api_is_permissioned_and_returns_pending_evidence(

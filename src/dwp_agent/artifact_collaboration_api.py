@@ -7,14 +7,19 @@ from fastapi import APIRouter, Depends, HTTPException, Response, status
 
 from .artifact_collaboration_contracts import (
     CreateTeamArtifactAccessRequest,
+    CreateTeamArtifactCommentRequest,
     CreateTeamArtifactShareRequest,
     CreateTeamArtifactWorkspaceRequest,
+    ReplyTeamArtifactCommentRequest,
     ResolveTeamArtifactConflictRequest,
+    ResolveTeamArtifactCommentRequest,
     RevokeTeamArtifactShareRequest,
     RunTeamArtifactPreflightRequest,
     SubmitTeamArtifactEditRequest,
     TeamArtifactAccessRequestEnvelope,
     TeamArtifactCapabilitiesEnvelope,
+    TeamArtifactCommentEnvelope,
+    TeamArtifactCommentsEnvelope,
     TeamArtifactEditEnvelope,
     TeamArtifactPreflightEnvelope,
     TeamArtifactShareEnvelope,
@@ -175,6 +180,102 @@ def submit_team_artifact_edit(
         lambda: TeamArtifactEditEnvelope(
             data=get_artifact_collaboration_store().edit(
                 identity, artifact_id, request
+            )
+        )
+    )
+
+
+@router.get(
+    "/{artifact_id}/workspace/comments",
+    response_model=TeamArtifactCommentsEnvelope,
+)
+def list_team_artifact_comments(
+    artifact_id: UUID,
+    identity: Annotated[PersonalDomainIdentity, Depends(require_personal_domain_identity)],
+    response: Response,
+) -> TeamArtifactCommentsEnvelope:
+    _access(identity, "VIEW")
+    _no_store(response)
+    return _run(
+        lambda: TeamArtifactCommentsEnvelope(
+            data=get_artifact_collaboration_store().list_comments(
+                identity,
+                artifact_id,
+            )
+        )
+    )
+
+
+@router.post(
+    "/{artifact_id}/workspace/comments",
+    status_code=status.HTTP_201_CREATED,
+    response_model=TeamArtifactCommentEnvelope,
+)
+def create_team_artifact_comment(
+    artifact_id: UUID,
+    request: CreateTeamArtifactCommentRequest,
+    identity: Annotated[PersonalDomainIdentity, Depends(require_personal_domain_identity)],
+    response: Response,
+) -> TeamArtifactCommentEnvelope:
+    _access(identity, "UPDATE")
+    _no_store(response)
+    return _run(
+        lambda: TeamArtifactCommentEnvelope(
+            data=get_artifact_collaboration_store().create_comment(
+                identity,
+                artifact_id,
+                request,
+            )
+        )
+    )
+
+
+@router.post(
+    "/{artifact_id}/workspace/comments/{comment_id}/replies",
+    status_code=status.HTTP_201_CREATED,
+    response_model=TeamArtifactCommentEnvelope,
+)
+def reply_team_artifact_comment(
+    artifact_id: UUID,
+    comment_id: UUID,
+    request: ReplyTeamArtifactCommentRequest,
+    identity: Annotated[PersonalDomainIdentity, Depends(require_personal_domain_identity)],
+    response: Response,
+) -> TeamArtifactCommentEnvelope:
+    _access(identity, "UPDATE")
+    _no_store(response)
+    return _run(
+        lambda: TeamArtifactCommentEnvelope(
+            data=get_artifact_collaboration_store().reply_comment(
+                identity,
+                artifact_id,
+                comment_id,
+                request,
+            )
+        )
+    )
+
+
+@router.post(
+    "/{artifact_id}/workspace/comments/{comment_id}/resolve",
+    response_model=TeamArtifactCommentEnvelope,
+)
+def resolve_team_artifact_comment(
+    artifact_id: UUID,
+    comment_id: UUID,
+    request: ResolveTeamArtifactCommentRequest,
+    identity: Annotated[PersonalDomainIdentity, Depends(require_personal_domain_identity)],
+    response: Response,
+) -> TeamArtifactCommentEnvelope:
+    _access(identity, "UPDATE")
+    _no_store(response)
+    return _run(
+        lambda: TeamArtifactCommentEnvelope(
+            data=get_artifact_collaboration_store().resolve_comment(
+                identity,
+                artifact_id,
+                comment_id,
+                request,
             )
         )
     )

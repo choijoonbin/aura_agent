@@ -142,6 +142,18 @@ class ArtifactCollaborationProviderConfiguration:
             external_sharing_available=False,
             share_expiry_available=available,
             share_revocation_available=available,
+            inline_comments=WorkflowCapability(
+                available=available,
+                configured=available,
+                reason_code=(
+                    None if available else "ARTIFACT_INLINE_COMMENTS_NOT_AVAILABLE"
+                ),
+                recovery_hint=(
+                    None
+                    if available
+                    else "Configure and attest the artifact collaboration provider."
+                ),
+            ),
             automatic_masking=WorkflowCapability(
                 available=False,
                 configured=False,

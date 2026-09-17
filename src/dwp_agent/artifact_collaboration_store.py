@@ -10,6 +10,9 @@ from .artifact_collaboration_access_request_store import (
 from .artifact_collaboration_capabilities import (
     artifact_collaboration_runtime_capabilities,
 )
+from .artifact_collaboration_comment_store import (
+    ArtifactCollaborationCommentCommands,
+)
 from .artifact_collaboration_content_store import ArtifactCollaborationContent
 from .artifact_collaboration_edit_store import ArtifactCollaborationEditCommands
 from .artifact_collaboration_preflight_store import ArtifactCollaborationPreflightCommands
@@ -27,6 +30,7 @@ class PostgresArtifactCollaborationStore(
     ArtifactCollaborationPreflightCommands,
     ArtifactCollaborationEditCommands,
     ArtifactCollaborationShareCommands,
+    ArtifactCollaborationCommentCommands,
     ArtifactCollaborationAccess,
     ArtifactCollaborationContent,
 ):

@@ -68,6 +68,11 @@ class TeamArtifactSharePermission(StrEnum):
     EDIT = "EDIT"
 
 
+class TeamArtifactCommentState(StrEnum):
+    OPEN = "OPEN"
+    RESOLVED = "RESOLVED"
+
+
 class TeamArtifactMemberRequest(ContractModel):
     subject_id: str = Field(
         min_length=1,
@@ -214,6 +219,43 @@ class RevokeTeamArtifactShareRequest(HighRiskMutationCommand):
     pass
 
 
+class CreateTeamArtifactCommentRequest(MutationCommand):
+    body: str = Field(min_length=1, max_length=4_000)
+    anchor: str | None = Field(default=None, max_length=1_000)
+
+    @field_validator("body")
+    @classmethod
+    def normalize_body(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("A comment body cannot be empty.")
+        return normalized
+
+    @field_validator("anchor")
+    @classmethod
+    def normalize_anchor(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = " ".join(value.split())
+        return normalized or None
+
+
+class ReplyTeamArtifactCommentRequest(MutationCommand):
+    body: str = Field(min_length=1, max_length=4_000)
+
+    @field_validator("body")
+    @classmethod
+    def normalize_body(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("A comment reply cannot be empty.")
+        return normalized
+
+
+class ResolveTeamArtifactCommentRequest(HighRiskMutationCommand):
+    pass
+
+
 class TeamArtifactCapabilities(ContractModel):
     team_workspace_available: bool
     acl_preflight_available: bool
@@ -224,12 +266,46 @@ class TeamArtifactCapabilities(ContractModel):
     external_sharing_available: bool = False
     share_expiry_available: bool
     share_revocation_available: bool
+    inline_comments: WorkflowCapability
     automatic_masking: WorkflowCapability
     synthetic_replacement: WorkflowCapability
     review_notification: WorkflowCapability
     review_rejection: WorkflowCapability
     provider_state: str
     recovery_hint: str | None = None
+
+
+class TeamArtifactCommentReply(ContractModel):
+    reply_id: UUID
+    comment_id: UUID
+    author_subject_id: str = Field(min_length=1, max_length=160)
+    author_display_name: str | None = Field(default=None, max_length=200)
+    body: str = Field(min_length=1, max_length=4_000)
+    created_at: datetime
+
+
+class TeamArtifactComment(ContractModel):
+    comment_id: UUID
+    workspace_id: UUID
+    artifact_id: UUID
+    author_subject_id: str = Field(min_length=1, max_length=160)
+    author_display_name: str | None = Field(default=None, max_length=200)
+    body: str = Field(min_length=1, max_length=4_000)
+    anchor: str | None = Field(default=None, max_length=1_000)
+    state: TeamArtifactCommentState
+    revision: int = Field(ge=1)
+    replies: list[TeamArtifactCommentReply] = Field(default_factory=list, max_length=500)
+    created_at: datetime
+    updated_at: datetime
+    resolved_at: datetime | None = None
+
+    @model_validator(mode="after")
+    def coherent_resolution(self) -> "TeamArtifactComment":
+        if (self.state == TeamArtifactCommentState.RESOLVED) != (
+            self.resolved_at is not None
+        ):
+            raise ValueError("Resolved comments require a resolution timestamp.")
+        return self
 
 
 class TeamArtifactAccessRequest(ContractModel):
@@ -366,3 +442,15 @@ class TeamArtifactShareEnvelope(ContractModel):
     status: str = "SUCCESS"
     success: bool = True
     data: TeamArtifactShare
+
+
+class TeamArtifactCommentEnvelope(ContractModel):
+    status: str = "SUCCESS"
+    success: bool = True
+    data: TeamArtifactComment
+
+
+class TeamArtifactCommentsEnvelope(ContractModel):
+    status: str = "SUCCESS"
+    success: bool = True
+    data: list[TeamArtifactComment]
