@@ -112,6 +112,7 @@ def _configure_production(monkeypatch: pytest.MonkeyPatch) -> None:
 _PRODUCTION_ENVIRONMENT = {
     "DWP_ENVIRONMENT": "production",
     "DWP_AGENT_SERVICE_TOKEN": "agent-service-token-for-production",
+    "DWP_DWAION_HOME_IDENTITY_SIGNING_SECRET": "dwaion-home-signing-secret-for-production",
     "DWP_AGENT_IDENTITY_SIGNING_SECRET": "agent-identity-signing-secret-for-production",
     "DWP_PLATFORM_RUNTIME_SERVICE_TOKEN": "platform-runtime-token-for-production",
     "DWP_APPROVAL_RUNTIME_SERVICE_TOKEN": "approval-runtime-token-for-production",

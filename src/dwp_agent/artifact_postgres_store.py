@@ -7,7 +7,6 @@ from uuid import UUID, uuid4
 
 from psycopg import Error as PsycopgError, connect
 from psycopg.rows import dict_row
-
 from .artifact_contracts import (
     ArtifactExportReceipt,
     ArtifactPreflightReceipt,
@@ -23,6 +22,7 @@ from .artifact_contracts import (
     RunArtifactPreflightRequest,
 )
 from .artifact_dlp import assess_artifact
+from .artifact_home_projection import ArtifactHomeProjectionQueries
 from .artifact_export_queries import ArtifactExportQueries
 from .artifact_postgres_base import ArtifactPostgresBase, _ARTIFACT_SELECT
 from .artifact_read_queries import ArtifactReadQueries
@@ -55,6 +55,7 @@ def _translated(function: Callable[..., T]) -> Callable[..., T]:
 
 
 class PostgresArtifactStore(
+    ArtifactHomeProjectionQueries,
     ArtifactSourceVerification,
     ArtifactExportQueries,
     ArtifactReadQueries,
@@ -110,6 +111,9 @@ class PostgresArtifactStore(
                 resource_id=str(artifact_id),
                 field="content",
             )
+            home_title_envelope = self._home_title_envelope(
+                identity, artifact_id, request.content.title
+            )
             fingerprint = self.fingerprints.value(
                 tenant_id=identity.tenant_id,
                 purpose="artifact-content",
@@ -133,14 +137,15 @@ class PostgresArtifactStore(
             connection.execute(
                 """INSERT INTO ai_artifact_drafts (
                        artifact_id, tenant_id, user_id, draft_revision,
-                       content_envelope, content_fingerprint, updated_by_user_id,
-                       updated_at)
-                   VALUES (%s, %s, %s, 1, %s, %s, %s, %s)""",
+                       content_envelope, home_title_envelope, content_fingerprint,
+                       updated_by_user_id, updated_at)
+                   VALUES (%s, %s, %s, 1, %s, %s, %s, %s, %s)""",
                 (
                     artifact_id,
                     identity.tenant_id,
                     identity.user_id,
                     envelope,
+                    home_title_envelope,
                     fingerprint,
                     identity.user_id,
                     now,
@@ -186,6 +191,9 @@ class PostgresArtifactStore(
                 resource_id=str(artifact_id),
                 field="content",
             )
+            home_title_envelope = self._home_title_envelope(
+                identity, artifact_id, request.content.title
+            )
             fingerprint = self.fingerprints.value(
                 tenant_id=identity.tenant_id,
                 purpose="artifact-content",
@@ -197,10 +205,13 @@ class PostgresArtifactStore(
             connection.execute(
                 """UPDATE ai_artifact_drafts
                       SET draft_revision = %s, base_version_number = %s,
-                          content_envelope = %s, content_fingerprint = %s,
+                          content_envelope = %s, home_title_envelope = %s,
+                          content_fingerprint = %s,
                           updated_by_user_id = %s, updated_at = CURRENT_TIMESTAMP
                     WHERE artifact_id = %s AND tenant_id = %s AND user_id = %s""",
-                (draft_revision, base_version, envelope, fingerprint, identity.user_id, artifact_id, identity.tenant_id, identity.user_id),
+                (draft_revision, base_version, envelope, home_title_envelope,
+                 fingerprint, identity.user_id, artifact_id,
+                 identity.tenant_id, identity.user_id),
             )
             connection.execute(
                 """UPDATE ai_artifacts

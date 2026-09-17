@@ -143,6 +143,26 @@ cd ../dwp-backend
 uv run pytest
 ```
 
+## DWAI·ON Home artifact projection
+
+`dwaion.artifact`는 Platform이 발급한 30초 이하 `dwp1-hmac-sha256`
+`X-DWP-Home-Assertion`만 받습니다. Assertion은 정확한 POST 경로·요청 본문 SHA-256·
+수신자·권한·authority revision/deadline에 묶이고 JTI는 데이터베이스에서 한 번만
+소비됩니다. 브라우저 권한이나 범용 Service Token은 받지 않습니다.
+
+Migration V41 적용 후 기존 artifact 제목은 다음의 bounded 명령으로 별도 투영합니다.
+명령은 한 실행당 batch 수를 제한하고 실패 건을 5분 간격·최대 5회만 재시도하며,
+제목/본문을 출력하지 않고 coverage 숫자만 출력합니다.
+
+```bash
+python -m dwp_agent.artifact_home_projection \
+  --batch-size 100 --max-batches 10 --require-complete
+```
+
+출력의 `complete=true`를 배포 증적으로 확인한 뒤에만
+`DWP_DWAION_HOME_TITLE_PROJECTION_READY=true`로 활성화합니다. 활성화 전 Home provider는
+성공 데이터를 꾸미지 않고 `UNAVAILABLE`을 반환합니다.
+
 Preview는 항상 `mutationAllowed=false`이며 L2 Plan에는 사람 승인을 요구합니다.
 응답의 `planHash`는 사용자·역할·요청·Agent Registry Revision을 결합한 SHA-256이고,
 구조화 감사 Event에는

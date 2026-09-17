@@ -83,6 +83,8 @@ from .system_api import build_system_router
 from .user_run_api import router as user_run_router
 from .activity_api import router as activity_router
 from .artifact_api import router as artifact_router
+from .artifact_home_projection import validate_artifact_home_projection_activation
+from .home_widget_api import router as home_widget_router
 from .domain_retention_api import admin_router as domain_retention_admin_router
 from .domain_retention_api import router as domain_retention_router
 from .personal_memory_api import router as personal_memory_router
@@ -112,6 +114,7 @@ async def lifespan(_: FastAPI):
     validate_meeting_intelligence_runtime_configuration()
     validate_meeting_media_runtime_configuration()
     initialize_database()
+    validate_artifact_home_projection_activation()
     seed_local_governance()
     seed_local_activity()
     validate_delivery_gate_runtime()
@@ -151,6 +154,7 @@ app.include_router(meeting_media_router)
 app.include_router(personal_routine_router)
 app.include_router(personal_memory_router)
 app.include_router(artifact_router)
+app.include_router(home_widget_router)
 app.include_router(domain_retention_router)
 app.include_router(domain_retention_admin_router)
 

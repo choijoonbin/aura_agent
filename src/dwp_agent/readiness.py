@@ -67,6 +67,7 @@ def validate_runtime_configuration(key_provider: KeyProvider | None = None) -> N
 
     required_secrets = (
         "DWP_AGENT_SERVICE_TOKEN",
+        "DWP_DWAION_HOME_IDENTITY_SIGNING_SECRET",
         "DWP_AGENT_IDENTITY_SIGNING_SECRET",
         "DWP_PLATFORM_RUNTIME_SERVICE_TOKEN",
         "DWP_APPROVAL_RUNTIME_SERVICE_TOKEN",
@@ -123,6 +124,7 @@ def validate_runtime_configuration(key_provider: KeyProvider | None = None) -> N
         errors,
         "service identity tokens",
         "DWP_AGENT_SERVICE_TOKEN",
+        "DWP_DWAION_HOME_IDENTITY_SIGNING_SECRET",
         "DWP_AGENT_IDENTITY_SIGNING_SECRET",
         "DWP_PLATFORM_RUNTIME_SERVICE_TOKEN",
         "DWP_APPROVAL_RUNTIME_SERVICE_TOKEN",
