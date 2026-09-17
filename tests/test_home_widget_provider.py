@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import asyncio
 import hashlib
 import hmac
 import json
@@ -18,11 +19,16 @@ from dwp_agent import home_widget_identity
 from dwp_agent.artifact_contracts import ArtifactState, ArtifactType
 from dwp_agent.governed_domain_core import GovernedDomainUnavailable
 from dwp_agent.home_widget_contracts import DwaionArtifactHomeItem
+from dwp_agent.home_widget_body_limit import (
+    HOME_WIDGET_REQUEST_LIMIT_BYTES,
+    HomeWidgetBodyLimitMiddleware,
+    install_home_widget_body_limit,
+)
 
 
 SIGNING_SECRET = "dwaion-home-delegated-identity-test-secret"
-MANIFEST_HASH = "a" * 64
-BINDING_REVISION = "binding-revision-1234567890"
+MANIFEST_HASH = home_widget_api.DEFINITION_MANIFEST_HASH
+BINDING_REVISION = "c" * 64
 
 
 class _Store:
@@ -64,14 +70,25 @@ class _Store:
 @pytest.fixture(autouse=True)
 def _service_identity(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DWP_DWAION_HOME_IDENTITY_SIGNING_SECRET", SIGNING_SECRET)
+    monkeypatch.delenv("DWP_DWAION_HOME_IDENTITY_PREVIOUS_KEY_ID", raising=False)
+    monkeypatch.delenv(
+        "DWP_DWAION_HOME_IDENTITY_PREVIOUS_SIGNING_SECRET", raising=False
+    )
     monkeypatch.setenv("DWP_DWAION_HOME_TITLE_PROJECTION_READY", "true")
     monkeypatch.setenv("DWP_ENVIRONMENT", "test")
     home_widget_identity.home_identity_replay_store.cache_clear()
 
 
-def _client(monkeypatch: pytest.MonkeyPatch, store: _Store) -> TestClient:
+def _client(
+    monkeypatch: pytest.MonkeyPatch,
+    store: _Store,
+    *,
+    install_body_limit: bool = False,
+) -> TestClient:
     monkeypatch.setattr(home_widget_api, "get_artifact_store", lambda: store)
     app = FastAPI()
+    if install_body_limit:
+        install_home_widget_body_limit(app)
     app.include_router(home_widget_api.router)
     return TestClient(app)
 
@@ -81,6 +98,8 @@ def _headers(
     body: bytes,
     permissions: str | None = None,
     path: str = "/internal/home/v1/widget-data:batch",
+    key_id: str = "platform-dwaion-home-v1",
+    signing_secret: str = SIGNING_SECRET,
 ) -> dict[str, str]:
     now = datetime.now(timezone.utc)
     headers = {
@@ -99,22 +118,31 @@ def _headers(
         "Content-Type": "application/json",
     }
     headers["X-DWP-Home-Assertion"] = _assertion(
-        headers, path=path, body=body
+        headers, path=path, body=body, key_id=key_id, signing_secret=signing_secret
     )
     return headers
 
 
-def _assertion(headers: dict[str, str], *, path: str, body: bytes) -> str:
+def _assertion(
+    headers: dict[str, str],
+    *,
+    path: str,
+    body: bytes,
+    key_id: str = "platform-dwaion-home-v1",
+    signing_secret: str = SIGNING_SECRET,
+) -> str:
     now = int(time.time())
     claims = {
         "v": 1,
-        "kid": "platform-dwaion-home-v1",
+        "kid": key_id,
         "iss": "dwp-platform-server",
         "aud": "dwp-agent-home",
         "sub": headers["X-DWP-User-ID"],
         "tid": headers["X-DWP-Tenant-ID"],
         "pid": headers.get("X-DWP-Person-Public-ID"),
         "cid": headers["X-Correlation-ID"],
+        "traceparent": headers.get("traceparent"),
+        "tracestate": headers.get("tracestate"),
         "ip": headers["X-DWP-Identity-Plane"],
         "htm": "POST",
         "htu": path,
@@ -135,18 +163,20 @@ def _assertion(headers: dict[str, str], *, path: str, body: bytes) -> str:
     )
     signed = f"dwp1.{encoded_claims}"
     signature = _b64(
-        hmac.new(SIGNING_SECRET.encode(), signed.encode(), hashlib.sha256).digest()
+        hmac.new(signing_secret.encode(), signed.encode(), hashlib.sha256).digest()
     )
     return f"{signed}.{signature}"
 
 
-def _signed_claims(claims: dict[str, object]) -> str:
+def _signed_claims(
+    claims: dict[str, object], *, signing_secret: str = SIGNING_SECRET
+) -> str:
     encoded_claims = _b64(
         json.dumps(claims, separators=(",", ":"), sort_keys=True).encode()
     )
     signed = f"dwp1.{encoded_claims}"
     signature = _b64(
-        hmac.new(SIGNING_SECRET.encode(), signed.encode(), hashlib.sha256).digest()
+        hmac.new(signing_secret.encode(), signed.encode(), hashlib.sha256).digest()
     )
     return f"{signed}.{signature}"
 
@@ -166,7 +196,7 @@ def _request(*, item_limit: int = 3, definition_key: str = "dwaion.artifact") ->
             {
                 "instanceId": str(uuid4()),
                 "definitionKey": definition_key,
-                "definitionVersion": "1.0.0",
+                "definitionVersion": home_widget_api.DEFINITION_VERSION,
                 "definitionManifestHash": MANIFEST_HASH,
                 "rendererBindingRevision": BINDING_REVISION,
                 "configuration": {},
@@ -183,7 +213,7 @@ def _request_many(item_limits: list[int]) -> dict:
             {
                 "instanceId": str(uuid4()),
                 "definitionKey": "dwaion.artifact",
-                "definitionVersion": "1.0.0",
+                "definitionVersion": home_widget_api.DEFINITION_VERSION,
                 "definitionManifestHash": MANIFEST_HASH,
                 "rendererBindingRevision": BINDING_REVISION,
                 "configuration": {},
@@ -233,7 +263,12 @@ def test_available_projection_is_recipient_bound_bounded_and_least_data(
     assert body["authorityDecisionRevision"] == "decision-17"
     result = body["results"][0]
     assert result["state"] == "AVAILABLE"
+    assert result["definitionManifestHash"] == MANIFEST_HASH
+    assert result["rendererBindingRevision"] == BINDING_REVISION
     assert result["source"]["sourceKey"] == "DWAION_HOME"
+    assert datetime.fromisoformat(result["source"]["expiresAt"]) <= datetime.fromisoformat(
+        response.request.headers["X-DWP-Home-Deadline-At"]
+    )
     assert result["source"]["resultVersion"].startswith("v1:")
     assert result["payload"]["visibleCount"] == 2
     assert len(result["payload"]["items"]) == 1
@@ -336,6 +371,40 @@ def test_transport_rejects_ambient_authority_wrong_owner_and_commands(
     assert command.status_code == 422
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("definitionVersion", "1.0.1"),
+        ("definitionManifestHash", "b" * 64),
+    ),
+)
+def test_provider_rejects_unapproved_immutable_definition_bindings(
+    monkeypatch: pytest.MonkeyPatch,
+    field: str,
+    value: str,
+) -> None:
+    request = _request()
+    request["widgets"][0][field] = value
+
+    response = _post(_client(monkeypatch, _Store()), request)
+
+    assert response.status_code == 400
+    assert response.json()["detail"]["reasonCode"] == (
+        "HOME_PROVIDER_DEFINITION_NOT_SUPPORTED"
+    )
+
+
+def test_provider_requires_a_canonical_catalog_binding_revision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = _request()
+    request["widgets"][0]["rendererBindingRevision"] = "unapproved-binding"
+
+    response = _post(_client(monkeypatch, _Store()), request)
+
+    assert response.status_code == 422
+
+
 def test_home_profile_rejects_gateway_assertion_and_service_token_profiles(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -421,6 +490,102 @@ def test_home_profile_bounds_assertion_and_fails_closed_for_invalid_key_id(
     )
 
 
+def test_previous_signing_key_is_accepted_only_during_a_valid_rotation_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    previous_key_id = "platform-dwaion-home-v0"
+    previous_secret = "previous-dwaion-home-signing-secret-0001"
+    monkeypatch.setenv("DWP_DWAION_HOME_IDENTITY_PREVIOUS_KEY_ID", previous_key_id)
+    monkeypatch.setenv(
+        "DWP_DWAION_HOME_IDENTITY_PREVIOUS_SIGNING_SECRET", previous_secret
+    )
+    request = _request()
+    raw = _body(request)
+    headers = _headers(
+        body=raw,
+        key_id=previous_key_id,
+        signing_secret=previous_secret,
+    )
+    client = _client(monkeypatch, _Store())
+
+    accepted = client.post(
+        "/internal/home/v1/widget-data:batch", headers=headers, content=raw
+    )
+    monkeypatch.setenv(
+        "DWP_DWAION_HOME_IDENTITY_PREVIOUS_SIGNING_SECRET", SIGNING_SECRET
+    )
+    unsafe_rotation = _post(client, _request())
+
+    assert accepted.status_code == 200
+    assert unsafe_rotation.status_code == 503
+    assert unsafe_rotation.json()["detail"]["reasonCode"] == (
+        "HOME_PROVIDER_DELEGATED_IDENTITY_NOT_CONFIGURED"
+    )
+
+
+def test_transport_rejects_declared_oversized_body_before_identity_verification(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    response = _client(
+        monkeypatch, _Store(), install_body_limit=True
+    ).post(
+        "/internal/home/v1/widget-data:batch",
+        headers={"Content-Length": str(HOME_WIDGET_REQUEST_LIMIT_BYTES + 1)},
+        content=b"{}",
+    )
+
+    assert response.status_code == 413
+    assert response.headers["Cache-Control"] == "no-store"
+    assert response.json()["detail"]["reasonCode"] == (
+        "HOME_PROVIDER_BODY_OUT_OF_BOUNDS"
+    )
+
+
+def test_transport_stops_streaming_body_at_the_bound_before_downstream_buffering() -> None:
+    downstream_called = False
+    sent: list[dict[str, object]] = []
+    chunks = iter(
+        (
+            {
+                "type": "http.request",
+                "body": b"a" * (HOME_WIDGET_REQUEST_LIMIT_BYTES // 2 + 1),
+                "more_body": True,
+            },
+            {
+                "type": "http.request",
+                "body": b"b" * (HOME_WIDGET_REQUEST_LIMIT_BYTES // 2 + 1),
+                "more_body": False,
+            },
+        )
+    )
+
+    async def downstream(scope, receive, send) -> None:
+        nonlocal downstream_called
+        downstream_called = True
+
+    async def receive() -> dict[str, object]:
+        return next(chunks)
+
+    async def send(message: dict[str, object]) -> None:
+        sent.append(message)
+
+    asyncio.run(
+        HomeWidgetBodyLimitMiddleware(downstream)(
+            {
+                "type": "http",
+                "method": "POST",
+                "path": "/internal/home/v1/widget-data:batch",
+                "headers": [],
+            },
+            receive,
+            send,
+        )
+    )
+
+    assert downstream_called is False
+    assert sent[0]["status"] == 413
+
+
 def test_transport_rejects_tampered_recipient_headers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -438,6 +603,45 @@ def test_transport_rejects_tampered_recipient_headers(
     assert response.json()["detail"]["reasonCode"] == (
         "HOME_PROVIDER_DELEGATED_IDENTITY_INVALID"
     )
+
+
+def test_transport_binds_trace_context_without_accepting_unsigned_replacement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = _request()
+    raw = _body(request)
+    headers = _headers(body=raw)
+    headers["traceparent"] = "00-" + "1" * 32 + "-" + "2" * 16 + "-01"
+
+    response = _client(monkeypatch, _Store()).post(
+        "/internal/home/v1/widget-data:batch", headers=headers, content=raw
+    )
+
+    assert response.status_code == 401
+    assert response.json()["detail"]["reasonCode"] == (
+        "HOME_PROVIDER_DELEGATED_IDENTITY_INVALID"
+    )
+
+
+def test_transport_accepts_trace_context_only_when_it_is_signed_exactly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = _request()
+    raw = _body(request)
+    headers = _headers(body=raw)
+    headers["traceparent"] = "00-" + "3" * 32 + "-" + "4" * 16 + "-01"
+    headers["tracestate"] = "vendor=value"
+    headers["X-DWP-Home-Assertion"] = _assertion(
+        headers,
+        path="/internal/home/v1/widget-data:batch",
+        body=raw,
+    )
+
+    response = _client(monkeypatch, _Store()).post(
+        "/internal/home/v1/widget-data:batch", headers=headers, content=raw
+    )
+
+    assert response.status_code == 200
 
 
 def test_transport_binds_exact_body_and_rejects_replay(

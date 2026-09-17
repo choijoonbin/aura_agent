@@ -35,7 +35,7 @@ class HomeWidgetRequest(ContractModel):
     definition_key: str = Field(min_length=1, max_length=160)
     definition_version: str = Field(min_length=1, max_length=80)
     definition_manifest_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
-    renderer_binding_revision: str = Field(min_length=1, max_length=160)
+    renderer_binding_revision: str = Field(pattern=r"^[0-9a-f]{64}$")
     configuration: dict[str, JsonValue] = Field(default_factory=dict, max_length=50)
     item_limit: int = Field(ge=1, le=HOME_WIDGET_MAX_ITEM_LIMIT)
 

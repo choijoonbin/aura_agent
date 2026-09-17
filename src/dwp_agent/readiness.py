@@ -82,10 +82,12 @@ def validate_runtime_configuration(key_provider: KeyProvider | None = None) -> N
         "DWP_API_HISTORY_PRIVACY_HASH_SECRET",
     )
     for name in required_secrets:
-        minimum_length = (
-            32 if name == "DWP_DWAION_HOME_IDENTITY_SIGNING_SECRET" else 24
+        configured = (
+            _managed_home_identity_secret(name)
+            if name == "DWP_DWAION_HOME_IDENTITY_SIGNING_SECRET"
+            else _managed_secret(name)
         )
-        if not _managed_secret(name, minimum_length=minimum_length):
+        if not configured:
             errors.append(name)
 
     home_identity_key_id = os.getenv(
@@ -93,6 +95,31 @@ def validate_runtime_configuration(key_provider: KeyProvider | None = None) -> N
     ).strip()
     if not _HOME_IDENTITY_KEY_ID.fullmatch(home_identity_key_id):
         errors.append("DWP_DWAION_HOME_IDENTITY_KEY_ID")
+    previous_key_id = os.getenv(
+        "DWP_DWAION_HOME_IDENTITY_PREVIOUS_KEY_ID", ""
+    ).strip()
+    previous_secret = os.getenv(
+        "DWP_DWAION_HOME_IDENTITY_PREVIOUS_SIGNING_SECRET", ""
+    ).strip()
+    if bool(previous_key_id) != bool(previous_secret):
+        errors.extend(
+            (
+                "DWP_DWAION_HOME_IDENTITY_PREVIOUS_KEY_ID",
+                "DWP_DWAION_HOME_IDENTITY_PREVIOUS_SIGNING_SECRET",
+            )
+        )
+    elif previous_key_id and previous_secret:
+        if not _HOME_IDENTITY_KEY_ID.fullmatch(previous_key_id):
+            errors.append("DWP_DWAION_HOME_IDENTITY_PREVIOUS_KEY_ID")
+        if not _managed_home_identity_secret(
+            "DWP_DWAION_HOME_IDENTITY_PREVIOUS_SIGNING_SECRET"
+        ):
+            errors.append("DWP_DWAION_HOME_IDENTITY_PREVIOUS_SIGNING_SECRET")
+        current_secret = os.getenv(
+            "DWP_DWAION_HOME_IDENTITY_SIGNING_SECRET", ""
+        ).strip()
+        if previous_key_id == home_identity_key_id or previous_secret == current_secret:
+            errors.append("distinct DWAI-ON Home identity rotation keys")
 
     required_values = (
         "DWP_AGENT_DATABASE_URL",
@@ -138,6 +165,7 @@ def validate_runtime_configuration(key_provider: KeyProvider | None = None) -> N
         "service identity tokens",
         "DWP_AGENT_SERVICE_TOKEN",
         "DWP_DWAION_HOME_IDENTITY_SIGNING_SECRET",
+        "DWP_DWAION_HOME_IDENTITY_PREVIOUS_SIGNING_SECRET",
         "DWP_AGENT_IDENTITY_SIGNING_SECRET",
         "DWP_PLATFORM_RUNTIME_SERVICE_TOKEN",
         "DWP_APPROVAL_RUNTIME_SERVICE_TOKEN",
@@ -158,6 +186,20 @@ def _managed_secret(name: str, *, minimum_length: int = 24) -> bool:
     lowered = value.lower()
     return (
         len(value) >= minimum_length
+        and "replace-with" not in lowered
+        and "change-me" not in lowered
+    )
+
+
+def _managed_home_identity_secret(name: str) -> bool:
+    value = os.getenv(name, "").strip()
+    try:
+        length = len(value.encode("utf-8"))
+    except UnicodeEncodeError:
+        return False
+    lowered = value.lower()
+    return (
+        32 <= length <= 256
         and "replace-with" not in lowered
         and "change-me" not in lowered
     )

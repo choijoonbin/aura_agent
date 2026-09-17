@@ -85,6 +85,7 @@ from .activity_api import router as activity_router
 from .artifact_api import router as artifact_router
 from .artifact_home_projection import validate_artifact_home_projection_activation
 from .home_widget_api import router as home_widget_router
+from .home_widget_body_limit import install_home_widget_body_limit
 from .domain_retention_api import admin_router as domain_retention_admin_router
 from .domain_retention_api import router as domain_retention_router
 from .personal_memory_api import router as personal_memory_router
@@ -132,6 +133,7 @@ app = FastAPI(title=SERVICE_NAME, version=SERVICE_VERSION, lifespan=lifespan)
 install_api_history(app)
 install_meeting_intelligence_body_limit(app)
 install_meeting_media_body_limit(app)
+install_home_widget_body_limit(app)
 install_product_surface_pep(app)
 install_private_no_store(app)
 install_operational_gate_problem_handler(app)

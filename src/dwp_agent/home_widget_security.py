@@ -34,6 +34,8 @@ _PROTECTED_HEADERS = (
     "X-DWP-Current-Revalidate-At",
     "X-DWP-Home-Deadline-At",
     "X-Correlation-ID",
+    "traceparent",
+    "tracestate",
     "X-DWP-Identity-Plane",
     ASSERTION_HEADER,
 )
@@ -68,24 +70,7 @@ class HomeWidgetRecipient:
 
 
 async def authorize_home_widget_request(request: Request) -> HomeWidgetRecipient:
-    signing_secret = os.getenv(
-        "DWP_DWAION_HOME_IDENTITY_SIGNING_SECRET", ""
-    ).strip()
-    if len(signing_secret) < 32:
-        _error(
-            status.HTTP_503_SERVICE_UNAVAILABLE,
-            "HOME_PROVIDER_DELEGATED_IDENTITY_NOT_CONFIGURED",
-            "The dedicated DWAI-ON Home delegated identity verifier is not configured.",
-        )
-    key_id = os.getenv(
-        "DWP_DWAION_HOME_IDENTITY_KEY_ID", DEFAULT_KEY_ID
-    ).strip()
-    if not _KEY_ID.fullmatch(key_id):
-        _error(
-            status.HTTP_503_SERVICE_UNAVAILABLE,
-            "HOME_PROVIDER_DELEGATED_IDENTITY_NOT_CONFIGURED",
-            "The dedicated DWAI-ON Home delegated identity verifier is not configured.",
-        )
+    identity_keys = _home_identity_keys()
     if any(len(request.headers.getlist(name)) > 1 for name in _PROTECTED_HEADERS):
         _error(
             status.HTTP_400_BAD_REQUEST,
@@ -139,16 +124,28 @@ async def authorize_home_widget_request(request: Request) -> HomeWidgetRecipient
                 "HOME_PROVIDER_BODY_OUT_OF_BOUNDS",
                 "The Home provider request body is outside the signed contract bound.",
             )
-        verify_home_delegated_identity(
-            assertion=request.headers[ASSERTION_HEADER],
-            secret=signing_secret,
-            method=request.method,
-            path=request.url.path,
-            body=body,
-            headers=request.headers,
-            replay_store=home_identity_replay_store(),
-            key_id=key_id,
-        )
+        replay_store = home_identity_replay_store()
+        identity_error: HomeDelegatedIdentityError | None = None
+        for key_id, signing_secret in identity_keys:
+            try:
+                verify_home_delegated_identity(
+                    assertion=request.headers[ASSERTION_HEADER],
+                    secret=signing_secret,
+                    method=request.method,
+                    path=request.url.path,
+                    body=body,
+                    headers=request.headers,
+                    replay_store=replay_store,
+                    key_id=key_id,
+                )
+                identity_error = None
+                break
+            except HomeIdentityReplayUnavailable:
+                raise
+            except HomeDelegatedIdentityError as error:
+                identity_error = error
+        if identity_error is not None:
+            raise identity_error
     except HomeIdentityReplayUnavailable:
         _error(
             status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -229,6 +226,51 @@ def _authority_set(raw: str) -> frozenset[str]:
             "Recipient authority sets must not contain duplicates.",
         )
     return frozenset(values)
+
+
+def _home_identity_keys() -> tuple[tuple[str, str], ...]:
+    current_key_id = os.getenv(
+        "DWP_DWAION_HOME_IDENTITY_KEY_ID", DEFAULT_KEY_ID
+    ).strip()
+    current_secret = os.getenv(
+        "DWP_DWAION_HOME_IDENTITY_SIGNING_SECRET", ""
+    ).strip()
+    previous_key_id = os.getenv(
+        "DWP_DWAION_HOME_IDENTITY_PREVIOUS_KEY_ID", ""
+    ).strip()
+    previous_secret = os.getenv(
+        "DWP_DWAION_HOME_IDENTITY_PREVIOUS_SIGNING_SECRET", ""
+    ).strip()
+    if not _valid_identity_key(current_key_id, current_secret):
+        _identity_not_configured()
+    if bool(previous_key_id) != bool(previous_secret):
+        _identity_not_configured()
+    keys = [(current_key_id, current_secret)]
+    if previous_key_id and previous_secret:
+        if (
+            not _valid_identity_key(previous_key_id, previous_secret)
+            or previous_key_id == current_key_id
+            or previous_secret == current_secret
+        ):
+            _identity_not_configured()
+        keys.append((previous_key_id, previous_secret))
+    return tuple(keys)
+
+
+def _valid_identity_key(key_id: str, secret: str) -> bool:
+    try:
+        secret_length = len(secret.encode("utf-8"))
+    except UnicodeEncodeError:
+        return False
+    return bool(_KEY_ID.fullmatch(key_id)) and 32 <= secret_length <= 256
+
+
+def _identity_not_configured() -> None:
+    _error(
+        status.HTTP_503_SERVICE_UNAVAILABLE,
+        "HOME_PROVIDER_DELEGATED_IDENTITY_NOT_CONFIGURED",
+        "The dedicated DWAI-ON Home delegated identity verifier is not configured.",
+    )
 
 
 def _positive_int(value: str) -> int:

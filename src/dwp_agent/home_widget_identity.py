@@ -95,6 +95,8 @@ def verify_home_delegated_identity(
         "tid": headers.get("X-DWP-Tenant-ID"),
         "pid": headers.get("X-DWP-Person-Public-ID"),
         "cid": headers.get("X-Correlation-ID"),
+        "traceparent": headers.get("traceparent"),
+        "tracestate": headers.get("tracestate"),
         "ip": headers.get("X-DWP-Identity-Plane"),
         "htm": method.upper(),
         "htu": path,

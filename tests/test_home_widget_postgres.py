@@ -12,6 +12,7 @@ import pytest
 from psycopg import connect
 
 from dwp_agent.artifact_home_projection import (
+    _BACKFILL_SELECT,
     PostgresArtifactHomeProjectionBackfill,
     validate_artifact_home_projection_activation,
 )
@@ -33,36 +34,82 @@ def migrated_database() -> None:
     database_name = urlparse(DATABASE_URL).path.removeprefix("/")
     if not database_name.endswith(("_integration", "_test", "_verify")):
         pytest.fail("Home provider integration tests require a dedicated test database.")
-    os.environ["DWP_ENVIRONMENT"] = "local"
-    os.environ["DWP_AGENT_KEY_PROVIDER"] = "local-inline"
-    os.environ["DWP_AGENT_DATA_KEY_VERSION"] = "home-test-v1"
-    os.environ["DWP_AGENT_DATA_KEY"] = base64.b64encode(b"h" * 32).decode("ascii")
-    apply_migrations(DATABASE_URL)
-    _reset()
+    names = (
+        "DWP_ENVIRONMENT",
+        "DWP_AGENT_KEY_PROVIDER",
+        "DWP_AGENT_DATA_KEY_VERSION",
+        "DWP_AGENT_DATA_KEY",
+        "DWP_AGENT_DATABASE_URL",
+        "DWP_DWAION_HOME_TITLE_PROJECTION_READY",
+    )
+    previous = {name: os.environ.get(name) for name in names}
+    initialized = False
+    try:
+        os.environ["DWP_ENVIRONMENT"] = "local"
+        os.environ["DWP_AGENT_KEY_PROVIDER"] = "local-inline"
+        os.environ["DWP_AGENT_DATA_KEY_VERSION"] = "home-test-v1"
+        os.environ["DWP_AGENT_DATA_KEY"] = base64.b64encode(b"h" * 32).decode("ascii")
+        apply_migrations(DATABASE_URL)
+        initialized = True
+        _reset()
+        yield
+    finally:
+        if initialized:
+            _reset()
+        for name, value in previous.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+
+@pytest.fixture(autouse=True)
+def restore_per_test_home_environment() -> None:
+    names = (
+        "DWP_AGENT_DATABASE_URL",
+        "DWP_DWAION_HOME_TITLE_PROJECTION_READY",
+    )
+    previous = {name: os.environ.get(name) for name in names}
     yield
-    _reset()
+    for name, value in previous.items():
+        if value is None:
+            os.environ.pop(name, None)
+        else:
+            os.environ[name] = value
 
 
 def test_v41_migration_and_postgres_replay_admission_are_enforced() -> None:
     with connect(DATABASE_URL) as connection:
-        migration = connection.execute(
-            "SELECT checksum FROM sys_schema_history WHERE version = 'V41'"
-        ).fetchone()
+        migrations = connection.execute(
+            "SELECT version, checksum FROM sys_schema_history "
+            "WHERE version IN ('V41', 'V42') ORDER BY version"
+        ).fetchall()
         relations = connection.execute(
             """SELECT to_regclass('agent_home_identity_assertion_replay'),
-                      to_regclass('agent_artifact_home_projection_backfill_receipts')"""
+                      to_regclass('agent_artifact_home_projection_backfill_receipts'),
+                      to_regclass('idx_ai_artifact_drafts_home_title_pending')"""
         ).fetchone()
         column = connection.execute(
             """SELECT is_nullable FROM information_schema.columns
                  WHERE table_name = 'ai_artifact_drafts'
                    AND column_name = 'home_title_envelope'"""
         ).fetchone()
-    assert migration is not None and len(migration[0]) == 64
+    assert [row[0] for row in migrations] == ["V41", "V42"]
+    assert all(len(row[1]) == 64 for row in migrations)
     assert relations == (
         "agent_home_identity_assertion_replay",
         "agent_artifact_home_projection_backfill_receipts",
+        "idx_ai_artifact_drafts_home_title_pending",
     )
     assert column == ("YES",)
+
+    with connect(DATABASE_URL) as connection:
+        connection.execute("SET LOCAL enable_seqscan = off")
+        plan = connection.execute(
+            "EXPLAIN (FORMAT JSON) " + _BACKFILL_SELECT,
+            (100,),
+        ).fetchone()[0]
+    assert "idx_ai_artifact_drafts_home_title_pending" in str(plan)
 
     store = PostgresHomeIdentityReplayStore(DATABASE_URL)
     jti = uuid4()

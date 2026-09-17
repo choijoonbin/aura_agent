@@ -30,6 +30,10 @@ from .personal_domain_security import PersonalDomainIdentity
 
 
 DEFINITION_KEY = "dwaion.artifact"
+DEFINITION_VERSION = "1.1.0"
+DEFINITION_MANIFEST_HASH = (
+    "eb2152b7f1cf21611bb4a2c1781f7f267c5cd0c6d489d4edc8f680bb4fa6af54"
+)
 SOURCE_KEY = "DWAION_HOME"
 SOURCE_ROUTE = "/dwaion/artifacts"
 REQUIRED_PERMISSIONS = frozenset(
@@ -39,25 +43,35 @@ REQUIRED_PERMISSIONS = frozenset(
 router = APIRouter(tags=["home-widget-provider"])
 
 
-@router.post(HOME_WIDGET_BATCH_PATH, response_model=HomeWidgetBatchResponse)
+@router.post(
+    HOME_WIDGET_BATCH_PATH,
+    response_model=HomeWidgetBatchResponse,
+    include_in_schema=False,
+)
 def batch_home_widgets(
     body: HomeWidgetBatchRequest,
     recipient: Annotated[HomeWidgetRecipient, Depends(authorize_home_widget_request)],
 ) -> HomeWidgetBatchResponse:
-    if any(widget.definition_key != DEFINITION_KEY for widget in body.widgets):
+    if any(
+        widget.definition_key != DEFINITION_KEY
+        or widget.definition_version != DEFINITION_VERSION
+        or widget.definition_manifest_hash != DEFINITION_MANIFEST_HASH
+        for widget in body.widgets
+    ):
         _request_error(
             status.HTTP_400_BAD_REQUEST,
-            "HOME_PROVIDER_DEFINITION_NOT_OWNED",
-            "DWAI-ON does not own a requested widget definition.",
+            "HOME_PROVIDER_DEFINITION_NOT_SUPPORTED",
+            "DWAI-ON does not support the requested immutable widget definition.",
         )
     if not REQUIRED_PERMISSIONS.issubset(recipient.permissions):
-        results = [_forbidden(widget) for widget in body.widgets]
+        results = [_forbidden(widget, recipient) for widget in body.widgets]
     elif os.getenv(
         "DWP_DWAION_HOME_TITLE_PROJECTION_READY", "false"
     ).strip().lower() != "true":
         results = [
             _unavailable(
                 widget,
+                recipient,
                 reason_code="PROVIDER_DWAION_ARTIFACT_PROJECTION_NOT_ACTIVATED",
             )
             for widget in body.widgets
@@ -78,11 +92,11 @@ def batch_home_widgets(
             )
             recipient.current()
             results = [
-                _result(widget, projection)
+                _result(widget, projection, recipient)
                 for widget in body.widgets
             ]
         except GovernedDomainUnavailable:
-            results = [_unavailable(widget) for widget in body.widgets]
+            results = [_unavailable(widget, recipient) for widget in body.widgets]
     recipient.current()
     return HomeWidgetBatchResponse(
         tenant_id=recipient.tenant_id,
@@ -92,7 +106,7 @@ def batch_home_widgets(
     )
 
 
-@router.post(HOME_WIDGET_COMMAND_PATH)
+@router.post(HOME_WIDGET_COMMAND_PATH, include_in_schema=False)
 def reject_home_widget_commands(
     _: Annotated[HomeWidgetRecipient, Depends(authorize_home_widget_request)],
 ) -> None:
@@ -106,14 +120,19 @@ def reject_home_widget_commands(
 def _result(
     widget: HomeWidgetRequest,
     projection: DwaionArtifactHomeProjection,
+    recipient: HomeWidgetRecipient,
 ) -> HomeWidgetResult:
     if projection.visible_count == 0:
-        return _empty(widget)
+        return _empty(widget, recipient)
     prefix = projection.slots[: widget.item_limit]
     items = [item for item in prefix if item is not None]
     unreadable_count = len(prefix) - len(items)
     if unreadable_count and not items:
-        return _unavailable(widget, reason_code="PROVIDER_DWAION_ARTIFACT_TITLE_UNREADABLE")
+        return _unavailable(
+            widget,
+            recipient,
+            reason_code="PROVIDER_DWAION_ARTIFACT_TITLE_UNREADABLE",
+        )
     payload_model = DwaionArtifactHomePayload(
         visible_count=projection.visible_count,
         items=items,
@@ -132,6 +151,7 @@ def _result(
             else HomeWidgetState.AVAILABLE
         ),
         source=_source(
+            recipient,
             now,
             reason_code=(
                 "PROVIDER_DWAION_ARTIFACT_TITLE_PARTIAL"
@@ -151,7 +171,9 @@ def _result(
     )
 
 
-def _empty(widget: HomeWidgetRequest) -> HomeWidgetResult:
+def _empty(
+    widget: HomeWidgetRequest, recipient: HomeWidgetRecipient
+) -> HomeWidgetResult:
     now = datetime.now(timezone.utc)
     return HomeWidgetResult(
         instance_id=widget.instance_id,
@@ -160,6 +182,7 @@ def _empty(widget: HomeWidgetRequest) -> HomeWidgetResult:
         renderer_binding_revision=widget.renderer_binding_revision,
         state=HomeWidgetState.EMPTY,
         source=_source(
+            recipient,
             now,
             result_version=_result_version(widget, {}),
             last_success_at=now,
@@ -169,7 +192,9 @@ def _empty(widget: HomeWidgetRequest) -> HomeWidgetResult:
     )
 
 
-def _forbidden(widget: HomeWidgetRequest) -> HomeWidgetResult:
+def _forbidden(
+    widget: HomeWidgetRequest, recipient: HomeWidgetRecipient
+) -> HomeWidgetResult:
     now = datetime.now(timezone.utc)
     return HomeWidgetResult(
         instance_id=widget.instance_id,
@@ -177,7 +202,11 @@ def _forbidden(widget: HomeWidgetRequest) -> HomeWidgetResult:
         definition_manifest_hash=widget.definition_manifest_hash,
         renderer_binding_revision=widget.renderer_binding_revision,
         state=HomeWidgetState.FORBIDDEN,
-        source=_source(now, reason_code="AUTHORIZATION_DWAION_ARTIFACT_REQUIRED"),
+        source=_source(
+            recipient,
+            now,
+            reason_code="AUTHORIZATION_DWAION_ARTIFACT_REQUIRED",
+        ),
         payload={},
         actions=[],
     )
@@ -185,6 +214,7 @@ def _forbidden(widget: HomeWidgetRequest) -> HomeWidgetResult:
 
 def _unavailable(
     widget: HomeWidgetRequest,
+    recipient: HomeWidgetRecipient,
     *,
     reason_code: str = "PROVIDER_DWAION_ARTIFACT_PROJECTION_UNAVAILABLE",
 ) -> HomeWidgetResult:
@@ -196,6 +226,7 @@ def _unavailable(
         renderer_binding_revision=widget.renderer_binding_revision,
         state=HomeWidgetState.UNAVAILABLE,
         source=_source(
+            recipient,
             now,
             reason_code=reason_code,
             retryable=True,
@@ -206,6 +237,7 @@ def _unavailable(
 
 
 def _source(
+    recipient: HomeWidgetRecipient,
     now: datetime,
     *,
     reason_code: str | None = None,
@@ -216,7 +248,11 @@ def _source(
     return HomeWidgetSourceState(
         source_key=SOURCE_KEY,
         generated_at=now,
-        expires_at=now + timedelta(seconds=30),
+        expires_at=min(
+            now + timedelta(seconds=30),
+            recipient.deadline_at,
+            recipient.authority_revalidate_at,
+        ),
         last_success_at=last_success_at,
         reason_code=reason_code,
         retryable=retryable,

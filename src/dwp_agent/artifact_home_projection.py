@@ -31,6 +31,18 @@ _PROJECTION_ERRORS = (
     ValueError,
 )
 
+_BACKFILL_SELECT = """SELECT a.artifact_id, a.tenant_id, a.user_id, d.content_envelope
+     FROM ai_artifact_drafts d
+     JOIN ai_artifacts a ON a.artifact_id = d.artifact_id
+     LEFT JOIN agent_artifact_home_projection_backfill_receipts r
+       ON r.artifact_id = a.artifact_id
+    WHERE d.home_title_envelope IS NULL
+      AND (r.artifact_id IS NULL OR (
+           r.state = 'FAILED' AND r.attempt_count < 5
+           AND r.attempted_at <= CURRENT_TIMESTAMP - INTERVAL '5 minutes'))
+    ORDER BY d.artifact_id
+    LIMIT %s FOR UPDATE OF d SKIP LOCKED"""
+
 
 class ArtifactHomeProjectionQueries:
     database_url: str
@@ -107,20 +119,7 @@ class PostgresArtifactHomeProjectionBackfill:
         if not 1 <= limit <= 500:
             raise ValueError("Artifact Home projection batch limit is invalid.")
         with connect(self.database_url, row_factory=dict_row) as connection:
-            rows = connection.execute(
-                """SELECT a.artifact_id, a.tenant_id, a.user_id, d.content_envelope
-                     FROM ai_artifacts a
-                     JOIN ai_artifact_drafts d ON d.artifact_id = a.artifact_id
-                     LEFT JOIN agent_artifact_home_projection_backfill_receipts r
-                       ON r.artifact_id = a.artifact_id
-                    WHERE d.home_title_envelope IS NULL
-                      AND (r.artifact_id IS NULL OR (
-                           r.state = 'FAILED' AND r.attempt_count < 5
-                           AND r.attempted_at <= CURRENT_TIMESTAMP - INTERVAL '5 minutes'))
-                    ORDER BY a.tenant_id, a.user_id, a.updated_at DESC, a.artifact_id
-                    LIMIT %s FOR UPDATE OF d SKIP LOCKED""",
-                (limit,),
-            ).fetchall()
+            rows = connection.execute(_BACKFILL_SELECT, (limit,)).fetchall()
             for row in rows:
                 self._project(connection, row)
             return len(rows)

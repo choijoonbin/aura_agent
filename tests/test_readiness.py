@@ -44,6 +44,7 @@ def test_production_runtime_accepts_complete_distinct_configuration(
     ("name", "value"),
     (
         ("DWP_DWAION_HOME_IDENTITY_SIGNING_SECRET", "h" * 31),
+        ("DWP_DWAION_HOME_IDENTITY_SIGNING_SECRET", "h" * 257),
         ("DWP_DWAION_HOME_IDENTITY_KEY_ID", "bad key id"),
         ("DWP_DWAION_HOME_IDENTITY_KEY_ID", "x"),
     ),
@@ -60,6 +61,59 @@ def test_production_runtime_rejects_home_identity_configuration_that_request_ver
         validate_runtime_configuration(ManagedTestKeyProvider())
 
     assert name in str(captured.value)
+
+
+def test_production_runtime_accepts_a_distinct_complete_home_identity_rotation_pair(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _configure_production(monkeypatch)
+    monkeypatch.setenv(
+        "DWP_DWAION_HOME_IDENTITY_PREVIOUS_KEY_ID", "platform-dwaion-home-v0"
+    )
+    monkeypatch.setenv(
+        "DWP_DWAION_HOME_IDENTITY_PREVIOUS_SIGNING_SECRET",
+        "previous-home-signing-secret-for-production",
+    )
+
+    validate_runtime_configuration(ManagedTestKeyProvider())
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    (
+        ("DWP_DWAION_HOME_IDENTITY_PREVIOUS_KEY_ID", "platform-dwaion-home-v0"),
+        (
+            "DWP_DWAION_HOME_IDENTITY_PREVIOUS_SIGNING_SECRET",
+            "previous-home-signing-secret-for-production",
+        ),
+    ),
+)
+def test_production_runtime_rejects_an_incomplete_home_identity_rotation_pair(
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    value: str,
+) -> None:
+    _configure_production(monkeypatch)
+    monkeypatch.setenv(name, value)
+
+    with pytest.raises(RuntimeConfigurationError, match="PREVIOUS"):
+        validate_runtime_configuration(ManagedTestKeyProvider())
+
+
+def test_production_runtime_keeps_previous_home_key_distinct_from_service_tokens(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _configure_production(monkeypatch)
+    monkeypatch.setenv(
+        "DWP_DWAION_HOME_IDENTITY_PREVIOUS_KEY_ID", "platform-dwaion-home-v0"
+    )
+    monkeypatch.setenv(
+        "DWP_DWAION_HOME_IDENTITY_PREVIOUS_SIGNING_SECRET",
+        _PRODUCTION_ENVIRONMENT["DWP_AGENT_SERVICE_TOKEN"],
+    )
+
+    with pytest.raises(RuntimeConfigurationError, match="distinct service identity tokens"):
+        validate_runtime_configuration(ManagedTestKeyProvider())
 
 
 def test_production_runtime_rejects_shared_identity_and_insecure_model_endpoint(
