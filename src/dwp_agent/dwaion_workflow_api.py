@@ -425,7 +425,9 @@ def require_workflow_worker(
 internal_router = APIRouter(
     prefix="/internal/v1",
     include_in_schema=False,
-    dependencies=[Depends(require_workflow_worker)],
+    # Worker authority supplements the normal service/delegated-identity boundary;
+    # it never replaces it for tenant-personal observations.
+    dependencies=[Depends(require_workflow_worker), *personal_domain_dependencies],
 )
 
 

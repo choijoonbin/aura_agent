@@ -13,6 +13,7 @@ from dwp_agent.artifact_collaboration_contracts import (
     CreateTeamArtifactAccessRequest,
     CreateTeamArtifactCommentRequest,
     CreateTeamArtifactWorkspaceRequest,
+    DecideTeamArtifactReviewStageRequest,
     ReplyTeamArtifactCommentRequest,
     ResolveTeamArtifactCommentRequest,
     RunTeamArtifactPreflightRequest,
@@ -23,7 +24,11 @@ from dwp_agent.artifact_collaboration_provider import (
     ArtifactAclPreflightResult,
 )
 from dwp_agent.artifact_collaboration_store import PostgresArtifactCollaborationStore
-from dwp_agent.artifact_contracts import ArtifactDraftContent, CreateArtifactRequest
+from dwp_agent.artifact_contracts import (
+    ArtifactDraftContent,
+    ArtifactMetadata,
+    CreateArtifactRequest,
+)
 from dwp_agent.artifact_postgres_store import PostgresArtifactStore
 from dwp_agent.database_migrations import apply_migrations
 from dwp_agent.domain_retention_store import PostgresDomainRetentionStore
@@ -407,3 +412,186 @@ def test_inline_comments_are_encrypted_scoped_audited_and_replay_safe() -> None:
         "COMMENT_REPLIED",
         "COMMENT_RESOLVED",
     ]
+
+
+def test_artifact_metadata_and_staged_review_are_tenant_bound_and_null_safe() -> None:
+    tenant_id = 700_000_000 + uuid4().int % 90_000_000
+    owner = PersonalDomainIdentity(
+        tenant_id=tenant_id,
+        user_id="review-owner",
+        correlation_id=str(uuid4()),
+        auth_session_id="review-owner-session",
+        roles=frozenset({"WORKSPACE_MEMBER"}),
+        permissions=frozenset(),
+    )
+    reviewer = PersonalDomainIdentity(
+        tenant_id=tenant_id,
+        user_id="primary-reviewer",
+        correlation_id=str(uuid4()),
+        auth_session_id="primary-reviewer-session",
+        roles=frozenset({"WORKSPACE_MEMBER"}),
+        permissions=frozenset(),
+    )
+    PostgresDomainRetentionStore(DATABASE_URL).upsert_policy(
+        owner,
+        DomainKey.ARTIFACT,
+        UpsertRetentionPolicyRequest(
+            commandId=uuid4(),
+            expectedRevision=0,
+            reasonCode="TENANT_RETENTION_BOOTSTRAP",
+            changeReason="Set artifact retention for staged review verification.",
+            retentionDays=365,
+            deletionGraceDays=7,
+            legalHold=False,
+        ),
+    )
+    sla_due_at = datetime.now(UTC) + timedelta(days=2)
+    artifact = PostgresArtifactStore(DATABASE_URL).create(
+        owner,
+        CreateArtifactRequest(
+            commandId=uuid4(),
+            expectedRevision=0,
+            reasonCode="USER_ARTIFACT_CREATE",
+            artifactType="DOCUMENT",
+            content=ArtifactDraftContent(
+                title="Staged review test",
+                body="Verify metadata and governed review decisions.",
+            ),
+            metadata=ArtifactMetadata(
+                tags=["Quarterly", "Risk"],
+                projectKey="FIN-Q4",
+                reviewSlaDueAt=sla_due_at,
+            ),
+        ),
+    )
+    assert artifact.author_subject_id == owner.user_id
+    assert artifact.metadata.tags == ["Quarterly", "Risk"]
+    assert artifact.metadata.project_key == "FIN-Q4"
+    assert artifact.metadata.review_sla_due_at == sla_due_at
+
+    store = PostgresArtifactCollaborationStore(
+        DATABASE_URL,
+        provider=_AllowedAccessProvider(),
+    )
+    team_id = uuid4()
+    preflight = store.preflight(
+        owner,
+        artifact.artifact_id,
+        RunTeamArtifactPreflightRequest(
+            commandId=uuid4(),
+            expectedRevision=artifact.revision,
+            reasonCode="TEAM_ACL_PREFLIGHT",
+            teamId=team_id,
+            artifactRevision=artifact.revision,
+            members=[{"subjectId": reviewer.user_id, "role": "REVIEWER"}],
+        ),
+    )
+    workspace = store.create_workspace(
+        owner,
+        artifact.artifact_id,
+        CreateTeamArtifactWorkspaceRequest(
+            commandId=uuid4(),
+            expectedRevision=artifact.revision,
+            reasonCode="TEAM_WORKSPACE_CREATE",
+            changeReason="Create a tenant-bound staged review workspace.",
+            teamId=team_id,
+            preflightId=preflight.preflight_id,
+        ),
+    )
+    primary = next(
+        stage for stage in workspace.review_stages if stage.stage_key == "PRIMARY_REVIEW"
+    )
+    assert primary.assignee_subject_id == reviewer.user_id
+    assert primary.state == "PENDING"
+    assert len(workspace.governance_gates) == 4
+    assert workspace.review_sla_due_at == sla_due_at
+    assert workspace.signature_evidence.capability.available is False
+
+    with connect(DATABASE_URL) as connection:
+        with pytest.raises(PsycopgError):
+            with connection.transaction():
+                connection.execute(
+                    """UPDATE ai_artifact_review_stages
+                          SET stage_state = 'APPROVED', revision = revision + 1,
+                              decided_by_user_id = %s, decided_at = CURRENT_TIMESTAMP,
+                              updated_at = CURRENT_TIMESTAMP
+                        WHERE stage_id = %s""",
+                    (reviewer.user_id, primary.stage_id),
+                )
+        tenant_boundary = connection.execute(
+            """SELECT pg_get_constraintdef(oid)
+                 FROM pg_constraint
+                WHERE conname = 'fk_ai_artifact_review_stage_boundary'"""
+        ).fetchone()[0]
+    assert (
+        "FOREIGN KEY (workspace_id, artifact_id, tenant_id)" in tenant_boundary
+    )
+    assert (
+        "REFERENCES ai_artifact_team_workspaces(workspace_id, artifact_id, tenant_id)"
+        in tenant_boundary
+    )
+
+    other_tenant = PersonalDomainIdentity(
+        tenant_id=tenant_id + 1,
+        user_id=reviewer.user_id,
+        correlation_id=str(uuid4()),
+        auth_session_id="other-tenant-review-session",
+        roles=reviewer.roles,
+        permissions=reviewer.permissions,
+    )
+    with pytest.raises(GovernedDomainNotFound):
+        store.get_workspace(other_tenant, artifact.artifact_id)
+    with pytest.raises(GovernedDomainNotFound):
+        store.decide_review_stage(
+            other_tenant,
+            artifact.artifact_id,
+            primary.stage_id,
+            DecideTeamArtifactReviewStageRequest(
+                commandId=uuid4(),
+                expectedRevision=primary.revision,
+                reasonCode="TEAM_ARTIFACT_REVIEW_DECISION",
+                changeReason="A different tenant must not see this review stage.",
+                decision="APPROVE",
+            ),
+        )
+
+    request = DecideTeamArtifactReviewStageRequest(
+        commandId=uuid4(),
+        expectedRevision=primary.revision,
+        reasonCode="TEAM_ARTIFACT_REVIEW_DECISION",
+        changeReason="Approve after verifying the four governance gates.",
+        decision="APPROVE",
+    )
+    decided = store.decide_review_stage(
+        reviewer,
+        artifact.artifact_id,
+        primary.stage_id,
+        request,
+    )
+    replay = store.decide_review_stage(
+        reviewer,
+        artifact.artifact_id,
+        primary.stage_id,
+        request,
+    )
+    approved = next(
+        stage for stage in decided.review_stages if stage.stage_id == primary.stage_id
+    )
+    assert approved.state == "APPROVED"
+    assert approved.evidence_fingerprint is not None
+    assert approved.decided_by_subject_id == reviewer.user_id
+    assert replay == decided
+
+    with connect(DATABASE_URL) as connection:
+        reason_envelope, event_type = connection.execute(
+            """SELECT s.decision_reason_envelope, e.event_type
+                 FROM ai_artifact_review_stages s
+                 JOIN ai_artifact_collaboration_events e
+                   ON e.workspace_id = s.workspace_id
+                  AND e.command_id = %s
+                WHERE s.stage_id = %s""",
+            (request.command_id, primary.stage_id),
+        ).fetchone()
+    assert reason_envelope.startswith("dwp2.")
+    assert "Approve after" not in reason_envelope
+    assert event_type == "REVIEW_APPROVED"
