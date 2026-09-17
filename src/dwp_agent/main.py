@@ -11,6 +11,11 @@ from fastapi.responses import StreamingResponse
 
 from .admin_authority import AdminPreflightDenied, require_admin_preflight
 from .admin_commands import resolve_admin_command
+from .ai_control_api import router as ai_control_router
+from .ai_control_integration import (
+    AI_CONTROL_ERRORS, ai_control_http_exception, controlled_ask_runtime,
+    stream_error_code as _stream_error_code,
+)
 from .ask_runtime import AskRuntime
 from .action_api import router as action_router
 from .audit import record_plan_preview
@@ -131,6 +136,7 @@ app.include_router(
     build_system_router(service_name=SERVICE_NAME, service_version=SERVICE_VERSION)
 )
 app.include_router(operations_router)
+app.include_router(ai_control_router)
 app.include_router(governance_router)
 app.include_router(governance_safety_router)
 app.include_router(operational_gate_router)
@@ -165,7 +171,7 @@ def require_operational_delivery(
 
 
 def get_ask_runtime() -> AskRuntime:
-    return AskRuntime()
+    return controlled_ask_runtime()
 
 
 def require_ask_access(
@@ -249,6 +255,8 @@ def ask(
         ) from error
     except ConversationNotFound as error:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(error)) from error
+    except AI_CONTROL_ERRORS as error:
+        raise ai_control_http_exception(error) from error
 
 
 @app.post(
@@ -481,20 +489,6 @@ def preview_plan(
 
 def _sse(event: str, payload: dict[str, object]) -> str:
     return f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
-
-
-def _stream_error_code(error: Exception) -> str:
-    if isinstance(error, ConversationNotFound):
-        return "CONVERSATION_NOT_FOUND"
-    if isinstance(error, RegistryResolutionError):
-        return "AGENT_REGISTRY_UNAVAILABLE"
-    if isinstance(error, RunInProgress):
-        return "RUN_IN_PROGRESS"
-    if isinstance(error, RequestIdConflict):
-        return "REQUEST_ID_CONFLICT"
-    if isinstance(error, RunStoreUnavailable):
-        return "AGENT_STORE_UNAVAILABLE"
-    return "ASK_STREAM_FAILED"
 
 
 install_product_surface_openapi_contract(app)

@@ -38,10 +38,13 @@ from dwp_agent.personal_memory_contracts import (
 from dwp_agent.personal_memory_policy import require_safe_explicit_memory
 from dwp_agent.personal_routine_contracts import (
     ArchiveRoutineRequest,
+    ChangeRoutineActivationRequest,
     ChangeRoutineConsentRequest,
     ChangeRoutineLifecycleRequest,
+    CommandRoutineRunRequest,
     CreateRoutineRequest,
     RoutineDefinition,
+    TriggerRoutineRunRequest,
     UpdateRoutineRequest,
 )
 from dwp_agent.personal_routine_schedule import preview_next_run
@@ -193,6 +196,9 @@ def test_every_mutation_contract_has_command_revision_and_reason() -> None:
         ChangeRoutineConsentRequest,
         ChangeRoutineLifecycleRequest,
         ArchiveRoutineRequest,
+        ChangeRoutineActivationRequest,
+        TriggerRoutineRunRequest,
+        CommandRoutineRunRequest,
         UpdateMemoryPreferenceRequest,
         UpdateMemoryRuntimePreferenceRequest,
         UpdateAiSourcePreferenceRequest,

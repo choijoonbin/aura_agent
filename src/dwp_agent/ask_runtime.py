@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from typing import Callable
 from uuid import uuid4
 
 from .audit import record_ask_failure, record_ask_run
+from .ai_control_runtime import AIRuntimeControl, AIRuntimePlan
 from .ask_response_guard import (
     model_provider_label as _model_provider_label, safe_status_code as _safe_status_code,
     safety_identifier as _safety_identifier, selected_response_guard,
@@ -37,6 +39,7 @@ from .model_gateway import (
     ModelConfigurationRequired,
     ModelRefused,
     OpenAIResponsesGateway,
+    input_token_reservation_ceiling,
 )
 from .policy import AskIdentity, SafetyControls, evaluate_ask_policy
 from .personal_memory_runtime import PersonalMemoryRuntime
@@ -53,12 +56,14 @@ class AskRuntime:
         run_store: RunStore | None = None,
         conversation_store: ConversationStore | None = None,
         personalization_runtime: PersonalMemoryRuntime | None = None,
+        ai_runtime_control: AIRuntimeControl | None = None,
     ) -> None:
         self.context_broker = context_broker or WorkspaceContextBroker()
         self.model_gateway = model_gateway or OpenAIResponsesGateway()
         self.run_store = run_store or get_run_store()
         self.conversation_store = conversation_store or get_conversation_store(self.run_store)
         self.personalization_runtime = personalization_runtime or PersonalMemoryRuntime()
+        self.ai_runtime_control = ai_runtime_control
 
     def answer(
         self,
@@ -268,6 +273,16 @@ class AskRuntime:
         on_progress: Callable[[str], None] | None,
         workspace_authorization: WorkspaceRequestAuthorization | None,
     ) -> tuple[AskResponse, str | None]:
+        runtime_plan: AIRuntimePlan | None = None
+        if self.ai_runtime_control is not None:
+            runtime_plan = self.ai_runtime_control.preflight(
+                tenant_id=identity.tenant_id,
+                provider=_model_provider_label(self.model_gateway),
+                model=self.model_gateway.model.strip(),
+                knowledge_sources=tuple(scope.value for scope in request.source_scopes),
+                now=datetime.now(timezone.utc),
+                region=getattr(self.model_gateway, "provider_region", None),
+            )
         _progress(on_progress, "RETRIEVING")
         try:
             context = self.context_broker.collect(
@@ -291,17 +306,16 @@ class AskRuntime:
                     state=AskState.CONFIGURATION_REQUIRED,
                     status_code="CONTEXT_BROKER_CONFIGURATION_REQUIRED",
                     model_route=AskModelRoute(state=ModelRouteState.NOT_INVOKED),
+                    warnings=runtime_plan.warnings if runtime_plan else (),
                 ),
                 None,
             )
-
         self.run_store.record_source_health(
             lease,
             tenant_id=identity.tenant_id, user_id=identity.user_id,
             request_id=request.request_id,
             observations=context.source_health,
         )
-
         if not context.sources:
             status_code = context.status_code or (
                 "CONTEXT_SOURCE_UNAVAILABLE"
@@ -319,26 +333,41 @@ class AskRuntime:
                     state=AskState.ABSTAINED,
                     status_code=status_code,
                     model_route=AskModelRoute(state=ModelRouteState.NOT_INVOKED),
+                    warnings=runtime_plan.warnings if runtime_plan else (),
                 ),
                 None,
             )
-
         _progress(on_progress, "REASONING")
         personalization = self.personalization_runtime.resolve(
             identity, agent_key=registry.entry_key
         )
         fallback_used = False
         try:
-            model_answer = self.model_gateway.generate(
+            input_token_ceiling = input_token_reservation_ceiling(
                 request.query,
-                context=context,
-                locale=request.locale,
-                run_id=run_id,
-                safety_identifier=_safety_identifier(identity),
+                context=context, locale=request.locale,
                 conversation_history=conversation_history,
                 page_context=request.page_context,
-                agent_key=registry.entry_key,
-                personal_preferences=personalization.preferences,
+                agent_key=registry.entry_key, personal_preferences=personalization.preferences,
+            )
+            def call_model(output_limit: int | None):
+                return self.model_gateway.generate(
+                    request.query, context=context, locale=request.locale, run_id=run_id,
+                    safety_identifier=_safety_identifier(identity),
+                    conversation_history=conversation_history, page_context=request.page_context,
+                    agent_key=registry.entry_key,
+                    personal_preferences=personalization.preferences,
+                    max_output_tokens=output_limit,
+                    allow_automatic_retry=self.ai_runtime_control is None,
+            )
+            model_answer = (
+                self.ai_runtime_control.invoke_model(
+                    plan=runtime_plan, run_id=run_id, attempt_generation=lease.generation,
+                    input_token_ceiling=input_token_ceiling, call=call_model,
+                    now=datetime.now(timezone.utc),
+                )
+                if self.ai_runtime_control is not None and runtime_plan is not None
+                else call_model(None)
             )
         except ModelConfigurationRequired:
             return (
@@ -358,6 +387,7 @@ class AskRuntime:
                         model=self.model_gateway.model.strip() or None,
                     ),
                     personalization=personalization.evidence(model_applied=False),
+                    warnings=runtime_plan.warnings if runtime_plan else (),
                 ),
                 None,
             )
@@ -379,6 +409,7 @@ class AskRuntime:
                         model=self.model_gateway.model.strip() or None,
                     ),
                     personalization=personalization.evidence(model_applied=False),
+                    warnings=runtime_plan.warnings if runtime_plan else (),
                 ),
                 None,
             )
@@ -403,10 +434,10 @@ class AskRuntime:
                         model=self.model_gateway.model.strip() or None,
                     ),
                     personalization=personalization.evidence(model_applied=False),
+                    warnings=runtime_plan.warnings if runtime_plan else (),
                 ),
                 None,
             )
-
         _progress(on_progress, "VERIFYING")
         citations_by_id = {
             source.citation.source_id: source.citation for source in context.sources
@@ -423,7 +454,6 @@ class AskRuntime:
             status_code = grounded_status_for_provider(
                 "DWP_GROUNDED_FALLBACK" if fallback_used else model_answer.provider
             )
-
         return (
             _response(
                 request=request,
@@ -448,6 +478,7 @@ class AskRuntime:
                     latency_ms=model_answer.latency_ms,
                 ),
                 personalization=personalization.evidence(model_applied=not fallback_used),
+                warnings=runtime_plan.warnings if runtime_plan else (),
             ),
             model_answer.provider_request_hash,
         )

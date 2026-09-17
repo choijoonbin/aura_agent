@@ -57,6 +57,15 @@ class AgentActivityStore(Protocol):
     def detail(self, *, tenant_id: str, user_id: str, run_id: UUID) -> ActivityRunSnapshot | None: ...
     def counts(self, *, tenant_id: str, user_id: str, filters: ActivityFilters,
                now: datetime) -> dict[str, int]: ...
+    def summary(
+        self,
+        *,
+        tenant_id: str,
+        user_id: str,
+        filters: ActivityFilters,
+        now: datetime,
+        attention_limit: int,
+    ) -> tuple[dict[str, int], list[ActivityRunSnapshot]]: ...
 
 
 class InMemoryAgentActivityStore:
@@ -80,6 +89,29 @@ class InMemoryAgentActivityStore:
                now: datetime) -> dict[str, int]:
         return dict(Counter(row.activity_state(now) for row in self.runs.activity_snapshots(
             tenant_id=tenant_id, user_id=user_id) if filters.matches(row, now)))
+
+    def summary(
+        self,
+        *,
+        tenant_id: str,
+        user_id: str,
+        filters: ActivityFilters,
+        now: datetime,
+        attention_limit: int,
+    ) -> tuple[dict[str, int], list[ActivityRunSnapshot]]:
+        rows = [
+            row
+            for row in self.runs.activity_snapshots(tenant_id=tenant_id, user_id=user_id)
+            if filters.matches(row, now)
+        ]
+        counts = dict(Counter(row.activity_state(now) for row in rows))
+        attention = [
+            row
+            for row in rows
+            if row.activity_state(now) in {"NEEDS_INPUT", "POLICY_BLOCKED"}
+        ]
+        attention.sort(key=lambda row: (row.created_at, row.run_id), reverse=True)
+        return counts, attention[:attention_limit]
 
 
 _COLUMNS = """run_id, tenant_id, user_id, agent_key, agent_revision, run_state,
@@ -164,6 +196,47 @@ class PostgresAgentActivityStore:
         where, params = self._where(tenant_id, user_id, filters, now)
         rows = self._query(f"SELECT {_STATE} AS activity_state, COUNT(*) FROM ai_agent_runs WHERE {where} GROUP BY 1", [now, *params])
         return {str(row[0]): int(row[1]) for row in rows}
+
+    def summary(
+        self,
+        *,
+        tenant_id: str,
+        user_id: str,
+        filters: ActivityFilters,
+        now: datetime,
+        attention_limit: int,
+    ) -> tuple[dict[str, int], list[ActivityRunSnapshot]]:
+        where, params = self._where(tenant_id, user_id, filters, now)
+        attention_where = f"{where} AND ({_STATE}) IN ('NEEDS_INPUT', 'POLICY_BLOCKED')"
+        try:
+            with connect(self.database_url, connect_timeout=5) as connection:
+                _configure_activity_summary_snapshot(connection)
+                count_rows = connection.execute(
+                    f"SELECT {_STATE} AS activity_state, COUNT(*) "
+                    f"FROM ai_agent_runs WHERE {where} GROUP BY 1",
+                    [now, *params],
+                ).fetchall()
+                attention_rows = connection.execute(
+                    f"SELECT {_COLUMNS} FROM ai_agent_runs "
+                    f"WHERE {attention_where} "
+                    "ORDER BY created_at DESC, run_id DESC LIMIT %s",
+                    [*params, now, attention_limit],
+                ).fetchall()
+        except (PsycopgError, ValueError) as error:
+            raise ActivityStoreUnavailable(
+                "The Agent execution source is unavailable."
+            ) from error
+        return (
+            {str(row[0]): int(row[1]) for row in count_rows},
+            [_snapshot(row) for row in attention_rows],
+        )
+
+
+def _configure_activity_summary_snapshot(connection) -> None:
+    connection.execute(
+        "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"
+    )
+    connection.execute("SET LOCAL statement_timeout = '5s'")
 
 
 def _snapshot(row: tuple) -> ActivityRunSnapshot:

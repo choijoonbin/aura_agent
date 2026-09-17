@@ -120,6 +120,7 @@ class ExecutionSummary(ContractModel):
     cancelled: int = 0
     unknown: int = 0
     generated_at: datetime
+    attention_items: list[ActivityEvent] = Field(default_factory=list, max_length=5)
     coverage: ActivityCoverage = Field(default_factory=ActivityCoverage)
 
 

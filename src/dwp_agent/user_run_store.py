@@ -21,6 +21,7 @@ from .user_run_contracts import (
 )
 from .run_store import InMemoryRunStore, PostgresRunStore, get_run_store
 from .run_store_errors import RunStoreUnavailable
+from .user_run_store_errors import UserRunStoreUnavailable
 from .run_observability import (
     RunSourceHealthSnapshot,
     RunSourceHealthStatus,
@@ -32,10 +33,6 @@ from .run_observability import (
 )
 
 
-class UserRunStoreUnavailable(RuntimeError):
-    pass
-
-
 class UserRunStore(Protocol):
     def list(
         self,
@@ -45,6 +42,19 @@ class UserRunStore(Protocol):
         limit: int,
         run_state: AgentRunState | None,
     ) -> list[UserAgentRunSummary]: ...
+
+    def page(
+        self,
+        *,
+        tenant_id: str,
+        user_id: str,
+        limit: int,
+        run_state: AgentRunState | None,
+        from_at: datetime | None,
+        to_at: datetime | None,
+        snapshot_at: datetime,
+        after: tuple[datetime, UUID] | None,
+    ) -> tuple[list[UserAgentRunSummary], bool]: ...
 
     def get(
         self,
@@ -66,6 +76,20 @@ class EmptyUserRunStore:
     ) -> list[UserAgentRunSummary]:
         return []
 
+    def page(
+        self,
+        *,
+        tenant_id: str,
+        user_id: str,
+        limit: int,
+        run_state: AgentRunState | None,
+        from_at: datetime | None,
+        to_at: datetime | None,
+        snapshot_at: datetime,
+        after: tuple[datetime, UUID] | None,
+    ) -> tuple[list[UserAgentRunSummary], bool]:
+        return [], False
+
     def get(
         self,
         *,
@@ -84,8 +108,39 @@ class InMemoryUserRunStore:
              run_state: AgentRunState | None) -> list[UserAgentRunSummary]:
         rows = self.runs.activity_snapshots(tenant_id=tenant_id, user_id=user_id)
         rows.sort(key=lambda row: (row.created_at, row.run_id), reverse=True)
-        return [_in_memory_summary(row, self.runs) for row in rows
-                if run_state is None or row.run_state == run_state][:limit]
+        return [
+            _in_memory_summary(row, self.runs)
+            for row in rows
+            if run_state is None or row.run_state == run_state
+        ][:limit]
+
+    def page(
+        self,
+        *,
+        tenant_id: str,
+        user_id: str,
+        limit: int,
+        run_state: AgentRunState | None,
+        from_at: datetime | None,
+        to_at: datetime | None,
+        snapshot_at: datetime,
+        after: tuple[datetime, UUID] | None,
+    ) -> tuple[list[UserAgentRunSummary], bool]:
+        rows = self.runs.activity_snapshots(tenant_id=tenant_id, user_id=user_id)
+        rows = [
+            row
+            for row in rows
+            if row.created_at <= snapshot_at
+            and (from_at is None or row.created_at >= from_at)
+            and (to_at is None or row.created_at < to_at)
+            and (after is None or (row.created_at, row.run_id) < after)
+            and (run_state is None or row.run_state == run_state)
+        ]
+        rows.sort(key=lambda row: (row.created_at, row.run_id), reverse=True)
+        return (
+            [_in_memory_summary(row, self.runs) for row in rows[:limit]],
+            len(rows) > limit,
+        )
 
     def get(
         self,
@@ -111,11 +166,50 @@ class PostgresUserRunStore:
         limit: int,
         run_state: AgentRunState | None,
     ) -> list[UserAgentRunSummary]:
+        rows, _ = self.page(
+            tenant_id=tenant_id,
+            user_id=user_id,
+            limit=limit,
+            run_state=run_state,
+            from_at=None,
+            to_at=None,
+            snapshot_at=datetime.max.replace(tzinfo=timezone.utc),
+            after=None,
+        )
+        return rows
+
+    def page(
+        self,
+        *,
+        tenant_id: str,
+        user_id: str,
+        limit: int,
+        run_state: AgentRunState | None,
+        from_at: datetime | None,
+        to_at: datetime | None,
+        snapshot_at: datetime,
+        after: tuple[datetime, UUID] | None,
+    ) -> tuple[list[UserAgentRunSummary], bool]:
+        where = ["run.tenant_id = %s", "run.user_id = %s", "run.created_at <= %s"]
+        params: list[object] = [int(tenant_id), user_id, snapshot_at]
+        if run_state is not None:
+            where.append("run.run_state = %s")
+            params.append(run_state.value)
+        if from_at is not None:
+            where.append("run.created_at >= %s")
+            params.append(from_at)
+        if to_at is not None:
+            where.append("run.created_at < %s")
+            params.append(to_at)
+        if after is not None:
+            where.append("(run.created_at, run.run_id) < (%s, %s)")
+            params.extend(after)
+        params.append(limit + 1)
         try:
             with connect(self.database_url) as connection:
                 _configure_read_snapshot(connection)
                 rows = connection.execute(
-                    """
+                    f"""
                     SELECT run.run_id, run.agent_key, run.agent_revision, run.run_state,
                            run.answer_state, run.risk_tier, run.policy_outcome,
                            run.status_code, run.source_count, run.latency_ms,
@@ -132,29 +226,24 @@ class PostgresUserRunStore:
                         ON conversation.conversation_id = message.conversation_id
                        AND conversation.tenant_id = run.tenant_id
                        AND conversation.user_id = run.user_id
-                     WHERE run.tenant_id = %s AND run.user_id = %s
-                       AND (%s::text IS NULL OR run.run_state = %s)
+                     WHERE {' AND '.join(where)}
                      GROUP BY run.run_id
-                     ORDER BY run.created_at DESC
+                     ORDER BY run.created_at DESC, run.run_id DESC
                      LIMIT %s
                     """,
-                    (
-                        int(tenant_id),
-                        user_id,
-                        run_state.value if run_state else None,
-                        run_state.value if run_state else None,
-                        limit,
-                    ),
+                    params,
                 ).fetchall()
+                selected_rows = rows[:limit]
                 stages, sources = _postgres_observability(
-                    connection, tenant_id, user_id, rows
+                    connection, tenant_id, user_id, selected_rows
                 )
         except (PsycopgError, ValueError) as error:
             raise UserRunStoreUnavailable("The Agent activity store is unavailable.") from error
-        return [
+        summaries = [
             _postgres_summary(row, stages.get(row[0], ()), sources.get(row[0], ()))
-            for row in rows
+            for row in selected_rows
         ]
+        return summaries, len(rows) > limit
 
     def get(
         self,

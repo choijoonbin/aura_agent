@@ -121,6 +121,7 @@ def _headers(*permissions: str, **overrides: str) -> dict[str, str]:
     (
         ("/v1/ai-controls", "APP.DWAION_MEMORY:VIEW"),
         ("/v1/routines", "APP.DWAION_ROUTINES:VIEW"),
+        ("/v1/routines/capabilities", "APP.DWAION_ROUTINES:VIEW"),
         ("/v1/artifacts", "APP.DWAION_ARTIFACTS:VIEW"),
         ("/v1/artifacts/capabilities", "APP.DWAION_ARTIFACTS:VIEW"),
         ("/v1/personal-data/retention", "APP.DWAION_PRIVACY:VIEW"),

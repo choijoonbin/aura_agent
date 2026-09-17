@@ -9,7 +9,11 @@ from uuid import UUID, uuid4
 import pytest
 from psycopg import connect
 
-from dwp_agent.activity_store import ActivityFilters, InMemoryAgentActivityStore
+from dwp_agent.activity_store import (
+    ActivityFilters,
+    InMemoryAgentActivityStore,
+    _configure_activity_summary_snapshot,
+)
 from dwp_agent.main import app
 from dwp_agent.contracts import AskResponse
 from dwp_agent.run_observability import (
@@ -152,6 +156,49 @@ def test_sample_runs_are_visible_only_in_dwaion_run_views_not_activity_kpis() ->
     ) == {}
 
 
+def test_user_run_pages_apply_owner_time_range_and_stable_keyset() -> None:
+    base = datetime(2026, 9, 1, 0, 0, tzinfo=timezone.utc)
+    now = [base]
+    store = InMemoryRunStore(clock=lambda: now[0])
+    run_ids: list[UUID] = []
+    for _ in range(3):
+        lease = store.begin(_start(audit_id=str(uuid4())))
+        assert lease is not None
+        run_ids.append(UUID(lease.run_id))
+        now[0] += timedelta(hours=1)
+    foreign = store.begin(
+        _start(audit_id=str(uuid4()), tenant_id="1", user_id="foreign")
+    )
+    assert foreign is not None
+
+    reader = InMemoryUserRunStore(store)
+    first, more = reader.page(
+        tenant_id="1",
+        user_id="900018",
+        limit=1,
+        run_state=None,
+        from_at=base + timedelta(hours=1),
+        to_at=base + timedelta(hours=3),
+        snapshot_at=now[0],
+        after=None,
+    )
+    second, tail_more = reader.page(
+        tenant_id="1",
+        user_id="900018",
+        limit=1,
+        run_state=None,
+        from_at=base + timedelta(hours=1),
+        to_at=base + timedelta(hours=3),
+        snapshot_at=now[0],
+        after=(first[-1].created_at, first[-1].run_id),
+    )
+
+    assert [row.run_id for row in first] == [run_ids[2]]
+    assert [row.run_id for row in second] == [run_ids[1]]
+    assert more is True and tail_more is False
+    assert UUID(foreign.run_id) not in {row.run_id for row in first + second}
+
+
 def test_postgres_projection_keeps_telemetry_on_the_selected_attempt_snapshot() -> None:
     run_id = uuid4()
     observed_at = datetime(2026, 9, 7, 3, 0, tzinfo=timezone.utc)
@@ -184,6 +231,15 @@ def test_postgres_projection_keeps_telemetry_on_the_selected_attempt_snapshot() 
 def test_postgres_projection_configures_one_repeatable_read_snapshot() -> None:
     connection = _TelemetryConnection(stage_rows=[], source_rows=[])
     _configure_read_snapshot(connection)
+    assert connection.queries == [
+        "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY",
+        "SET LOCAL statement_timeout = '5s'",
+    ]
+
+
+def test_activity_summary_counts_and_attention_share_one_repeatable_read_snapshot() -> None:
+    connection = _TelemetryConnection(stage_rows=[], source_rows=[])
+    _configure_activity_summary_snapshot(connection)
     assert connection.queries == [
         "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY",
         "SET LOCAL statement_timeout = '5s'",

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Callable
 from uuid import UUID, uuid4
 
 from .governed_domain_core import (
@@ -21,11 +21,20 @@ from .personal_routine_contracts import (
     RoutineDefinition,
 )
 from .personal_routine_schedule import SOURCE_PERMISSIONS
+from .personal_routine_capabilities import routine_runtime_capabilities
 
 
 class PersonalRoutinePostgresBase:
-    def __init__(self, database_url: str) -> None:
+    def __init__(
+        self,
+        database_url: str,
+        *,
+        execution_available: Callable[[], bool] | None = None,
+    ) -> None:
         self.database_url = database_url
+        self.execution_available = execution_available or (
+            lambda: routine_runtime_capabilities().background_execution_available
+        )
         try:
             self.codec = GovernedPayloadCodec()
             self.fingerprints = GovernedFingerprints.load()
@@ -141,6 +150,7 @@ class PersonalRoutinePostgresBase:
         return row
 
     def _routine(self, row: Any) -> PersonalRoutine:
+        capabilities = routine_runtime_capabilities()
         return PersonalRoutine(
             routine_id=row["routine_id"],
             lifecycle_state=row["lifecycle_state"],
@@ -153,8 +163,12 @@ class PersonalRoutinePostgresBase:
             execution_mode=row["execution_mode"],
             revision=row["revision"],
             definition=self._definition(row),
-            scheduling_available=False,
-            next_run_at=None,
+            scheduling_available=(
+                capabilities.scheduling_available
+                and row["execution_mode"] == "SCHEDULED"
+            ),
+            next_run_at=row["next_run_at"],
+            capabilities=capabilities,
             created_at=row["created_at"],
             updated_at=row["updated_at"],
         )

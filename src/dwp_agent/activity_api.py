@@ -131,14 +131,21 @@ def activity_event_detail(
 def activity_execution_summary(
     identity: Annotated[AskIdentity, Depends(verified_ask_identity)],
     filters: Annotated[ActivityFilters, Depends(activity_filters)],
+    locale: Annotated[str, Header(alias="Accept-Language")] = "en",
 ) -> ExecutionSummaryEnvelope:
     now = datetime.now(timezone.utc)
     try:
-        counts = get_agent_activity_store().counts(tenant_id=identity.tenant_id, user_id=identity.user_id,
-                                                  filters=filters, now=now)
+        counts, attention_rows = get_agent_activity_store().summary(
+            tenant_id=identity.tenant_id,
+            user_id=identity.user_id,
+            filters=filters,
+            now=now,
+            attention_limit=5,
+        )
     except ActivityStoreUnavailable as error:
         raise HTTPException(503, str(error)) from error
     return ExecutionSummaryEnvelope(data=ExecutionSummary(
         total=sum(counts.values()), running=counts.get("RUNNING", 0), needs_input=counts.get("NEEDS_INPUT", 0),
         policy_blocked=counts.get("POLICY_BLOCKED", 0), completed=counts.get("COMPLETED", 0),
-        failed=counts.get("FAILED", 0), unknown=counts.get("UNKNOWN", 0), generated_at=now))
+        failed=counts.get("FAILED", 0), unknown=counts.get("UNKNOWN", 0), generated_at=now,
+        attention_items=[_event(row, now=now, locale=locale) for row in attention_rows]))

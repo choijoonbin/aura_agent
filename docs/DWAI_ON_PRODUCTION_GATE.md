@@ -222,6 +222,10 @@ uv run python scripts/export_openapi.py --check
 - `/v1/runs`와 `/v1/runs/{run_id}`도 동일한 SELF Route Contract 아래 등록됩니다.
   단건 조회는 최신 목록 한도와 독립적이며, Tenant와 사용자 소유권이 맞지 않거나 삭제된
   실행은 동일한 `404`로 처리하고 질문·답변·인용 원문을 반환하지 않습니다.
+  목록은 선택적인 `from`(포함)·`to`(미포함) 기간과 최대 100건의 페이지 한도를 서버에서
+  적용합니다. `nextCursor`는 Tenant·Owner·상태·기간·최초 조회 Watermark·마지막 위치에
+  HMAC으로 결속되며 한 시간 뒤 만료됩니다. 기존 `state`·`limit` 호출과 `data` 배열은
+  그대로 유지하고 `snapshotAt`·`nextCursor`·`hasMore`만 응답에 추가합니다.
 - 자료는 불변 이벤트 이력이 아니라 `ai_agent_runs`의 **현재 실행 Snapshot**입니다.
   `coverage.semantics=CURRENT_EXECUTION_SNAPSHOTS`, `sourceScope=DWAI_ON`을 명시하며
   과거 Attempt별 전이 이력·Outbox·외부 업무 처리·자동 Agent 실행은 제공하지 않습니다.
@@ -240,6 +244,9 @@ uv run python scripts/export_openapi.py --check
   위치에 HMAC으로 결속되고 한 시간 후 만료됩니다. 서명 Key는 기존 Identity Secret 또는
   Service Token에서 목적 분리해 파생하며 고정·빈 Key 대체를 하지 않습니다.
 - Summary는 페이지 제한과 무관하게 동일 사용자의 전체 해당 원장 행을 집계합니다.
+  `attentionItems`는 같은 읽기 Snapshot에서 확인된 `NEEDS_INPUT`·`POLICY_BLOCKED` 실행만
+  최신순 최대 5건으로 제공하며, 각 항목은 목록과 같은 개인정보 최소화 `ActivityEvent`
+  계약과 정확 원본 실행 Route를 사용합니다.
   질문·답변·대화명·Citation·암호문·임의 Correlation 문자열은 조회·복호화·응답하지 않습니다.
   V31은 opaque Agent audit ID와 여기서 계산한 결정적 UUIDv5 `auditRecordId`를 Run에
   저장하지만, 이 값은 중앙 감사 레코드의 조회 주소일 뿐 실제 수신·검증 증거가 아닙니다.

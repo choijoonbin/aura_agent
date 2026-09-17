@@ -40,6 +40,7 @@ class PersonalRoutineLifecycleCommands:
             connection.execute(
                 """UPDATE ai_personal_routines
                       SET lifecycle_state = %s, revision = %s,
+                          execution_mode = 'DRY_RUN_ONLY', next_run_at = NULL,
                           updated_at = CURRENT_TIMESTAMP
                     WHERE routine_id = %s AND tenant_id = %s AND user_id = %s""",
                 (target, revision, routine_id, identity.tenant_id, identity.user_id),

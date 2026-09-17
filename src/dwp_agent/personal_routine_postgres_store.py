@@ -27,6 +27,7 @@ from .personal_routine_contracts import (
     UpdateRoutineRequest,
 )
 from .personal_routine_lifecycle import PersonalRoutineLifecycleCommands
+from .personal_routine_execution_store import PersonalRoutineExecutionCommands
 from .personal_routine_postgres_base import (
     PersonalRoutinePostgresBase,
     _ROUTINE_SELECT,
@@ -51,9 +52,16 @@ def _translated(function: Callable[..., T]) -> Callable[..., T]:
 
 
 class PostgresPersonalRoutineStore(
-    PersonalRoutineLifecycleCommands, PersonalRoutinePostgresBase
+    PersonalRoutineExecutionCommands,
+    PersonalRoutineLifecycleCommands,
+    PersonalRoutinePostgresBase,
 ):
     change_lifecycle = _translated(PersonalRoutineLifecycleCommands.change_lifecycle)
+    change_activation = _translated(PersonalRoutineExecutionCommands.change_activation)
+    trigger_run = _translated(PersonalRoutineExecutionCommands.trigger_run)
+    list_runs = _translated(PersonalRoutineExecutionCommands.list_runs)
+    get_run = _translated(PersonalRoutineExecutionCommands.get_run)
+    command_run = _translated(PersonalRoutineExecutionCommands.command_run)
 
     @_translated
     def list(self, identity: PersonalDomainIdentity) -> list[PersonalRoutine]:
@@ -178,6 +186,13 @@ class PostgresPersonalRoutineStore(
                           consent_state = %s, source_access_consent_state = %s,
                           analysis_consent_state = %s,
                           proposal_delivery_consent_state = %s,
+                          lifecycle_state = CASE
+                              WHEN lifecycle_state = 'ACTIVE' THEN 'PAUSED'
+                              ELSE lifecycle_state END,
+                          execution_mode = CASE
+                              WHEN lifecycle_state = 'ACTIVE' THEN 'DRY_RUN_ONLY'
+                              ELSE execution_mode END,
+                          next_run_at = NULL,
                           revision = %s, updated_at = CURRENT_TIMESTAMP
                     WHERE routine_id = %s AND tenant_id = %s AND user_id = %s""",
                 (
@@ -259,11 +274,23 @@ class PostgresPersonalRoutineStore(
             connection.execute(
                 f"""UPDATE ai_personal_routines
                       SET {consent_column} = %s, consent_state = %s,
+                          lifecycle_state = CASE
+                              WHEN lifecycle_state = 'ACTIVE' AND %s <> 'ENABLED'
+                              THEN 'PAUSED' ELSE lifecycle_state END,
+                          execution_mode = CASE
+                              WHEN lifecycle_state = 'ACTIVE' AND %s <> 'ENABLED'
+                              THEN 'DRY_RUN_ONLY' ELSE execution_mode END,
+                          next_run_at = CASE
+                              WHEN lifecycle_state = 'ACTIVE' AND %s <> 'ENABLED'
+                              THEN NULL ELSE next_run_at END,
                           revision = %s, updated_at = CURRENT_TIMESTAMP
                     WHERE routine_id = %s AND tenant_id = %s AND user_id = %s""",
                 (
                     request.consent_state.value,
                     aggregate,
+                    request.consent_state.value,
+                    request.consent_state.value,
+                    request.consent_state.value,
                     revision,
                     routine_id,
                     identity.tenant_id,
@@ -399,6 +426,7 @@ class PostgresPersonalRoutineStore(
             connection.execute(
                 """UPDATE ai_personal_routines
                       SET lifecycle_state = 'ARCHIVED', consent_state = 'DISABLED',
+                          execution_mode = 'DRY_RUN_ONLY', next_run_at = NULL,
                           source_access_consent_state = 'DISABLED',
                           analysis_consent_state = 'DISABLED',
                           proposal_delivery_consent_state = 'DISABLED',

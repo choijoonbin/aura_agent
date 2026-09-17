@@ -284,6 +284,56 @@ def test_activity_projects_measured_progress_and_central_audit_link(configured):
     assert "private-correlation" not in str(event)
 
 
+def test_execution_summary_includes_only_recent_owner_attention_snapshots(configured):
+    observed_at = [datetime(2026, 9, 16, 0, 0, tzinfo=timezone.utc)]
+    configured._clock = lambda: observed_at[0]
+    attention_ids: list[str] = []
+    for index in range(7):
+        outcome = "HANDOFF" if index % 2 == 0 else "DENY"
+        run = replace(start(), policy_outcome=outcome)
+        lease = configured.begin(run)
+        assert lease is not None
+        configured._activity[lease.run_id] = replace(
+            configured._activity[lease.run_id],
+            run_state="COMPLETED",
+            completed_at=observed_at[0],
+        )
+        attention_ids.append(lease.run_id)
+        observed_at[0] += timedelta(seconds=1)
+
+    foreign = configured.begin(start(user="other-user"))
+    assert foreign is not None
+    configured._activity[foreign.run_id] = replace(
+        configured._activity[foreign.run_id],
+        run_state="COMPLETED",
+        policy_outcome="DENY",
+        completed_at=observed_at[0],
+    )
+
+    response = request("/v1/activity/executions/summary")
+
+    assert response.status_code == 200
+    summary = response.json()["data"]
+    assert summary["total"] == 7
+    assert summary["needsInput"] == 4
+    assert summary["policyBlocked"] == 3
+    assert [item["id"] for item in summary["attentionItems"]] == list(
+        reversed(attention_ids[-5:])
+    )
+    assert {item["state"] for item in summary["attentionItems"]} == {
+        "NEEDS_INPUT",
+        "POLICY_BLOCKED",
+    }
+    assert all(
+        item["sourceAccess"] == "AVAILABLE"
+        and item["eventKind"] == "EXECUTION_SNAPSHOT"
+        and item["sourceRoute"] == f"/dwaion/activity?run={item['id']}"
+        for item in summary["attentionItems"]
+    )
+    assert foreign.run_id not in response.text
+    assert "private-correlation" not in response.text
+
+
 def test_signed_identity_required_and_v5_default_fail_closed(configured, monkeypatch):
     monkeypatch.setenv("DWP_AGENT_IDENTITY_SIGNING_SECRET", "test-identity-secret")
     assert request("/v1/activity/events").status_code == 401

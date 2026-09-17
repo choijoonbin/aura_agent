@@ -1,5 +1,9 @@
-# Generated from product-surfaces-v1.bundle-v6.json. Keep the DRAFT checksum in sync.
+# Generated v6 base plus the canonical product-authorization v21 AI-control overlay.
 from __future__ import annotations
+
+PRODUCT_AUTHORIZATION_V21_CHECKSUM = (
+    "4cd1732df91d197cc47fca94699b0fb702ab1f6f2c557d3d17ce0e069d65af85"
+)
 
 ROUTE_BINDING_SPECS = (
     {'route_contract_key': 'route.dwaion.management.evaluation-export.data', 'route_kind': 'DATA', 'method': 'GET', 'path_template': '/v1/admin/evaluations/{evaluationSetId}/runs/{evaluationRunId}/export', 'surface_key': 'dwaion.management', 'scope_kind': 'CONFIG_SCOPE', 'required_permission_sets': (('ADMIN.DWAION_EVALUATION:EXPORT',),), 'introduced_version': 6, 'parameter_validators': {'evaluationSetId': 'uuid', 'evaluationRunId': 'uuid'}},
@@ -91,3 +95,12 @@ ROUTE_BINDING_SPECS = (
     {'route_contract_key': 'route.dwaion.work.runs.data', 'route_kind': 'DATA', 'method': 'GET', 'path_template': '/v1/runs', 'surface_key': 'dwaion.work', 'scope_kind': 'SELF', 'required_permission_sets': (('APP.ASK:VIEW',),), 'introduced_version': 5, 'parameter_validators': {}},
     {'route_contract_key': 'route.dwaion.work.ask.action', 'route_kind': 'ACTION', 'method': 'POST', 'path_template': '/v1/ask', 'surface_key': 'dwaion.work', 'scope_kind': 'SELF', 'required_permission_sets': (('APP.ASK:VIEW',),), 'introduced_version': 4, 'parameter_validators': {}},
 )
+
+ROUTE_BINDING_V21_SPECS = (
+    {'route_contract_key': 'route.dwaion.management.ai-control.page', 'route_kind': 'DATA', 'method': 'GET', 'path_template': '/v1/admin/ai-control', 'surface_key': 'dwaion.management', 'scope_kind': 'CONFIG_SCOPE', 'required_permission_sets': (('ADMIN.DWAION_SAFETY:VIEW',), ('ADMIN.DWAION_SAFETY:MANAGE',)), 'introduced_version': 21, 'parameter_validators': {}},
+    {'route_contract_key': 'route.dwaion.management.ai-control-bootstrap.action', 'route_kind': 'ACTION', 'method': 'POST', 'path_template': '/v1/admin/ai-control/bootstrap', 'surface_key': 'dwaion.management', 'scope_kind': 'CONFIG_SCOPE', 'required_permission_sets': (('ADMIN.DWAION_SAFETY:UPDATE',), ('ADMIN.DWAION_SAFETY:MANAGE',)), 'introduced_version': 21, 'parameter_validators': {}},
+    {'route_contract_key': 'route.dwaion.management.ai-control-update.action', 'route_kind': 'ACTION', 'method': 'PUT', 'path_template': '/v1/admin/ai-control/policy', 'surface_key': 'dwaion.management', 'scope_kind': 'CONFIG_SCOPE', 'required_permission_sets': (('ADMIN.DWAION_SAFETY:UPDATE',), ('ADMIN.DWAION_SAFETY:MANAGE',)), 'introduced_version': 21, 'parameter_validators': {}},
+    {'route_contract_key': 'route.dwaion.management.ai-control-emergency.action', 'route_kind': 'ACTION', 'method': 'POST', 'path_template': '/v1/admin/ai-control/emergency', 'surface_key': 'dwaion.management', 'scope_kind': 'CONFIG_SCOPE', 'required_permission_sets': (('ADMIN.DWAION_SAFETY:MANAGE',),), 'introduced_version': 21, 'parameter_validators': {}},
+)
+
+ALL_ROUTE_BINDING_SPECS = ROUTE_BINDING_SPECS + ROUTE_BINDING_V21_SPECS

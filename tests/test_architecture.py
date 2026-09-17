@@ -84,6 +84,9 @@ def test_runtime_uses_installable_src_package() -> None:
     assert (
         PACKAGE_ROOT / "migrations" / "V34__fence_governed_disposition_domains.sql"
     ).is_file()
+    assert (
+        PACKAGE_ROOT / "migrations" / "V35__index_user_run_activity_pages.sql"
+    ).is_file()
 
 
 def test_migration_versions_are_unique() -> None:

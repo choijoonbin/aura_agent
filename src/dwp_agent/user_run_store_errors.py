@@ -1,0 +1,2 @@
+class UserRunStoreUnavailable(RuntimeError):
+    pass

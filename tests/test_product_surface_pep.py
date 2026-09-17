@@ -207,6 +207,10 @@ class ActivityStoreStub:
         self.calls.append(("summary", tenant_id, user_id))
         return {"COMPLETED": 1}
 
+    def summary(self, *, tenant_id, user_id, filters, now, attention_limit):
+        self.calls.append(("summary", tenant_id, user_id))
+        return {"COMPLETED": 1}, []
+
 
 class UserRunStoreStub:
     def __init__(self) -> None:
@@ -227,6 +231,21 @@ class UserRunStoreStub:
     def list(self, *, tenant_id, user_id, limit, run_state):
         self.calls.append(("list", tenant_id, user_id))
         return [self.run]
+
+    def page(
+        self,
+        *,
+        tenant_id,
+        user_id,
+        limit,
+        run_state,
+        from_at,
+        to_at,
+        snapshot_at,
+        after,
+    ):
+        self.calls.append(("page", tenant_id, user_id))
+        return [self.run], False
 
     def get(self, *, tenant_id, user_id, run_id):
         self.calls.append(("detail", tenant_id, user_id))
@@ -448,7 +467,7 @@ def test_executes_registered_activity_and_run_reads_through_owner_pep(
         ("summary", str(TENANT_ID), str(USER_ID)),
     ]
     assert runs.calls == [
-        ("list", str(TENANT_ID), str(USER_ID)),
+        ("page", str(TENANT_ID), str(USER_ID)),
         ("detail", str(TENANT_ID), str(USER_ID)),
     ]
     for response in responses:

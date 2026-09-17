@@ -7,7 +7,7 @@ from typing import Annotated, Any
 from uuid import UUID
 
 from fastapi import FastAPI, Header
-from .product_surface_pep_bindings import ROUTE_BINDING_SPECS
+from .product_surface_pep_bindings import ALL_ROUTE_BINDING_SPECS as ROUTE_BINDING_SPECS
 from .product_surface_pep_http import (
     AsgiReceive,
     AsgiSend,
@@ -56,6 +56,12 @@ _ROLLOUT_COHORTS = {
     "baseline", "holdout", "full", "eligible-10", "eligible-25", "eligible-50", "eligible-90"
 }
 _WORK_ACCESS_MODES = {"NORMAL", "ELEVATED"}
+_READINESS_FLAGS = {
+    4: "DWP_AGENT_PRODUCT_AUTHORIZATION_V4_ENABLED",
+    5: "DWP_AGENT_PRODUCT_AUTHORIZATION_V5_ENABLED",
+    6: "DWP_AGENT_PRODUCT_AUTHORIZATION_V6_ENABLED",
+    21: "DWP_AGENT_PRODUCT_AUTHORIZATION_V21_ENABLED",
+}
 _CONTEXT = re.compile(r"^psc-[a-f0-9]{64}$")
 _ROLLOUT_REVISION = re.compile(r"^rollout-[a-f0-9]{64}$")
 _DECISION_REVISION = re.compile(r"^psr-[a-f0-9]{64}$")
@@ -88,7 +94,7 @@ class ProductSurfacePepMiddleware:
 
         headers = _headers(scope)
         state = _exact_header(headers, ROLLOUT_STATE_HEADER)
-        any_version_enabled = _v4_enabled() or _v5_enabled() or _v6_enabled()
+        any_version_enabled = any(_flag_enabled(flag) for flag in _READINESS_FLAGS.values())
         if (
             state is None
             and not any_version_enabled
@@ -479,21 +485,10 @@ def _flag_enabled(name: str) -> bool:
     return os.getenv(name, "false").strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _v4_enabled() -> bool:
-    return _flag_enabled("DWP_AGENT_PRODUCT_AUTHORIZATION_V4_ENABLED")
-
-
-def _v5_enabled() -> bool:
-    return _flag_enabled("DWP_AGENT_PRODUCT_AUTHORIZATION_V5_ENABLED")
-
-
-def _v6_enabled() -> bool:
-    return _flag_enabled("DWP_AGENT_PRODUCT_AUTHORIZATION_V6_ENABLED")
-
-
 def _enabled_for(binding: Binding) -> bool:
-    if binding.introduced_version == 6:
-        return _v6_enabled()
-    if binding.introduced_version == 5:
-        return _v5_enabled() or _v6_enabled()
-    return _v4_enabled() or _v5_enabled() or _v6_enabled()
+    if binding.introduced_version not in _READINESS_FLAGS:
+        return False
+    return any(
+        version >= binding.introduced_version and _flag_enabled(flag)
+        for version, flag in _READINESS_FLAGS.items()
+    )

@@ -22,8 +22,19 @@ RUN_ID = UUID("00000000-0000-4000-8000-000000000101")
 class FakeUserRunStore:
     def __init__(self) -> None:
         self.received: tuple[str, str, int, AgentRunState | None] | None = None
+        self.received_page: tuple[
+            str,
+            str,
+            int,
+            AgentRunState | None,
+            datetime | None,
+            datetime | None,
+            datetime,
+            tuple[datetime, UUID] | None,
+        ] | None = None
         self.received_get: tuple[str, str, UUID] | None = None
         self.missing = False
+        self.has_more = False
 
     def list(
         self,
@@ -35,6 +46,30 @@ class FakeUserRunStore:
     ) -> list[UserAgentRunSummary]:
         self.received = (tenant_id, user_id, limit, run_state)
         return [self._run()]
+
+    def page(
+        self,
+        *,
+        tenant_id: str,
+        user_id: str,
+        limit: int,
+        run_state: AgentRunState | None,
+        from_at: datetime | None,
+        to_at: datetime | None,
+        snapshot_at: datetime,
+        after: tuple[datetime, UUID] | None,
+    ) -> tuple[list[UserAgentRunSummary], bool]:
+        self.received_page = (
+            tenant_id,
+            user_id,
+            limit,
+            run_state,
+            from_at,
+            to_at,
+            snapshot_at,
+            after,
+        )
+        return [self._run()], self.has_more
 
     def get(
         self,
@@ -73,11 +108,12 @@ async def request(
     *,
     permissions: str = "APP.ASK:VIEW",
     path: str = "/v1/runs?state=COMPLETED&limit=250",
+    user_id: str = "user-7",
 ) -> httpx.Response:
     headers = {
         "X-DWP-Service-Token": SERVICE_TOKEN,
         "X-DWP-Tenant-ID": "42",
-        "X-DWP-User-ID": "user-7",
+        "X-DWP-User-ID": user_id,
         "X-DWP-Permissions": permissions,
         "X-Correlation-ID": "run-correlation",
     }
@@ -96,13 +132,17 @@ def test_user_activity_is_scoped_to_verified_identity_and_bounded(
     response = asyncio.run(request())
 
     assert response.status_code == 200
-    assert store.received == ("42", "user-7", 100, AgentRunState.COMPLETED)
+    assert store.received_page is not None
+    assert store.received_page[:4] == ("42", "user-7", 100, AgentRunState.COMPLETED)
     assert response.headers["Cache-Control"] == "private, no-store, max-age=0"
     assert response.json()["data"][0]["runId"] == str(RUN_ID)
     assert response.json()["data"][0]["activityTitle"] == "DWAI·ON Agent execution"
     assert response.json()["data"][0]["attempt"] == 1
     assert response.json()["data"][0]["measurementStatus"] == "NOT_AVAILABLE"
     assert response.json()["data"][0]["auditEvidence"]["status"] == "NOT_AVAILABLE"
+    assert response.json()["hasMore"] is False
+    assert response.json()["nextCursor"] is None
+    assert response.json()["snapshotAt"] is not None
     assert "query" not in response.text.lower()
     assert "ciphertext" not in response.text.lower()
 
@@ -170,14 +210,18 @@ def test_user_run_store_unavailable_responses_are_private_no_store(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class UnavailableUserRunStore(FakeUserRunStore):
-        def list(
+        def page(
             self,
             *,
             tenant_id: str,
             user_id: str,
             limit: int,
             run_state: AgentRunState | None,
-        ) -> list[UserAgentRunSummary]:
+            from_at: datetime | None,
+            to_at: datetime | None,
+            snapshot_at: datetime,
+            after: tuple[datetime, UUID] | None,
+        ) -> tuple[list[UserAgentRunSummary], bool]:
             raise UserRunStoreUnavailable("Run source unavailable.")
 
         def get(
@@ -215,3 +259,67 @@ def test_user_run_validation_and_unknown_route_are_private_no_store(
     assert invalid_state.headers["Cache-Control"] == "private, no-store, max-age=0"
     assert unknown_route.status_code == 404
     assert unknown_route.headers["Cache-Control"] == "private, no-store, max-age=0"
+
+
+def test_user_activity_applies_time_range_and_owner_bound_cursor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = FakeUserRunStore()
+    store.has_more = True
+    monkeypatch.setattr(user_run_api_module, "get_user_run_store", lambda: store)
+    start = datetime(2026, 8, 1, tzinfo=timezone.utc)
+    end = datetime(2026, 9, 1, tzinfo=timezone.utc)
+    path = (
+        "/v1/runs?limit=25&from=2026-08-01T09%3A00%3A00%2B09%3A00"
+        "&to=2026-09-01T09%3A00%3A00%2B09%3A00"
+    )
+
+    first = asyncio.run(request(path=path))
+
+    assert first.status_code == 200
+    assert store.received_page is not None
+    assert store.received_page[:6] == ("42", "user-7", 25, None, start, end)
+    cursor = first.json()["nextCursor"]
+    assert first.json()["hasMore"] is True
+    assert isinstance(cursor, str)
+
+    store.has_more = False
+    second = asyncio.run(request(path=f"{path}&cursor={cursor}"))
+
+    assert second.status_code == 200
+    assert store.received_page is not None
+    assert store.received_page[7] == (
+        datetime(2026, 8, 27, 1, 0, tzinfo=timezone.utc),
+        RUN_ID,
+    )
+    assert second.json()["hasMore"] is False
+    assert second.json()["nextCursor"] is None
+
+    wrong_scope = asyncio.run(
+        request(path=f"/v1/runs?limit=25&from=2026-08-02T00%3A00%3A00Z&cursor={cursor}")
+    )
+    assert wrong_scope.status_code == 400
+    wrong_state = asyncio.run(request(path=f"{path}&state=COMPLETED&cursor={cursor}"))
+    assert wrong_state.status_code == 400
+    wrong_owner = asyncio.run(request(path=f"{path}&cursor={cursor}", user_id="user-8"))
+    assert wrong_owner.status_code == 400
+
+
+@pytest.mark.parametrize(
+    "path",
+    (
+        "/v1/runs?from=2026-08-01T00:00:00",
+        "/v1/runs?from=2026-09-01T00:00:00Z&to=2026-08-01T00:00:00Z",
+    ),
+)
+def test_user_activity_rejects_unsafe_page_ranges(
+    monkeypatch: pytest.MonkeyPatch,
+    path: str,
+) -> None:
+    store = FakeUserRunStore()
+    monkeypatch.setattr(user_run_api_module, "get_user_run_store", lambda: store)
+
+    response = asyncio.run(request(path=path))
+
+    assert response.status_code == 422
+    assert store.received_page is None

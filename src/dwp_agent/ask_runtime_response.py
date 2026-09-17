@@ -13,6 +13,7 @@ from .contracts import (
     AskResponse,
     AskState,
 )
+from .ask_warning_contracts import AskRuntimeWarning
 from .policy import AskIdentity
 
 
@@ -32,6 +33,7 @@ def build_ask_response(
     citations: list[AskCitation] | None = None,
     source_count: int = 0,
     personalization: AskPersonalization | None = None,
+    warnings: tuple[AskRuntimeWarning, ...] = (),
 ) -> AskResponse:
     return AskResponse(
         run_id=run_id,
@@ -50,4 +52,5 @@ def build_ask_response(
         completed_at=datetime.now(timezone.utc),
         selected_work=request.page_context.selected_work if request.page_context else None,
         personalization=personalization or AskPersonalization(),
+        warnings=list(warnings),
     )

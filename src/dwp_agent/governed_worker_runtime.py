@@ -20,6 +20,15 @@ def governed_worker_available(worker_type: str) -> bool:
     return heartbeat is not None and time.monotonic() - heartbeat <= _HEARTBEAT_TTL_SECONDS
 
 
+def register_governed_worker_heartbeat(*worker_types: str) -> None:
+    """Publish liveness for capability responses without exposing heartbeat storage."""
+    _heartbeat(*worker_types)
+
+
+def remove_governed_worker_heartbeat(*worker_types: str) -> None:
+    _remove_heartbeats(*worker_types)
+
+
 def _heartbeat(*worker_types: str) -> None:
     now = time.monotonic()
     with _HEARTBEAT_LOCK:

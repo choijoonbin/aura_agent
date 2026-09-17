@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Annotated, Callable, TypeVar
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 
 from .governed_domain_core import (
     GovernedDomainConflict,
@@ -17,15 +17,22 @@ from .personal_domain_security import (
 )
 from .personal_routine_contracts import (
     ArchiveRoutineRequest,
+    ChangeRoutineActivationRequest,
     ChangeRoutineConsentRequest,
     ChangeRoutineLifecycleRequest,
+    CommandRoutineRunRequest,
     CreateRoutineRequest,
     DryRunRoutineRequest,
     RoutineDryRunEnvelope,
     RoutineEnvelope,
+    RoutineCapabilitiesEnvelope,
+    RoutineExecutionEnvelope,
+    RoutineExecutionListEnvelope,
     RoutineListEnvelope,
+    TriggerRoutineRunRequest,
     UpdateRoutineRequest,
 )
+from .personal_routine_capabilities import routine_runtime_capabilities
 from .personal_routine_store import get_personal_routine_store
 
 
@@ -46,6 +53,16 @@ def list_routines(
     _access(identity, write=False)
     _no_store(response)
     return _run(lambda: RoutineListEnvelope(data=get_personal_routine_store().list(identity)))
+
+
+@router.get("/capabilities", response_model=RoutineCapabilitiesEnvelope)
+def get_routine_capabilities(
+    identity: Annotated[PersonalDomainIdentity, Depends(require_personal_domain_identity)],
+    response: Response,
+) -> RoutineCapabilitiesEnvelope:
+    _access(identity, write=False)
+    _no_store(response)
+    return RoutineCapabilitiesEnvelope(data=routine_runtime_capabilities())
 
 
 @router.get("/{routine_id}", response_model=RoutineEnvelope)
@@ -119,6 +136,106 @@ def change_routine_lifecycle(
         lambda: RoutineEnvelope(
             data=get_personal_routine_store().change_lifecycle(
                 identity, routine_id, request
+            )
+        )
+    )
+
+
+@router.post("/{routine_id}/activation", response_model=RoutineEnvelope)
+def change_routine_activation(
+    routine_id: UUID,
+    request: ChangeRoutineActivationRequest,
+    identity: Annotated[PersonalDomainIdentity, Depends(require_personal_domain_identity)],
+    response: Response,
+) -> RoutineEnvelope:
+    _access(identity, write=True)
+    _no_store(response)
+    return _run(
+        lambda: RoutineEnvelope(
+            data=get_personal_routine_store().change_activation(
+                identity, routine_id, request
+            )
+        )
+    )
+
+
+@router.get("/{routine_id}/runs", response_model=RoutineExecutionListEnvelope)
+def list_routine_runs(
+    routine_id: UUID,
+    identity: Annotated[PersonalDomainIdentity, Depends(require_personal_domain_identity)],
+    response: Response,
+    limit: Annotated[int, Query(ge=1, le=100)] = 30,
+) -> RoutineExecutionListEnvelope:
+    _access(identity, write=False)
+    _no_store(response)
+    return _run(
+        lambda: RoutineExecutionListEnvelope(
+            data=get_personal_routine_store().list_runs(
+                identity, routine_id, limit=limit
+            )
+        )
+    )
+
+
+@router.post(
+    "/{routine_id}/runs",
+    status_code=status.HTTP_202_ACCEPTED,
+    response_model=RoutineExecutionEnvelope,
+)
+def trigger_routine_run(
+    routine_id: UUID,
+    request: TriggerRoutineRunRequest,
+    identity: Annotated[PersonalDomainIdentity, Depends(require_personal_domain_identity)],
+    response: Response,
+) -> RoutineExecutionEnvelope:
+    _access(identity, write=True)
+    _no_store(response)
+    return _run(
+        lambda: RoutineExecutionEnvelope(
+            data=get_personal_routine_store().trigger_run(
+                identity, routine_id, request
+            )
+        )
+    )
+
+
+@router.get(
+    "/{routine_id}/runs/{routine_run_id}", response_model=RoutineExecutionEnvelope
+)
+def get_routine_run(
+    routine_id: UUID,
+    routine_run_id: UUID,
+    identity: Annotated[PersonalDomainIdentity, Depends(require_personal_domain_identity)],
+    response: Response,
+) -> RoutineExecutionEnvelope:
+    _access(identity, write=False)
+    _no_store(response)
+    return _run(
+        lambda: RoutineExecutionEnvelope(
+            data=get_personal_routine_store().get_run(
+                identity, routine_id, routine_run_id
+            )
+        )
+    )
+
+
+@router.post(
+    "/{routine_id}/runs/{routine_run_id}/commands",
+    response_model=RoutineExecutionEnvelope,
+)
+def command_routine_run(
+    routine_id: UUID,
+    routine_run_id: UUID,
+    request: CommandRoutineRunRequest,
+    identity: Annotated[PersonalDomainIdentity, Depends(require_personal_domain_identity)],
+    response: Response,
+) -> RoutineExecutionEnvelope:
+    _access(identity, write=True)
+    _no_store(response)
+    return _run(
+        lambda: RoutineExecutionEnvelope(
+            data=get_personal_routine_store().command_run(
+                identity, routine_id, routine_run_id, request
             )
         )
     )

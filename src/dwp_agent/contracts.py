@@ -8,6 +8,7 @@ from uuid import UUID
 from pydantic import Field, JsonValue, model_validator
 
 from .ask_personalization_contracts import AskPersonalization, AskPersonalizationState
+from .ask_warning_contracts import AskRuntimeWarning
 from .contract_model import ContractModel, to_camel
 from .grounded_response_status import grounded_status_for_provider
 
@@ -316,6 +317,7 @@ class AskResponse(ContractModel):
     assistant_message_id: UUID | None = None
     selected_work: AskSelectedWork | None = None
     personalization: AskPersonalization = Field(default_factory=AskPersonalization)
+    warnings: list[AskRuntimeWarning] = Field(default_factory=list, max_length=20)
 
     @model_validator(mode="after")
     def validate_answer_state(self) -> "AskResponse":

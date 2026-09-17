@@ -103,6 +103,9 @@ class UserAgentRunListEnvelope(ContractModel):
     message: str = "Agent activity loaded."
     success: bool = True
     data: list[UserAgentRunSummary]
+    snapshot_at: datetime | None = None
+    next_cursor: str | None = Field(default=None, max_length=2048)
+    has_more: bool = False
 
 
 class UserAgentRunEnvelope(ContractModel):
