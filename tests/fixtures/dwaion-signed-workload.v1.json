@@ -1,0 +1,69 @@
+{
+  "schemaVersion": 1,
+  "profile": "dwp1-hmac-sha256",
+  "description": "Test-only Java-to-Python DWAI-ON Home signed workload fixture.",
+  "testOnlySigningSecret": "0123456789abcdef0123456789abcdef",
+  "keyId": "platform-dwaion-home-v1",
+  "method": "POST",
+  "path": "/internal/home/v1/widget-data:batch",
+  "definition": {
+    "key": "dwaion.artifact",
+    "version": "1.1.0",
+    "manifestHash": "eb2152b7f1cf21611bb4a2c1781f7f267c5cd0c6d489d4edc8f680bb4fa6af54",
+    "rendererBindingRevisionPolicy": "CURRENT_ACTIVE_CATALOG_SHA256",
+    "fixtureRendererBindingRevision": "9999999999999999999999999999999999999999999999999999999999999999"
+  },
+  "requestBodyUtf8": "{\"schemaVersion\":1,\"widgets\":[{\"instanceId\":\"11111111-2222-3333-4444-555555555555\",\"definitionKey\":\"dwaion.artifact\",\"definitionVersion\":\"1.1.0\",\"definitionManifestHash\":\"eb2152b7f1cf21611bb4a2c1781f7f267c5cd0c6d489d4edc8f680bb4fa6af54\",\"rendererBindingRevision\":\"9999999999999999999999999999999999999999999999999999999999999999\",\"configuration\":{},\"itemLimit\":3}]}",
+  "requestBodySha256": "a9c15a6a7cecd66afe90b4cfa6221308e732211bb3eaa5336404f075c4d0e900",
+  "headers": {
+    "X-Correlation-ID": "corr-fixture",
+    "traceparent": "00-11111111111111111111111111111111-2222222222222222-01",
+    "tracestate": "vendor=fixture",
+    "X-DWP-Tenant-ID": "71",
+    "X-DWP-User-ID": "82",
+    "X-DWP-Identity-Plane": "TENANT",
+    "X-DWP-Permissions": "APP.ASK:VIEW,APP.DWAION_ARTIFACTS:VIEW",
+    "X-DWP-Roles": "MEMBER",
+    "X-DWP-Group-Refs": "team-a",
+    "X-DWP-Current-Decision-Revision": "decision-17",
+    "X-DWP-Current-Revalidate-At": "2026-09-17T01:02:13Z",
+    "X-DWP-Home-Deadline-At": "2026-09-17T01:02:03.900Z"
+  },
+  "issuedAt": "2026-09-17T01:02:03Z",
+  "nonce": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+  "claims": {
+    "v": 1,
+    "kid": "platform-dwaion-home-v1",
+    "iss": "dwp-platform-server",
+    "aud": "dwp-agent-home",
+    "sub": "82",
+    "tid": "71",
+    "pid": null,
+    "cid": "corr-fixture",
+    "traceparent": "00-11111111111111111111111111111111-2222222222222222-01",
+    "tracestate": "vendor=fixture",
+    "ip": "TENANT",
+    "htm": "POST",
+    "htu": "/internal/home/v1/widget-data:batch",
+    "permissions": [
+      "APP.ASK:VIEW",
+      "APP.DWAION_ARTIFACTS:VIEW"
+    ],
+    "roles": [
+      "MEMBER"
+    ],
+    "groups": [
+      "team-a"
+    ],
+    "authorityRevision": "decision-17",
+    "authorityRevalidateAt": "2026-09-17T01:02:13Z",
+    "deadlineAt": "2026-09-17T01:02:03.900Z",
+    "bodySha256": "a9c15a6a7cecd66afe90b4cfa6221308e732211bb3eaa5336404f075c4d0e900",
+    "iat": 1789606923,
+    "nbf": 1789606922,
+    "exp": 1789606924,
+    "jti": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+  },
+  "assertion": "dwp1.eyJ2IjoxLCJraWQiOiJwbGF0Zm9ybS1kd2Fpb24taG9tZS12MSIsImlzcyI6ImR3cC1wbGF0Zm9ybS1zZXJ2ZXIiLCJhdWQiOiJkd3AtYWdlbnQtaG9tZSIsInN1YiI6IjgyIiwidGlkIjoiNzEiLCJwaWQiOm51bGwsImNpZCI6ImNvcnItZml4dHVyZSIsInRyYWNlcGFyZW50IjoiMDAtMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTEtMjIyMjIyMjIyMjIyMjIyMi0wMSIsInRyYWNlc3RhdGUiOiJ2ZW5kb3I9Zml4dHVyZSIsImlwIjoiVEVOQU5UIiwiaHRtIjoiUE9TVCIsImh0dSI6Ii9pbnRlcm5hbC9ob21lL3YxL3dpZGdldC1kYXRhOmJhdGNoIiwicGVybWlzc2lvbnMiOlsiQVBQLkFTSzpWSUVXIiwiQVBQLkRXQUlPTl9BUlRJRkFDVFM6VklFVyJdLCJyb2xlcyI6WyJNRU1CRVIiXSwiZ3JvdXBzIjpbInRlYW0tYSJdLCJhdXRob3JpdHlSZXZpc2lvbiI6ImRlY2lzaW9uLTE3IiwiYXV0aG9yaXR5UmV2YWxpZGF0ZUF0IjoiMjAyNi0wOS0xN1QwMTowMjoxM1oiLCJkZWFkbGluZUF0IjoiMjAyNi0wOS0xN1QwMTowMjowMy45MDBaIiwiYm9keVNoYTI1NiI6ImE5YzE1YTZhN2NlY2Q2NmFmZTkwYjRjZmE2MjIxMzA4ZTczMjIxMWJiM2VhYTUzMzY0MDRmMDc1YzRkMGU5MDAiLCJpYXQiOjE3ODk2MDY5MjMsIm5iZiI6MTc4OTYwNjkyMiwiZXhwIjoxNzg5NjA2OTI0LCJqdGkiOiJhYWFhYWFhYS1iYmJiLWNjY2MtZGRkZC1lZWVlZWVlZWVlZWUifQ.5H76PF8FHWFMghvh0hw5agi37LXIcYR4B9kB-_I913Q",
+  "assertionSha256": "ac7ff7568c38f0110d8807ba359400fb3a380589ea0c239607e871e724cf3909"
+}
