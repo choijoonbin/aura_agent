@@ -22,6 +22,7 @@ AUTHORITY_REVISION_HEADER = "X-DWP-Current-Decision-Revision"
 _AUTHORITY = re.compile(r"^[A-Za-z0-9._:@+-]{1,160}$")
 _REVISION = re.compile(r"^[A-Za-z0-9._:@+-]{1,200}$")
 _LOCALE = re.compile(r"^[A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*$")
+_KEY_ID = re.compile(r"^[A-Za-z0-9._:-]{1,80}$")
 _PROTECTED_HEADERS = (
     AUTHORITY_REVISION_HEADER,
     "X-DWP-Tenant-ID",
@@ -71,6 +72,15 @@ async def authorize_home_widget_request(request: Request) -> HomeWidgetRecipient
         "DWP_DWAION_HOME_IDENTITY_SIGNING_SECRET", ""
     ).strip()
     if len(signing_secret) < 32:
+        _error(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "HOME_PROVIDER_DELEGATED_IDENTITY_NOT_CONFIGURED",
+            "The dedicated DWAI-ON Home delegated identity verifier is not configured.",
+        )
+    key_id = os.getenv(
+        "DWP_DWAION_HOME_IDENTITY_KEY_ID", DEFAULT_KEY_ID
+    ).strip()
+    if not _KEY_ID.fullmatch(key_id):
         _error(
             status.HTTP_503_SERVICE_UNAVAILABLE,
             "HOME_PROVIDER_DELEGATED_IDENTITY_NOT_CONFIGURED",
@@ -137,9 +147,7 @@ async def authorize_home_widget_request(request: Request) -> HomeWidgetRecipient
             body=body,
             headers=request.headers,
             replay_store=home_identity_replay_store(),
-            key_id=os.getenv(
-                "DWP_DWAION_HOME_IDENTITY_KEY_ID", DEFAULT_KEY_ID
-            ).strip(),
+            key_id=key_id,
         )
     except HomeIdentityReplayUnavailable:
         _error(

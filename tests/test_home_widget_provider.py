@@ -140,6 +140,17 @@ def _assertion(headers: dict[str, str], *, path: str, body: bytes) -> str:
     return f"{signed}.{signature}"
 
 
+def _signed_claims(claims: dict[str, object]) -> str:
+    encoded_claims = _b64(
+        json.dumps(claims, separators=(",", ":"), sort_keys=True).encode()
+    )
+    signed = f"dwp1.{encoded_claims}"
+    signature = _b64(
+        hmac.new(SIGNING_SECRET.encode(), signed.encode(), hashlib.sha256).digest()
+    )
+    return f"{signed}.{signature}"
+
+
 def _b64(value: bytes) -> str:
     return base64.urlsafe_b64encode(value).decode().rstrip("=")
 
@@ -353,6 +364,61 @@ def test_home_profile_rejects_gateway_assertion_and_service_token_profiles(
 
     assert gateway.status_code == 401
     assert service_token.status_code == 403
+
+
+def test_home_profile_rejects_a_validly_signed_meeting_dwp1_profile(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = _request()
+    raw = _body(request)
+    headers = _headers(body=raw)
+    now = int(time.time())
+    # This is the canonical Meeting workload claim shape, signed with the same key to
+    # prove that claim-profile separation is enforced independently of the MAC.
+    headers["X-DWP-Home-Assertion"] = _signed_claims(
+        {
+            "v": 1,
+            "kid": "meeting-workload-v1",
+            "method": "POST",
+            "path": "/internal/home/v1/widget-data:batch",
+            "tenantId": 71,
+            "meetingId": str(uuid4()),
+            "runId": str(uuid4()),
+            "iat": now,
+            "exp": now + 4,
+            "jti": str(uuid4()),
+            "bodySha256": hashlib.sha256(raw).hexdigest(),
+        }
+    )
+    response = _client(monkeypatch, _Store()).post(
+        "/internal/home/v1/widget-data:batch", headers=headers, content=raw
+    )
+
+    assert response.status_code == 401
+    assert response.json()["detail"]["reasonCode"] == (
+        "HOME_PROVIDER_DELEGATED_IDENTITY_INVALID"
+    )
+
+
+def test_home_profile_bounds_assertion_and_fails_closed_for_invalid_key_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = _request()
+    raw = _body(request)
+    oversized = _headers(body=raw)
+    oversized["X-DWP-Home-Assertion"] = "dwp1." + "a" * 20_000 + ".a"
+    client = _client(monkeypatch, _Store())
+    rejected = client.post(
+        "/internal/home/v1/widget-data:batch", headers=oversized, content=raw
+    )
+    monkeypatch.setenv("DWP_DWAION_HOME_IDENTITY_KEY_ID", "bad key id")
+    misconfigured = _post(client, _request())
+
+    assert rejected.status_code == 401
+    assert misconfigured.status_code == 503
+    assert misconfigured.json()["detail"]["reasonCode"] == (
+        "HOME_PROVIDER_DELEGATED_IDENTITY_NOT_CONFIGURED"
+    )
 
 
 def test_transport_rejects_tampered_recipient_headers(

@@ -22,6 +22,8 @@ import psycopg
 ASSERTION_HEADER = "X-DWP-Home-Assertion"
 DEFAULT_KEY_ID = "platform-dwaion-home-v1"
 _SEGMENT = re.compile(r"^[A-Za-z0-9_-]+$")
+_KEY_ID = re.compile(r"^[A-Za-z0-9._:-]{1,80}$")
+MAX_ASSERTION_LENGTH = 16_384
 
 
 class HomeDelegatedIdentityError(RuntimeError):
@@ -56,6 +58,10 @@ def verify_home_delegated_identity(
     now: int | None = None,
     key_id: str = DEFAULT_KEY_ID,
 ) -> None:
+    if not _KEY_ID.fullmatch(key_id):
+        raise HomeDelegatedIdentityError("Home delegated identity is invalid.")
+    if len(assertion) > MAX_ASSERTION_LENGTH:
+        raise HomeDelegatedIdentityError("Home delegated identity is invalid.")
     signed_value, encoded_payload, encoded_signature = _segments(assertion)
     signed = signed_value.encode("ascii")
     expected_signature = _encode(
