@@ -86,6 +86,9 @@ from .dwaion_workflow_api import internal_router as dwaion_workflow_internal_rou
 from .dwaion_workflow_api import router as dwaion_workflow_router
 from .dwaion_navigation_api import router as dwaion_navigation_router
 from .research_download_api import router as research_download_router
+from .artifact_home_projection import validate_artifact_home_projection_activation
+from .home_widget_api import router as home_widget_router
+from .home_widget_body_limit import install_home_widget_body_limit
 from .domain_retention_api import admin_router as domain_retention_admin_router
 from .domain_retention_api import router as domain_retention_router
 from .personal_memory_api import router as personal_memory_router
@@ -113,6 +116,7 @@ async def lifespan(_: FastAPI):
     validate_meeting_intelligence_runtime_configuration()
     validate_meeting_media_runtime_configuration()
     initialize_database()
+    validate_artifact_home_projection_activation()
     seed_local_governance()
     seed_local_activity()
     validate_delivery_gate_runtime()
@@ -131,6 +135,7 @@ app = FastAPI(title=SERVICE_NAME, version=SERVICE_VERSION, lifespan=lifespan)
 install_api_history(app)
 install_meeting_intelligence_body_limit(app)
 install_meeting_media_body_limit(app)
+install_home_widget_body_limit(app)
 install_product_surface_pep(app)
 install_private_no_store(app)
 install_operational_gate_problem_handler(app)
@@ -159,6 +164,7 @@ app.include_router(personal_routine_evidence_router)
 app.include_router(personal_memory_router)
 app.include_router(artifact_router)
 app.include_router(artifact_collaboration_router)
+app.include_router(home_widget_router)
 app.include_router(domain_retention_router)
 app.include_router(domain_retention_admin_router)
 
