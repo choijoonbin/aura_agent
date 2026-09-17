@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from threading import Barrier
 from urllib.parse import urlparse
 from uuid import uuid4
@@ -386,6 +386,113 @@ def test_memory_is_explicit_idempotent_tombstoned_and_session_bound() -> None:
     assert "concise numbered" not in envelope.lower()
 
 
+def test_memory_scope_narrowing_expiry_reset_owner_lock_and_audit() -> None:
+    tenant = _tenant()
+    identity = _identity(tenant)
+    store = PostgresPersonalMemoryStore(DATABASE_URL)
+    _seed_policy(PostgresDomainRetentionStore(DATABASE_URL), identity, DomainKey.MEMORY)
+    store.update_controls(
+        identity,
+        UpdateMemoryPreferenceRequest(
+            command_id=uuid4(), expected_revision=0,
+            reason_code="USER_MEMORY_ENABLE",
+            change_reason="Store only the explicit scoped preference I enter.",
+            memory_state="ENABLED",
+        ),
+    )
+    store.update_runtime_controls(
+        identity,
+        UpdateMemoryRuntimePreferenceRequest(
+            command_id=uuid4(), expected_revision=1,
+            reason_code="USER_RUNTIME_PERSONALIZATION",
+            change_reason="Apply active ASK scoped preferences to my answers.",
+            runtime_application_state="ENABLED",
+        ),
+    )
+    created = store.create(
+        identity,
+        CreateMemoryRequest(
+            command_id=uuid4(), expected_revision=0,
+            reason_code="USER_MEMORY_CREATE", kind="TONE",
+            memory=ExplicitMemoryValue(value="Use a concise professional tone"),
+            scope=["ASK", "RESEARCH"],
+            expires_at=datetime.now(UTC) + timedelta(days=30),
+        ),
+    )
+    update = UpdateMemoryRequest(
+        command_id=uuid4(), expected_revision=created.revision,
+        reason_code="USER_MEMORY_SCOPE_NARROW",
+        scope=["RESEARCH"],
+        expires_at=datetime.now(UTC) + timedelta(days=14),
+    )
+    narrowed = store.update(identity, created.memory_id, update)
+    assert narrowed.scope == ["RESEARCH"]
+    assert narrowed.expires_at == update.expires_at
+    assert store.update(identity, created.memory_id, update) == narrowed
+    assert store.runtime_preferences(
+        tenant_id=tenant, user_id=identity.user_id,
+    ).memories == ()
+    with pytest.raises(GovernedDomainConflict):
+        store.update(
+            replace(identity, auth_session_id="different-session"),
+            created.memory_id,
+            update,
+        )
+    with pytest.raises(GovernedDomainConflict):
+        store.update(
+            identity,
+            created.memory_id,
+            UpdateMemoryRequest(
+                command_id=uuid4(), expected_revision=created.revision,
+                reason_code="USER_MEMORY_STALE", scope=["RESEARCH"],
+            ),
+        )
+    with pytest.raises(GovernedDomainConflict):
+        store.update(
+            identity,
+            created.memory_id,
+            UpdateMemoryRequest(
+                command_id=uuid4(), expected_revision=narrowed.revision,
+                reason_code="USER_MEMORY_SCOPE_EXPAND", scope=["ASK", "RESEARCH"],
+            ),
+        )
+    other = _identity(tenant, user="member-2")
+    store.update_controls(
+        other,
+        UpdateMemoryPreferenceRequest(
+            command_id=uuid4(), expected_revision=0,
+            reason_code="USER_MEMORY_ENABLE",
+            change_reason="Enable explicit memory for the isolation check.",
+            memory_state="ENABLED",
+        ),
+    )
+    with pytest.raises(GovernedDomainNotFound):
+        store.update(
+            other,
+            created.memory_id,
+            UpdateMemoryRequest(
+                command_id=uuid4(), expected_revision=narrowed.revision,
+                reason_code="USER_MEMORY_OWNER_CHECK", scope=["RESEARCH"],
+            ),
+        )
+    with connect(DATABASE_URL) as connection:
+        event = connection.execute(
+            """SELECT event_type, revision FROM ai_user_memory_events
+                WHERE tenant_id = %s AND user_id = %s AND command_id = %s""",
+            (tenant, identity.user_id, update.command_id),
+        ).fetchone()
+        connection.execute(
+            "UPDATE ai_user_memories SET expires_at = CURRENT_TIMESTAMP - INTERVAL '1 second' WHERE memory_id = %s",
+            (created.memory_id,),
+        )
+    assert event == ("UPDATED", narrowed.revision)
+    expired = next(item for item in store.list(identity) if item.memory_id == created.memory_id)
+    assert expired.state == MemoryState.EXPIRED
+    assert store.runtime_preferences(
+        tenant_id=tenant, user_id=identity.user_id,
+    ).memories == ()
+
+
 def test_runtime_memory_requires_separate_consent_and_is_owner_expiry_scoped() -> None:
     tenant = _tenant()
     identity = _identity(tenant)
@@ -462,6 +569,22 @@ def test_runtime_memory_requires_separate_consent_and_is_owner_expiry_scoped() -
     assert [(item.kind.value, item.memory.value) for item in selection.memories] == [
         ("TONE", "Use a concise professional tone")
     ]
+    selected = selection.memories[0]
+    assert selected.origin.value == "MANUAL"
+    assert selected.source_type == "USER_EXPLICIT_ENTRY"
+    assert selected.confidence is None
+    assert selected.fact_vector == []
+    assert selected.use_count == 1
+    assert selected.last_used_at is not None
+    assert selected.encryption_provider
+    assert selected.encryption_key_version == "verify-v1"
+    assert len(selected.encryption_key_reference_fingerprint or "") == 64
+    capabilities = store.controls(identity).evidence_capabilities
+    assert capabilities.manual_provenance.available is True
+    assert capabilities.usage_metrics.available is True
+    assert capabilities.kms_binding.available is True
+    assert capabilities.ai_derived_memory.available is False
+    assert capabilities.usage_trail.available is False
 
     disabled = store.update_controls(
         identity,

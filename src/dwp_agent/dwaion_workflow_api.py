@@ -257,21 +257,16 @@ def research_capabilities(
 ) -> ResearchCapabilitiesEnvelope:
     _research_access(identity, write=False)
     _no_store(response)
+    available = WorkflowCapability(available=True, configured=True)
     def unavailable(code: str, hint: str) -> WorkflowCapability:
         return WorkflowCapability(
             available=False, configured=False, reason_code=code, recovery_hint=hint,
         )
     return ResearchCapabilitiesEnvelope(data=ResearchCapabilities(
-        raw_export=unavailable(
-            "RESEARCH_RAW_EXPORT_NOT_CONFIGURED",
-            "Configure a governed export worker and downloadable object provider.",
-        ),
+        raw_export=available,
         pdf_export=unavailable("RESEARCH_PDF_EXPORT_NOT_CONFIGURED", "Configure the governed research export renderer."),
-        receipt_download=unavailable(
-            "RESEARCH_RECEIPT_DOWNLOAD_NOT_CONFIGURED",
-            "Configure an authenticated receipt artifact provider.",
-        ),
-        audit_download=unavailable("RESEARCH_AUDIT_EXPORT_NOT_CONFIGURED", "Configure a signed audit export worker."),
+        receipt_download=available,
+        audit_download=available,
         fork=unavailable("RESEARCH_FORK_NOT_CONFIGURED", "Configure the governed research branch worker."),
         merge=unavailable("RESEARCH_MERGE_NOT_CONFIGURED", "Configure the governed research merge worker."),
         keep_local=unavailable("RESEARCH_KEEP_LOCAL_NOT_CONFIGURED", "Configure the governed research conflict resolver."),

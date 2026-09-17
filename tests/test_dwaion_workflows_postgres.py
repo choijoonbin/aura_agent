@@ -38,6 +38,7 @@ from dwp_agent.dwaion_workflow_contracts import (
 from dwp_agent.dwaion_workflow_errors import DwaionWorkflowNotFound
 from dwp_agent.personal_domain_security import PersonalDomainIdentity
 from dwp_agent.research_delivery_store import ResearchDeliveryStore
+from dwp_agent.research_download_store import ResearchDownloadStore
 from dwp_agent.research_plan_store import ResearchPlanStore
 from dwp_agent.research_run_store import ResearchRunStore
 from dwp_agent.secure_attachment_store import SecureAttachmentStore
@@ -206,6 +207,23 @@ def test_research_plan_run_partial_recovery_receipt_and_delivery(monkeypatch: py
     )
     assert completed.state == ResearchRunState.COMPLETED
     assert completed.receipt_id is not None
+
+    downloads = ResearchDownloadStore(DATABASE_URL)
+    raw = downloads.raw(identity, completed.run_id)
+    assert raw.result.result_sha256 == completed.result.result_sha256
+    assert len(raw.integrity_fingerprint) == 64
+    receipt = downloads.receipt(identity, completed.run_id)
+    assert receipt.receipt_id == completed.receipt_id
+    assert receipt.citation_count == 1
+    audit = downloads.audit(identity, completed.run_id)
+    assert {event.event_type for event in audit} >= {
+        "DOWNLOAD_RAW", "DOWNLOAD_RECEIPT", "DOWNLOAD_AUDIT",
+    }
+    assert all(len(event.integrity_fingerprint) == 64 for event in audit)
+    with pytest.raises(DwaionWorkflowNotFound):
+        downloads.raw(
+            _identity(tenant_id=identity.tenant_id, user="other-user"), completed.run_id,
+        )
 
     deliveries = ResearchDeliveryStore(DATABASE_URL, run_store=runs)
     delivery_request = CreateResearchDeliveryRequest(

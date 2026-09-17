@@ -5006,6 +5006,18 @@
             "title": "Expectedrevision",
             "type": "integer"
           },
+          "expiresAt": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expiresat"
+          },
           "kind": {
             "$ref": "#/components/schemas/MemoryKind"
           },
@@ -5016,6 +5028,14 @@
             "pattern": "^[A-Z][A-Z0-9_.-]{1,63}$",
             "title": "Reasoncode",
             "type": "string"
+          },
+          "scope": {
+            "items": {
+              "$ref": "#/components/schemas/MemoryScope"
+            },
+            "minItems": 1,
+            "title": "Scope",
+            "type": "array"
           }
         },
         "required": [
@@ -5273,6 +5293,52 @@
           "preflightId"
         ],
         "title": "CreateTeamArtifactAccessRequest",
+        "type": "object"
+      },
+      "CreateTeamArtifactCommentRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "anchor": {
+            "anyOf": [
+              {
+                "maxLength": 1000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Anchor"
+          },
+          "body": {
+            "maxLength": 4000,
+            "minLength": 1,
+            "title": "Body",
+            "type": "string"
+          },
+          "commandId": {
+            "format": "uuid",
+            "title": "Commandid",
+            "type": "string"
+          },
+          "expectedRevision": {
+            "minimum": 0.0,
+            "title": "Expectedrevision",
+            "type": "integer"
+          },
+          "reasonCode": {
+            "pattern": "^[A-Z][A-Z0-9_.-]{1,63}$",
+            "title": "Reasoncode",
+            "type": "string"
+          }
+        },
+        "required": [
+          "commandId",
+          "expectedRevision",
+          "reasonCode",
+          "body"
+        ],
+        "title": "CreateTeamArtifactCommentRequest",
         "type": "object"
       },
       "CreateTeamArtifactShareRequest": {
@@ -8444,6 +8510,34 @@
         "title": "MemoryEnvelope",
         "type": "object"
       },
+      "MemoryEvidenceCapabilities": {
+        "additionalProperties": false,
+        "properties": {
+          "aiDerivedMemory": {
+            "$ref": "#/components/schemas/WorkflowCapability"
+          },
+          "confidenceScoring": {
+            "$ref": "#/components/schemas/WorkflowCapability"
+          },
+          "factVector": {
+            "$ref": "#/components/schemas/WorkflowCapability"
+          },
+          "kmsBinding": {
+            "$ref": "#/components/schemas/WorkflowCapability"
+          },
+          "manualProvenance": {
+            "$ref": "#/components/schemas/WorkflowCapability"
+          },
+          "usageMetrics": {
+            "$ref": "#/components/schemas/WorkflowCapability"
+          },
+          "usageTrail": {
+            "$ref": "#/components/schemas/WorkflowCapability"
+          }
+        },
+        "title": "MemoryEvidenceCapabilities",
+        "type": "object"
+      },
       "MemoryKind": {
         "enum": [
           "RESPONSE_LENGTH",
@@ -8481,6 +8575,13 @@
         "title": "MemoryListEnvelope",
         "type": "object"
       },
+      "MemoryOrigin": {
+        "enum": [
+          "MANUAL"
+        ],
+        "title": "MemoryOrigin",
+        "type": "string"
+      },
       "MemoryPreferenceState": {
         "enum": [
           "UNSET",
@@ -8490,10 +8591,22 @@
         "title": "MemoryPreferenceState",
         "type": "string"
       },
+      "MemoryScope": {
+        "enum": [
+          "ASK",
+          "RESEARCH",
+          "PROPOSALS",
+          "ROUTINES",
+          "ARTIFACTS"
+        ],
+        "title": "MemoryScope",
+        "type": "string"
+      },
       "MemoryState": {
         "enum": [
           "ACTIVE",
           "DISABLED",
+          "EXPIRED",
           "DELETED"
         ],
         "title": "MemoryState",
@@ -9645,6 +9758,9 @@
             "title": "Backgroundcredentialstorage",
             "type": "boolean"
           },
+          "evidenceCapabilities": {
+            "$ref": "#/components/schemas/MemoryEvidenceCapabilities"
+          },
           "explicitMemoryStorageAvailable": {
             "default": true,
             "title": "Explicitmemorystorageavailable",
@@ -9803,6 +9919,9 @@
             "title": "Deletionrequestavailable",
             "type": "boolean"
           },
+          "legalHoldAppeal": {
+            "$ref": "#/components/schemas/WorkflowCapability"
+          },
           "legalHoldEvidence": {
             "$ref": "#/components/schemas/WorkflowCapability"
           },
@@ -9842,6 +9961,7 @@
           "backupDestructionLog",
           "sreSupport",
           "legalHoldEvidence",
+          "legalHoldAppeal",
           "signedCertificate",
           "siemSync"
         ],
@@ -9874,13 +9994,95 @@
       "PersonalMemory": {
         "additionalProperties": false,
         "properties": {
+          "confidence": {
+            "anyOf": [
+              {
+                "maximum": 1.0,
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Confidence"
+          },
           "createdAt": {
             "format": "date-time",
             "title": "Createdat",
             "type": "string"
           },
+          "encryptionKeyReferenceFingerprint": {
+            "anyOf": [
+              {
+                "pattern": "^[0-9a-f]{64}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Encryptionkeyreferencefingerprint"
+          },
+          "encryptionKeyVersion": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Encryptionkeyversion"
+          },
+          "encryptionProvider": {
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Encryptionprovider"
+          },
+          "expiresAt": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expiresat"
+          },
+          "factVector": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 0,
+            "title": "Factvector",
+            "type": "array"
+          },
           "kind": {
             "$ref": "#/components/schemas/MemoryKind"
+          },
+          "lastUsedAt": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Lastusedat"
           },
           "memory": {
             "$ref": "#/components/schemas/ExplicitMemoryValue"
@@ -9890,10 +10092,27 @@
             "title": "Memoryid",
             "type": "string"
           },
+          "origin": {
+            "$ref": "#/components/schemas/MemoryOrigin",
+            "default": "MANUAL"
+          },
           "revision": {
             "minimum": 1.0,
             "title": "Revision",
             "type": "integer"
+          },
+          "scope": {
+            "items": {
+              "$ref": "#/components/schemas/MemoryScope"
+            },
+            "minItems": 1,
+            "title": "Scope",
+            "type": "array"
+          },
+          "sourceType": {
+            "default": "USER_EXPLICIT_ENTRY",
+            "title": "Sourcetype",
+            "type": "string"
           },
           "state": {
             "$ref": "#/components/schemas/MemoryState"
@@ -9902,6 +10121,12 @@
             "format": "date-time",
             "title": "Updatedat",
             "type": "string"
+          },
+          "useCount": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Usecount",
+            "type": "integer"
           }
         },
         "required": [
@@ -11069,6 +11294,40 @@
         "title": "RenameConversationRequest",
         "type": "object"
       },
+      "ReplyTeamArtifactCommentRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "body": {
+            "maxLength": 4000,
+            "minLength": 1,
+            "title": "Body",
+            "type": "string"
+          },
+          "commandId": {
+            "format": "uuid",
+            "title": "Commandid",
+            "type": "string"
+          },
+          "expectedRevision": {
+            "minimum": 0.0,
+            "title": "Expectedrevision",
+            "type": "integer"
+          },
+          "reasonCode": {
+            "pattern": "^[A-Z][A-Z0-9_.-]{1,63}$",
+            "title": "Reasoncode",
+            "type": "string"
+          }
+        },
+        "required": [
+          "commandId",
+          "expectedRevision",
+          "reasonCode",
+          "body"
+        ],
+        "title": "ReplyTeamArtifactCommentRequest",
+        "type": "object"
+      },
       "RequestDeletionRequest": {
         "additionalProperties": false,
         "properties": {
@@ -11559,6 +11818,118 @@
         "title": "ResearchProgress",
         "type": "object"
       },
+      "ResearchRawDownload": {
+        "additionalProperties": false,
+        "properties": {
+          "completedAt": {
+            "format": "date-time",
+            "title": "Completedat",
+            "type": "string"
+          },
+          "integrityFingerprint": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Integrityfingerprint",
+            "type": "string"
+          },
+          "planId": {
+            "format": "uuid",
+            "title": "Planid",
+            "type": "string"
+          },
+          "planRevision": {
+            "minimum": 1.0,
+            "title": "Planrevision",
+            "type": "integer"
+          },
+          "result": {
+            "$ref": "#/components/schemas/ResearchResult"
+          },
+          "runId": {
+            "format": "uuid",
+            "title": "Runid",
+            "type": "string"
+          },
+          "schemaVersion": {
+            "const": 1,
+            "default": 1,
+            "title": "Schemaversion",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "runId",
+          "planId",
+          "planRevision",
+          "result",
+          "completedAt",
+          "integrityFingerprint"
+        ],
+        "title": "ResearchRawDownload",
+        "type": "object"
+      },
+      "ResearchReceiptDownload": {
+        "additionalProperties": false,
+        "properties": {
+          "citationCount": {
+            "minimum": 1.0,
+            "title": "Citationcount",
+            "type": "integer"
+          },
+          "completedAt": {
+            "format": "date-time",
+            "title": "Completedat",
+            "type": "string"
+          },
+          "integrityFingerprint": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Integrityfingerprint",
+            "type": "string"
+          },
+          "planId": {
+            "format": "uuid",
+            "title": "Planid",
+            "type": "string"
+          },
+          "planRevision": {
+            "minimum": 1.0,
+            "title": "Planrevision",
+            "type": "integer"
+          },
+          "receiptId": {
+            "format": "uuid",
+            "title": "Receiptid",
+            "type": "string"
+          },
+          "resultSha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Resultsha256",
+            "type": "string"
+          },
+          "runId": {
+            "format": "uuid",
+            "title": "Runid",
+            "type": "string"
+          },
+          "schemaVersion": {
+            "const": 1,
+            "default": 1,
+            "title": "Schemaversion",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "receiptId",
+          "runId",
+          "planId",
+          "planRevision",
+          "resultSha256",
+          "citationCount",
+          "completedAt",
+          "integrityFingerprint"
+        ],
+        "title": "ResearchReceiptDownload",
+        "type": "object"
+      },
       "ResearchResult": {
         "additionalProperties": false,
         "properties": {
@@ -11840,6 +12211,40 @@
         "title": "ResearchSourcePolicy",
         "type": "object"
       },
+      "ResolveTeamArtifactCommentRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "changeReason": {
+            "maxLength": 1000,
+            "minLength": 5,
+            "title": "Changereason",
+            "type": "string"
+          },
+          "commandId": {
+            "format": "uuid",
+            "title": "Commandid",
+            "type": "string"
+          },
+          "expectedRevision": {
+            "minimum": 0.0,
+            "title": "Expectedrevision",
+            "type": "integer"
+          },
+          "reasonCode": {
+            "pattern": "^[A-Z][A-Z0-9_.-]{1,63}$",
+            "title": "Reasoncode",
+            "type": "string"
+          }
+        },
+        "required": [
+          "commandId",
+          "expectedRevision",
+          "reasonCode",
+          "changeReason"
+        ],
+        "title": "ResolveTeamArtifactCommentRequest",
+        "type": "object"
+      },
       "ResolveTeamArtifactConflictRequest": {
         "additionalProperties": false,
         "properties": {
@@ -11993,6 +12398,40 @@
         "title": "RiskTier",
         "type": "string"
       },
+      "RollbackRoutineVersionRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "changeReason": {
+            "maxLength": 1000,
+            "minLength": 5,
+            "title": "Changereason",
+            "type": "string"
+          },
+          "commandId": {
+            "format": "uuid",
+            "title": "Commandid",
+            "type": "string"
+          },
+          "expectedRevision": {
+            "minimum": 0.0,
+            "title": "Expectedrevision",
+            "type": "integer"
+          },
+          "reasonCode": {
+            "pattern": "^[A-Z][A-Z0-9_.-]{1,63}$",
+            "title": "Reasoncode",
+            "type": "string"
+          }
+        },
+        "required": [
+          "commandId",
+          "expectedRevision",
+          "reasonCode",
+          "changeReason"
+        ],
+        "title": "RollbackRoutineVersionRequest",
+        "type": "object"
+      },
       "RoutineActivationAction": {
         "enum": [
           "ACTIVATE",
@@ -12051,10 +12490,25 @@
             "title": "Activewindowpreviewavailable",
             "type": "boolean"
           },
+          "agentKernelBinding": {
+            "$ref": "#/components/schemas/WorkflowCapability"
+          },
+          "agentSwitching": {
+            "$ref": "#/components/schemas/WorkflowCapability"
+          },
+          "automaticQuarantine": {
+            "$ref": "#/components/schemas/WorkflowCapability"
+          },
           "backgroundExecutionAvailable": {
             "default": false,
             "title": "Backgroundexecutionavailable",
             "type": "boolean"
+          },
+          "blockedSourcePolicy": {
+            "$ref": "#/components/schemas/WorkflowCapability"
+          },
+          "changeApproval": {
+            "$ref": "#/components/schemas/WorkflowCapability"
           },
           "consentScopes": {
             "items": {
@@ -12089,7 +12543,7 @@
             "type": "boolean"
           },
           "lifecycleMode": {
-            "default": "GOVERNED_SCHEDULED_EXECUTION",
+            "default": "GOVERNED_SCHEDULED_OR_WEBHOOK_EXECUTION",
             "title": "Lifecyclemode",
             "type": "string"
           },
@@ -12149,10 +12603,16 @@
             "title": "Runtimebudgetavailable",
             "type": "boolean"
           },
+          "runtimeBudgetRetry": {
+            "$ref": "#/components/schemas/WorkflowCapability"
+          },
           "schedulingAvailable": {
             "default": false,
             "title": "Schedulingavailable",
             "type": "boolean"
+          },
+          "semanticVersionDiff": {
+            "$ref": "#/components/schemas/WorkflowCapability"
           },
           "supportedCadences": {
             "items": {
@@ -12163,9 +12623,33 @@
           },
           "temporaryBudgetIncrease": {
             "$ref": "#/components/schemas/WorkflowCapability"
+          },
+          "webhookTriggerAvailable": {
+            "default": false,
+            "title": "Webhooktriggeravailable",
+            "type": "boolean"
+          },
+          "whitelistedSourceBinding": {
+            "$ref": "#/components/schemas/WorkflowCapability"
+          },
+          "wormDelivery": {
+            "$ref": "#/components/schemas/WorkflowCapability"
+          },
+          "zeroWritePolicy": {
+            "$ref": "#/components/schemas/WorkflowCapability"
           }
         },
         "required": [
+          "agentKernelBinding",
+          "whitelistedSourceBinding",
+          "blockedSourcePolicy",
+          "zeroWritePolicy",
+          "semanticVersionDiff",
+          "runtimeBudgetRetry",
+          "automaticQuarantine",
+          "changeApproval",
+          "agentSwitching",
+          "wormDelivery",
           "oauthReauthorization",
           "temporaryBudgetIncrease",
           "operatorEscalation",
@@ -12292,15 +12776,29 @@
             "$ref": "#/components/schemas/RoutineBudget"
           },
           "cadence": {
-            "$ref": "#/components/schemas/RoutineCadence"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RoutineCadence"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "compensationPolicy": {
             "$ref": "#/components/schemas/RoutineCompensationPolicy"
           },
           "localTime": {
-            "pattern": "^(?:[01]\\d|2[0-3]):[0-5]\\d$",
-            "title": "Localtime",
-            "type": "string"
+            "anyOf": [
+              {
+                "pattern": "^(?:[01]\\d|2[0-3]):[0-5]\\d$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Localtime"
           },
           "locale": {
             "pattern": "^[a-z]{2}(?:-[A-Z]{2})?$",
@@ -12359,10 +12857,45 @@
             "type": "array"
           },
           "timeZone": {
-            "maxLength": 64,
-            "minLength": 1,
-            "title": "Timezone",
-            "type": "string"
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Timezone"
+          },
+          "triggerType": {
+            "$ref": "#/components/schemas/RoutineTriggerType",
+            "default": "SCHEDULED"
+          },
+          "webhookEndpointReference": {
+            "anyOf": [
+              {
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9:/._-]{0,239}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Webhookendpointreference"
+          },
+          "webhookEventType": {
+            "anyOf": [
+              {
+                "pattern": "^[A-Z][A-Z0-9_.-]{1,63}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Webhookeventtype"
           },
           "weekDays": {
             "items": {
@@ -12376,9 +12909,6 @@
         "required": [
           "name",
           "objective",
-          "cadence",
-          "localTime",
-          "timeZone",
           "locale",
           "sources"
         ],
@@ -12442,9 +12972,16 @@
             "type": "string"
           },
           "previewNextRunAt": {
-            "format": "date-time",
-            "title": "Previewnextrunat",
-            "type": "string"
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Previewnextrunat"
           },
           "proposalOnly": {
             "default": true,
@@ -12499,8 +13036,7 @@
           "routineRevision",
           "evaluatedAt",
           "evidenceCount",
-          "validatedSources",
-          "previewNextRunAt"
+          "validatedSources"
         ],
         "title": "RoutineDryRunReceipt",
         "type": "object"
@@ -12581,7 +13117,8 @@
       "RoutineExecutionMode": {
         "enum": [
           "DRY_RUN_ONLY",
-          "SCHEDULED"
+          "SCHEDULED",
+          "WEBHOOK"
         ],
         "title": "RoutineExecutionMode",
         "type": "string"
@@ -12867,6 +13404,125 @@
         "title": "RoutineExecutionRun",
         "type": "object"
       },
+      "RoutineHealth": {
+        "additionalProperties": false,
+        "properties": {
+          "allConsentsEnabled": {
+            "title": "Allconsentsenabled",
+            "type": "boolean"
+          },
+          "checkedAt": {
+            "format": "date-time",
+            "title": "Checkedat",
+            "type": "string"
+          },
+          "latestRunAt": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Latestrunat"
+          },
+          "latestRunId": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Latestrunid"
+          },
+          "latestRunState": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RoutineRunState"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "recoveryHints": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Recoveryhints",
+            "type": "array"
+          },
+          "routineId": {
+            "format": "uuid",
+            "title": "Routineid",
+            "type": "string"
+          },
+          "routineRevision": {
+            "minimum": 1.0,
+            "title": "Routinerevision",
+            "type": "integer"
+          },
+          "scheduleCurrent": {
+            "title": "Schedulecurrent",
+            "type": "boolean"
+          },
+          "state": {
+            "$ref": "#/components/schemas/RoutineHealthState"
+          },
+          "workerAvailable": {
+            "title": "Workeravailable",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "routineId",
+          "routineRevision",
+          "state",
+          "workerAvailable",
+          "scheduleCurrent",
+          "allConsentsEnabled",
+          "checkedAt"
+        ],
+        "title": "RoutineHealth",
+        "type": "object"
+      },
+      "RoutineHealthEnvelope": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/RoutineHealth"
+          },
+          "status": {
+            "default": "SUCCESS",
+            "title": "Status",
+            "type": "string"
+          },
+          "success": {
+            "default": true,
+            "title": "Success",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "title": "RoutineHealthEnvelope",
+        "type": "object"
+      },
+      "RoutineHealthState": {
+        "enum": [
+          "HEALTHY",
+          "DEGRADED",
+          "BLOCKED"
+        ],
+        "title": "RoutineHealthState",
+        "type": "string"
+      },
       "RoutineLifecycle": {
         "enum": [
           "DRAFT",
@@ -12972,6 +13628,84 @@
         "title": "RoutineRetryPolicy",
         "type": "object"
       },
+      "RoutineRollbackEnvelope": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/RoutineRollbackReceipt"
+          },
+          "status": {
+            "default": "SUCCESS",
+            "title": "Status",
+            "type": "string"
+          },
+          "success": {
+            "default": true,
+            "title": "Success",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "title": "RoutineRollbackEnvelope",
+        "type": "object"
+      },
+      "RoutineRollbackReceipt": {
+        "additionalProperties": false,
+        "properties": {
+          "commandId": {
+            "format": "uuid",
+            "title": "Commandid",
+            "type": "string"
+          },
+          "createdRevision": {
+            "minimum": 2.0,
+            "title": "Createdrevision",
+            "type": "integer"
+          },
+          "integrityFingerprint": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Integrityfingerprint",
+            "type": "string"
+          },
+          "rolledBackAt": {
+            "format": "date-time",
+            "title": "Rolledbackat",
+            "type": "string"
+          },
+          "routine": {
+            "$ref": "#/components/schemas/PersonalRoutine"
+          },
+          "routineId": {
+            "format": "uuid",
+            "title": "Routineid",
+            "type": "string"
+          },
+          "targetFingerprint": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Targetfingerprint",
+            "type": "string"
+          },
+          "targetRevision": {
+            "minimum": 1.0,
+            "title": "Targetrevision",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "commandId",
+          "routineId",
+          "targetRevision",
+          "targetFingerprint",
+          "createdRevision",
+          "routine",
+          "rolledBackAt",
+          "integrityFingerprint"
+        ],
+        "title": "RoutineRollbackReceipt",
+        "type": "object"
+      },
       "RoutineRunCommand": {
         "enum": [
           "RETRY",
@@ -13000,7 +13734,8 @@
       "RoutineRunTrigger": {
         "enum": [
           "SCHEDULED",
-          "MANUAL"
+          "MANUAL",
+          "WEBHOOK"
         ],
         "title": "RoutineRunTrigger",
         "type": "string"
@@ -13013,6 +13748,109 @@
         ],
         "title": "RoutineSource",
         "type": "string"
+      },
+      "RoutineTriggerType": {
+        "enum": [
+          "SCHEDULED",
+          "WEBHOOK"
+        ],
+        "title": "RoutineTriggerType",
+        "type": "string"
+      },
+      "RoutineVersionListEnvelope": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "items": {
+              "$ref": "#/components/schemas/RoutineVersionSnapshot"
+            },
+            "title": "Data",
+            "type": "array"
+          },
+          "status": {
+            "default": "SUCCESS",
+            "title": "Status",
+            "type": "string"
+          },
+          "success": {
+            "default": true,
+            "title": "Success",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "title": "RoutineVersionListEnvelope",
+        "type": "object"
+      },
+      "RoutineVersionSnapshot": {
+        "additionalProperties": false,
+        "properties": {
+          "commandId": {
+            "format": "uuid",
+            "title": "Commandid",
+            "type": "string"
+          },
+          "commandType": {
+            "maxLength": 24,
+            "minLength": 1,
+            "title": "Commandtype",
+            "type": "string"
+          },
+          "createdAt": {
+            "format": "date-time",
+            "title": "Createdat",
+            "type": "string"
+          },
+          "integrityFingerprint": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Integrityfingerprint",
+            "type": "string"
+          },
+          "revision": {
+            "minimum": 1.0,
+            "title": "Revision",
+            "type": "integer"
+          },
+          "rollbackTargetFingerprint": {
+            "anyOf": [
+              {
+                "pattern": "^[0-9a-f]{64}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rollbacktargetfingerprint"
+          },
+          "rollbackTargetRevision": {
+            "anyOf": [
+              {
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rollbacktargetrevision"
+          },
+          "snapshot": {
+            "$ref": "#/components/schemas/PersonalRoutine"
+          }
+        },
+        "required": [
+          "commandId",
+          "commandType",
+          "revision",
+          "snapshot",
+          "createdAt",
+          "integrityFingerprint"
+        ],
+        "title": "RoutineVersionSnapshot",
+        "type": "object"
       },
       "RoutingPolicySummary": {
         "additionalProperties": false,
@@ -13801,6 +14639,9 @@
             "title": "Externalsharingavailable",
             "type": "boolean"
           },
+          "inlineComments": {
+            "$ref": "#/components/schemas/WorkflowCapability"
+          },
           "internalSharingAvailable": {
             "title": "Internalsharingavailable",
             "type": "boolean"
@@ -13851,6 +14692,7 @@
           "internalSharingAvailable",
           "shareExpiryAvailable",
           "shareRevocationAvailable",
+          "inlineComments",
           "automaticMasking",
           "syntheticReplacement",
           "reviewNotification",
@@ -13881,6 +14723,224 @@
           "data"
         ],
         "title": "TeamArtifactCapabilitiesEnvelope",
+        "type": "object"
+      },
+      "TeamArtifactComment": {
+        "additionalProperties": false,
+        "properties": {
+          "anchor": {
+            "anyOf": [
+              {
+                "maxLength": 1000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Anchor"
+          },
+          "artifactId": {
+            "format": "uuid",
+            "title": "Artifactid",
+            "type": "string"
+          },
+          "authorDisplayName": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Authordisplayname"
+          },
+          "authorSubjectId": {
+            "maxLength": 160,
+            "minLength": 1,
+            "title": "Authorsubjectid",
+            "type": "string"
+          },
+          "body": {
+            "maxLength": 4000,
+            "minLength": 1,
+            "title": "Body",
+            "type": "string"
+          },
+          "commentId": {
+            "format": "uuid",
+            "title": "Commentid",
+            "type": "string"
+          },
+          "createdAt": {
+            "format": "date-time",
+            "title": "Createdat",
+            "type": "string"
+          },
+          "replies": {
+            "items": {
+              "$ref": "#/components/schemas/TeamArtifactCommentReply"
+            },
+            "maxItems": 500,
+            "title": "Replies",
+            "type": "array"
+          },
+          "resolvedAt": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resolvedat"
+          },
+          "revision": {
+            "minimum": 1.0,
+            "title": "Revision",
+            "type": "integer"
+          },
+          "state": {
+            "$ref": "#/components/schemas/TeamArtifactCommentState"
+          },
+          "updatedAt": {
+            "format": "date-time",
+            "title": "Updatedat",
+            "type": "string"
+          },
+          "workspaceId": {
+            "format": "uuid",
+            "title": "Workspaceid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "commentId",
+          "workspaceId",
+          "artifactId",
+          "authorSubjectId",
+          "body",
+          "state",
+          "revision",
+          "createdAt",
+          "updatedAt"
+        ],
+        "title": "TeamArtifactComment",
+        "type": "object"
+      },
+      "TeamArtifactCommentEnvelope": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/TeamArtifactComment"
+          },
+          "status": {
+            "default": "SUCCESS",
+            "title": "Status",
+            "type": "string"
+          },
+          "success": {
+            "default": true,
+            "title": "Success",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "title": "TeamArtifactCommentEnvelope",
+        "type": "object"
+      },
+      "TeamArtifactCommentReply": {
+        "additionalProperties": false,
+        "properties": {
+          "authorDisplayName": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Authordisplayname"
+          },
+          "authorSubjectId": {
+            "maxLength": 160,
+            "minLength": 1,
+            "title": "Authorsubjectid",
+            "type": "string"
+          },
+          "body": {
+            "maxLength": 4000,
+            "minLength": 1,
+            "title": "Body",
+            "type": "string"
+          },
+          "commentId": {
+            "format": "uuid",
+            "title": "Commentid",
+            "type": "string"
+          },
+          "createdAt": {
+            "format": "date-time",
+            "title": "Createdat",
+            "type": "string"
+          },
+          "replyId": {
+            "format": "uuid",
+            "title": "Replyid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "replyId",
+          "commentId",
+          "authorSubjectId",
+          "body",
+          "createdAt"
+        ],
+        "title": "TeamArtifactCommentReply",
+        "type": "object"
+      },
+      "TeamArtifactCommentState": {
+        "enum": [
+          "OPEN",
+          "RESOLVED"
+        ],
+        "title": "TeamArtifactCommentState",
+        "type": "string"
+      },
+      "TeamArtifactCommentsEnvelope": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "items": {
+              "$ref": "#/components/schemas/TeamArtifactComment"
+            },
+            "title": "Data",
+            "type": "array"
+          },
+          "status": {
+            "default": "SUCCESS",
+            "title": "Status",
+            "type": "string"
+          },
+          "success": {
+            "default": true,
+            "title": "Success",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "title": "TeamArtifactCommentsEnvelope",
         "type": "object"
       },
       "TeamArtifactConflict": {
@@ -14698,6 +15758,66 @@
         "title": "TriggerRoutineRunRequest",
         "type": "object"
       },
+      "TriggerRoutineWebhookRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "changeReason": {
+            "maxLength": 1000,
+            "minLength": 5,
+            "title": "Changereason",
+            "type": "string"
+          },
+          "commandId": {
+            "format": "uuid",
+            "title": "Commandid",
+            "type": "string"
+          },
+          "eventId": {
+            "format": "uuid",
+            "title": "Eventid",
+            "type": "string"
+          },
+          "eventType": {
+            "pattern": "^[A-Z][A-Z0-9_.-]{1,63}$",
+            "title": "Eventtype",
+            "type": "string"
+          },
+          "expectedRevision": {
+            "minimum": 0.0,
+            "title": "Expectedrevision",
+            "type": "integer"
+          },
+          "occurredAt": {
+            "format": "date-time",
+            "title": "Occurredat",
+            "type": "string"
+          },
+          "payload": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/JsonValue"
+            },
+            "maxProperties": 100,
+            "title": "Payload",
+            "type": "object"
+          },
+          "reasonCode": {
+            "pattern": "^[A-Z][A-Z0-9_.-]{1,63}$",
+            "title": "Reasoncode",
+            "type": "string"
+          }
+        },
+        "required": [
+          "commandId",
+          "expectedRevision",
+          "reasonCode",
+          "changeReason",
+          "eventId",
+          "eventType",
+          "occurredAt"
+        ],
+        "title": "TriggerRoutineWebhookRequest",
+        "type": "object"
+      },
       "UpdateAIExecutionPolicyRequest": {
         "additionalProperties": false,
         "properties": {
@@ -15009,20 +16129,53 @@
             "title": "Expectedrevision",
             "type": "integer"
           },
+          "expiresAt": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expiresat"
+          },
           "memory": {
-            "$ref": "#/components/schemas/ExplicitMemoryValue"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ExplicitMemoryValue"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "reasonCode": {
             "pattern": "^[A-Z][A-Z0-9_.-]{1,63}$",
             "title": "Reasoncode",
             "type": "string"
+          },
+          "scope": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/MemoryScope"
+                },
+                "minItems": 1,
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Scope"
           }
         },
         "required": [
           "commandId",
           "expectedRevision",
-          "reasonCode",
-          "memory"
+          "reasonCode"
         ],
         "title": "UpdateMemoryRequest",
         "type": "object"
@@ -15165,6 +16318,19 @@
       "UpdateRoutineRequest": {
         "additionalProperties": false,
         "properties": {
+          "changeReason": {
+            "anyOf": [
+              {
+                "maxLength": 1000,
+                "minLength": 5,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Changereason"
+          },
           "commandId": {
             "format": "uuid",
             "title": "Commandid",
@@ -25672,6 +26838,711 @@
         ]
       }
     },
+    "/v1/artifact-collaboration/{artifact_id}/workspace/comments": {
+      "get": {
+        "operationId": "list_team_artifact_comments_v1_artifact_collaboration__artifact_id__workspace_comments_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "artifact_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Artifact Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Auth-Session-ID",
+            "required": true,
+            "schema": {
+              "maxLength": 160,
+              "minLength": 1,
+              "title": "X-Dwp-Auth-Session-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-User-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Dwp-User-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Tenant-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Dwp-Tenant-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Correlation-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Correlation-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Roles",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Roles"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Permissions",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Permissions"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Person-Public-ID",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 36,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Person-Public-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Display-Name-B64",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 400,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Display-Name-B64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TeamArtifactCommentsEnvelope"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Team Artifact Comments",
+        "tags": [
+          "governed-artifact-collaboration"
+        ]
+      },
+      "post": {
+        "operationId": "create_team_artifact_comment_v1_artifact_collaboration__artifact_id__workspace_comments_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "artifact_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Artifact Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Auth-Session-ID",
+            "required": true,
+            "schema": {
+              "maxLength": 160,
+              "minLength": 1,
+              "title": "X-Dwp-Auth-Session-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-User-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Dwp-User-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Tenant-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Dwp-Tenant-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Correlation-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Correlation-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Roles",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Roles"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Permissions",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Permissions"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Person-Public-ID",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 36,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Person-Public-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Display-Name-B64",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 400,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Display-Name-B64"
+            }
+          },
+          {
+            "description": "Required for product-authorization rollout states 110/111. The gateway rejects a missing or stale value before the state-changing request reaches the Agent owner service; rollout states 000/100 ignore it.",
+            "in": "header",
+            "name": "X-DWP-Expected-Decision-Revision",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Expected-Decision-Revision"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateTeamArtifactCommentRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TeamArtifactCommentEnvelope"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Team Artifact Comment",
+        "tags": [
+          "governed-artifact-collaboration"
+        ]
+      }
+    },
+    "/v1/artifact-collaboration/{artifact_id}/workspace/comments/{comment_id}/replies": {
+      "post": {
+        "operationId": "reply_team_artifact_comment_v1_artifact_collaboration__artifact_id__workspace_comments__comment_id__replies_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "artifact_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Artifact Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "comment_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Comment Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Auth-Session-ID",
+            "required": true,
+            "schema": {
+              "maxLength": 160,
+              "minLength": 1,
+              "title": "X-Dwp-Auth-Session-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-User-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Dwp-User-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Tenant-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Dwp-Tenant-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Correlation-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Correlation-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Roles",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Roles"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Permissions",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Permissions"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Person-Public-ID",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 36,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Person-Public-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Display-Name-B64",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 400,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Display-Name-B64"
+            }
+          },
+          {
+            "description": "Required for product-authorization rollout states 110/111. The gateway rejects a missing or stale value before the state-changing request reaches the Agent owner service; rollout states 000/100 ignore it.",
+            "in": "header",
+            "name": "X-DWP-Expected-Decision-Revision",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Expected-Decision-Revision"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReplyTeamArtifactCommentRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TeamArtifactCommentEnvelope"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Reply Team Artifact Comment",
+        "tags": [
+          "governed-artifact-collaboration"
+        ]
+      }
+    },
+    "/v1/artifact-collaboration/{artifact_id}/workspace/comments/{comment_id}/resolve": {
+      "post": {
+        "operationId": "resolve_team_artifact_comment_v1_artifact_collaboration__artifact_id__workspace_comments__comment_id__resolve_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "artifact_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Artifact Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "comment_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Comment Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Auth-Session-ID",
+            "required": true,
+            "schema": {
+              "maxLength": 160,
+              "minLength": 1,
+              "title": "X-Dwp-Auth-Session-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-User-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Dwp-User-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Tenant-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Dwp-Tenant-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Correlation-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Correlation-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Roles",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Roles"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Permissions",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Permissions"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Person-Public-ID",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 36,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Person-Public-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Display-Name-B64",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 400,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Display-Name-B64"
+            }
+          },
+          {
+            "description": "Required for product-authorization rollout states 110/111. The gateway rejects a missing or stale value before the state-changing request reaches the Agent owner service; rollout states 000/100 ignore it.",
+            "in": "header",
+            "name": "X-DWP-Expected-Decision-Revision",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Expected-Decision-Revision"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ResolveTeamArtifactCommentRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TeamArtifactCommentEnvelope"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Resolve Team Artifact Comment",
+        "tags": [
+          "governed-artifact-collaboration"
+        ]
+      }
+    },
     "/v1/artifact-collaboration/{artifact_id}/workspace/conflicts/{conflict_id}/resolve": {
       "post": {
         "operationId": "resolve_team_artifact_conflict_v1_artifact_collaboration__artifact_id__workspace_conflicts__conflict_id__resolve_post",
@@ -35862,6 +37733,456 @@
         ]
       }
     },
+    "/v1/research/runs/{run_id}/downloads/audit": {
+      "get": {
+        "operationId": "download_research_audit_v1_research_runs__run_id__downloads_audit_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Run Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Auth-Session-ID",
+            "required": true,
+            "schema": {
+              "maxLength": 160,
+              "minLength": 1,
+              "title": "X-Dwp-Auth-Session-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-User-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Dwp-User-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Tenant-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Dwp-Tenant-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Correlation-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Correlation-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Roles",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Roles"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Permissions",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Permissions"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Person-Public-ID",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 36,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Person-Public-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Display-Name-B64",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 400,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Display-Name-B64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/x-ndjson": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Download Research Audit",
+        "tags": [
+          "research"
+        ]
+      }
+    },
+    "/v1/research/runs/{run_id}/downloads/raw": {
+      "get": {
+        "operationId": "download_research_raw_v1_research_runs__run_id__downloads_raw_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Run Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Auth-Session-ID",
+            "required": true,
+            "schema": {
+              "maxLength": 160,
+              "minLength": 1,
+              "title": "X-Dwp-Auth-Session-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-User-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Dwp-User-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Tenant-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Dwp-Tenant-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Correlation-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Correlation-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Roles",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Roles"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Permissions",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Permissions"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Person-Public-ID",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 36,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Person-Public-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Display-Name-B64",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 400,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Display-Name-B64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResearchRawDownload"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Download Research Raw",
+        "tags": [
+          "research"
+        ]
+      }
+    },
+    "/v1/research/runs/{run_id}/downloads/receipt": {
+      "get": {
+        "operationId": "download_research_receipt_v1_research_runs__run_id__downloads_receipt_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Run Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Auth-Session-ID",
+            "required": true,
+            "schema": {
+              "maxLength": 160,
+              "minLength": 1,
+              "title": "X-Dwp-Auth-Session-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-User-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Dwp-User-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Tenant-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Dwp-Tenant-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Correlation-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Correlation-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Roles",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Roles"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Permissions",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Permissions"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Person-Public-ID",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 36,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Person-Public-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Display-Name-B64",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 400,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Display-Name-B64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResearchReceiptDownload"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Download Research Receipt",
+        "tags": [
+          "research"
+        ]
+      }
+    },
     "/v1/research/runs/{run_id}/execute": {
       "post": {
         "operationId": "execute_research_run_v1_research_runs__run_id__execute_post",
@@ -38426,6 +40747,156 @@
         ]
       }
     },
+    "/v1/routines/{routine_id}/health": {
+      "get": {
+        "operationId": "get_routine_health_v1_routines__routine_id__health_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "routine_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Routine Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Auth-Session-ID",
+            "required": true,
+            "schema": {
+              "maxLength": 160,
+              "minLength": 1,
+              "title": "X-Dwp-Auth-Session-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-User-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Dwp-User-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Tenant-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Dwp-Tenant-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Correlation-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Correlation-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Roles",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Roles"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Permissions",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Permissions"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Person-Public-ID",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 36,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Person-Public-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Display-Name-B64",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 400,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Display-Name-B64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RoutineHealthEnvelope"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Routine Health",
+        "tags": [
+          "personal-routine-evidence"
+        ]
+      }
+    },
     "/v1/routines/{routine_id}/lifecycle": {
       "post": {
         "operationId": "change_routine_lifecycle_v1_routines__routine_id__lifecycle_post",
@@ -39290,6 +41761,674 @@
         "summary": "Command Routine Run",
         "tags": [
           "personal-routines"
+        ]
+      }
+    },
+    "/v1/routines/{routine_id}/telemetry/download": {
+      "get": {
+        "operationId": "download_routine_telemetry_v1_routines__routine_id__telemetry_download_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "routine_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Routine Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Auth-Session-ID",
+            "required": true,
+            "schema": {
+              "maxLength": 160,
+              "minLength": 1,
+              "title": "X-Dwp-Auth-Session-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-User-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Dwp-User-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Tenant-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Dwp-Tenant-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Correlation-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Correlation-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Roles",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Roles"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Permissions",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Permissions"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Person-Public-ID",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 36,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Person-Public-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Display-Name-B64",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 400,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Display-Name-B64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/x-ndjson": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Download Routine Telemetry",
+        "tags": [
+          "personal-routine-evidence"
+        ]
+      }
+    },
+    "/v1/routines/{routine_id}/versions": {
+      "get": {
+        "operationId": "list_routine_versions_v1_routines__routine_id__versions_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "routine_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Routine Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Auth-Session-ID",
+            "required": true,
+            "schema": {
+              "maxLength": 160,
+              "minLength": 1,
+              "title": "X-Dwp-Auth-Session-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-User-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Dwp-User-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Tenant-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Dwp-Tenant-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Correlation-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Correlation-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Roles",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Roles"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Permissions",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Permissions"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Person-Public-ID",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 36,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Person-Public-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Display-Name-B64",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 400,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Display-Name-B64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RoutineVersionListEnvelope"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Routine Versions",
+        "tags": [
+          "personal-routine-evidence"
+        ]
+      }
+    },
+    "/v1/routines/{routine_id}/versions/{revision}/rollback": {
+      "post": {
+        "operationId": "rollback_routine_version_v1_routines__routine_id__versions__revision__rollback_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "routine_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Routine Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "revision",
+            "required": true,
+            "schema": {
+              "minimum": 1,
+              "title": "Revision",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Auth-Session-ID",
+            "required": true,
+            "schema": {
+              "maxLength": 160,
+              "minLength": 1,
+              "title": "X-Dwp-Auth-Session-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-User-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Dwp-User-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Tenant-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Dwp-Tenant-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Correlation-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Correlation-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Roles",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Roles"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Permissions",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Permissions"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Person-Public-ID",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 36,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Person-Public-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Display-Name-B64",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 400,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Display-Name-B64"
+            }
+          },
+          {
+            "description": "Required for product-authorization rollout states 110/111. The gateway rejects a missing or stale value before the state-changing request reaches the Agent owner service; rollout states 000/100 ignore it.",
+            "in": "header",
+            "name": "X-DWP-Expected-Decision-Revision",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Expected-Decision-Revision"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RollbackRoutineVersionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RoutineRollbackEnvelope"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Rollback Routine Version",
+        "tags": [
+          "personal-routine-evidence"
+        ]
+      }
+    },
+    "/v1/routines/{routine_id}/webhook-events": {
+      "post": {
+        "operationId": "trigger_routine_webhook_v1_routines__routine_id__webhook_events_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "routine_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Routine Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Auth-Session-ID",
+            "required": true,
+            "schema": {
+              "maxLength": 160,
+              "minLength": 1,
+              "title": "X-Dwp-Auth-Session-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-User-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Dwp-User-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Tenant-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Dwp-Tenant-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Correlation-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Correlation-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Roles",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Roles"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Permissions",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Permissions"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Person-Public-ID",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 36,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Person-Public-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Display-Name-B64",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 400,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Display-Name-B64"
+            }
+          },
+          {
+            "description": "Required for product-authorization rollout states 110/111. The gateway rejects a missing or stale value before the state-changing request reaches the Agent owner service; rollout states 000/100 ignore it.",
+            "in": "header",
+            "name": "X-DWP-Expected-Decision-Revision",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Expected-Decision-Revision"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TriggerRoutineWebhookRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RoutineExecutionEnvelope"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Trigger Routine Webhook",
+        "tags": [
+          "personal-routine-evidence"
         ]
       }
     },

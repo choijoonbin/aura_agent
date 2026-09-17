@@ -70,6 +70,7 @@ class PersonalDataGovernanceCapabilities(ContractModel):
     backup_destruction_log: WorkflowCapability
     sre_support: WorkflowCapability
     legal_hold_evidence: WorkflowCapability
+    legal_hold_appeal: WorkflowCapability
     signed_certificate: WorkflowCapability
     siem_sync: WorkflowCapability
 

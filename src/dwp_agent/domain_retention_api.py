@@ -82,6 +82,10 @@ def get_personal_data_governance_capabilities(
                 "Configure the audited SRE escalation connector.",
             ),
             legal_hold_evidence=_provider_capability(True, None, None),
+            legal_hold_appeal=_provider_capability(
+                False, "LEGAL_HOLD_APPEAL_NOT_CONFIGURED",
+                "Configure the governed compliance appeal provider.",
+            ),
             signed_certificate=_provider_capability(
                 False, "SIGNED_DELETION_CERTIFICATE_NOT_CONFIGURED",
                 "Configure the tenant signing key and certificate renderer.",

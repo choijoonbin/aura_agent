@@ -31,6 +31,11 @@ class RoutineCadence(StrEnum):
     WEEKLY = "WEEKLY"
 
 
+class RoutineTriggerType(StrEnum):
+    SCHEDULED = "SCHEDULED"
+    WEBHOOK = "WEBHOOK"
+
+
 class RoutineSource(StrEnum):
     WORK_ITEM = "WORK_ITEM"
     MAIL = "MAIL"
@@ -56,6 +61,7 @@ class RoutineActivationAction(StrEnum):
 class RoutineExecutionMode(StrEnum):
     DRY_RUN_ONLY = "DRY_RUN_ONLY"
     SCHEDULED = "SCHEDULED"
+    WEBHOOK = "WEBHOOK"
 
 
 class RoutineCompensationStrategy(StrEnum):
@@ -66,6 +72,7 @@ class RoutineCompensationStrategy(StrEnum):
 class RoutineRunTrigger(StrEnum):
     SCHEDULED = "SCHEDULED"
     MANUAL = "MANUAL"
+    WEBHOOK = "WEBHOOK"
 
 
 class RoutineRunState(StrEnum):
@@ -122,9 +129,18 @@ class RoutineCompensationPolicy(ContractModel):
 class RoutineDefinition(ContractModel):
     name: str = Field(min_length=1, max_length=80)
     objective: str = Field(min_length=1, max_length=500)
-    cadence: RoutineCadence
-    local_time: str = Field(pattern=r"^(?:[01]\d|2[0-3]):[0-5]\d$")
-    time_zone: str = Field(min_length=1, max_length=64)
+    trigger_type: RoutineTriggerType = RoutineTriggerType.SCHEDULED
+    cadence: RoutineCadence | None = None
+    local_time: str | None = Field(
+        default=None, pattern=r"^(?:[01]\d|2[0-3]):[0-5]\d$"
+    )
+    time_zone: str | None = Field(default=None, min_length=1, max_length=64)
+    webhook_event_type: str | None = Field(
+        default=None, pattern=r"^[A-Z][A-Z0-9_.-]{1,63}$"
+    )
+    webhook_endpoint_reference: str | None = Field(
+        default=None, pattern=r"^[A-Za-z0-9][A-Za-z0-9:/._-]{0,239}$"
+    )
     locale: str = Field(pattern=r"^[a-z]{2}(?:-[A-Z]{2})?$")
     sources: list[RoutineSource] = Field(min_length=1, max_length=3)
     week_days: list[int] = Field(default_factory=list, max_length=7)
@@ -169,6 +185,33 @@ class RoutineDefinition(ContractModel):
 
     @model_validator(mode="after")
     def coherent_schedule(self) -> RoutineDefinition:
+        if self.trigger_type == RoutineTriggerType.SCHEDULED:
+            if self.cadence is None or self.local_time is None or self.time_zone is None:
+                raise ValueError(
+                    "A scheduled routine requires cadence, localTime and timeZone."
+                )
+            if self.webhook_event_type or self.webhook_endpoint_reference:
+                raise ValueError(
+                    "A scheduled routine cannot include webhook trigger fields."
+                )
+        else:
+            if self.webhook_event_type is None:
+                raise ValueError("A webhook routine requires webhookEventType.")
+            if any(
+                value is not None
+                for value in (self.cadence, self.local_time, self.time_zone)
+            ) or self.week_days or any(
+                value is not None
+                for value in (
+                    self.active_from,
+                    self.active_until,
+                    self.quiet_hours_start,
+                    self.quiet_hours_end,
+                )
+            ):
+                raise ValueError(
+                    "Webhook and scheduled trigger configuration are mutually exclusive."
+                )
         if self.cadence == RoutineCadence.WEEKLY and not self.week_days:
             raise ValueError("A weekly routine requires at least one weekDay.")
         if self.cadence != RoutineCadence.WEEKLY and self.week_days:
@@ -188,6 +231,7 @@ class CreateRoutineRequest(MutationCommand):
 
 class UpdateRoutineRequest(MutationCommand):
     definition: RoutineDefinition
+    change_reason: str | None = Field(default=None, min_length=5, max_length=1_000)
 
 
 class ChangeRoutineConsentRequest(HighRiskMutationCommand):
@@ -241,9 +285,10 @@ class RoutineConsentSet(ContractModel):
 
 
 class RoutineCapabilities(ContractModel):
-    lifecycle_mode: str = "GOVERNED_SCHEDULED_EXECUTION"
+    lifecycle_mode: str = "GOVERNED_SCHEDULED_OR_WEBHOOK_EXECUTION"
     activation_available: bool = False
     scheduling_available: bool = False
+    webhook_trigger_available: bool = False
     background_execution_available: bool = False
     dry_run_available: bool = True
     pause_resume_available: bool = True
@@ -257,6 +302,16 @@ class RoutineCapabilities(ContractModel):
     notification_delivery_available: bool = False
     proposal_delivery_available: bool = False
     external_write_available: bool = False
+    agent_kernel_binding: WorkflowCapability
+    whitelisted_source_binding: WorkflowCapability
+    blocked_source_policy: WorkflowCapability
+    zero_write_policy: WorkflowCapability
+    semantic_version_diff: WorkflowCapability
+    runtime_budget_retry: WorkflowCapability
+    automatic_quarantine: WorkflowCapability
+    change_approval: WorkflowCapability
+    agent_switching: WorkflowCapability
+    worm_delivery: WorkflowCapability
     oauth_reauthorization: WorkflowCapability
     temporary_budget_increase: WorkflowCapability
     operator_escalation: WorkflowCapability
@@ -381,7 +436,7 @@ class RoutineDryRunReceipt(ContractModel):
     evidence_scope: str = "AUTHORIZED_SOURCE_BINDING"
     business_evidence_count: int = 0
     validated_sources: list[RoutineSource]
-    preview_next_run_at: datetime
+    preview_next_run_at: datetime | None = None
     scheduling_available: bool = False
 
 

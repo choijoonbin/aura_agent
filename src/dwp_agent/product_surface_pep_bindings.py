@@ -1,4 +1,4 @@
-# Generated v6 base plus canonical product-authorization v21 and v22 overlays.
+# Generated v6 base plus canonical product-authorization v21, v22 and v24 overlays.
 from __future__ import annotations
 
 PRODUCT_AUTHORIZATION_V21_CHECKSUM = (
@@ -6,6 +6,9 @@ PRODUCT_AUTHORIZATION_V21_CHECKSUM = (
 )
 PRODUCT_AUTHORIZATION_V22_CHECKSUM = (
     "1629b75f62c7bb524dc70faaecac73499b9f9b0fb126ab38221b6e4773f35ede"
+)
+PRODUCT_AUTHORIZATION_V24_CHECKSUM = (
+    "be3db891d27cd0b94aa88ac706d9bc87d4b991c9f9d8e505e26b296647728b84"
 )
 
 ROUTE_BINDING_SPECS = (
@@ -170,6 +173,22 @@ ROUTE_BINDING_V22_SPECS = (
     {'route_contract_key': 'route.dwaion.work.routine-run-trigger.action', 'route_kind': 'ACTION', 'method': 'POST', 'path_template': '/v1/routines/{routineId}/runs', 'surface_key': 'dwaion.work', 'scope_kind': 'SELF', 'required_permission_sets': (('APP.DWAION_ROUTINES:MANAGE',),), 'introduced_version': 22, 'parameter_validators': {'routineId': 'uuid'}},
 )
 
+ROUTE_BINDING_V24_SPECS = (
+    {'route_contract_key': 'route.dwaion.work.research-raw-download.data', 'route_kind': 'DATA', 'method': 'GET', 'path_template': '/v1/research/runs/{runId}/downloads/raw', 'surface_key': 'dwaion.work', 'scope_kind': 'SELF', 'required_permission_sets': (('APP.ASK:VIEW',),), 'introduced_version': 24, 'parameter_validators': {'runId': 'uuid'}},
+    {'route_contract_key': 'route.dwaion.work.research-receipt-download.data', 'route_kind': 'DATA', 'method': 'GET', 'path_template': '/v1/research/runs/{runId}/downloads/receipt', 'surface_key': 'dwaion.work', 'scope_kind': 'SELF', 'required_permission_sets': (('APP.ASK:VIEW',),), 'introduced_version': 24, 'parameter_validators': {'runId': 'uuid'}},
+    {'route_contract_key': 'route.dwaion.work.research-audit-download.data', 'route_kind': 'DATA', 'method': 'GET', 'path_template': '/v1/research/runs/{runId}/downloads/audit', 'surface_key': 'dwaion.work', 'scope_kind': 'SELF', 'required_permission_sets': (('APP.ASK:VIEW',),), 'introduced_version': 24, 'parameter_validators': {'runId': 'uuid'}},
+    {'route_contract_key': 'route.dwaion.work.routine-evidence.data', 'route_kind': 'DATA', 'method': 'GET', 'path_template': '/v1/routines/{routineId}/versions', 'surface_key': 'dwaion.work', 'scope_kind': 'SELF', 'required_permission_sets': (('APP.ASK:VIEW',),), 'introduced_version': 24, 'parameter_validators': {'routineId': 'uuid'}},
+    {'route_contract_key': 'route.dwaion.work.routine-evidence.data', 'route_kind': 'DATA', 'method': 'GET', 'path_template': '/v1/routines/{routineId}/health', 'surface_key': 'dwaion.work', 'scope_kind': 'SELF', 'required_permission_sets': (('APP.ASK:VIEW',),), 'introduced_version': 24, 'parameter_validators': {'routineId': 'uuid'}},
+    {'route_contract_key': 'route.dwaion.work.routine-evidence.data', 'route_kind': 'DATA', 'method': 'GET', 'path_template': '/v1/routines/{routineId}/telemetry/download', 'surface_key': 'dwaion.work', 'scope_kind': 'SELF', 'required_permission_sets': (('APP.ASK:VIEW',),), 'introduced_version': 24, 'parameter_validators': {'routineId': 'uuid'}},
+    {'route_contract_key': 'route.dwaion.work.routine-webhook-trigger.action', 'route_kind': 'ACTION', 'method': 'POST', 'path_template': '/v1/routines/{routineId}/webhook-events', 'surface_key': 'dwaion.work', 'scope_kind': 'SELF', 'required_permission_sets': (('APP.DWAION_ROUTINES:MANAGE',),), 'introduced_version': 24, 'parameter_validators': {'routineId': 'uuid'}},
+    {'route_contract_key': 'route.dwaion.work.routine-version-rollback.action', 'route_kind': 'ACTION', 'method': 'POST', 'path_template': '/v1/routines/{routineId}/versions/{revision}/rollback', 'surface_key': 'dwaion.work', 'scope_kind': 'SELF', 'required_permission_sets': (('APP.DWAION_ROUTINES:MANAGE',),), 'introduced_version': 24, 'parameter_validators': {'routineId': 'uuid', 'revision': 'positive-int'}},
+    {'route_contract_key': 'route.dwaion.work.artifact-collaboration-comments.data', 'route_kind': 'DATA', 'method': 'GET', 'path_template': '/v1/artifact-collaboration/{artifactId}/workspace/comments', 'surface_key': 'dwaion.work', 'scope_kind': 'SELF', 'required_permission_sets': (('APP.ASK:VIEW',),), 'introduced_version': 24, 'parameter_validators': {'artifactId': 'uuid'}},
+    {'route_contract_key': 'route.dwaion.work.artifact-collaboration-comments.action', 'route_kind': 'ACTION', 'method': 'POST', 'path_template': '/v1/artifact-collaboration/{artifactId}/workspace/comments', 'surface_key': 'dwaion.work', 'scope_kind': 'SELF', 'required_permission_sets': (('APP.DWAION_ARTIFACTS:UPDATE',),), 'introduced_version': 24, 'parameter_validators': {'artifactId': 'uuid'}},
+    {'route_contract_key': 'route.dwaion.work.artifact-collaboration-comments.action', 'route_kind': 'ACTION', 'method': 'POST', 'path_template': '/v1/artifact-collaboration/{artifactId}/workspace/comments/{commentId}/replies', 'surface_key': 'dwaion.work', 'scope_kind': 'SELF', 'required_permission_sets': (('APP.DWAION_ARTIFACTS:UPDATE',),), 'introduced_version': 24, 'parameter_validators': {'artifactId': 'uuid', 'commentId': 'uuid'}},
+    {'route_contract_key': 'route.dwaion.work.artifact-collaboration-comments.action', 'route_kind': 'ACTION', 'method': 'POST', 'path_template': '/v1/artifact-collaboration/{artifactId}/workspace/comments/{commentId}/resolve', 'surface_key': 'dwaion.work', 'scope_kind': 'SELF', 'required_permission_sets': (('APP.DWAION_ARTIFACTS:UPDATE',),), 'introduced_version': 24, 'parameter_validators': {'artifactId': 'uuid', 'commentId': 'uuid'}},
+)
+
 ALL_ROUTE_BINDING_SPECS = (
     ROUTE_BINDING_SPECS + ROUTE_BINDING_V21_SPECS + ROUTE_BINDING_V22_SPECS
+    + ROUTE_BINDING_V24_SPECS
 )

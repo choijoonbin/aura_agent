@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
+import hashlib
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -14,6 +16,7 @@ from .governed_domain_core import (
     require_command_replay,
 )
 from .personal_domain_security import PersonalDomainIdentity
+from .envelope_codec import EnvelopeCiphertextCodec
 from .personal_memory_contracts import (
     AiSourceKey,
     AiSourcePreference,
@@ -204,6 +207,7 @@ class PersonalMemoryPostgresBase:
         return row
 
     def _memory(self, row: Any) -> PersonalMemory:
+        key_slot = EnvelopeCiphertextCodec().decode(row["payload_envelope"]).key_slot
         payload = self.codec.decrypt_json(
             row["payload_envelope"],
             tenant_id=row["tenant_id"],
@@ -214,9 +218,25 @@ class PersonalMemoryPostgresBase:
         return PersonalMemory(
             memory_id=row["memory_id"],
             kind=row["memory_kind"],
-            state=row["memory_state"],
+            state=(
+                MemoryState.EXPIRED
+                if row["memory_state"] == MemoryState.ACTIVE.value
+                and row["expires_at"] is not None
+                and row["expires_at"] <= datetime.now(UTC)
+                else row["memory_state"]
+            ),
             revision=row["revision"],
             memory=ExplicitMemoryValue.model_validate(payload),
+            scope=row["application_scope"],
+            expires_at=row["expires_at"],
+            origin=row["memory_origin"],
+            use_count=row["use_count"],
+            last_used_at=row["last_used_at"],
+            encryption_provider=key_slot.provider,
+            encryption_key_version=key_slot.key_version,
+            encryption_key_reference_fingerprint=hashlib.sha256(
+                key_slot.immutable_key_id.encode("utf-8")
+            ).hexdigest(),
             created_at=row["created_at"],
             updated_at=row["updated_at"],
         )
@@ -335,5 +355,7 @@ class PersonalMemoryPostgresBase:
 
 
 _MEMORY_SELECT = """SELECT memory_id, tenant_id, user_id, memory_kind, memory_state,
-       revision, payload_envelope, payload_fingerprint, created_at, updated_at
+       revision, payload_envelope, payload_fingerprint, application_scope,
+       expires_at, memory_origin, use_count, last_used_at, retention_until,
+       created_at, updated_at
   FROM ai_user_memories"""

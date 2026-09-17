@@ -237,7 +237,7 @@ class PostgresPersonalRoutineStore(
                 revision,
                 request.reason_code,
                 proof.request_fingerprint,
-                None,
+                request.change_reason,
             )
             return routine
 
@@ -359,7 +359,11 @@ class PostgresPersonalRoutineStore(
             self._require_source_access(identity, definition)
             self._require_source_preferences(connection, identity, definition)
             reference = request.reference_time or datetime.now(UTC)
-            next_run = preview_next_run(definition, after=reference)
+            next_run = (
+                preview_next_run(definition, after=reference)
+                if definition.trigger_type.value == "SCHEDULED"
+                else None
+            )
             evaluated_at = connection.execute(
                 "SELECT CURRENT_TIMESTAMP AS now"
             ).fetchone()["now"]

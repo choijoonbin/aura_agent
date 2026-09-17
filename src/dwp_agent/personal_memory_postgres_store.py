@@ -294,14 +294,33 @@ class PostgresPersonalMemoryStore(PersonalMemoryPostgresBase):
                 """SELECT DISTINCT ON (memory_kind)
                           memory_id, tenant_id, user_id, memory_kind, memory_state,
                           revision, payload_envelope, payload_fingerprint,
+                          application_scope, expires_at, retention_until,
+                          memory_origin, use_count, last_used_at,
                           created_at, updated_at
                      FROM ai_user_memories
                     WHERE tenant_id = %s AND user_id = %s
                       AND memory_state = 'ACTIVE'
                       AND retention_until > CURRENT_TIMESTAMP
+                      AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)
+                      AND 'ASK' = ANY(application_scope)
                     ORDER BY memory_kind, updated_at DESC, memory_id DESC""",
                 (tenant_id, user_id),
             ).fetchall()
+            if rows:
+                used_at = connection.execute(
+                    "SELECT CURRENT_TIMESTAMP AS now"
+                ).fetchone()["now"]
+                memory_ids = [row["memory_id"] for row in rows]
+                connection.execute(
+                    """UPDATE ai_user_memories
+                          SET use_count = use_count + 1, last_used_at = %s
+                        WHERE tenant_id = %s AND user_id = %s
+                          AND memory_id = ANY(%s)""",
+                    (used_at, tenant_id, user_id, memory_ids),
+                )
+                for row in rows:
+                    row["use_count"] = int(row["use_count"]) + 1
+                    row["last_used_at"] = used_at
             return RuntimeMemorySelection(
                 storage_enabled,
                 runtime_enabled,
@@ -325,13 +344,16 @@ class PostgresPersonalMemoryStore(PersonalMemoryPostgresBase):
             now = connection.execute(
                 "SELECT CURRENT_TIMESTAMP AS now"
             ).fetchone()["now"]
+            retention_until = retention_deadline(now, days)
+            self._validate_expiry(request.expires_at, now, retention_until)
             memory_id = uuid4()
             envelope, fingerprint = self._encoded_memory(identity, memory_id, request.memory)
             connection.execute(
                 """INSERT INTO ai_user_memories (
                        memory_id, tenant_id, user_id, memory_kind, payload_envelope,
-                       payload_fingerprint, retention_until, created_at, updated_at)
-                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                       payload_fingerprint, application_scope, expires_at,
+                       retention_until, created_at, updated_at)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
                 (
                     memory_id,
                     identity.tenant_id,
@@ -339,7 +361,9 @@ class PostgresPersonalMemoryStore(PersonalMemoryPostgresBase):
                     request.kind.value,
                     envelope,
                     fingerprint,
-                    retention_deadline(now, days),
+                    [scope.value for scope in request.scope],
+                    request.expires_at,
+                    retention_until,
                     now,
                     now,
                 ),
@@ -356,7 +380,8 @@ class PostgresPersonalMemoryStore(PersonalMemoryPostgresBase):
         memory_id: UUID,
         request: UpdateMemoryRequest,
     ) -> PersonalMemory:
-        require_safe_explicit_memory(request.memory)
+        if request.memory is not None:
+            require_safe_explicit_memory(request.memory)
         proof = self._proof(identity, "UPDATE", memory_id, request)
         with connect(self.database_url, row_factory=dict_row) as connection:
             replay = self._replay(connection, identity, request.command_id, "UPDATE", proof)
@@ -365,19 +390,48 @@ class PostgresPersonalMemoryStore(PersonalMemoryPostgresBase):
             self._require_enabled(connection, identity)
             row = self._locked(connection, identity, memory_id)
             self._expected_active(row, request.expected_revision)
-            envelope, fingerprint = self._encoded_memory(identity, memory_id, request.memory)
+            current_scope = set(row["application_scope"])
+            next_scope = (
+                [scope.value for scope in request.scope]
+                if request.scope is not None
+                else list(row["application_scope"])
+            )
+            if not set(next_scope) <= current_scope:
+                raise GovernedDomainConflict("A personal memory scope can only be narrowed.")
+            next_expiry = row["expires_at"]
+            if "expires_at" in request.model_fields_set:
+                next_expiry = request.expires_at
+                now = connection.execute("SELECT CURRENT_TIMESTAMP AS now").fetchone()["now"]
+                self._validate_expiry(next_expiry, now, row["retention_until"])
+            if request.memory is None:
+                envelope, fingerprint = row["payload_envelope"], row["payload_fingerprint"]
+            else:
+                envelope, fingerprint = self._encoded_memory(
+                    identity, memory_id, request.memory
+                )
             revision = int(row["revision"]) + 1
             connection.execute(
                 """UPDATE ai_user_memories
                       SET payload_envelope = %s, payload_fingerprint = %s,
+                          application_scope = %s, expires_at = %s,
                           revision = %s, updated_at = CURRENT_TIMESTAMP
                     WHERE memory_id = %s AND tenant_id = %s AND user_id = %s""",
-                (envelope, fingerprint, revision, memory_id, identity.tenant_id, identity.user_id),
+                (
+                    envelope, fingerprint, next_scope, next_expiry, revision,
+                    memory_id, identity.tenant_id, identity.user_id,
+                ),
             )
             result = self._memory(self._locked(connection, identity, memory_id, lock=False))
             self._record_command(connection, identity, memory_id, "UPDATE", request, proof, result)
             self._event(connection, identity, request.command_id, "MEMORY", str(memory_id), "UPDATED", row["memory_state"], result.state.value, revision, proof, request.reason_code, None)
             return result
+
+    @staticmethod
+    def _validate_expiry(expires_at: object, now: object, retention_until: object) -> None:
+        if expires_at is not None and not (now < expires_at <= retention_until):
+            raise GovernedDomainConflict(
+                "Memory expiry must be in the future and within the retention deadline."
+            )
 
     @_translated
     def change_state(

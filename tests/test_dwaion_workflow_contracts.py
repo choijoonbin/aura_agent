@@ -60,7 +60,7 @@ def test_research_result_requires_report_bound_digest() -> None:
         ResearchResult(reportMarkdown=report, citations=[citation], resultSha256="f" * 64)
 
 
-def test_research_download_capabilities_stay_closed_without_artifact_provider() -> None:
+def test_research_download_capabilities_match_real_server_artifacts() -> None:
     identity = PersonalDomainIdentity(
         tenant_id=7,
         user_id="member-1",
@@ -72,7 +72,7 @@ def test_research_download_capabilities_stay_closed_without_artifact_provider() 
 
     capabilities = research_capabilities(identity, Response()).data
 
-    assert capabilities.raw_export.available is False
+    assert capabilities.raw_export.available is True
     assert capabilities.pdf_export.available is False
-    assert capabilities.receipt_download.available is False
-    assert capabilities.audit_download.available is False
+    assert capabilities.receipt_download.available is True
+    assert capabilities.audit_download.available is True

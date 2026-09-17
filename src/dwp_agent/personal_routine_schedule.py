@@ -4,7 +4,11 @@ from datetime import UTC, date, datetime, time, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .governed_domain_core import GovernedDomainConflict
-from .personal_routine_contracts import RoutineCadence, RoutineDefinition
+from .personal_routine_contracts import (
+    RoutineCadence,
+    RoutineDefinition,
+    RoutineTriggerType,
+)
 
 
 SOURCE_PERMISSIONS = {
@@ -23,6 +27,14 @@ def preview_next_run(
     *,
     after: datetime,
 ) -> datetime:
+    if definition.trigger_type != RoutineTriggerType.SCHEDULED:
+        raise GovernedDomainConflict("A webhook routine has no scheduled run time.")
+    if (
+        definition.cadence is None
+        or definition.local_time is None
+        or definition.time_zone is None
+    ):
+        raise GovernedDomainConflict("The scheduled routine definition is incomplete.")
     try:
         zone = ZoneInfo(definition.time_zone)
     except ZoneInfoNotFoundError as error:

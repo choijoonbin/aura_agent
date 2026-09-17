@@ -85,10 +85,12 @@ from .artifact_collaboration_api import router as artifact_collaboration_router
 from .dwaion_workflow_api import internal_router as dwaion_workflow_internal_router
 from .dwaion_workflow_api import router as dwaion_workflow_router
 from .dwaion_navigation_api import router as dwaion_navigation_router
+from .research_download_api import router as research_download_router
 from .domain_retention_api import admin_router as domain_retention_admin_router
 from .domain_retention_api import router as domain_retention_router
 from .personal_memory_api import router as personal_memory_router
 from .personal_routine_api import router as personal_routine_router
+from .personal_routine_evidence_api import router as personal_routine_evidence_router
 from .personal_routine_execution_worker import MAINTENANCE as routine_execution_maintenance
 from .private_no_store import install_private_no_store
 from .voice_api import router as voice_router
@@ -104,7 +106,6 @@ from .runtime_policy import (
 )
 SERVICE_NAME = os.getenv("APP_NAME", "DWP Agent Runtime")
 SERVICE_VERSION = os.getenv("APP_VERSION", "0.2.0")
-
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     validate_runtime_configuration()
@@ -125,7 +126,6 @@ async def lifespan(_: FastAPI):
         governed_worker_maintenance.close()
         question_launch_maintenance.close()
         shutdown_ask_stream_pool()
-
 
 app = FastAPI(title=SERVICE_NAME, version=SERVICE_VERSION, lifespan=lifespan)
 install_api_history(app)
@@ -148,12 +148,14 @@ app.include_router(proposal_router)
 app.include_router(dwaion_workflow_router)
 app.include_router(dwaion_workflow_internal_router)
 app.include_router(dwaion_navigation_router)
+app.include_router(research_download_router)
 app.include_router(user_run_router)
 app.include_router(activity_router)
 app.include_router(voice_router)
 app.include_router(meeting_intelligence_router)
 app.include_router(meeting_media_router)
 app.include_router(personal_routine_router)
+app.include_router(personal_routine_evidence_router)
 app.include_router(personal_memory_router)
 app.include_router(artifact_router)
 app.include_router(artifact_collaboration_router)

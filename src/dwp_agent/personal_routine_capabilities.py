@@ -34,6 +34,7 @@ def routine_runtime_capabilities() -> RoutineCapabilities:
     return RoutineCapabilities(
         activation_available=available,
         scheduling_available=available,
+        webhook_trigger_available=available,
         background_execution_available=available,
         dry_run_available=True,
         pause_resume_available=True,
@@ -46,6 +47,43 @@ def routine_runtime_capabilities() -> RoutineCapabilities:
         notification_delivery_available=available,
         proposal_delivery_available=available,
         external_write_available=False,
+        agent_kernel_binding=_supported(
+            "The governed Deep Research routine kernel is bound server-side."
+        ),
+        whitelisted_source_binding=_supported(
+            "Routine sources are restricted to permission-checked bindings."
+        ),
+        blocked_source_policy=_supported(
+            "Unauthorized or user-disabled sources are rejected before execution."
+        ),
+        zero_write_policy=_supported(
+            "Routine execution can create approval-gated proposals and performs no direct write."
+        ),
+        semantic_version_diff=_supported(
+            "Immutable encrypted routine revisions and integrity fingerprints are available."
+        ),
+        runtime_budget_retry=WorkflowCapability(
+            available=available,
+            configured=configured,
+            reason_code=None if available else "ROUTINE_RUNTIME_GOVERNANCE_UNAVAILABLE",
+            recovery_hint=None if available else hint,
+        ),
+        automatic_quarantine=_unsupported(
+            "ROUTINE_AUTOMATIC_QUARANTINE_NOT_CONFIGURED",
+            "Configure an attested quarantine policy and operator recovery workflow.",
+        ),
+        change_approval=_unsupported(
+            "ROUTINE_CHANGE_APPROVAL_NOT_CONFIGURED",
+            "Configure an independent maker-checker provider for routine definition changes.",
+        ),
+        agent_switching=_unsupported(
+            "ROUTINE_AGENT_SWITCHING_NOT_CONFIGURED",
+            "Configure an approved agent registry before switching the routine execution kernel.",
+        ),
+        worm_delivery=_unsupported(
+            "ROUTINE_WORM_DELIVERY_NOT_CONFIGURED",
+            "Configure an immutable artifact retention provider before enabling WORM delivery.",
+        ),
         oauth_reauthorization=WorkflowCapability(
             available=False,
             configured=False,
@@ -83,4 +121,22 @@ def routine_runtime_capabilities() -> RoutineCapabilities:
         ),
         execution_provider_state=state,
         recovery_hint=hint,
+    )
+
+
+def _supported(evidence: str) -> WorkflowCapability:
+    return WorkflowCapability(
+        available=True,
+        configured=True,
+        reason_code=None,
+        recovery_hint=evidence,
+    )
+
+
+def _unsupported(reason_code: str, recovery_hint: str) -> WorkflowCapability:
+    return WorkflowCapability(
+        available=False,
+        configured=False,
+        reason_code=reason_code,
+        recovery_hint=recovery_hint,
     )

@@ -5,7 +5,7 @@ DWAI.ON user and administration routes are fail closed. A deployment is ready on
 ## Authorization and storage
 
 - Apply database migrations through `V41` before starting the API or workers.
-- Enable product authorization v21 and v22 only after the gateway and Agent owner PEP both load the matching sealed checksums.
+- Enable product authorization v21, v22 and v24 only after the gateway and Agent owner PEP load the matching sealed checksums. V24 covers governed research downloads, routine webhook/evidence/rollback, and artifact comments.
 - Configure the managed envelope key provider, privacy fingerprint secret, tenant identity signature verification, and the Agent PostgreSQL database.
 - Keep provider support identities outside tenant SELF and CONFIG_SCOPE authority.
 

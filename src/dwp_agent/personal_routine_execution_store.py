@@ -15,6 +15,7 @@ from .personal_routine_contracts import (
     RoutineExecutionRun,
     RoutineLifecycle,
     RoutineRunCommand,
+    RoutineTriggerType,
     TriggerRoutineRunRequest,
 )
 from .personal_routine_execution_queries import (
@@ -64,9 +65,13 @@ class PersonalRoutineExecutionCommands(PersonalRoutineExecutionQueries):
                     "SELECT CURRENT_TIMESTAMP AS now"
                 ).fetchone()["now"]
                 reference = max(now, request.start_at or now)
-                next_run_at = preview_next_run(definition, after=reference)
+                if definition.trigger_type == RoutineTriggerType.SCHEDULED:
+                    next_run_at = preview_next_run(definition, after=reference)
+                    execution_mode = "SCHEDULED"
+                else:
+                    next_run_at = None
+                    execution_mode = "WEBHOOK"
                 target = RoutineLifecycle.ACTIVE.value
-                execution_mode = "SCHEDULED"
                 event_type = "ACTIVATED"
             else:
                 if row["lifecycle_state"] != RoutineLifecycle.ACTIVE.value:
