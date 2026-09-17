@@ -8,6 +8,7 @@ from pydantic import Field, field_validator, model_validator
 
 from .artifact_contracts import ArtifactDraftContent, ArtifactSourceReference
 from .contracts import ContractModel
+from .dwaion_workflow_contracts import WorkflowCapability
 from .governed_domain_contracts import HighRiskMutationCommand, MutationCommand
 
 
@@ -28,6 +29,13 @@ class TeamArtifactPreflightState(StrEnum):
     READY = "READY"
     PARTIAL = "PARTIAL"
     PERMISSION_DENIED = "PERMISSION_DENIED"
+    EXPIRED = "EXPIRED"
+
+
+class TeamArtifactAccessRequestState(StrEnum):
+    PENDING = "PENDING"
+    APPROVED = "APPROVED"
+    DENIED = "DENIED"
     EXPIRED = "EXPIRED"
 
 
@@ -111,6 +119,12 @@ class RunTeamArtifactPreflightRequest(MutationCommand):
             raise ValueError("Team artifact sources must be unique.")
         return value
 
+    @model_validator(mode="after")
+    def bind_artifact_revision(self) -> "RunTeamArtifactPreflightRequest":
+        if self.expected_revision != self.artifact_revision:
+            raise ValueError("artifactRevision must match expectedRevision.")
+        return self
+
 
 class TeamArtifactPreflight(ContractModel):
     preflight_id: UUID
@@ -151,6 +165,10 @@ class CreateTeamArtifactWorkspaceRequest(HighRiskMutationCommand):
     preflight_id: UUID
 
 
+class CreateTeamArtifactAccessRequest(HighRiskMutationCommand):
+    preflight_id: UUID
+
+
 class UpdateTeamArtifactMembersRequest(HighRiskMutationCommand):
     preflight_id: UUID
 
@@ -158,6 +176,12 @@ class UpdateTeamArtifactMembersRequest(HighRiskMutationCommand):
 class SubmitTeamArtifactEditRequest(MutationCommand):
     base_revision: int = Field(ge=1)
     content: ArtifactDraftContent
+
+    @model_validator(mode="after")
+    def bind_workspace_revision(self) -> "SubmitTeamArtifactEditRequest":
+        if self.expected_revision != self.base_revision:
+            raise ValueError("baseRevision must match expectedRevision.")
+        return self
 
 
 class ResolveTeamArtifactConflictRequest(HighRiskMutationCommand):
@@ -193,14 +217,37 @@ class RevokeTeamArtifactShareRequest(HighRiskMutationCommand):
 class TeamArtifactCapabilities(ContractModel):
     team_workspace_available: bool
     acl_preflight_available: bool
+    access_request_available: bool
     collaboration_available: bool
     conflict_resolution_available: bool
     internal_sharing_available: bool
     external_sharing_available: bool = False
     share_expiry_available: bool
     share_revocation_available: bool
+    automatic_masking: WorkflowCapability
+    synthetic_replacement: WorkflowCapability
+    review_notification: WorkflowCapability
+    review_rejection: WorkflowCapability
     provider_state: str
     recovery_hint: str | None = None
+
+
+class TeamArtifactAccessRequest(ContractModel):
+    access_request_id: UUID
+    artifact_id: UUID
+    team_id: UUID
+    preflight_id: UUID
+    state: TeamArtifactAccessRequestState
+    denied_subject_count: int = Field(ge=0, le=100)
+    denied_source_count: int = Field(ge=0, le=20)
+    submission_evidence_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    created_at: datetime
+
+    @model_validator(mode="after")
+    def denied_evidence_required(self) -> "TeamArtifactAccessRequest":
+        if self.denied_subject_count + self.denied_source_count < 1:
+            raise ValueError("An access request requires denied ACL evidence.")
+        return self
 
 
 class TeamArtifactConflict(ContractModel):
@@ -295,6 +342,12 @@ class TeamArtifactPreflightEnvelope(ContractModel):
     status: str = "SUCCESS"
     success: bool = True
     data: TeamArtifactPreflight
+
+
+class TeamArtifactAccessRequestEnvelope(ContractModel):
+    status: str = "SUCCESS"
+    success: bool = True
+    data: TeamArtifactAccessRequest
 
 
 class TeamArtifactWorkspaceEnvelope(ContractModel):

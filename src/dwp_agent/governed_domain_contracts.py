@@ -7,6 +7,7 @@ from uuid import UUID
 from pydantic import Field, field_validator, model_validator
 
 from .contracts import ContractModel
+from .dwaion_workflow_contracts import WorkflowCapability
 
 
 class DomainKey(StrEnum):
@@ -66,6 +67,11 @@ class PersonalDataGovernanceCapabilities(ContractModel):
     proposal_clear_managed_separately: bool = True
     proposal_clear_route: str = "/v1/proposals/clear"
     analysis_receipt_clear_available: bool = False
+    backup_destruction_log: WorkflowCapability
+    sre_support: WorkflowCapability
+    legal_hold_evidence: WorkflowCapability
+    signed_certificate: WorkflowCapability
+    siem_sync: WorkflowCapability
 
 
 class PersonalDataGovernanceCapabilitiesEnvelope(ContractModel):
@@ -112,6 +118,10 @@ class RequestDeletionRequest(HighRiskMutationCommand):
         if len(set(value)) != len(value):
             raise ValueError("Deletion domains must be unique.")
         return value
+
+
+class RetryDeletionRequest(HighRiskMutationCommand):
+    pass
 
 
 class DataDispositionReceipt(ContractModel):
@@ -177,3 +187,9 @@ class DeletionJobEnvelope(ContractModel):
     status: str = "SUCCESS"
     success: bool = True
     data: DeletionJob
+
+
+class DeletionJobsEnvelope(ContractModel):
+    status: str = "SUCCESS"
+    success: bool = True
+    data: list[DeletionJob]

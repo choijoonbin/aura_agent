@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 
+from .dwaion_workflow_contracts import WorkflowCapability
 from .governed_worker_runtime import governed_worker_available
 from .personal_routine_contracts import RoutineCapabilities
 from .personal_routine_execution_provider import (
@@ -45,6 +46,41 @@ def routine_runtime_capabilities() -> RoutineCapabilities:
         notification_delivery_available=available,
         proposal_delivery_available=available,
         external_write_available=False,
+        oauth_reauthorization=WorkflowCapability(
+            available=False,
+            configured=False,
+            reason_code="ROUTINE_OAUTH_REAUTHORIZATION_NOT_CONFIGURED",
+            recovery_hint=(
+                "Configure a governed OAuth reauthorization provider before requesting "
+                "credential recovery."
+            ),
+        ),
+        temporary_budget_increase=WorkflowCapability(
+            available=False,
+            configured=False,
+            reason_code="ROUTINE_TEMPORARY_BUDGET_PROVIDER_NOT_CONFIGURED",
+            recovery_hint=(
+                "Configure a maker-checker budget exception provider before requesting "
+                "a temporary limit increase."
+            ),
+        ),
+        operator_escalation=WorkflowCapability(
+            available=False,
+            configured=False,
+            reason_code="ROUTINE_OPERATOR_ESCALATION_NOT_CONFIGURED",
+            recovery_hint=(
+                "Configure the governed operator escalation queue before escalating a run."
+            ),
+        ),
+        provider_rollback=WorkflowCapability(
+            available=False,
+            configured=False,
+            reason_code="ROUTINE_PROVIDER_ROLLBACK_NOT_CONFIGURED",
+            recovery_hint=(
+                "Configure an attested provider rollback adapter before restoring an "
+                "external side effect."
+            ),
+        ),
         execution_provider_state=state,
         recovery_hint=hint,
     )

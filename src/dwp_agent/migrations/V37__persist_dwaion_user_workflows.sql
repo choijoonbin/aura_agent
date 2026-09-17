@@ -262,6 +262,7 @@ CREATE TABLE ai_research_deliveries (
     delivery_type VARCHAR(24) NOT NULL,
     delivery_state VARCHAR(32) NOT NULL,
     request_envelope TEXT NOT NULL,
+    receipt_id UUID,
     receipt_envelope TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -280,6 +281,25 @@ CREATE TABLE ai_research_deliveries (
         receipt_envelope IS NULL OR receipt_envelope LIKE 'dwp2.%'
     )
 );
+
+CREATE TABLE ai_research_delivery_events (
+    event_id UUID PRIMARY KEY,
+    delivery_id UUID NOT NULL REFERENCES ai_research_deliveries(delivery_id) ON DELETE RESTRICT,
+    tenant_id BIGINT NOT NULL,
+    user_id VARCHAR(160) NOT NULL,
+    actor_user_id VARCHAR(160) NOT NULL,
+    correlation_id VARCHAR(160) NOT NULL,
+    command_id UUID NOT NULL,
+    event_type VARCHAR(40) NOT NULL,
+    previous_state VARCHAR(32),
+    current_state VARCHAR(32) NOT NULL,
+    occurred_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT uq_ai_research_delivery_event_command UNIQUE (tenant_id, user_id, command_id)
+);
+
+CREATE TRIGGER trg_ai_research_delivery_events_append_only
+BEFORE UPDATE OR DELETE ON ai_research_delivery_events
+FOR EACH ROW EXECUTE FUNCTION reject_ai_audit_event_mutation();
 
 COMMENT ON TABLE ai_secure_attachments IS
     'User-owned attachment metadata and governed scan/parser state. File bytes remain in the approved storage provider.';

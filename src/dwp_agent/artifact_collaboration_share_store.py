@@ -39,6 +39,10 @@ class ArtifactCollaborationShareCommands:
                 workspace = self._locked_workspace(
                     connection, identity, artifact_id, owner_only=False, require_edit=True
                 )
+                if workspace["workspace_state"] != "ACTIVE":
+                    raise GovernedDomainConflict(
+                        "Only an active team workspace can create shares."
+                    )
                 if int(workspace["revision"]) != request.expected_revision:
                     raise GovernedDomainConflict("The team workspace revision has changed.")
                 now = connection.execute(

@@ -8,6 +8,7 @@ from uuid import UUID, uuid4
 from psycopg import Error as PsycopgError, connect
 from psycopg.rows import dict_row
 
+from .attachment_evidence_contracts import AttachmentEvidence, AttachmentEvidenceEvent
 from .dwaion_workflow_contracts import (
     AttachmentCapabilities,
     AttachmentCitation,
@@ -164,6 +165,38 @@ class SecureAttachmentStore:
             raise
         except (PsycopgError, ValueError, TypeError) as error:
             raise DwaionWorkflowUnavailable("Attachment storage is unavailable.") from error
+
+    def evidence(
+        self, identity: PersonalDomainIdentity, attachment_id: UUID
+    ) -> AttachmentEvidence:
+        attachment = self.get(identity, attachment_id)
+        try:
+            with connect(self.database_url, row_factory=dict_row) as connection:
+                rows = connection.execute(
+                    """SELECT event_id, event_type, previous_state, current_state,
+                              revision, safe_error_code, occurred_at
+                         FROM ai_secure_attachment_events
+                        WHERE attachment_id = %s AND tenant_id = %s AND user_id = %s
+                        ORDER BY occurred_at, event_id""",
+                    (attachment_id, identity.tenant_id, identity.user_id),
+                ).fetchall()
+            events = [AttachmentEvidenceEvent.model_validate(dict(row)) for row in rows]
+            ocr_passed = any(
+                stage.key == AttachmentStageKey.OCR
+                and stage.state == AttachmentStageState.PASSED
+                for stage in attachment.stages
+            )
+            return AttachmentEvidence(
+                attachment_id=attachment.attachment_id,
+                source_sha256=attachment.source_sha256,
+                stages=attachment.stages,
+                citations=attachment.citations,
+                inspection_log=events,
+                masking_history=[event for event in events if "MASK" in event.event_type],
+                ocr_evidence=attachment.citations if ocr_passed else [],
+            )
+        except (PsycopgError, ValueError, TypeError) as error:
+            raise DwaionWorkflowUnavailable("Attachment evidence is unavailable.") from error
 
     def complete_upload(
         self,

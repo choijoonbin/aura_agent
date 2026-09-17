@@ -80,6 +80,42 @@ CREATE TABLE ai_artifact_team_workspaces (
     )
 );
 
+CREATE TABLE ai_artifact_team_access_requests (
+    access_request_id UUID PRIMARY KEY,
+    artifact_id UUID NOT NULL,
+    team_id UUID NOT NULL,
+    preflight_id UUID NOT NULL,
+    tenant_id BIGINT NOT NULL,
+    requester_user_id VARCHAR(160) NOT NULL,
+    command_id UUID NOT NULL,
+    request_state VARCHAR(24) NOT NULL DEFAULT 'PENDING',
+    denied_subject_count INTEGER NOT NULL,
+    denied_source_count INTEGER NOT NULL,
+    submission_evidence_sha256 CHAR(64) NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT fk_ai_artifact_team_access_request_artifact
+        FOREIGN KEY (artifact_id) REFERENCES ai_artifacts(artifact_id)
+        ON DELETE RESTRICT,
+    CONSTRAINT fk_ai_artifact_team_access_request_preflight
+        FOREIGN KEY (preflight_id)
+        REFERENCES ai_artifact_team_preflights(preflight_id)
+        ON DELETE RESTRICT,
+    CONSTRAINT uq_ai_artifact_team_access_request_command
+        UNIQUE (tenant_id, requester_user_id, command_id),
+    CONSTRAINT ck_ai_artifact_team_access_request_state CHECK (
+        request_state IN ('PENDING', 'APPROVED', 'DENIED', 'EXPIRED')
+    ),
+    CONSTRAINT ck_ai_artifact_team_access_request_denials CHECK (
+        denied_subject_count BETWEEN 0 AND 100
+        AND denied_source_count BETWEEN 0 AND 20
+        AND denied_subject_count + denied_source_count > 0
+    ),
+    CONSTRAINT ck_ai_artifact_team_access_request_evidence CHECK (
+        submission_evidence_sha256 ~ '^[0-9a-f]{64}$'
+    )
+);
+
 CREATE TABLE ai_artifact_team_members (
     workspace_id UUID NOT NULL,
     tenant_id BIGINT NOT NULL,
@@ -242,7 +278,8 @@ CREATE TABLE ai_artifact_collaboration_commands (
     CONSTRAINT ck_ai_artifact_collaboration_command_type CHECK (
         command_type IN (
             'PREFLIGHT', 'CREATE_WORKSPACE', 'UPDATE_MEMBERS', 'EDIT',
-            'RESOLVE_CONFLICT', 'CREATE_SHARE', 'REVOKE_SHARE'
+            'RESOLVE_CONFLICT', 'CREATE_SHARE', 'REVOKE_SHARE',
+            'REQUEST_ACCESS'
         )
     ),
     CONSTRAINT ck_ai_artifact_collaboration_command_fingerprints CHECK (
@@ -273,7 +310,7 @@ CREATE TABLE ai_artifact_collaboration_events (
         event_type IN (
             'PREFLIGHT_COMPLETED', 'WORKSPACE_CREATED', 'MEMBERS_UPDATED',
             'EDIT_APPLIED', 'CONFLICT_DETECTED', 'CONFLICT_RESOLVED',
-            'SHARE_CREATED', 'SHARE_REVOKED'
+            'SHARE_CREATED', 'SHARE_REVOKED', 'ACCESS_REQUESTED'
         )
     ),
     CONSTRAINT ck_ai_artifact_collaboration_event_revision CHECK (revision > 0),
@@ -292,6 +329,9 @@ CREATE INDEX idx_ai_artifact_team_workspaces_team
 CREATE INDEX idx_ai_artifact_team_shares_expiry
     ON ai_artifact_team_shares (expires_at)
     WHERE share_state = 'ACTIVE';
+CREATE INDEX idx_ai_artifact_team_access_requests_pending
+    ON ai_artifact_team_access_requests (tenant_id, team_id, created_at DESC)
+    WHERE request_state = 'PENDING';
 
 COMMENT ON TABLE ai_artifact_team_workspaces IS
     'Governed team artifact workspace with optimistic revisions and encrypted content.';

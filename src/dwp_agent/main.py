@@ -1,16 +1,14 @@
 from __future__ import annotations
-
 import os
 import json
 from contextlib import asynccontextmanager
 from typing import Annotated
 from uuid import UUID
-
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response, status
 from fastapi.responses import StreamingResponse
-
 from .admin_authority import AdminPreflightDenied, require_admin_preflight
 from .admin_commands import resolve_admin_command
+from .admin_control_plane_api import internal_router as admin_control_internal_router, router as admin_control_router
 from .ai_control_api import router as ai_control_router
 from .ai_control_integration import (
     AI_CONTROL_ERRORS, ai_control_http_exception, controlled_ask_runtime,
@@ -83,10 +81,15 @@ from .system_api import build_system_router
 from .user_run_api import router as user_run_router
 from .activity_api import router as activity_router
 from .artifact_api import router as artifact_router
+from .artifact_collaboration_api import router as artifact_collaboration_router
+from .dwaion_workflow_api import internal_router as dwaion_workflow_internal_router
+from .dwaion_workflow_api import router as dwaion_workflow_router
+from .dwaion_navigation_api import router as dwaion_navigation_router
 from .domain_retention_api import admin_router as domain_retention_admin_router
 from .domain_retention_api import router as domain_retention_router
 from .personal_memory_api import router as personal_memory_router
 from .personal_routine_api import router as personal_routine_router
+from .personal_routine_execution_worker import MAINTENANCE as routine_execution_maintenance
 from .private_no_store import install_private_no_store
 from .voice_api import router as voice_router
 from .voice_provider import validate_voice_runtime_configuration
@@ -99,11 +102,8 @@ from .runtime_policy import (
     SourceScopeLimitExceeded,
     resolve_runtime_safety_controls,
 )
-
-
 SERVICE_NAME = os.getenv("APP_NAME", "DWP Agent Runtime")
 SERVICE_VERSION = os.getenv("APP_VERSION", "0.2.0")
-
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
@@ -117,9 +117,11 @@ async def lifespan(_: FastAPI):
     validate_delivery_gate_runtime()
     question_launch_maintenance.start()
     governed_worker_maintenance.start()
+    routine_execution_maintenance.start()
     try:
         yield
     finally:
+        routine_execution_maintenance.close()
         governed_worker_maintenance.close()
         question_launch_maintenance.close()
         shutdown_ask_stream_pool()
@@ -132,17 +134,20 @@ install_meeting_media_body_limit(app)
 install_product_surface_pep(app)
 install_private_no_store(app)
 install_operational_gate_problem_handler(app)
-app.include_router(
-    build_system_router(service_name=SERVICE_NAME, service_version=SERVICE_VERSION)
-)
+app.include_router(build_system_router(service_name=SERVICE_NAME, service_version=SERVICE_VERSION))
 app.include_router(operations_router)
 app.include_router(ai_control_router)
+app.include_router(admin_control_router)
+app.include_router(admin_control_internal_router)
 app.include_router(governance_router)
 app.include_router(governance_safety_router)
 app.include_router(operational_gate_router)
 app.include_router(action_router)
 app.include_router(question_launch_router)
 app.include_router(proposal_router)
+app.include_router(dwaion_workflow_router)
+app.include_router(dwaion_workflow_internal_router)
+app.include_router(dwaion_navigation_router)
 app.include_router(user_run_router)
 app.include_router(activity_router)
 app.include_router(voice_router)
@@ -151,13 +156,12 @@ app.include_router(meeting_media_router)
 app.include_router(personal_routine_router)
 app.include_router(personal_memory_router)
 app.include_router(artifact_router)
+app.include_router(artifact_collaboration_router)
 app.include_router(domain_retention_router)
 app.include_router(domain_retention_admin_router)
 
 
-def require_operational_delivery(
-    *, tenant_id: str, user_id: str, capability: DeliveryCapability
-) -> None:
+def require_operational_delivery(*, tenant_id: str, user_id: str, capability: DeliveryCapability) -> None:
     try:
         require_delivery_capability(
             tenant_id=tenant_id,

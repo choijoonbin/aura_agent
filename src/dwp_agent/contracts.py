@@ -1,10 +1,8 @@
 from __future__ import annotations
-
 from datetime import datetime
 from enum import StrEnum
 from typing import Literal
 from uuid import UUID
-
 from pydantic import Field, JsonValue, model_validator
 
 from .ask_personalization_contracts import AskPersonalization, AskPersonalizationState
@@ -57,6 +55,7 @@ class CitationSourceType(StrEnum):
     APPROVAL_REQUEST = "APPROVAL_REQUEST"
     APPROVAL_FORM = "APPROVAL_FORM"
     APPROVAL_OPERATION = "APPROVAL_OPERATION"
+    ATTACHMENT = "ATTACHMENT"
 
 
 class ConversationRole(StrEnum):
@@ -192,16 +191,21 @@ class AskRequest(ContractModel):
         pattern=r"^[A-Za-z][A-Za-z0-9_.-]{0,99}$",
     )
     conversation_id: UUID | None = None
+    attachment_ids: list[UUID] = Field(default_factory=list, max_length=10)
     source_scopes: list[CitationSourceType] = Field(
-        default_factory=lambda: list(CitationSourceType),
+        default_factory=lambda: [
+            scope for scope in CitationSourceType
+            if scope != CitationSourceType.ATTACHMENT
+        ],
         min_length=1,
-        max_length=7,
+        max_length=8,
     )
     page_context: "AskPageContext | None" = None
 
     @model_validator(mode="after")
     def normalize_source_scopes(self) -> "AskRequest":
         self.source_scopes = list(dict.fromkeys(self.source_scopes))
+        self.attachment_ids = list(dict.fromkeys(self.attachment_ids))
         selected = self.page_context.selected_work if self.page_context else None
         if selected is not None:
             approval = selected.source_system.startswith("APPROVAL_")

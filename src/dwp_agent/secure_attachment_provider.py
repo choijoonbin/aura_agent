@@ -123,6 +123,11 @@ class AttachmentProviderConfiguration:
             ocr=_capability(configured and self.ocr_available, "OCR_NOT_CONFIGURED"),
             index=_capability(configured and self.index_available, "INDEX_NOT_CONFIGURED"),
             deletion=_capability(configured and self.deletion_available, "DELETE_NOT_CONFIGURED"),
+            detach_all=_capability(False, "DETACH_ALL_NOT_IMPLEMENTED"),
+            inspection_log=_capability(True, None),
+            masking_history=_capability(False, "MASKING_HISTORY_NOT_CONFIGURED"),
+            ocr_viewer=_capability(configured and self.ocr_available, "OCR_NOT_CONFIGURED"),
+            signed_audit_report=_capability(False, "SIGNED_AUDIT_REPORT_NOT_CONFIGURED"),
             maximum_file_bytes=self.maximum_file_bytes,
             allowed_media_types=sorted(self.allowed_media_types),
         )

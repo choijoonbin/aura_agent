@@ -7,6 +7,7 @@ from uuid import UUID
 from pydantic import Field, field_validator, model_validator
 
 from .contracts import ContractModel
+from .dwaion_workflow_contracts import WorkflowCapability
 from .governed_domain_contracts import HighRiskMutationCommand, MutationCommand
 
 
@@ -256,6 +257,10 @@ class RoutineCapabilities(ContractModel):
     notification_delivery_available: bool = False
     proposal_delivery_available: bool = False
     external_write_available: bool = False
+    oauth_reauthorization: WorkflowCapability
+    temporary_budget_increase: WorkflowCapability
+    operator_escalation: WorkflowCapability
+    provider_rollback: WorkflowCapability
     execution_provider_state: str = "NOT_CONFIGURED"
     recovery_hint: str | None = (
         "Configure and start the governed routine execution broker."

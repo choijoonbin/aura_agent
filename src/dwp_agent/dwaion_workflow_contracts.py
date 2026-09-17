@@ -1,4 +1,5 @@
 from __future__ import annotations
+import hashlib
 
 from datetime import datetime
 from enum import StrEnum
@@ -8,7 +9,6 @@ from pydantic import Field, JsonValue, field_validator, model_validator
 
 from .contract_model import ContractModel
 
-
 class WorkflowCapability(ContractModel):
     available: bool
     configured: bool
@@ -16,7 +16,6 @@ class WorkflowCapability(ContractModel):
         default=None, pattern=r"^[A-Z][A-Z0-9_.-]{1,127}$"
     )
     recovery_hint: str | None = Field(default=None, max_length=500)
-
 
 class ProposalHandoffState(StrEnum):
     REVIEW_REQUIRED = "REVIEW_REQUIRED"
@@ -30,13 +29,11 @@ class ProposalHandoffState(StrEnum):
     COMPENSATING = "COMPENSATING"
     COMPENSATED = "COMPENSATED"
 
-
 class CreateProposalHandoffRequest(ContractModel):
     expected_version: int = Field(ge=1)
     command_id: UUID
     idempotency_key: UUID
     reviewed_inputs: dict[str, JsonValue] = Field(default_factory=dict, max_length=20)
-
 
 class ProposalHandoff(ContractModel):
     handoff_id: UUID
@@ -50,13 +47,11 @@ class ProposalHandoff(ContractModel):
     created_at: datetime
     updated_at: datetime
 
-
 class ProposalHandoffEnvelope(ContractModel):
     status: str = "SUCCESS"
     message: str = "Proposal handoff prepared."
     success: bool = True
     data: ProposalHandoff
-
 
 class ProposalHandoffObservation(ContractModel):
     command_id: UUID
@@ -72,7 +67,6 @@ class ProposalHandoffObservation(ContractModel):
             raise ValueError("A domain completion receipt is only accepted for COMPLETED.")
         return self
 
-
 class AttachmentState(StrEnum):
     UPLOADING = "UPLOADING"
     SCANNING = "SCANNING"
@@ -84,7 +78,6 @@ class AttachmentState(StrEnum):
     DELETION_PENDING = "DELETION_PENDING"
     DELETED = "DELETED"
 
-
 class AttachmentStageKey(StrEnum):
     UPLOAD = "UPLOAD"
     AV = "AV"
@@ -92,7 +85,6 @@ class AttachmentStageKey(StrEnum):
     PARSER = "PARSER"
     OCR = "OCR"
     INDEX = "INDEX"
-
 
 class AttachmentStageState(StrEnum):
     PENDING = "PENDING"
@@ -102,7 +94,6 @@ class AttachmentStageState(StrEnum):
     FAILED = "FAILED"
     NOT_REQUIRED = "NOT_REQUIRED"
     NOT_CONFIGURED = "NOT_CONFIGURED"
-
 
 class AttachmentStage(ContractModel):
     key: AttachmentStageKey
@@ -114,13 +105,18 @@ class AttachmentStage(ContractModel):
     )
     recovery_hint: str | None = Field(default=None, max_length=500)
 
-
 class AttachmentCitation(ContractModel):
     citation_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$")
     locator: str = Field(min_length=1, max_length=500)
     label: str = Field(min_length=1, max_length=240)
     content_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    evidence: str = Field(min_length=1, max_length=4_000)
 
+    @model_validator(mode="after")
+    def verified_content_hash(self) -> "AttachmentCitation":
+        if hashlib.sha256(self.evidence.encode("utf-8")).hexdigest() != self.content_sha256:
+            raise ValueError("Attachment citation contentSha256 does not match its evidence.")
+        return self
 
 class AttachmentCapabilities(ContractModel):
     upload: WorkflowCapability
@@ -130,16 +126,25 @@ class AttachmentCapabilities(ContractModel):
     ocr: WorkflowCapability
     index: WorkflowCapability
     deletion: WorkflowCapability
+    detach_all: WorkflowCapability
+    inspection_log: WorkflowCapability
+    masking_history: WorkflowCapability
+    ocr_viewer: WorkflowCapability
+    signed_audit_report: WorkflowCapability
     maximum_file_bytes: int = Field(ge=1)
     allowed_media_types: list[str]
 
+class AttachmentCapabilitiesEnvelope(ContractModel):
+    status: str = "SUCCESS"
+    message: str = "Secure attachment capabilities loaded."
+    success: bool = True
+    data: AttachmentCapabilities
 
 class AttachmentUploadTicket(ContractModel):
     method: str = "PUT"
     upload_url: str = Field(min_length=8, max_length=8_192)
     upload_reference: str = Field(min_length=8, max_length=1_000)
     expires_at: datetime
-
 
 class CreateAttachmentRequest(ContractModel):
     command_id: UUID
@@ -159,7 +164,6 @@ class CreateAttachmentRequest(ContractModel):
             raise ValueError("Attachment fileName must be a leaf name.")
         return normalized
 
-
 class CompleteAttachmentUploadRequest(ContractModel):
     command_id: UUID
     expected_revision: int = Field(ge=1)
@@ -175,12 +179,10 @@ class CompleteAttachmentUploadRequest(ContractModel):
             raise ValueError("Upload references must be opaque provider identifiers.")
         return normalized
 
-
 class DeleteAttachmentRequest(ContractModel):
     command_id: UUID
     expected_revision: int = Field(ge=1)
     reason: str = Field(min_length=5, max_length=500)
-
 
 class AttachmentWorkerObservation(ContractModel):
     command_id: UUID
@@ -194,7 +196,6 @@ class AttachmentWorkerObservation(ContractModel):
         if len({stage.key for stage in self.stages}) != len(self.stages):
             raise ValueError("Attachment stage keys must be unique.")
         return self
-
 
 class SecureAttachment(ContractModel):
     attachment_id: UUID
@@ -214,13 +215,11 @@ class SecureAttachment(ContractModel):
     updated_at: datetime
     deleted_at: datetime | None = None
 
-
 class AttachmentEnvelope(ContractModel):
     status: str = "SUCCESS"
     message: str = "Secure attachment loaded."
     success: bool = True
     data: SecureAttachment
-
 
 class AttachmentListEnvelope(ContractModel):
     status: str = "SUCCESS"
@@ -228,12 +227,27 @@ class AttachmentListEnvelope(ContractModel):
     success: bool = True
     data: list[SecureAttachment]
 
+class ResearchCapabilities(ContractModel):
+    raw_export: WorkflowCapability
+    pdf_export: WorkflowCapability
+    receipt_download: WorkflowCapability
+    audit_download: WorkflowCapability
+    fork: WorkflowCapability
+    merge: WorkflowCapability
+    keep_local: WorkflowCapability
+    sensitivity_recalculation: WorkflowCapability
+    cache_fallback: WorkflowCapability
+
+class ResearchCapabilitiesEnvelope(ContractModel):
+    status: str = "SUCCESS"
+    message: str = "Research capabilities loaded."
+    success: bool = True
+    data: ResearchCapabilities
 
 class ResearchPlanState(StrEnum):
     DRAFT = "DRAFT"
     READY = "READY"
     ARCHIVED = "ARCHIVED"
-
 
 class ResearchRunState(StrEnum):
     QUEUED = "QUEUED"
@@ -246,18 +260,15 @@ class ResearchRunState(StrEnum):
     FAILED = "FAILED"
     COMPLETED = "COMPLETED"
 
-
 class ResearchSourcePolicy(ContractModel):
     source_key: str = Field(pattern=r"^[A-Z][A-Z0-9_.:-]{0,127}$")
     allowed: bool
     scope: str = Field(min_length=1, max_length=500)
 
-
 class ResearchBudget(ContractModel):
     maximum_minutes: int = Field(ge=1, le=240)
     maximum_sources: int = Field(ge=1, le=500)
     maximum_tokens: int = Field(ge=128, le=2_000_000)
-
 
 class ResearchPlanDefinition(ContractModel):
     goal: str = Field(min_length=10, max_length=4_000)
@@ -285,18 +296,15 @@ class ResearchPlanDefinition(ContractModel):
             raise ValueError("Research deliverableTypes contain an unsupported value.")
         return normalized
 
-
 class CreateResearchPlanRequest(ContractModel):
     command_id: UUID
     expected_revision: int = Field(default=0, ge=0, le=0)
     definition: ResearchPlanDefinition
 
-
 class UpdateResearchPlanRequest(ContractModel):
     command_id: UUID
     expected_revision: int = Field(ge=1)
     definition: ResearchPlanDefinition
-
 
 class ResearchPlan(ContractModel):
     plan_id: UUID
@@ -306,19 +314,20 @@ class ResearchPlan(ContractModel):
     created_at: datetime
     updated_at: datetime
 
-
 class ResearchPlanEnvelope(ContractModel):
     status: str = "SUCCESS"
     message: str = "Research plan loaded."
     success: bool = True
     data: ResearchPlan
 
-
 class StartResearchRunRequest(ContractModel):
     command_id: UUID
     expected_plan_revision: int = Field(ge=1)
     idempotency_key: UUID
 
+class ExecuteResearchRunRequest(ContractModel):
+    command_id: UUID
+    expected_version: int = Field(ge=1)
 
 class ResearchRunCommandAction(StrEnum):
     PAUSE = "PAUSE"
@@ -327,7 +336,6 @@ class ResearchRunCommandAction(StrEnum):
     REPROBE_SOURCE = "REPROBE_SOURCE"
     SAFE_CANCEL = "SAFE_CANCEL"
     EXTEND = "EXTEND"
-
 
 class ResearchRunCommandRequest(ContractModel):
     command_id: UUID
@@ -350,7 +358,6 @@ class ResearchRunCommandRequest(ContractModel):
             raise ValueError("extensionMinutes is required for EXTEND.")
         return self
 
-
 class ResearchProgress(ContractModel):
     completed_steps: int = Field(ge=0)
     total_steps: int = Field(ge=0)
@@ -359,12 +366,16 @@ class ResearchProgress(ContractModel):
     failed_sources: list[str] = Field(default_factory=list, max_length=100)
     recovery_hint: str | None = Field(default=None, max_length=500)
 
-
 class ResearchResult(ContractModel):
     report_markdown: str = Field(min_length=1, max_length=1_000_000)
     citations: list[AttachmentCitation] = Field(min_length=1, max_length=5_000)
     result_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
 
+    @model_validator(mode="after")
+    def verified_result_hash(self) -> "ResearchResult":
+        if hashlib.sha256(self.report_markdown.encode("utf-8")).hexdigest() != self.result_sha256:
+            raise ValueError("Research resultSha256 does not match reportMarkdown.")
+        return self
 
 class ResearchRun(ContractModel):
     run_id: UUID
@@ -381,13 +392,11 @@ class ResearchRun(ContractModel):
     updated_at: datetime
     completed_at: datetime | None = None
 
-
 class ResearchRunEnvelope(ContractModel):
     status: str = "SUCCESS"
     message: str = "Research run loaded."
     success: bool = True
     data: ResearchRun
-
 
 class ResearchWorkerObservation(ContractModel):
     command_id: UUID
@@ -407,7 +416,6 @@ class ResearchWorkerObservation(ContractModel):
             raise ValueError("Research results are sealed only when the run completes.")
         return self
 
-
 class ResearchDeliveryType(StrEnum):
     ARTIFACT = "ARTIFACT"
     PROPOSAL = "PROPOSAL"
@@ -415,7 +423,6 @@ class ResearchDeliveryType(StrEnum):
     HANDOFF = "HANDOFF"
     SHARE = "SHARE"
     ROUTINE = "ROUTINE"
-
 
 class ResearchDeliveryState(StrEnum):
     QUEUED = "QUEUED"
@@ -426,13 +433,11 @@ class ResearchDeliveryState(StrEnum):
     FAILED = "FAILED"
     CANCELLED = "CANCELLED"
 
-
 class CreateResearchDeliveryRequest(ContractModel):
     command_id: UUID
     expected_version: int = Field(ge=1)
     idempotency_key: UUID
     parameters: dict[str, JsonValue] = Field(default_factory=dict, max_length=30)
-
 
 class ResearchDelivery(ContractModel):
     delivery_id: UUID
@@ -444,9 +449,32 @@ class ResearchDelivery(ContractModel):
     updated_at: datetime
     completed_at: datetime | None = None
 
+class ResearchDeliveryObservation(ContractModel):
+    command_id: UUID
+    state: ResearchDeliveryState
+    receipt_id: UUID | None = None
+    receipt: dict[str, JsonValue] | None = None
+
+    @model_validator(mode="after")
+    def completed_has_receipt(self) -> "ResearchDeliveryObservation":
+        if self.state == ResearchDeliveryState.COMPLETED and (
+            self.receipt_id is None or not self.receipt
+        ):
+            raise ValueError("A completed delivery requires a target-system receipt.")
+        if self.state != ResearchDeliveryState.COMPLETED and (
+            self.receipt_id is not None or self.receipt is not None
+        ):
+            raise ValueError("A receipt is only accepted for a completed delivery.")
+        return self
 
 class ResearchDeliveryEnvelope(ContractModel):
     status: str = "SUCCESS"
     message: str = "Research delivery requested."
     success: bool = True
     data: ResearchDelivery
+
+class ResearchDeliveryListEnvelope(ContractModel):
+    status: str = "SUCCESS"
+    message: str = "Research deliveries loaded."
+    success: bool = True
+    data: list[ResearchDelivery]

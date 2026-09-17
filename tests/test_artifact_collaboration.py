@@ -14,9 +14,12 @@ from pydantic import ValidationError
 
 from dwp_agent import artifact_collaboration_api
 from dwp_agent.artifact_collaboration_contracts import (
+    CreateTeamArtifactAccessRequest,
     ResolveTeamArtifactConflictRequest,
     RunTeamArtifactPreflightRequest,
+    SubmitTeamArtifactEditRequest,
     TeamArtifactCapabilities,
+    TeamArtifactAccessRequest,
     TeamArtifactMemberRequest,
     TeamArtifactShare,
 )
@@ -25,6 +28,7 @@ from dwp_agent.artifact_collaboration_provider import (
     ArtifactCollaborationProviderConfiguration,
     ArtifactCollaborationProviderUnavailable,
 )
+from dwp_agent.dwaion_workflow_contracts import WorkflowCapability
 from dwp_agent.artifact_contracts import ArtifactSourceReference
 
 
@@ -100,6 +104,56 @@ def test_acl_provider_binds_current_authorization_subject_role_and_sources() -> 
 
     assert result.decisionRevision == 11
     assert result.members[0].allowed is True
+
+
+def test_acl_provider_submits_denied_access_request_with_idempotency() -> None:
+    artifact_id = uuid4()
+    team_id = uuid4()
+    preflight_id = uuid4()
+    command_id = uuid4()
+    access_request_id = uuid4()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        assert request.url.path == "/internal/v1/artifact-acl/access-requests"
+        assert body["commandId"] == str(command_id)
+        assert body["preflightId"] == str(preflight_id)
+        assert body["deniedSubjectIds"] == ["member-2"]
+        assert body["deniedSourceCount"] == 1
+        assert body["requireCurrentAuthorization"] is True
+        return httpx.Response(
+            202,
+            json={
+                "accessRequestId": str(access_request_id),
+                "artifactId": str(artifact_id),
+                "teamId": str(team_id),
+                "preflightId": str(preflight_id),
+                "state": "PENDING",
+                "submissionEvidenceSha256": hashlib.sha256(
+                    b"access-request"
+                ).hexdigest(),
+            },
+        )
+
+    result = ArtifactCollaborationProvider(
+        _configuration(), transport=httpx.MockTransport(handler)
+    ).request_access(
+        artifact_id=artifact_id,
+        team_id=team_id,
+        preflight_id=preflight_id,
+        tenant_id=7,
+        owner_user_id="member-1",
+        artifact_revision=3,
+        command_id=command_id,
+        denied_subject_ids=["member-2"],
+        denied_source_count=1,
+        reason_code="TEAM_ACL_REQUEST",
+        change_reason="Request reviewed access for denied team recipients.",
+        correlation_id="artifact-collaboration-test",
+    )
+
+    assert result.accessRequestId == access_request_id
+    assert result.state == "PENDING"
 
 
 @pytest.mark.parametrize(
@@ -184,6 +238,32 @@ def test_contracts_require_merged_content_and_sealed_revocation_receipt() -> Non
     )
     assert valid.state == "REVOKED"
 
+    with pytest.raises(ValidationError):
+        TeamArtifactAccessRequest.model_validate(
+            {
+                "accessRequestId": str(uuid4()),
+                "artifactId": str(uuid4()),
+                "teamId": str(uuid4()),
+                "preflightId": str(uuid4()),
+                "state": "PENDING",
+                "deniedSubjectCount": 0,
+                "deniedSourceCount": 0,
+                "submissionEvidenceSha256": "c" * 64,
+                "createdAt": now.isoformat(),
+            }
+        )
+
+    request = CreateTeamArtifactAccessRequest.model_validate(
+        {
+            "commandId": str(uuid4()),
+            "expectedRevision": 2,
+            "reasonCode": "TEAM_ACL_REQUEST",
+            "changeReason": "Request access for denied team recipients.",
+            "preflightId": str(uuid4()),
+        }
+    )
+    assert request.expected_revision == 2
+
 
 def test_preflight_contract_rejects_duplicate_sources() -> None:
     source = {"sourceType": "MAIL", "reference": "mail:thread-77"}
@@ -201,21 +281,68 @@ def test_preflight_contract_rejects_duplicate_sources() -> None:
         )
 
 
-class _CapabilityStore:
-    @staticmethod
-    def capabilities() -> TeamArtifactCapabilities:
-        return TeamArtifactCapabilities(
-            team_workspace_available=False,
-            acl_preflight_available=False,
-            collaboration_available=False,
-            conflict_resolution_available=False,
-            internal_sharing_available=False,
-            external_sharing_available=False,
-            share_expiry_available=False,
-            share_revocation_available=False,
-            provider_state="NOT_CONFIGURED",
-            recovery_hint="Configure and attest the artifact ACL broker.",
+def test_revision_aliases_cannot_bypass_optimistic_concurrency() -> None:
+    with pytest.raises(ValidationError):
+        RunTeamArtifactPreflightRequest.model_validate(
+            {
+                "commandId": str(uuid4()),
+                "expectedRevision": 2,
+                "reasonCode": "TEAM_ACL_PREFLIGHT",
+                "teamId": str(uuid4()),
+                "artifactRevision": 3,
+                "members": [{"subjectId": "member-2", "role": "EDITOR"}],
+            }
         )
+    with pytest.raises(ValidationError):
+        SubmitTeamArtifactEditRequest.model_validate(
+            {
+                "commandId": str(uuid4()),
+                "expectedRevision": 2,
+                "reasonCode": "TEAM_ARTIFACT_EDIT",
+                "baseRevision": 3,
+                "content": {"title": "Plan", "body": "Reviewed content"},
+            }
+        )
+
+
+def _capabilities() -> TeamArtifactCapabilities:
+    return TeamArtifactCapabilities(
+        team_workspace_available=False,
+        acl_preflight_available=False,
+        access_request_available=False,
+        collaboration_available=False,
+        conflict_resolution_available=False,
+        internal_sharing_available=False,
+        external_sharing_available=False,
+        share_expiry_available=False,
+        share_revocation_available=False,
+        automatic_masking=WorkflowCapability(
+            available=False,
+            configured=False,
+            reason_code="ARTIFACT_AUTOMATIC_MASKING_NOT_CONFIGURED",
+            recovery_hint="Configure masking.",
+        ),
+        synthetic_replacement=WorkflowCapability(
+            available=False,
+            configured=False,
+            reason_code="ARTIFACT_SYNTHETIC_REPLACEMENT_NOT_CONFIGURED",
+            recovery_hint="Configure synthetic replacement.",
+        ),
+        review_notification=WorkflowCapability(
+            available=False,
+            configured=False,
+            reason_code="ARTIFACT_REVIEW_NOTIFICATION_NOT_CONFIGURED",
+            recovery_hint="Configure review notifications.",
+        ),
+        review_rejection=WorkflowCapability(
+            available=False,
+            configured=False,
+            reason_code="ARTIFACT_REVIEW_REJECTION_NOT_CONFIGURED",
+            recovery_hint="Configure review rejection.",
+        ),
+        provider_state="NOT_CONFIGURED",
+        recovery_hint="Configure and attest the artifact ACL broker.",
+    )
 
 
 def _headers(*permissions: str) -> dict[str, str]:
@@ -241,8 +368,8 @@ def test_capability_api_is_private_permissioned_and_truthful(
     monkeypatch.delenv("DWP_AGENT_IDENTITY_SIGNING_SECRET", raising=False)
     monkeypatch.setattr(
         artifact_collaboration_api,
-        "get_artifact_collaboration_store",
-        lambda: _CapabilityStore(),
+        "artifact_collaboration_runtime_capabilities",
+        _capabilities,
     )
     app = FastAPI()
     app.include_router(artifact_collaboration_api.router)
@@ -261,7 +388,88 @@ def test_capability_api_is_private_permissioned_and_truthful(
     assert allowed.status_code == 200
     assert allowed.headers["cache-control"] == "no-store"
     assert allowed.json()["data"]["providerState"] == "NOT_CONFIGURED"
+    assert allowed.json()["data"]["accessRequestAvailable"] is False
     assert allowed.json()["data"]["externalSharingAvailable"] is False
+    assert allowed.json()["data"]["automaticMasking"] == {
+        "available": False,
+        "configured": False,
+        "reasonCode": "ARTIFACT_AUTOMATIC_MASKING_NOT_CONFIGURED",
+        "recoveryHint": "Configure masking.",
+    }
+    assert allowed.json()["data"]["reviewRejection"]["available"] is False
+
+
+def test_access_request_api_is_permissioned_and_returns_pending_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(
+        "DWP_AGENT_SERVICE_TOKEN", "artifact-collaboration-service-token"
+    )
+    monkeypatch.delenv("DWP_AGENT_IDENTITY_SIGNING_SECRET", raising=False)
+    now = datetime.now(UTC)
+    access_request_id = uuid4()
+
+    class FakeStore:
+        def request_access(self, identity, artifact_id, request):
+            assert identity.user_id == "member-1"
+            assert artifact_id == ARTIFACT_ID
+            assert request.preflight_id == PREFLIGHT_ID
+            return TeamArtifactAccessRequest(
+                access_request_id=access_request_id,
+                artifact_id=artifact_id,
+                team_id=TEAM_ID,
+                preflight_id=request.preflight_id,
+                state="PENDING",
+                denied_subject_count=1,
+                denied_source_count=0,
+                submission_evidence_sha256="d" * 64,
+                created_at=now,
+            )
+
+    ARTIFACT_ID = uuid4()
+    TEAM_ID = uuid4()
+    PREFLIGHT_ID = uuid4()
+    monkeypatch.setattr(
+        artifact_collaboration_api,
+        "get_artifact_collaboration_store",
+        lambda: FakeStore(),
+    )
+    app = FastAPI()
+    app.include_router(artifact_collaboration_api.router)
+    client = TestClient(app)
+    body = {
+        "commandId": str(uuid4()),
+        "expectedRevision": 3,
+        "reasonCode": "TEAM_ACL_REQUEST",
+        "changeReason": "Request access for the denied team member.",
+        "preflightId": str(PREFLIGHT_ID),
+    }
+
+    denied = client.post(
+        f"/v1/artifact-collaboration/{ARTIFACT_ID}/access-requests",
+        headers=_headers("APP.ASK:VIEW", "APP.DWAION_ARTIFACTS:VIEW"),
+        json=body,
+    )
+    accepted = client.post(
+        f"/v1/artifact-collaboration/{ARTIFACT_ID}/access-requests",
+        headers=_headers("APP.ASK:VIEW", "APP.DWAION_ARTIFACTS:UPDATE"),
+        json=body,
+    )
+
+    assert denied.status_code == 403
+    assert accepted.status_code == 202
+    assert accepted.headers["cache-control"] == "no-store"
+    assert accepted.json()["data"] == {
+        "accessRequestId": str(access_request_id),
+        "artifactId": str(ARTIFACT_ID),
+        "teamId": str(TEAM_ID),
+        "preflightId": str(PREFLIGHT_ID),
+        "state": "PENDING",
+        "deniedSubjectCount": 1,
+        "deniedSourceCount": 0,
+        "submissionEvidenceSha256": "d" * 64,
+        "createdAt": now.isoformat().replace("+00:00", "Z"),
+    }
 
 
 def test_v40_migration_seals_team_versions_conflicts_and_share_revocation() -> None:
@@ -278,3 +486,6 @@ def test_v40_migration_seals_team_versions_conflicts_and_share_revocation() -> N
     assert "expires_at > created_at" in sql
     assert "reject_ai_audit_event_mutation" in sql
     assert "SHARE_REVOKED" in sql
+    assert "ai_artifact_team_access_requests" in sql
+    assert "REQUEST_ACCESS" in sql
+    assert "ACCESS_REQUESTED" in sql

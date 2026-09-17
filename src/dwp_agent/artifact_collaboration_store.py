@@ -4,6 +4,12 @@ import os
 from functools import lru_cache
 
 from .artifact_collaboration_access_store import ArtifactCollaborationAccess
+from .artifact_collaboration_access_request_store import (
+    ArtifactCollaborationAccessRequestCommands,
+)
+from .artifact_collaboration_capabilities import (
+    artifact_collaboration_runtime_capabilities,
+)
 from .artifact_collaboration_content_store import ArtifactCollaborationContent
 from .artifact_collaboration_edit_store import ArtifactCollaborationEditCommands
 from .artifact_collaboration_preflight_store import ArtifactCollaborationPreflightCommands
@@ -17,6 +23,7 @@ from .governed_domain_core import (
 
 
 class PostgresArtifactCollaborationStore(
+    ArtifactCollaborationAccessRequestCommands,
     ArtifactCollaborationPreflightCommands,
     ArtifactCollaborationEditCommands,
     ArtifactCollaborationShareCommands,
@@ -40,7 +47,7 @@ class PostgresArtifactCollaborationStore(
             ) from error
 
     def capabilities(self):
-        return self.provider.capabilities()
+        return artifact_collaboration_runtime_capabilities()
 
 
 @lru_cache(maxsize=1)

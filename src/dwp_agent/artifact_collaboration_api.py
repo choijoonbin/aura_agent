@@ -6,18 +6,23 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 
 from .artifact_collaboration_contracts import (
+    CreateTeamArtifactAccessRequest,
     CreateTeamArtifactShareRequest,
     CreateTeamArtifactWorkspaceRequest,
     ResolveTeamArtifactConflictRequest,
     RevokeTeamArtifactShareRequest,
     RunTeamArtifactPreflightRequest,
     SubmitTeamArtifactEditRequest,
+    TeamArtifactAccessRequestEnvelope,
     TeamArtifactCapabilitiesEnvelope,
     TeamArtifactEditEnvelope,
     TeamArtifactPreflightEnvelope,
     TeamArtifactShareEnvelope,
     TeamArtifactWorkspaceEnvelope,
     UpdateTeamArtifactMembersRequest,
+)
+from .artifact_collaboration_capabilities import (
+    artifact_collaboration_runtime_capabilities,
 )
 from .artifact_collaboration_store import get_artifact_collaboration_store
 from .governed_domain_core import (
@@ -48,10 +53,8 @@ def get_artifact_collaboration_capabilities(
 ) -> TeamArtifactCapabilitiesEnvelope:
     _access(identity, "VIEW")
     _no_store(response)
-    return _run(
-        lambda: TeamArtifactCapabilitiesEnvelope(
-            data=get_artifact_collaboration_store().capabilities()
-        )
+    return TeamArtifactCapabilitiesEnvelope(
+        data=artifact_collaboration_runtime_capabilities()
     )
 
 
@@ -69,6 +72,28 @@ def run_team_artifact_preflight(
     return _run(
         lambda: TeamArtifactPreflightEnvelope(
             data=get_artifact_collaboration_store().preflight(
+                identity, artifact_id, request
+            )
+        )
+    )
+
+
+@router.post(
+    "/{artifact_id}/access-requests",
+    status_code=status.HTTP_202_ACCEPTED,
+    response_model=TeamArtifactAccessRequestEnvelope,
+)
+def request_team_artifact_access(
+    artifact_id: UUID,
+    request: CreateTeamArtifactAccessRequest,
+    identity: Annotated[PersonalDomainIdentity, Depends(require_personal_domain_identity)],
+    response: Response,
+) -> TeamArtifactAccessRequestEnvelope:
+    _access(identity, "UPDATE")
+    _no_store(response)
+    return _run(
+        lambda: TeamArtifactAccessRequestEnvelope(
+            data=get_artifact_collaboration_store().request_access(
                 identity, artifact_id, request
             )
         )

@@ -6,12 +6,15 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 
 from .domain_retention_store import get_domain_retention_store
+from .deletion_retry_store import DeletionRetryStore
 from .governed_domain_contracts import (
     DeletionJobEnvelope,
+    DeletionJobsEnvelope,
     DomainKey,
     PersonalDataGovernanceCapabilities,
     PersonalDataGovernanceCapabilitiesEnvelope,
     RequestDeletionRequest,
+    RetryDeletionRequest,
     RetentionPoliciesEnvelope,
     RetentionPolicyEnvelope,
     UpsertRetentionPolicyRequest,
@@ -27,6 +30,7 @@ from .personal_domain_security import (
     require_personal_domain_identity,
 )
 from .governed_worker_runtime import governed_worker_available
+from .dwaion_workflow_contracts import WorkflowCapability
 
 
 router = APIRouter(
@@ -69,6 +73,23 @@ def get_personal_data_governance_capabilities(
             deletion_completion_claim_available=execution_available,
             active_store_physical_purge_available=execution_available,
             active_store_crypto_shred_available=False,
+            backup_destruction_log=_provider_capability(
+                False, "BACKUP_DESTRUCTION_LOG_NOT_CONFIGURED",
+                "Connect the backup retention provider and its signed destruction ledger.",
+            ),
+            sre_support=_provider_capability(
+                False, "DELETION_SRE_SUPPORT_NOT_CONFIGURED",
+                "Configure the audited SRE escalation connector.",
+            ),
+            legal_hold_evidence=_provider_capability(True, None, None),
+            signed_certificate=_provider_capability(
+                False, "SIGNED_DELETION_CERTIFICATE_NOT_CONFIGURED",
+                "Configure the tenant signing key and certificate renderer.",
+            ),
+            siem_sync=_provider_capability(
+                False, "DELETION_SIEM_SYNC_NOT_CONFIGURED",
+                "Configure the governed SIEM delivery connector.",
+            ),
         )
     )
 
@@ -135,6 +156,57 @@ def get_personal_data_deletion(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(error)) from error
     except GovernedDomainUnavailable as error:
         _unavailable(error)
+
+
+@router.get("/deletions", response_model=DeletionJobsEnvelope)
+def list_personal_data_deletions(
+    identity: Annotated[PersonalDomainIdentity, Depends(require_personal_domain_identity)],
+    response: Response,
+) -> DeletionJobsEnvelope:
+    identity.require("APP.ASK:VIEW", "APP.DWAION_PRIVACY:VIEW")
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        store = get_domain_retention_store()
+        return DeletionJobsEnvelope(data=DeletionRetryStore(store).list(identity))
+    except GovernedDomainUnavailable as error:
+        _unavailable(error)
+
+
+@router.post(
+    "/deletions/{deletion_job_id}/retry",
+    status_code=status.HTTP_202_ACCEPTED,
+    response_model=DeletionJobEnvelope,
+)
+def retry_personal_data_deletion(
+    deletion_job_id: UUID,
+    request: RetryDeletionRequest,
+    identity: Annotated[PersonalDomainIdentity, Depends(require_personal_domain_identity)],
+    response: Response,
+) -> DeletionJobEnvelope:
+    identity.require("APP.ASK:VIEW", "APP.DWAION_PRIVACY:MANAGE")
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        store = get_domain_retention_store()
+        return DeletionJobEnvelope(
+            data=DeletionRetryStore(store).retry(identity, deletion_job_id, request)
+        )
+    except GovernedDomainNotFound as error:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(error)) from error
+    except GovernedDomainConflict as error:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+    except GovernedDomainUnavailable as error:
+        _unavailable(error)
+
+
+def _provider_capability(
+    available: bool, reason_code: str | None, recovery_hint: str | None
+) -> WorkflowCapability:
+    return WorkflowCapability(
+        available=available,
+        configured=available,
+        reason_code=reason_code,
+        recovery_hint=recovery_hint,
+    )
 
 
 def _unavailable(error: Exception) -> None:

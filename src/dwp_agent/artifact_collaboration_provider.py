@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 from datetime import datetime
+from typing import TypeVar
 from urllib.parse import urljoin, urlparse
 from uuid import UUID
 
@@ -15,6 +16,7 @@ from .artifact_collaboration_contracts import (
     TeamArtifactMemberRequest,
 )
 from .artifact_contracts import ArtifactSourceReference
+from .dwaion_workflow_contracts import WorkflowCapability
 
 
 class ArtifactCollaborationProviderUnavailable(RuntimeError):
@@ -63,6 +65,18 @@ class ArtifactAclPreflightResult(_ProviderModel):
         ):
             raise ValueError("Provider sources must form a unique partition.")
         return self
+
+
+class ArtifactAclAccessRequestResult(_ProviderModel):
+    accessRequestId: UUID
+    artifactId: UUID
+    teamId: UUID
+    preflightId: UUID
+    state: str = Field(pattern=r"^PENDING$")
+    submissionEvidenceSha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+ProviderResultT = TypeVar("ProviderResultT", bound=_ProviderModel)
 
 
 @dataclass(frozen=True)
@@ -121,12 +135,49 @@ class ArtifactCollaborationProviderConfiguration:
         return TeamArtifactCapabilities(
             team_workspace_available=available,
             acl_preflight_available=available,
+            access_request_available=available,
             collaboration_available=available,
             conflict_resolution_available=available,
             internal_sharing_available=available,
             external_sharing_available=False,
             share_expiry_available=available,
             share_revocation_available=available,
+            automatic_masking=WorkflowCapability(
+                available=False,
+                configured=False,
+                reason_code="ARTIFACT_AUTOMATIC_MASKING_NOT_CONFIGURED",
+                recovery_hint=(
+                    "Configure an attested artifact masking provider before applying "
+                    "automatic redaction."
+                ),
+            ),
+            synthetic_replacement=WorkflowCapability(
+                available=False,
+                configured=False,
+                reason_code="ARTIFACT_SYNTHETIC_REPLACEMENT_NOT_CONFIGURED",
+                recovery_hint=(
+                    "Configure an attested synthetic-data provider before replacing "
+                    "restricted values."
+                ),
+            ),
+            review_notification=WorkflowCapability(
+                available=False,
+                configured=False,
+                reason_code="ARTIFACT_REVIEW_NOTIFICATION_NOT_CONFIGURED",
+                recovery_hint=(
+                    "Configure the governed review notification provider before "
+                    "resending a review request."
+                ),
+            ),
+            review_rejection=WorkflowCapability(
+                available=False,
+                configured=False,
+                reason_code="ARTIFACT_REVIEW_REJECTION_NOT_CONFIGURED",
+                recovery_hint=(
+                    "Configure the governed review workflow provider before rejecting "
+                    "a submitted review."
+                ),
+            ),
             provider_state="AVAILABLE" if available else "NOT_CONFIGURED",
             recovery_hint=(
                 None
@@ -178,6 +229,8 @@ class ArtifactCollaborationProvider:
                 "requireCurrentAuthorization": True,
             },
             correlation_id,
+            ArtifactAclPreflightResult,
+            frozenset({200}),
         )
         if result.artifactId != artifact_id or result.teamId != team_id:
             raise ArtifactCollaborationProviderUnavailable(
@@ -206,12 +259,60 @@ class ArtifactCollaborationProvider:
             )
         return result
 
+    def request_access(
+        self,
+        *,
+        artifact_id: UUID,
+        team_id: UUID,
+        preflight_id: UUID,
+        tenant_id: int,
+        owner_user_id: str,
+        artifact_revision: int,
+        command_id: UUID,
+        denied_subject_ids: list[str],
+        denied_source_count: int,
+        reason_code: str,
+        change_reason: str,
+        correlation_id: str,
+    ) -> ArtifactAclAccessRequestResult:
+        result = self._request(
+            "/internal/v1/artifact-acl/access-requests",
+            {
+                "artifactId": str(artifact_id),
+                "teamId": str(team_id),
+                "preflightId": str(preflight_id),
+                "tenantId": tenant_id,
+                "ownerUserId": owner_user_id,
+                "artifactRevision": artifact_revision,
+                "commandId": str(command_id),
+                "deniedSubjectIds": denied_subject_ids,
+                "deniedSourceCount": denied_source_count,
+                "reasonCode": reason_code,
+                "changeReason": change_reason,
+                "requireCurrentAuthorization": True,
+            },
+            correlation_id,
+            ArtifactAclAccessRequestResult,
+            frozenset({200, 202}),
+        )
+        if (
+            result.artifactId != artifact_id
+            or result.teamId != team_id
+            or result.preflightId != preflight_id
+        ):
+            raise ArtifactCollaborationProviderUnavailable(
+                "ARTIFACT_ACL_RESPONSE_MISMATCH"
+            )
+        return result
+
     def _request(
         self,
         path: str,
         body: dict[str, object],
         correlation_id: str,
-    ) -> ArtifactAclPreflightResult:
+        result_type: type[ProviderResultT],
+        success_statuses: frozenset[int],
+    ) -> ProviderResultT:
         self.configuration.validate()
         try:
             with httpx.Client(
@@ -231,11 +332,14 @@ class ArtifactCollaborationProvider:
                         "Accept": "application/json",
                     },
                 )
-            if response.status_code != 200 or len(response.content) > 1_000_000:
+            if (
+                response.status_code not in success_statuses
+                or len(response.content) > 1_000_000
+            ):
                 raise ArtifactCollaborationProviderUnavailable(
                     "ARTIFACT_ACL_PROVIDER_UNAVAILABLE"
                 )
-            return ArtifactAclPreflightResult.model_validate(response.json())
+            return result_type.model_validate(response.json())
         except ArtifactCollaborationProviderUnavailable:
             raise
         except (httpx.HTTPError, ValueError) as error:

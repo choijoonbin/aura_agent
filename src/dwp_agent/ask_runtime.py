@@ -1,10 +1,8 @@
 from __future__ import annotations
-
 import json
 from datetime import datetime, timezone
 from typing import Callable
 from uuid import uuid4
-
 from .audit import record_ask_failure, record_ask_run
 from .ai_control_runtime import AIRuntimeControl, AIRuntimePlan
 from .ask_response_guard import (
@@ -12,6 +10,7 @@ from .ask_response_guard import (
     safety_identifier as _safety_identifier, selected_response_guard,
 )
 from .ask_runtime_response import build_ask_response as _response
+from .attachment_context import AttachmentContextUnavailable, collect_with_ready_attachments
 from .context_broker import ContextBrokerUnavailable, WorkspaceContextBroker
 from .grounded_fallback import grounded_evidence_fallback
 from .grounded_response_status import grounded_status_for_provider
@@ -64,7 +63,6 @@ class AskRuntime:
         self.conversation_store = conversation_store or get_conversation_store(self.run_store)
         self.personalization_runtime = personalization_runtime or PersonalMemoryRuntime()
         self.ai_runtime_control = ai_runtime_control
-
     def answer(
         self,
         request: AskRequest,
@@ -98,7 +96,12 @@ class AskRuntime:
 
         run_id = str(uuid4())
         audit_id = str(uuid4())
-        registry = self._resolve_registry(request, identity)
+        registry = resolve_agent(
+            request.agent_key,
+            tenant_id=identity.tenant_id,
+            user_id=identity.user_id,
+            correlation_id=identity.correlation_id,
+        )
         policy = evaluate_ask_policy(
             request.query,
             identity,
@@ -135,7 +138,6 @@ class AskRuntime:
                 )
             raise RunInProgress("The Ask request is already running.")
         run_id = lease.run_id
-
         def tracked_progress(stage: str) -> None:
             self.run_store.advance_stage(
                 lease,
@@ -285,16 +287,26 @@ class AskRuntime:
             )
         _progress(on_progress, "RETRIEVING")
         try:
-            context = self.context_broker.collect(
-                request.query,
+            context = collect_with_ready_attachments(
+                self.context_broker,
+                request,
                 identity=identity,
                 locale=request.locale,
                 agent_key=registry.entry_key,
-                source_scopes=request.source_scopes,
-                page_context=request.page_context,
                 workspace_authorization=workspace_authorization,
             )
         except ContextBrokerUnavailable:
+            return (
+                _response(
+                    request=request, identity=identity, run_id=run_id, audit_id=audit_id,
+                    registry=registry, policy=policy, state=AskState.CONFIGURATION_REQUIRED,
+                    status_code="CONTEXT_BROKER_CONFIGURATION_REQUIRED",
+                    model_route=AskModelRoute(state=ModelRouteState.NOT_INVOKED),
+                    warnings=runtime_plan.warnings if runtime_plan else (),
+                ),
+                None,
+            )
+        except AttachmentContextUnavailable:
             return (
                 _response(
                     request=request,
@@ -303,8 +315,8 @@ class AskRuntime:
                     audit_id=audit_id,
                     registry=registry,
                     policy=policy,
-                    state=AskState.CONFIGURATION_REQUIRED,
-                    status_code="CONTEXT_BROKER_CONFIGURATION_REQUIRED",
+                    state=AskState.ABSTAINED,
+                    status_code="ATTACHMENT_NOT_READY",
                     model_route=AskModelRoute(state=ModelRouteState.NOT_INVOKED),
                     warnings=runtime_plan.warnings if runtime_plan else (),
                 ),
@@ -481,18 +493,6 @@ class AskRuntime:
                 warnings=runtime_plan.warnings if runtime_plan else (),
             ),
             model_answer.provider_request_hash,
-        )
-
-    def _resolve_registry(
-        self,
-        request: AskRequest,
-        identity: AskIdentity,
-    ) -> AgentRegistryResolution:
-        return resolve_agent(
-            request.agent_key,
-            tenant_id=identity.tenant_id,
-            user_id=identity.user_id,
-            correlation_id=identity.correlation_id,
         )
 
 def _progress(callback: Callable[[str], None] | None, stage: str) -> None:

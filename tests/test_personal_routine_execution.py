@@ -15,6 +15,7 @@ from dwp_agent.personal_routine_contracts import (
     RoutineExecutionReceipt,
     RoutineExecutionRun,
 )
+from dwp_agent.personal_routine_capabilities import routine_runtime_capabilities
 from dwp_agent.personal_routine_execution_provider import (
     RoutineExecutionProvider,
     RoutineExecutionProviderConfiguration,
@@ -23,6 +24,25 @@ from dwp_agent.personal_routine_execution_provider import (
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_routine_provider_only_capabilities_publish_recovery_contracts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("DWP_ROUTINE_EXECUTION_ENABLED", raising=False)
+    monkeypatch.delenv("DWP_ROUTINE_EXECUTION_BROKER_BASE_URL", raising=False)
+    monkeypatch.delenv("DWP_ROUTINE_EXECUTION_BROKER_SERVICE_TOKEN", raising=False)
+
+    payload = routine_runtime_capabilities().model_dump(mode="json", by_alias=True)
+
+    assert payload["oauthReauthorization"]["available"] is False
+    assert payload["oauthReauthorization"]["configured"] is False
+    assert payload["oauthReauthorization"]["reasonCode"] == (
+        "ROUTINE_OAUTH_REAUTHORIZATION_NOT_CONFIGURED"
+    )
+    assert payload["temporaryBudgetIncrease"]["recoveryHint"]
+    assert payload["operatorEscalation"]["recoveryHint"]
+    assert payload["providerRollback"]["recoveryHint"]
 
 
 def _configuration() -> RoutineExecutionProviderConfiguration:

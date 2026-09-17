@@ -58,6 +58,14 @@ class ArtifactCollaborationPreflightCommands:
                 except ArtifactCollaborationProviderUnavailable as error:
                     raise GovernedDomainUnavailable(str(error)) from error
                 denied_members = [member for member in result.members if not member.allowed]
+                if any(
+                    member.role.value == "OWNER"
+                    and member.subject_id != identity.user_id
+                    for member in result.members
+                ):
+                    raise GovernedDomainConflict(
+                        "Only the artifact owner can hold the team workspace owner role."
+                    )
                 if denied_members:
                     state = TeamArtifactPreflightState.PERMISSION_DENIED
                 elif result.excludedSources:
@@ -327,6 +335,10 @@ class ArtifactCollaborationPreflightCommands:
                 workspace_row = self._locked_workspace(
                     connection, identity, artifact_id, owner_only=True
                 )
+                if workspace_row["workspace_state"] != "ACTIVE":
+                    raise GovernedDomainConflict(
+                        "Only an active team workspace can change members."
+                    )
                 if int(workspace_row["revision"]) != request.expected_revision:
                     raise GovernedDomainConflict("The team workspace revision has changed.")
                 preflight = self._usable_preflight(
