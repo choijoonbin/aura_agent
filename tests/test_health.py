@@ -157,6 +157,7 @@ def test_public_openapi_contains_only_explicit_runtime_apis() -> None:
                 "/v1/artifact-collaboration/{artifact_id}/workspace/comments",
                 "/v1/artifact-collaboration/{artifact_id}/workspace/comments/{comment_id}/replies",
                 "/v1/artifact-collaboration/{artifact_id}/workspace/comments/{comment_id}/resolve",
+                "/v1/artifact-collaboration/{artifact_id}/workspace/review-stages/{stage_id}/decision",
             "/v1/artifact-collaboration/{artifact_id}/preflights",
             "/v1/artifact-collaboration/{artifact_id}/access-requests",
             "/v1/attachments",

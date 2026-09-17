@@ -1650,6 +1650,46 @@
         "title": "ArtifactListEnvelope",
         "type": "object"
       },
+      "ArtifactMetadata": {
+        "additionalProperties": false,
+        "properties": {
+          "projectKey": {
+            "anyOf": [
+              {
+                "maxLength": 80,
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,79}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Projectkey"
+          },
+          "reviewSlaDueAt": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reviewsladueat"
+          },
+          "tags": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 20,
+            "title": "Tags",
+            "type": "array"
+          }
+        },
+        "title": "ArtifactMetadata",
+        "type": "object"
+      },
       "ArtifactPreflightEnvelope": {
         "additionalProperties": false,
         "properties": {
@@ -3239,6 +3279,9 @@
             "title": "Expectedrevision",
             "type": "integer"
           },
+          "metadata": {
+            "$ref": "#/components/schemas/ArtifactMetadata"
+          },
           "reasonCode": {
             "pattern": "^[A-Z][A-Z0-9_.-]{1,63}$",
             "title": "Reasoncode",
@@ -4720,6 +4763,9 @@
             "title": "Expectedrevision",
             "type": "integer"
           },
+          "metadata": {
+            "$ref": "#/components/schemas/ArtifactMetadata"
+          },
           "reasonCode": {
             "pattern": "^[A-Z][A-Z0-9_.-]{1,63}$",
             "title": "Reasoncode",
@@ -5731,6 +5777,44 @@
         "title": "DecideOperationalGateRequest",
         "type": "object"
       },
+      "DecideTeamArtifactReviewStageRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "changeReason": {
+            "maxLength": 1000,
+            "minLength": 5,
+            "title": "Changereason",
+            "type": "string"
+          },
+          "commandId": {
+            "format": "uuid",
+            "title": "Commandid",
+            "type": "string"
+          },
+          "decision": {
+            "$ref": "#/components/schemas/TeamArtifactReviewDecision"
+          },
+          "expectedRevision": {
+            "minimum": 0.0,
+            "title": "Expectedrevision",
+            "type": "integer"
+          },
+          "reasonCode": {
+            "pattern": "^[A-Z][A-Z0-9_.-]{1,63}$",
+            "title": "Reasoncode",
+            "type": "string"
+          }
+        },
+        "required": [
+          "commandId",
+          "expectedRevision",
+          "reasonCode",
+          "changeReason",
+          "decision"
+        ],
+        "title": "DecideTeamArtifactReviewStageRequest",
+        "type": "object"
+      },
       "DeleteAttachmentRequest": {
         "additionalProperties": false,
         "properties": {
@@ -5843,10 +5927,26 @@
             "title": "Domains",
             "type": "array"
           },
+          "legalHolds": {
+            "items": {
+              "$ref": "#/components/schemas/LegalHoldEvidence"
+            },
+            "maxItems": 4,
+            "title": "Legalholds",
+            "type": "array"
+          },
           "requestedAt": {
             "format": "date-time",
             "title": "Requestedat",
             "type": "string"
+          },
+          "stages": {
+            "items": {
+              "$ref": "#/components/schemas/DeletionStage"
+            },
+            "maxItems": 5,
+            "title": "Stages",
+            "type": "array"
           },
           "state": {
             "$ref": "#/components/schemas/DeletionJobState"
@@ -5931,6 +6031,89 @@
         "title": "DeletionJobsEnvelope",
         "type": "object"
       },
+      "DeletionStage": {
+        "additionalProperties": false,
+        "properties": {
+          "detailCode": {
+            "pattern": "^[A-Z][A-Z0-9_.-]{1,127}$",
+            "title": "Detailcode",
+            "type": "string"
+          },
+          "evidenceFingerprint": {
+            "anyOf": [
+              {
+                "pattern": "^[0-9a-f]{64}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Evidencefingerprint"
+          },
+          "evidenceReference": {
+            "anyOf": [
+              {
+                "maxLength": 240,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Evidencereference"
+          },
+          "key": {
+            "$ref": "#/components/schemas/DeletionStageKey"
+          },
+          "observedAt": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Observedat"
+          },
+          "state": {
+            "$ref": "#/components/schemas/DeletionStageState"
+          }
+        },
+        "required": [
+          "key",
+          "state",
+          "detailCode"
+        ],
+        "title": "DeletionStage",
+        "type": "object"
+      },
+      "DeletionStageKey": {
+        "enum": [
+          "REQUEST_ACCEPTED",
+          "TARGETS_SCHEDULED",
+          "ACTIVE_STORE_DISPOSITION",
+          "BACKUP_BOUNDARY",
+          "RECEIPT_FINALIZATION"
+        ],
+        "title": "DeletionStageKey",
+        "type": "string"
+      },
+      "DeletionStageState": {
+        "enum": [
+          "PENDING",
+          "RUNNING",
+          "COMPLETED",
+          "PARTIAL",
+          "BLOCKED",
+          "FAILED",
+          "UNAVAILABLE"
+        ],
+        "title": "DeletionStageState",
+        "type": "string"
+      },
       "DeletionTargetReceipt": {
         "additionalProperties": false,
         "properties": {
@@ -5958,6 +6141,16 @@
           },
           "domain": {
             "$ref": "#/components/schemas/DomainKey"
+          },
+          "legalHoldEvidence": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/LegalHoldEvidence"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "safeErrorCode": {
             "anyOf": [
@@ -7626,6 +7819,19 @@
           "artifactType": {
             "$ref": "#/components/schemas/ArtifactType"
           },
+          "authorSubjectId": {
+            "anyOf": [
+              {
+                "maxLength": 160,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Authorsubjectid"
+          },
           "capabilities": {
             "$ref": "#/components/schemas/ArtifactCapabilities"
           },
@@ -7646,6 +7852,9 @@
             "minimum": 1.0,
             "title": "Draftrevision",
             "type": "integer"
+          },
+          "metadata": {
+            "$ref": "#/components/schemas/ArtifactMetadata"
           },
           "publishedVersionNumber": {
             "anyOf": [
@@ -8476,6 +8685,150 @@
           "generatedAt"
         ],
         "title": "LatestRoutingSimulation",
+        "type": "object"
+      },
+      "LegalHoldDirective": {
+        "additionalProperties": false,
+        "properties": {
+          "authorityReference": {
+            "maxLength": 160,
+            "minLength": 1,
+            "title": "Authorityreference",
+            "type": "string"
+          },
+          "dpoSubjectId": {
+            "maxLength": 160,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9@._:-]{0,159}$",
+            "title": "Dposubjectid",
+            "type": "string"
+          },
+          "effectiveAt": {
+            "format": "date-time",
+            "title": "Effectiveat",
+            "type": "string"
+          },
+          "expiresAt": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expiresat"
+          },
+          "reasonCode": {
+            "pattern": "^[A-Z][A-Z0-9_.-]{1,63}$",
+            "title": "Reasoncode",
+            "type": "string"
+          }
+        },
+        "required": [
+          "authorityReference",
+          "dpoSubjectId",
+          "reasonCode",
+          "effectiveAt"
+        ],
+        "title": "LegalHoldDirective",
+        "type": "object"
+      },
+      "LegalHoldEvidence": {
+        "additionalProperties": false,
+        "properties": {
+          "authorityReference": {
+            "anyOf": [
+              {
+                "maxLength": 160,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Authorityreference"
+          },
+          "available": {
+            "title": "Available",
+            "type": "boolean"
+          },
+          "domain": {
+            "$ref": "#/components/schemas/DomainKey"
+          },
+          "dpoSubjectId": {
+            "anyOf": [
+              {
+                "maxLength": 160,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dposubjectid"
+          },
+          "effectiveAt": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Effectiveat"
+          },
+          "expiresAt": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expiresat"
+          },
+          "holdId": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Holdid"
+          },
+          "reasonCode": {
+            "pattern": "^[A-Z][A-Z0-9_.-]{1,127}$",
+            "title": "Reasoncode",
+            "type": "string"
+          },
+          "state": {
+            "anyOf": [
+              {
+                "pattern": "^(ACTIVE|RELEASED)$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "State"
+          }
+        },
+        "required": [
+          "available",
+          "domain",
+          "reasonCode"
+        ],
+        "title": "LegalHoldEvidence",
         "type": "object"
       },
       "MeasurementFreshness": {
@@ -14675,6 +15028,12 @@
             "title": "Sharerevocationavailable",
             "type": "boolean"
           },
+          "signedWormReceipt": {
+            "$ref": "#/components/schemas/WorkflowCapability"
+          },
+          "stagedReview": {
+            "$ref": "#/components/schemas/WorkflowCapability"
+          },
           "syntheticReplacement": {
             "$ref": "#/components/schemas/WorkflowCapability"
           },
@@ -15093,6 +15452,85 @@
         "title": "TeamArtifactEditResult",
         "type": "object"
       },
+      "TeamArtifactGovernanceGate": {
+        "additionalProperties": false,
+        "properties": {
+          "detailCode": {
+            "pattern": "^[A-Z][A-Z0-9_.-]{1,127}$",
+            "title": "Detailcode",
+            "type": "string"
+          },
+          "evaluatedAt": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Evaluatedat"
+          },
+          "evidenceFingerprint": {
+            "anyOf": [
+              {
+                "pattern": "^[0-9a-f]{64}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Evidencefingerprint"
+          },
+          "evidenceReference": {
+            "anyOf": [
+              {
+                "maxLength": 240,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Evidencereference"
+          },
+          "key": {
+            "$ref": "#/components/schemas/TeamArtifactGovernanceGateKey"
+          },
+          "state": {
+            "$ref": "#/components/schemas/TeamArtifactGovernanceGateState"
+          }
+        },
+        "required": [
+          "key",
+          "state",
+          "detailCode"
+        ],
+        "title": "TeamArtifactGovernanceGate",
+        "type": "object"
+      },
+      "TeamArtifactGovernanceGateKey": {
+        "enum": [
+          "DLP",
+          "CITATION",
+          "RECIPIENT_ACL",
+          "IMMUTABLE_VERSION"
+        ],
+        "title": "TeamArtifactGovernanceGateKey",
+        "type": "string"
+      },
+      "TeamArtifactGovernanceGateState": {
+        "enum": [
+          "PASS",
+          "REVIEW",
+          "BLOCKED",
+          "UNAVAILABLE"
+        ],
+        "title": "TeamArtifactGovernanceGateState",
+        "type": "string"
+      },
       "TeamArtifactMember": {
         "additionalProperties": false,
         "properties": {
@@ -15276,6 +15714,117 @@
         "title": "TeamArtifactPreflightState",
         "type": "string"
       },
+      "TeamArtifactReviewDecision": {
+        "enum": [
+          "APPROVE",
+          "REJECT"
+        ],
+        "title": "TeamArtifactReviewDecision",
+        "type": "string"
+      },
+      "TeamArtifactReviewStage": {
+        "additionalProperties": false,
+        "properties": {
+          "assigneeSubjectId": {
+            "anyOf": [
+              {
+                "maxLength": 160,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Assigneesubjectid"
+          },
+          "decidedAt": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Decidedat"
+          },
+          "decidedBySubjectId": {
+            "anyOf": [
+              {
+                "maxLength": 160,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Decidedbysubjectid"
+          },
+          "evidenceFingerprint": {
+            "anyOf": [
+              {
+                "pattern": "^[0-9a-f]{64}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Evidencefingerprint"
+          },
+          "revision": {
+            "minimum": 1.0,
+            "title": "Revision",
+            "type": "integer"
+          },
+          "stageId": {
+            "format": "uuid",
+            "title": "Stageid",
+            "type": "string"
+          },
+          "stageKey": {
+            "$ref": "#/components/schemas/TeamArtifactReviewStageKey"
+          },
+          "stageOrder": {
+            "maximum": 3.0,
+            "minimum": 1.0,
+            "title": "Stageorder",
+            "type": "integer"
+          },
+          "state": {
+            "$ref": "#/components/schemas/TeamArtifactReviewStageState"
+          }
+        },
+        "required": [
+          "stageId",
+          "stageOrder",
+          "stageKey",
+          "state",
+          "revision"
+        ],
+        "title": "TeamArtifactReviewStage",
+        "type": "object"
+      },
+      "TeamArtifactReviewStageKey": {
+        "enum": [
+          "AUTHOR",
+          "PRIMARY_REVIEW",
+          "FINAL_APPROVAL"
+        ],
+        "title": "TeamArtifactReviewStageKey",
+        "type": "string"
+      },
+      "TeamArtifactReviewStageState": {
+        "enum": [
+          "PENDING",
+          "APPROVED",
+          "REJECTED",
+          "UNAVAILABLE"
+        ],
+        "title": "TeamArtifactReviewStageState",
+        "type": "string"
+      },
       "TeamArtifactRole": {
         "enum": [
           "OWNER",
@@ -15423,6 +15972,67 @@
         "title": "TeamArtifactShareState",
         "type": "string"
       },
+      "TeamArtifactSignatureEvidence": {
+        "additionalProperties": false,
+        "properties": {
+          "capability": {
+            "$ref": "#/components/schemas/WorkflowCapability"
+          },
+          "keyReferenceFingerprint": {
+            "anyOf": [
+              {
+                "pattern": "^[0-9a-f]{64}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Keyreferencefingerprint"
+          },
+          "provider": {
+            "anyOf": [
+              {
+                "maxLength": 80,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Provider"
+          },
+          "signature": {
+            "anyOf": [
+              {
+                "maxLength": 2000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Signature"
+          },
+          "signedAt": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Signedat"
+          }
+        },
+        "required": [
+          "capability"
+        ],
+        "title": "TeamArtifactSignatureEvidence",
+        "type": "object"
+      },
       "TeamArtifactWorkspace": {
         "additionalProperties": false,
         "properties": {
@@ -15444,6 +16054,14 @@
             "title": "Createdat",
             "type": "string"
           },
+          "governanceGates": {
+            "items": {
+              "$ref": "#/components/schemas/TeamArtifactGovernanceGate"
+            },
+            "maxItems": 4,
+            "title": "Governancegates",
+            "type": "array"
+          },
           "members": {
             "items": {
               "$ref": "#/components/schemas/TeamArtifactMember"
@@ -15463,6 +16081,26 @@
               }
             ]
           },
+          "reviewSlaDueAt": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reviewsladueat"
+          },
+          "reviewStages": {
+            "items": {
+              "$ref": "#/components/schemas/TeamArtifactReviewStage"
+            },
+            "maxItems": 3,
+            "title": "Reviewstages",
+            "type": "array"
+          },
           "revision": {
             "minimum": 1.0,
             "title": "Revision",
@@ -15475,6 +16113,9 @@
             "maxItems": 100,
             "title": "Shares",
             "type": "array"
+          },
+          "signatureEvidence": {
+            "$ref": "#/components/schemas/TeamArtifactSignatureEvidence"
           },
           "state": {
             "$ref": "#/components/schemas/TeamArtifactWorkspaceState"
@@ -16477,6 +17118,16 @@
             "default": false,
             "title": "Legalhold",
             "type": "boolean"
+          },
+          "legalHoldDirective": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/LegalHoldDirective"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "reasonCode": {
             "pattern": "^[A-Z][A-Z0-9_.-]{1,63}$",
@@ -28085,6 +28736,176 @@
           }
         },
         "summary": "Update Team Artifact Members",
+        "tags": [
+          "governed-artifact-collaboration"
+        ]
+      }
+    },
+    "/v1/artifact-collaboration/{artifact_id}/workspace/review-stages/{stage_id}/decision": {
+      "post": {
+        "operationId": "decide_team_artifact_review_stage_v1_artifact_collaboration__artifact_id__workspace_review_stages__stage_id__decision_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "artifact_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Artifact Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "stage_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Stage Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Auth-Session-ID",
+            "required": true,
+            "schema": {
+              "maxLength": 160,
+              "minLength": 1,
+              "title": "X-Dwp-Auth-Session-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-User-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Dwp-User-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Tenant-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Dwp-Tenant-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Correlation-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Correlation-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Roles",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Roles"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Permissions",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Permissions"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Person-Public-ID",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 36,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Person-Public-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Display-Name-B64",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 400,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Display-Name-B64"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DecideTeamArtifactReviewStageRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TeamArtifactWorkspaceEnvelope"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Decide Team Artifact Review Stage",
         "tags": [
           "governed-artifact-collaboration"
         ]

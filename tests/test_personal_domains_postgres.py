@@ -26,6 +26,7 @@ from dwp_agent.database_migrations import apply_migrations
 from dwp_agent.domain_retention_store import PostgresDomainRetentionStore
 from dwp_agent.governed_domain_contracts import (
     DomainKey,
+    LegalHoldDirective,
     RequestDeletionRequest,
     UpsertRetentionPolicyRequest,
 )
@@ -1014,6 +1015,111 @@ def test_deletion_request_respects_legal_hold_and_never_claims_completion() -> N
         connection.rollback()
     assert state == "DELIVERED"
     assert raw_token_count == 0
+
+
+def test_legal_hold_evidence_and_five_stage_deletion_boundary_are_durable() -> None:
+    tenant = _tenant()
+    identity = _identity(tenant, user="legal-hold-owner", session="legal-hold-session")
+    store = PostgresDomainRetentionStore(DATABASE_URL)
+    policy = _seed_policy(store, identity, DomainKey.MEMORY)
+    effective_at = datetime.now(UTC) - timedelta(minutes=5)
+    expires_at = effective_at + timedelta(days=30)
+    governed = store.upsert_policy(
+        identity,
+        DomainKey.MEMORY,
+        UpsertRetentionPolicyRequest(
+            command_id=uuid4(),
+            expected_revision=policy.revision,
+            reason_code="LEGAL_HOLD_CHANGE",
+            change_reason="Apply the recorded DPO legal hold before deleting memory data.",
+            retention_days=365,
+            deletion_grace_days=7,
+            legal_hold=True,
+            legal_hold_directive=LegalHoldDirective(
+                authority_reference="DPO-CASE-2026-0917",
+                dpo_subject_id="dpo-reviewer",
+                reason_code="REGULATORY_PRESERVATION",
+                effective_at=effective_at,
+                expires_at=expires_at,
+            ),
+        ),
+    )
+    assert governed.legal_hold is True
+
+    blocked = store.request_deletion(
+        identity,
+        RequestDeletionRequest(
+            command_id=uuid4(),
+            expected_revision=0,
+            reason_code="USER_DATA_DELETE",
+            change_reason="Delete memory data unless the recorded legal hold blocks it.",
+            domains=[DomainKey.MEMORY],
+        ),
+    )
+    assert blocked.state.value == "BLOCKED_LEGAL_HOLD"
+    assert blocked.deletion_performed is False
+    assert [stage.key.value for stage in blocked.stages] == [
+        "REQUEST_ACCEPTED",
+        "TARGETS_SCHEDULED",
+        "ACTIVE_STORE_DISPOSITION",
+        "BACKUP_BOUNDARY",
+        "RECEIPT_FINALIZATION",
+    ]
+    assert [stage.state.value for stage in blocked.stages] == [
+        "COMPLETED",
+        "COMPLETED",
+        "BLOCKED",
+        "UNAVAILABLE",
+        "BLOCKED",
+    ]
+    assert blocked.stages[3].evidence_reference == "EXTERNAL_RETENTION_BOUNDARY"
+    assert len(blocked.legal_holds) == 1
+    evidence = blocked.legal_holds[0]
+    assert evidence.available is True
+    assert evidence.domain == DomainKey.MEMORY
+    assert evidence.authority_reference == "DPO-CASE-2026-0917"
+    assert evidence.dpo_subject_id == "dpo-reviewer"
+    assert evidence.reason_code == "REGULATORY_PRESERVATION"
+    assert evidence.effective_at == effective_at
+    assert evidence.expires_at == expires_at
+    assert blocked.targets[0].legal_hold_evidence == evidence
+
+    other_tenant = _identity(
+        tenant + 1,
+        user=identity.user_id,
+        session="other-tenant-legal-hold-session",
+    )
+    with pytest.raises(GovernedDomainNotFound):
+        store.deletion_job(other_tenant, blocked.deletion_job_id)
+
+    with connect(DATABASE_URL) as connection:
+        hold_row = connection.execute(
+            """SELECT hold_state, authority_reference, dpo_subject_id, reason_code
+                 FROM ai_personal_data_legal_holds
+                WHERE hold_id = %s AND tenant_id = %s""",
+            (evidence.hold_id, tenant),
+        ).fetchone()
+        event_row = connection.execute(
+            """SELECT event_type, current_state
+                 FROM ai_personal_data_legal_hold_events
+                WHERE hold_id = %s""",
+            (evidence.hold_id,),
+        ).fetchone()
+        with pytest.raises(PsycopgError):
+            with connection.transaction():
+                connection.execute(
+                    """UPDATE ai_personal_data_legal_hold_events
+                          SET current_state = 'RELEASED'
+                        WHERE hold_id = %s""",
+                    (evidence.hold_id,),
+                )
+    assert hold_row == (
+        "ACTIVE",
+        "DPO-CASE-2026-0917",
+        "dpo-reviewer",
+        "REGULATORY_PRESERVATION",
+    )
+    assert event_row == ("CREATED", "ACTIVE")
 
 
 def _seed_policy(
