@@ -36,6 +36,14 @@ def test_v24_sensitive_bindings_require_exact_authority_and_parameters() -> None
     assert comment.required_permission_sets == (
         frozenset({"APP.DWAION_ARTIFACTS:UPDATE"}),
     )
+    research_download = resolve_binding(
+        "GET",
+        "/v1/research/runs/00000000-0000-4000-8000-000000000001/downloads/audit",
+    )
+    assert research_download is not None
+    assert research_download.required_permission_sets == (
+        frozenset({"APP.ASK:VIEW", "APP.DWAION_RESEARCH:VIEW"}),
+    )
 
 
 def test_v24_readiness_is_explicit(monkeypatch: pytest.MonkeyPatch) -> None:

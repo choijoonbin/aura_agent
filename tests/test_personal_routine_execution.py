@@ -20,6 +20,10 @@ from dwp_agent.personal_routine_execution_provider import (
     RoutineExecutionProvider,
     RoutineExecutionProviderConfiguration,
     RoutineExecutionProviderUnavailable,
+    RoutineExecutionRuntimeControls,
+    RoutineProviderCompensationResult,
+    RoutineProviderResult,
+    runtime_controls_digest,
 )
 
 
@@ -67,8 +71,43 @@ def _definition() -> RoutineDefinition:
     )
 
 
+def _runtime_attestation(
+    routine_id,
+    revision: int = 1,
+    controls: dict[str, object] | None = None,
+) -> dict[str, object]:
+    applied = RoutineExecutionRuntimeControls.model_validate(
+        controls
+        or {
+            "engineOverride": None,
+            "budgetExceptionCommandIds": [],
+            "additionalTokensPerRun": 0,
+            "additionalMinutesPerRun": 0,
+        }
+    )
+    return {
+        "routineId": str(routine_id),
+        "routineRevision": revision,
+        "appliedRuntimeControls": applied.model_dump(mode="json"),
+        "runtimeControlsSha256": runtime_controls_digest(applied),
+    }
+
+
 def test_routine_provider_executes_only_approval_gated_actions() -> None:
     run_id = uuid4()
+    routine_id = uuid4()
+    runtime_controls = {
+        "engineOverride": {
+            "agentId": "routine-agent",
+            "engineId": "engine-v2",
+            "stateVersion": 2,
+            "sourceCommandId": str(uuid4()),
+            "expiresAt": "2026-09-20T00:00:00+00:00",
+        },
+        "budgetExceptionCommandIds": [str(uuid4())],
+        "additionalTokensPerRun": 10_000,
+        "additionalMinutesPerRun": 5,
+    }
 
     def handler(request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content)
@@ -77,6 +116,9 @@ def test_routine_provider_executes_only_approval_gated_actions() -> None:
         assert body["externalWritesAllowed"] is False
         assert body["approvalGatedActionsOnly"] is True
         assert body["requireCurrentAuthorization"] is True
+        assert body["runtimeControls"] == RoutineExecutionRuntimeControls.model_validate(
+            runtime_controls
+        ).model_dump(mode="json")
         assert request.headers["authorization"] == "Bearer test-service-token"
         return httpx.Response(
             200,
@@ -95,6 +137,7 @@ def test_routine_provider_executes_only_approval_gated_actions() -> None:
                 "compensationRequired": False,
                 "authorizationDecisionRevision": 14,
                 "authorizedSources": ["WORK_ITEM"],
+                **_runtime_attestation(routine_id, 2, runtime_controls),
             },
         )
 
@@ -103,12 +146,13 @@ def test_routine_provider_executes_only_approval_gated_actions() -> None:
     )
     result = provider.execute(
         routine_run_id=run_id,
-        routine_id=uuid4(),
+        routine_id=routine_id,
         routine_revision=2,
         tenant_id=7,
         user_id="member-1",
         correlation_id="correlation-1",
         definition=_definition(),
+        runtime_controls=runtime_controls,
     )
 
     assert result.state == "COMPLETED"
@@ -116,8 +160,162 @@ def test_routine_provider_executes_only_approval_gated_actions() -> None:
     assert result.approvalGatedActionsCreated == 2
 
 
+def test_routine_provider_models_reject_whitespace_terminal_receipts() -> None:
+    routine_id = uuid4()
+    result = {
+        "routineRunId": str(uuid4()),
+        "providerReceiptId": "   ",
+        "resultSha256": hashlib.sha256(b"blank").hexdigest(),
+    }
+    with pytest.raises(ValidationError, match="must not be blank"):
+        RoutineProviderResult.model_validate({
+            **result,
+            "state": "COMPLETED",
+            "evidenceCount": 0,
+            "proposalsCreated": 0,
+            "approvalGatedActionsCreated": 0,
+            "externalWritesPerformed": 0,
+            "tokensUsed": 0,
+            "elapsedMs": 0,
+            "notificationState": "NOT_REQUIRED",
+            "authorizationDecisionRevision": 1,
+            "authorizedSources": ["WORK_ITEM"],
+            **_runtime_attestation(routine_id),
+        })
+    with pytest.raises(ValidationError, match="must not be blank"):
+        RoutineProviderCompensationResult.model_validate({
+            **result,
+            "revokedPendingHandoffs": 0,
+            "externalWritesReversed": 0,
+        })
+
+
+def test_routine_provider_transport_rejects_whitespace_execution_and_compensation_receipts() -> None:
+    run_id = uuid4()
+    routine_id = uuid4()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/compensate"):
+            return httpx.Response(
+                200,
+                json={
+                    "routineRunId": str(run_id),
+                    "providerReceiptId": "   ",
+                    "resultSha256": hashlib.sha256(b"compensation").hexdigest(),
+                    "revokedPendingHandoffs": 0,
+                    "externalWritesReversed": 0,
+                },
+            )
+        return httpx.Response(
+            200,
+            json={
+                "routineRunId": str(run_id),
+                "state": "COMPLETED",
+                "providerReceiptId": "   ",
+                "resultSha256": hashlib.sha256(b"execution").hexdigest(),
+                "evidenceCount": 0,
+                "proposalsCreated": 0,
+                "approvalGatedActionsCreated": 0,
+                "externalWritesPerformed": 0,
+                "tokensUsed": 0,
+                "elapsedMs": 0,
+                "notificationState": "NOT_REQUIRED",
+                "authorizationDecisionRevision": 1,
+                "authorizedSources": ["WORK_ITEM"],
+                **_runtime_attestation(routine_id),
+            },
+        )
+
+    provider = RoutineExecutionProvider(
+        _configuration(), transport=httpx.MockTransport(handler)
+    )
+    with pytest.raises(
+        RoutineExecutionProviderUnavailable,
+        match="ROUTINE_EXECUTION_PROVIDER_UNAVAILABLE",
+    ):
+        provider.execute(
+            routine_run_id=run_id,
+            routine_id=routine_id,
+            routine_revision=1,
+            tenant_id=7,
+            user_id="member-1",
+            correlation_id="blank-execution-receipt",
+            definition=_definition(),
+        )
+    with pytest.raises(
+        RoutineExecutionProviderUnavailable,
+        match="ROUTINE_EXECUTION_PROVIDER_UNAVAILABLE",
+    ):
+        provider.compensate(
+            routine_run_id=run_id,
+            provider_receipt_id="prior-provider-receipt",
+            tenant_id=7,
+            user_id="member-1",
+            correlation_id="blank-compensation-receipt",
+        )
+
+
+def test_routine_provider_binds_skip_quarantine_recovery_to_prior_receipt() -> None:
+    run_id = uuid4()
+    routine_id = uuid4()
+    command_id = uuid4()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        assert body["recoveryDirective"] == {
+            "action": "SKIP_QUARANTINED_AND_CONTINUE",
+            "commandId": str(command_id),
+            "reasonCode": "PARTIAL_SOURCE_QUARANTINED",
+            "changeReason": "Continue with verified records after quarantine.",
+            "priorProviderReceiptId": "provider-partial-receipt-1",
+        }
+        return httpx.Response(
+            200,
+            json={
+                "routineRunId": str(run_id),
+                "state": "COMPLETED",
+                "providerReceiptId": "provider-recovery-receipt-2",
+                "resultSha256": hashlib.sha256(b"recovered").hexdigest(),
+                "evidenceCount": 7,
+                "proposalsCreated": 1,
+                "approvalGatedActionsCreated": 1,
+                "externalWritesPerformed": 0,
+                "tokensUsed": 800,
+                "elapsedMs": 1800,
+                "notificationState": "DELIVERED",
+                "authorizationDecisionRevision": 18,
+                "authorizedSources": ["WORK_ITEM"],
+                **_runtime_attestation(routine_id, 3),
+            },
+        )
+
+    provider = RoutineExecutionProvider(
+        _configuration(), transport=httpx.MockTransport(handler)
+    )
+    result = provider.execute(
+        routine_run_id=run_id,
+        routine_id=routine_id,
+        routine_revision=3,
+        tenant_id=7,
+        user_id="member-1",
+        correlation_id="correlation-recovery-1",
+        definition=_definition(),
+        recovery_directive={
+            "action": "SKIP_QUARANTINED_AND_CONTINUE",
+            "commandId": str(command_id),
+            "reasonCode": "PARTIAL_SOURCE_QUARANTINED",
+            "changeReason": "Continue with verified records after quarantine.",
+            "priorProviderReceiptId": "provider-partial-receipt-1",
+        },
+    )
+
+    assert result.state == "COMPLETED"
+    assert result.providerReceiptId == "provider-recovery-receipt-2"
+
+
 def test_routine_provider_rejects_external_write_claims() -> None:
     run_id = uuid4()
+    routine_id = uuid4()
 
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
@@ -136,6 +334,7 @@ def test_routine_provider_rejects_external_write_claims() -> None:
                 "notificationState": "NOT_REQUIRED",
                 "authorizationDecisionRevision": 14,
                 "authorizedSources": ["WORK_ITEM"],
+                **_runtime_attestation(routine_id),
             },
         )
 
@@ -145,7 +344,7 @@ def test_routine_provider_rejects_external_write_claims() -> None:
     with pytest.raises(RoutineExecutionProviderUnavailable):
         provider.execute(
             routine_run_id=run_id,
-            routine_id=uuid4(),
+            routine_id=routine_id,
             routine_revision=1,
             tenant_id=7,
             user_id="member-1",
@@ -156,6 +355,7 @@ def test_routine_provider_rejects_external_write_claims() -> None:
 
 def test_routine_provider_rejects_run_or_source_authorization_mismatch() -> None:
     run_id = uuid4()
+    routine_id = uuid4()
 
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
@@ -174,6 +374,7 @@ def test_routine_provider_rejects_run_or_source_authorization_mismatch() -> None
                 "notificationState": "NOT_REQUIRED",
                 "authorizationDecisionRevision": 15,
                 "authorizedSources": ["MAIL"],
+                **_runtime_attestation(routine_id),
             },
         )
 
@@ -183,12 +384,71 @@ def test_routine_provider_rejects_run_or_source_authorization_mismatch() -> None
     with pytest.raises(RoutineExecutionProviderUnavailable):
         provider.execute(
             routine_run_id=run_id,
-            routine_id=uuid4(),
+            routine_id=routine_id,
             routine_revision=1,
             tenant_id=7,
             user_id="member-1",
             correlation_id="correlation-2",
             definition=_definition(),
+        )
+
+
+def test_routine_provider_rejects_unapplied_runtime_controls() -> None:
+    run_id = uuid4()
+    routine_id = uuid4()
+    requested = {
+        "engineOverride": None,
+        "budgetExceptionCommandIds": [str(uuid4())],
+        "additionalTokensPerRun": 10_000,
+        "additionalMinutesPerRun": 5,
+    }
+    ignored = RoutineExecutionRuntimeControls(
+        engineOverride=None,
+        budgetExceptionCommandIds=[],
+        additionalTokensPerRun=0,
+        additionalMinutesPerRun=0,
+    )
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "routineRunId": str(run_id),
+                "routineId": str(routine_id),
+                "routineRevision": 4,
+                "state": "COMPLETED",
+                "providerReceiptId": "ignored-runtime-controls",
+                "resultSha256": hashlib.sha256(b"ignored").hexdigest(),
+                "evidenceCount": 0,
+                "proposalsCreated": 0,
+                "approvalGatedActionsCreated": 0,
+                "externalWritesPerformed": 0,
+                "tokensUsed": 0,
+                "elapsedMs": 0,
+                "notificationState": "NOT_REQUIRED",
+                "authorizationDecisionRevision": 1,
+                "authorizedSources": ["WORK_ITEM"],
+                "appliedRuntimeControls": ignored.model_dump(mode="json"),
+                "runtimeControlsSha256": runtime_controls_digest(ignored),
+            },
+        )
+
+    provider = RoutineExecutionProvider(
+        _configuration(), transport=httpx.MockTransport(handler)
+    )
+    with pytest.raises(
+        RoutineExecutionProviderUnavailable,
+        match="ROUTINE_EXECUTION_RESPONSE_MISMATCH",
+    ):
+        provider.execute(
+            routine_run_id=run_id,
+            routine_id=routine_id,
+            routine_revision=4,
+            tenant_id=7,
+            user_id="member-1",
+            correlation_id="runtime-binding-mismatch",
+            definition=_definition(),
+            runtime_controls=requested,
         )
 
 

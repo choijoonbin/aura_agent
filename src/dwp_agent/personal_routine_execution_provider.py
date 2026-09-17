@@ -1,18 +1,21 @@
 from __future__ import annotations
 
+import hashlib
 import os
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Literal
 from urllib.parse import urljoin, urlparse
 from uuid import UUID
 
 import httpx
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from .personal_routine_contracts import (
     RoutineDefinition,
     RoutineNotificationState,
 )
+from .governed_domain_core import canonical_json_bytes
 
 
 class RoutineExecutionProviderUnavailable(RuntimeError):
@@ -25,21 +28,58 @@ class _ProviderModel(BaseModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
 
-class RoutineProviderResult(_ProviderModel):
-    routineRunId: UUID
-    state: Literal["COMPLETED", "PARTIAL"]
+class _ProviderReceiptModel(_ProviderModel):
     providerReceiptId: str = Field(min_length=1, max_length=240)
+
+    @field_validator("providerReceiptId")
+    @classmethod
+    def normalize_provider_receipt(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("Provider receipt ID must not be blank.")
+        return normalized
+
+
+class RoutineEngineOverrideSelection(_ProviderModel):
+    agentId: str = Field(min_length=1, max_length=160)
+    engineId: str = Field(min_length=1, max_length=160)
+    stateVersion: int = Field(ge=1)
+    sourceCommandId: UUID
+    expiresAt: datetime
+
+
+class RoutineExecutionRuntimeControls(_ProviderModel):
+    engineOverride: RoutineEngineOverrideSelection | None
+    budgetExceptionCommandIds: list[UUID] = Field(max_length=30)
+    additionalTokensPerRun: int = Field(ge=0, le=2_000_000)
+    additionalMinutesPerRun: int = Field(ge=0, le=240)
+
+    @field_validator("budgetExceptionCommandIds")
+    @classmethod
+    def unique_budget_exceptions(cls, value: list[UUID]) -> list[UUID]:
+        if len(value) != len(set(value)):
+            raise ValueError("Runtime budget exception commands must be unique.")
+        return value
+
+
+class RoutineProviderResult(_ProviderReceiptModel):
+    routineRunId: UUID
+    routineId: UUID
+    routineRevision: int = Field(ge=1)
+    state: Literal["COMPLETED", "PARTIAL"]
     resultSha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     evidenceCount: int = Field(ge=0, le=1_000_000)
     proposalsCreated: int = Field(ge=0, le=100_000)
     approvalGatedActionsCreated: int = Field(ge=0, le=100_000)
     externalWritesPerformed: int = Field(ge=0, le=100_000)
-    tokensUsed: int = Field(ge=0, le=2_000_000)
-    elapsedMs: int = Field(ge=0, le=14_400_000)
+    tokensUsed: int = Field(ge=0, le=4_000_000)
+    elapsedMs: int = Field(ge=0, le=28_800_000)
     notificationState: RoutineNotificationState
     compensationRequired: bool = False
     authorizationDecisionRevision: int = Field(ge=1)
     authorizedSources: list[str] = Field(min_length=1, max_length=3)
+    appliedRuntimeControls: RoutineExecutionRuntimeControls
+    runtimeControlsSha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     safeErrorCode: str | None = Field(
         default=None, pattern=r"^[A-Z][A-Z0-9_.-]{1,127}$"
     )
@@ -59,12 +99,13 @@ class RoutineProviderResult(_ProviderModel):
             self.safeErrorCode is None or self.recoveryHint is None
         ):
             raise ValueError("Partial routine execution requires a recoverable error.")
+        if runtime_controls_digest(self.appliedRuntimeControls) != self.runtimeControlsSha256:
+            raise ValueError("Applied runtime controls digest is not canonical.")
         return self
 
 
-class RoutineProviderCompensationResult(_ProviderModel):
+class RoutineProviderCompensationResult(_ProviderReceiptModel):
     routineRunId: UUID
-    providerReceiptId: str = Field(min_length=1, max_length=240)
     resultSha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     revokedPendingHandoffs: int = Field(ge=0, le=100_000)
     externalWritesReversed: int = Field(default=0, ge=0, le=100_000)
@@ -156,24 +197,44 @@ class RoutineExecutionProvider:
         user_id: str,
         correlation_id: str,
         definition: RoutineDefinition,
+        runtime_controls: dict[str, object] | None = None,
+        recovery_directive: dict[str, str] | None = None,
     ) -> RoutineProviderResult:
+        body: dict[str, object] = {
+            "routineRunId": str(routine_run_id),
+            "routineId": str(routine_id),
+            "routineRevision": routine_revision,
+            "tenantId": tenant_id,
+            "userId": user_id,
+            "definition": definition.model_dump(mode="json", by_alias=True),
+            "externalWritesAllowed": False,
+            "approvalGatedActionsOnly": True,
+            "requireCurrentAuthorization": True,
+        }
+        controls = RoutineExecutionRuntimeControls.model_validate(
+            runtime_controls
+            or {
+                "engineOverride": None,
+                "budgetExceptionCommandIds": [],
+                "additionalTokensPerRun": 0,
+                "additionalMinutesPerRun": 0,
+            }
+        )
+        body["runtimeControls"] = controls.model_dump(mode="json")
+        if recovery_directive is not None:
+            body["recoveryDirective"] = recovery_directive
         response = self._request(
             "/internal/v1/routine-executions",
-            {
-                "routineRunId": str(routine_run_id),
-                "routineId": str(routine_id),
-                "routineRevision": routine_revision,
-                "tenantId": tenant_id,
-                "userId": user_id,
-                "definition": definition.model_dump(mode="json", by_alias=True),
-                "externalWritesAllowed": False,
-                "approvalGatedActionsOnly": True,
-                "requireCurrentAuthorization": True,
-            },
+            body,
             correlation_id,
             RoutineProviderResult,
         )
-        if response.routineRunId != routine_run_id:
+        if (
+            response.routineRunId != routine_run_id
+            or response.routineId != routine_id
+            or response.routineRevision != routine_revision
+            or response.appliedRuntimeControls != controls
+        ):
             raise RoutineExecutionProviderUnavailable(
                 "ROUTINE_EXECUTION_RESPONSE_MISMATCH"
             )
@@ -244,6 +305,12 @@ class RoutineExecutionProvider:
             raise RoutineExecutionProviderUnavailable(
                 "ROUTINE_EXECUTION_PROVIDER_UNAVAILABLE"
             ) from error
+
+
+def runtime_controls_digest(controls: RoutineExecutionRuntimeControls) -> str:
+    return hashlib.sha256(
+        canonical_json_bytes(controls.model_dump(mode="json"))
+    ).hexdigest()
 
 
 def _flag(name: str) -> bool:

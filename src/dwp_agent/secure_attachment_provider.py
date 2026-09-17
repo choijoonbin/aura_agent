@@ -7,13 +7,15 @@ from urllib.parse import urljoin, urlparse
 from uuid import UUID
 
 import httpx
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from .dwaion_workflow_contracts import (
     AttachmentCapabilities,
+    AttachmentStageKey,
     AttachmentUploadTicket,
     WorkflowCapability,
 )
+from .attachment_stage_contracts import AttachmentStageProviderReceipt
 
 
 class AttachmentProviderUnavailable(RuntimeError):
@@ -41,6 +43,14 @@ class _DeleteResponse(_ProviderModel):
     uploadReference: str = Field(min_length=8, max_length=1_000)
     deleted: bool
     providerReceiptId: str = Field(min_length=1, max_length=240)
+
+    @field_validator("providerReceiptId")
+    @classmethod
+    def valid_provider_receipt(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("Attachment deletion requires a provider receipt.")
+        return normalized
 
 
 @dataclass(frozen=True)
@@ -214,12 +224,59 @@ class SecureAttachmentProvider:
             raise AttachmentProviderUnavailable("ATTACHMENT_DELETE_UNVERIFIED")
         return response
 
+    def execute_stage(
+        self,
+        *,
+        attachment_id: UUID,
+        upload_reference: str,
+        source_sha256: str,
+        stage: AttachmentStageKey,
+        idempotency_key: UUID,
+        correlation_id: str,
+    ) -> AttachmentStageProviderReceipt:
+        if stage == AttachmentStageKey.UPLOAD or not self._stage_available(stage):
+            raise AttachmentProviderUnavailable(
+                f"ATTACHMENT_{stage.value}_NOT_CONFIGURED"
+            )
+        response = self._request(
+            "POST",
+            "/internal/v1/attachments/stages/execute",
+            {
+                "attachmentId": str(attachment_id),
+                "uploadReference": upload_reference,
+                "sourceSha256": source_sha256,
+                "stage": stage.value,
+                "idempotencyKey": str(idempotency_key),
+            },
+            correlation_id,
+            AttachmentStageProviderReceipt,
+        )
+        if (
+            response.attachment_id != attachment_id
+            or response.upload_reference != upload_reference
+            or response.source_sha256 != source_sha256
+            or response.stage != stage
+        ):
+            raise AttachmentProviderUnavailable(
+                "ATTACHMENT_STAGE_RECEIPT_BINDING_INVALID"
+            )
+        return response
+
     def _allow(self, media_type: str, size_bytes: int) -> None:
         self.configuration.validate()
         if media_type not in self.configuration.allowed_media_types:
             raise AttachmentProviderUnavailable("ATTACHMENT_MEDIA_TYPE_BLOCKED")
         if size_bytes > self.configuration.maximum_file_bytes:
             raise AttachmentProviderUnavailable("ATTACHMENT_SIZE_LIMIT_EXCEEDED")
+
+    def _stage_available(self, stage: AttachmentStageKey) -> bool:
+        return {
+            AttachmentStageKey.AV: self.configuration.antivirus_available,
+            AttachmentStageKey.DLP: self.configuration.dlp_available,
+            AttachmentStageKey.PARSER: self.configuration.parser_available,
+            AttachmentStageKey.OCR: self.configuration.ocr_available,
+            AttachmentStageKey.INDEX: self.configuration.index_available,
+        }.get(stage, False)
 
     def _request(self, method: str, path: str, body: dict[str, object], correlation_id: str, model):
         self.configuration.validate()

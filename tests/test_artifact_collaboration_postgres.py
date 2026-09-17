@@ -14,6 +14,7 @@ from dwp_agent.artifact_collaboration_contracts import (
     CreateTeamArtifactCommentRequest,
     CreateTeamArtifactWorkspaceRequest,
     DecideTeamArtifactReviewStageRequest,
+    ExecuteTeamArtifactRemediationRequest,
     ReplyTeamArtifactCommentRequest,
     ResolveTeamArtifactCommentRequest,
     RunTeamArtifactPreflightRequest,
@@ -22,8 +23,12 @@ from dwp_agent.artifact_collaboration_contracts import (
 from dwp_agent.artifact_collaboration_provider import (
     ArtifactAclAccessRequestResult,
     ArtifactAclPreflightResult,
+    ArtifactReviewNotificationResult,
 )
 from dwp_agent.artifact_collaboration_store import PostgresArtifactCollaborationStore
+from dwp_agent.artifact_review_notification_contracts import (
+    review_notification_result_sha256,
+)
 from dwp_agent.artifact_contracts import (
     ArtifactDraftContent,
     ArtifactMetadata,
@@ -115,6 +120,39 @@ class _AllowedAccessProvider:
 
     def request_access(self, **_request: object) -> ArtifactAclAccessRequestResult:
         raise AssertionError("An allowed preflight must not request access.")
+
+
+class _RemediationProvider(_AllowedAccessProvider):
+    def notify_review(self, **request: object) -> ArtifactReviewNotificationResult:
+        delivered_at = datetime.now(UTC)
+        provider_receipt_id = f"review-notification:{request['command_id']}"
+        evidence = review_notification_result_sha256(
+            command_id=request["command_id"],
+            artifact_id=request["artifact_id"],
+            workspace_id=request["workspace_id"],
+            stage_id=request["stage_id"],
+            assignee_subject_id=request["assignee_subject_id"],
+            workspace_revision=request["workspace_revision"],
+            reason_code=request["reason_code"],
+            change_reason=request["change_reason"],
+            delivery_state="DELIVERED",
+            provider_receipt_id=provider_receipt_id,
+            delivered_at=delivered_at,
+        )
+        return ArtifactReviewNotificationResult(
+            commandId=request["command_id"],
+            artifactId=request["artifact_id"],
+            workspaceId=request["workspace_id"],
+            stageId=request["stage_id"],
+            assigneeSubjectId=request["assignee_subject_id"],
+            workspaceRevision=request["workspace_revision"],
+            reasonCode=request["reason_code"],
+            changeReason=request["change_reason"],
+            deliveryState="DELIVERED",
+            providerReceiptId=provider_receipt_id,
+            resultSha256=evidence,
+            deliveredAt=delivered_at,
+        )
 
 
 def test_denied_preflight_access_request_is_durable_audited_and_idempotent() -> None:
@@ -595,3 +633,223 @@ def test_artifact_metadata_and_staged_review_are_tenant_bound_and_null_safe() ->
     assert reason_envelope.startswith("dwp2.")
     assert "Approve after" not in reason_envelope
     assert event_type == "REVIEW_APPROVED"
+
+
+def test_remediation_updates_encrypted_draft_and_notification_records_provider_receipt() -> None:
+    tenant_id = 780_000_000 + uuid4().int % 90_000_000
+    owner = PersonalDomainIdentity(
+        tenant_id=tenant_id,
+        user_id="remediation-owner",
+        correlation_id=str(uuid4()),
+        auth_session_id="remediation-owner-session",
+        roles=frozenset({"WORKSPACE_MEMBER"}),
+        permissions=frozenset(),
+    )
+    reviewer = PersonalDomainIdentity(
+        tenant_id=tenant_id,
+        user_id="remediation-reviewer",
+        correlation_id=str(uuid4()),
+        auth_session_id="remediation-reviewer-session",
+        roles=frozenset({"WORKSPACE_MEMBER"}),
+        permissions=frozenset(),
+    )
+    PostgresDomainRetentionStore(DATABASE_URL).upsert_policy(
+        owner,
+        DomainKey.ARTIFACT,
+        UpsertRetentionPolicyRequest(
+            commandId=uuid4(),
+            expectedRevision=0,
+            reasonCode="TENANT_RETENTION_BOOTSTRAP",
+            changeReason="Set artifact retention for remediation verification.",
+            retentionDays=365,
+            deletionGraceDays=7,
+            legalHold=False,
+        ),
+    )
+    artifacts = PostgresArtifactStore(DATABASE_URL)
+    artifact = artifacts.create(
+        owner,
+        CreateArtifactRequest(
+            commandId=uuid4(),
+            expectedRevision=0,
+            reasonCode="USER_ARTIFACT_CREATE",
+            artifactType="DOCUMENT",
+            content=ArtifactDraftContent(
+                title="Contact owner@example.com",
+                body="Call 010-1234-5678 and verify 900101-1234567.",
+            ),
+        ),
+    )
+    with connect(DATABASE_URL) as connection:
+        source_content_fingerprint = connection.execute(
+            "SELECT content_fingerprint FROM ai_artifact_drafts WHERE artifact_id = %s",
+            (artifact.artifact_id,),
+        ).fetchone()[0]
+    store = PostgresArtifactCollaborationStore(
+        DATABASE_URL,
+        provider=_RemediationProvider(),
+    )
+    mask_request = ExecuteTeamArtifactRemediationRequest(
+        commandId=uuid4(),
+        expectedRevision=artifact.revision,
+        reasonCode="TEAM_ARTIFACT_REMEDIATION",
+        changeReason="Mask detected identifiers before sharing this artifact.",
+        action="AUTOMATIC_MASKING",
+    )
+
+    masked = store.remediate(owner, artifact.artifact_id, mask_request)
+    masked_replay = store.remediate(owner, artifact.artifact_id, mask_request)
+    current = artifacts.get(owner, artifact.artifact_id)
+
+    assert masked_replay == masked
+    assert masked.affected_count == 3
+    assert masked.artifact_revision == artifact.revision + 1
+    assert masked.provider_receipt_id is None
+    assert current.revision == masked.artifact_revision
+    assert masked.source_content_fingerprint == source_content_fingerprint
+    assert masked.finding_manifest_sha256 is not None
+    assert masked.result_content_sha256 is not None
+    assert masked.residual_finding_count == 0
+    assert masked.remediated_codes == [
+        "EMAIL_ADDRESS",
+        "KOREAN_RESIDENT_ID",
+        "PHONE_NUMBER",
+    ]
+    assert current.content.title == "Contact [MASKED_EMAIL_ADDRESS]"
+    assert current.content.body == (
+        "Call [MASKED_PHONE_NUMBER] and verify [MASKED_KOREAN_RESIDENT_ID]."
+    )
+    with pytest.raises(GovernedDomainConflict, match="No current artifact DLP findings"):
+        store.remediate(
+            owner,
+            artifact.artifact_id,
+            mask_request.model_copy(
+                update={
+                    "command_id": uuid4(),
+                    "expected_revision": current.revision,
+                }
+            ),
+        )
+
+    source_owner = PersonalDomainIdentity(
+        tenant_id=owner.tenant_id,
+        user_id=owner.user_id,
+        correlation_id=owner.correlation_id,
+        auth_session_id=owner.auth_session_id,
+        roles=owner.roles,
+        permissions=frozenset({"APP.MAIL:VIEW"}),
+    )
+    unverified = artifacts.create(
+        source_owner,
+        CreateArtifactRequest(
+            commandId=uuid4(),
+            expectedRevision=0,
+            reasonCode="USER_ARTIFACT_CREATE",
+            artifactType="DOCUMENT",
+            content=ArtifactDraftContent(
+                title="Unverified owner@example.com",
+                body="A governed source must be verified first.",
+            ),
+            sources=[{"sourceType": "MAIL", "reference": "mail:unverified-1"}],
+        ),
+    )
+    with pytest.raises(GovernedDomainConflict, match="Verify every current artifact source"):
+        store.remediate(
+            source_owner,
+            unverified.artifact_id,
+            mask_request.model_copy(
+                update={
+                    "command_id": uuid4(),
+                    "expected_revision": unverified.revision,
+                }
+            ),
+        )
+
+    team_id = uuid4()
+    preflight = store.preflight(
+        owner,
+        artifact.artifact_id,
+        RunTeamArtifactPreflightRequest(
+            commandId=uuid4(),
+            expectedRevision=current.revision,
+            reasonCode="TEAM_ACL_PREFLIGHT",
+            teamId=team_id,
+            artifactRevision=current.revision,
+            members=[{"subjectId": reviewer.user_id, "role": "REVIEWER"}],
+        ),
+    )
+    workspace = store.create_workspace(
+        owner,
+        artifact.artifact_id,
+        CreateTeamArtifactWorkspaceRequest(
+            commandId=uuid4(),
+            expectedRevision=current.revision,
+            reasonCode="TEAM_WORKSPACE_CREATE",
+            changeReason="Create the governed workspace for remediation review.",
+            teamId=team_id,
+            preflightId=preflight.preflight_id,
+        ),
+    )
+    primary = next(
+        stage for stage in workspace.review_stages if stage.stage_key == "PRIMARY_REVIEW"
+    )
+    notification_request = ExecuteTeamArtifactRemediationRequest(
+        commandId=uuid4(),
+        expectedRevision=current.revision,
+        reasonCode="TEAM_REVIEW_NOTIFICATION",
+        changeReason="Resend the governed request to the assigned primary reviewer.",
+        action="REVIEW_NOTIFICATION",
+        stageId=primary.stage_id,
+    )
+
+    notified = store.remediate(
+        owner, artifact.artifact_id, notification_request
+    )
+    notified_replay = store.remediate(
+        owner, artifact.artifact_id, notification_request
+    )
+
+    assert notified_replay == notified
+    assert notified.artifact_revision == current.revision
+    assert notified.workspace_revision == workspace.revision
+    assert notified.provider_receipt_id == (
+        f"review-notification:{notification_request.command_id}"
+    )
+    assert notified.affected_count == 1
+    with pytest.raises(GovernedDomainNotFound):
+        store.remediate(
+            reviewer,
+            artifact.artifact_id,
+            notification_request.model_copy(update={"command_id": uuid4()}),
+        )
+
+    with connect(DATABASE_URL) as connection:
+        command_rows = connection.execute(
+            """SELECT command_type, result_envelope
+                 FROM ai_artifact_collaboration_commands
+                WHERE command_id IN (%s, %s) ORDER BY command_type""",
+            (mask_request.command_id, notification_request.command_id),
+        ).fetchall()
+        event_rows = connection.execute(
+            """SELECT event_type, current_state
+                 FROM ai_artifact_collaboration_events
+                WHERE command_id IN (%s, %s) ORDER BY event_type""",
+            (mask_request.command_id, notification_request.command_id),
+        ).fetchall()
+        content_envelope = connection.execute(
+            """SELECT content_envelope FROM ai_artifact_drafts
+                WHERE artifact_id = %s""",
+            (artifact.artifact_id,),
+        ).fetchone()[0]
+
+    assert [row[0] for row in command_rows] == [
+        "REMEDIATE_MASK",
+        "REVIEW_NOTIFICATION",
+    ]
+    assert all(row[1].startswith("dwp2.") for row in command_rows)
+    assert event_rows == [
+        ("REMEDIATION_APPLIED", "DRAFT"),
+        ("REVIEW_NOTIFICATION_SENT", "DRAFT"),
+    ]
+    assert content_envelope.startswith("dwp2.")
+    assert "owner@example.com" not in content_envelope

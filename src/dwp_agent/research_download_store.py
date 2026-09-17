@@ -10,6 +10,8 @@ from uuid import UUID, uuid4
 from psycopg import Error as PsycopgError, connect
 from psycopg.rows import dict_row
 
+from .artifact_contracts import ArtifactDraftContent, ExportFormat
+from .artifact_export_renderer import render_artifact_export
 from .dwaion_workflow_contracts import ResearchResult
 from .dwaion_workflow_errors import (
     DwaionWorkflowConflict,
@@ -83,6 +85,26 @@ class ResearchDownloadStore:
             raise
         except (PsycopgError, ValueError, TypeError) as error:
             raise DwaionWorkflowUnavailable("Research receipt download is unavailable.") from error
+
+    def pdf(self, identity: PersonalDomainIdentity, run_id: UUID) -> bytes:
+        try:
+            with connect(self.database_url, row_factory=dict_row) as connection:
+                row = self._completed(connection, identity, run_id)
+                result = self._result(row)
+                rendered = render_artifact_export(
+                    ArtifactDraftContent(
+                        title="DWAI.ON Deep Research Report",
+                        body=result.report_markdown,
+                    ),
+                    ExportFormat.PDF,
+                )
+                fingerprint = hashlib.sha256(rendered.content).hexdigest()
+                self._download_event(connection, identity, row, "PDF", fingerprint)
+                return rendered.content
+        except (DwaionWorkflowConflict, DwaionWorkflowNotFound):
+            raise
+        except (PsycopgError, ValueError, TypeError) as error:
+            raise DwaionWorkflowUnavailable("Research PDF download is unavailable.") from error
 
     def audit(
         self, identity: PersonalDomainIdentity, run_id: UUID

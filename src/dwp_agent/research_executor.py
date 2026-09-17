@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import hashlib
+from dataclasses import dataclass, replace
+from typing import Callable
 from uuid import UUID
 
 from .context_broker import ContextBrokerUnavailable, WorkspaceContextBroker
@@ -9,10 +11,10 @@ from .dwaion_workflow_contracts import (
     AttachmentCitation,
     ExecuteResearchRunRequest,
     ResearchProgress,
+    ResearchPlan,
     ResearchResult,
     ResearchRun,
     ResearchRunState,
-    ResearchWorkerObservation,
 )
 from .model_gateway import (
     GroundingViolation,
@@ -23,9 +25,17 @@ from .model_gateway import (
 )
 from .personal_domain_security import PersonalDomainIdentity
 from .policy import AskIdentity
-from .research_plan_store import get_research_plan_store
+from .research_run_runtime import ResearchRuntimeControls
 from .research_run_store import get_research_run_store
 from .workspace_authorization import WorkspaceRequestAuthorization
+
+
+@dataclass(frozen=True)
+class ResearchExecutionOutcome:
+    state: ResearchRunState
+    progress: ResearchProgress
+    result: ResearchResult | None = None
+    safe_error_code: str | None = None
 
 
 class ResearchExecutor:
@@ -44,13 +54,19 @@ class ResearchExecutor:
         request: ExecuteResearchRunRequest,
         workspace_authorization: WorkspaceRequestAuthorization,
     ) -> ResearchRun:
-        run_store = get_research_run_store()
-        run = run_store.get(identity, run_id)
-        if run.version != request.expected_version:
-            from .dwaion_workflow_errors import DwaionWorkflowConflict
+        return get_research_run_store().request_execution(
+            identity, run_id, request, workspace_authorization
+        )
 
-            raise DwaionWorkflowConflict("The research run version has changed.")
-        plan = get_research_plan_store().get(identity, run.plan_id)
+    def perform(
+        self,
+        identity: PersonalDomainIdentity,
+        run: ResearchRun,
+        plan: ResearchPlan,
+        controls: ResearchRuntimeControls,
+        workspace_authorization: WorkspaceRequestAuthorization,
+        checkpoint: Callable[[str], ResearchRuntimeControls],
+    ) -> ResearchExecutionOutcome:
         ask_identity = AskIdentity(
             tenant_id=str(identity.tenant_id),
             user_id=identity.user_id,
@@ -58,11 +74,15 @@ class ResearchExecutor:
             permissions=tuple(identity.permissions),
             correlation_id=identity.correlation_id,
         )
+        controls = checkpoint("BEFORE_CONTEXT")
         scopes = tuple(
             CitationSourceType(policy.source_key)
             for policy in plan.definition.source_policies
-            if policy.allowed and policy.source_key in _RESEARCH_SCOPES
+            if policy.allowed
+            and policy.source_key in _RESEARCH_SCOPES
+            and policy.source_key not in controls.excluded_source_keys
         )
+        requested_source_keys = {scope.value for scope in scopes}
         try:
             context = self.context_broker.collect(
                 plan.definition.question,
@@ -72,19 +92,30 @@ class ResearchExecutor:
                 source_scopes=scopes,
                 workspace_authorization=workspace_authorization,
             )
+            checkpoint("AFTER_CONTEXT")
+            context = replace(
+                context,
+                sources=context.sources[: plan.definition.budget.maximum_sources],
+            )
+            unavailable = requested_source_keys & set(context.unavailable_sources)
+            if plan.definition.require_all_allowed_sources and unavailable:
+                return self._partial(run, "RESEARCH_REQUIRED_SOURCE_UNAVAILABLE")
             if not context.sources:
-                return self._partial(identity, run, request, "RESEARCH_SOURCE_EVIDENCE_UNAVAILABLE")
+                return self._partial(run, "RESEARCH_SOURCE_EVIDENCE_UNAVAILABLE")
             answer = self.model_gateway.generate(
                 _prompt(plan.definition.goal, plan.definition.success_criteria, plan.definition.deliverable_types),
                 context=context,
                 locale="ko",
-                run_id=str(run_id),
+                run_id=str(run.run_id),
                 safety_identifier=_safety_identifier(identity),
                 max_output_tokens=min(plan.definition.budget.maximum_tokens, 4096),
             )
+            checkpoint("AFTER_MODEL")
             if not answer.answer or not answer.cited_source_ids:
-                return self._partial(identity, run, request, "RESEARCH_MODEL_ABSTAINED")
+                return self._partial(run, "RESEARCH_MODEL_ABSTAINED")
             by_id = {source.citation.source_id: source for source in context.sources}
+            if any(source_id not in by_id for source_id in answer.cited_source_ids):
+                return self._partial(run, "RESEARCH_MODEL_GROUNDING_INVALID")
             citations = [
                 AttachmentCitation(
                     citation_id=source_id,
@@ -108,46 +139,32 @@ class ResearchExecutor:
                 verified_citations=len(citations),
                 failed_sources=list(context.unavailable_sources),
             )
-            return run_store.observe(
-                identity,
-                run_id,
-                ResearchWorkerObservation(
-                    command_id=request.command_id,
-                    expected_version=request.expected_version,
-                    state=ResearchRunState.COMPLETED,
-                    progress=progress,
-                    result=result,
-                ),
+            return ResearchExecutionOutcome(
+                state=ResearchRunState.COMPLETED,
+                progress=progress,
+                result=result,
             )
         except ModelConfigurationRequired:
-            return self._partial(identity, run, request, "RESEARCH_MODEL_NOT_CONFIGURED")
+            return self._partial(run, "RESEARCH_MODEL_NOT_CONFIGURED")
         except ContextBrokerUnavailable:
-            return self._partial(identity, run, request, "RESEARCH_CONTEXT_NOT_CONFIGURED")
+            return self._partial(run, "RESEARCH_CONTEXT_NOT_CONFIGURED")
         except (ModelCallFailed, ModelRefused, GroundingViolation):
-            return self._partial(identity, run, request, "RESEARCH_MODEL_EXECUTION_FAILED")
+            return self._partial(run, "RESEARCH_MODEL_EXECUTION_FAILED")
 
     @staticmethod
     def _partial(
-        identity: PersonalDomainIdentity,
         run: ResearchRun,
-        request: ExecuteResearchRunRequest,
         code: str,
-    ) -> ResearchRun:
+    ) -> ResearchExecutionOutcome:
         progress = run.progress.model_copy(
             update={
                 "recovery_hint": "Review source access and provider configuration, then resume the run.",
             }
         )
-        return get_research_run_store().observe(
-            identity,
-            run.run_id,
-            ResearchWorkerObservation(
-                command_id=request.command_id,
-                expected_version=request.expected_version,
-                state=ResearchRunState.PARTIAL,
-                progress=progress,
-                safe_error_code=code,
-            ),
+        return ResearchExecutionOutcome(
+            state=ResearchRunState.PARTIAL,
+            progress=progress,
+            safe_error_code=code,
         )
 
 

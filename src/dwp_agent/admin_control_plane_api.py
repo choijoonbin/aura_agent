@@ -10,6 +10,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
 
 from .admin_control_plane_contracts import (
+    AdminCommandCapabilitiesEnvelope,
     CreateGovernedCommandRequest,
     GovernedCommandDecisionRequest,
     GovernedCommandEnvelope,
@@ -22,6 +23,7 @@ from .admin_control_plane_contracts import (
     GovernedCommandTransitionRequest,
     SnapshotEnvelope,
 )
+from .admin_control_plane_executor import admin_command_capabilities
 from .admin_control_plane_errors import (
     AdminControlPlaneConflict,
     AdminControlPlaneDenied,
@@ -78,6 +80,18 @@ router = APIRouter(
     prefix="/v1/admin/control-plane", tags=["administration"],
     dependencies=[Depends(require_gateway_service)],
 )
+
+
+@router.get(
+    "/command-capabilities",
+    response_model=AdminCommandCapabilitiesEnvelope,
+    response_model_by_alias=True,
+)
+def command_capabilities(
+    identity: Annotated[AdminControlIdentity, Depends(require_admin_control_identity)],
+) -> AdminCommandCapabilitiesEnvelope:
+    identity.require_view()
+    return AdminCommandCapabilitiesEnvelope(data=admin_command_capabilities())
 
 
 @router.get("/models-routing", response_model=SnapshotEnvelope, response_model_by_alias=True)

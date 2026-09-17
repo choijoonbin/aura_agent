@@ -70,6 +70,25 @@ def test_v22_sensitive_bindings_resolve_with_exact_authority_and_parameters() ->
     assert attachment.required_permission_sets == (frozenset({"APP.ASK:VIEW"}),)
     assert resolve_binding("GET", "/v1/attachments/not-a-uuid/evidence") is None
 
+    research_read = resolve_binding("GET", "/v1/research/capabilities")
+    assert research_read is not None
+    assert research_read.required_permission_sets == (
+        frozenset({"APP.ASK:VIEW", "APP.DWAION_RESEARCH:VIEW"}),
+    )
+    research_write = resolve_binding("POST", "/v1/research/plans")
+    assert research_write is not None
+    assert research_write.required_permission_sets == (
+        frozenset({"APP.ASK:VIEW", "APP.DWAION_RESEARCH:MANAGE"}),
+    )
+    for granted in (
+        frozenset({"APP.ASK:VIEW"}),
+        frozenset({"APP.DWAION_RESEARCH:MANAGE"}),
+    ):
+        assert not any(
+            required.issubset(granted)
+            for required in research_write.required_permission_sets
+        )
+
     command = resolve_binding("POST", "/v1/admin/control-plane/commands")
     assert command is not None
     assert command.route_contract_key == "route.dwaion.management.control-plane-command.action"

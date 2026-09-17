@@ -505,15 +505,18 @@ def test_worker_capability_requires_opt_in_and_fresh_live_heartbeat(
     monkeypatch.setenv("DWP_GOVERNED_WORKERS_ENABLED", "true")
     assert governed_worker_available("ARTIFACT_EXPORT") is False
     assert governed_worker_available("DATA_DELETION") is False
+    assert governed_worker_available("RESEARCH_DELIVERY") is False
 
     MAINTENANCE.start()
     try:
         assert governed_worker_available("ARTIFACT_EXPORT") is True
         assert governed_worker_available("DATA_DELETION") is True
+        assert governed_worker_available("RESEARCH_DELIVERY") is True
     finally:
         MAINTENANCE.close()
     assert governed_worker_available("ARTIFACT_EXPORT") is False
     assert governed_worker_available("DATA_DELETION") is False
+    assert governed_worker_available("RESEARCH_DELIVERY") is False
 
 
 def test_export_worker_rejects_an_expired_preflight_at_execution_time() -> None:

@@ -12,7 +12,7 @@ def artifact_collaboration_runtime_capabilities() -> TeamArtifactCapabilities:
     provider_ready = ArtifactCollaborationProviderConfiguration.from_environment().configured
     database_ready = bool(os.getenv("DWP_AGENT_DATABASE_URL", "").strip())
     security_ready = False
-    if provider_ready and database_ready:
+    if database_ready:
         try:
             GovernedPayloadCodec()
             GovernedFingerprints.load()
@@ -20,6 +20,7 @@ def artifact_collaboration_runtime_capabilities() -> TeamArtifactCapabilities:
         except Exception:
             security_ready = False
     available = provider_ready and database_ready and security_ready
+    local_remediation_available = database_ready and security_ready
     if not provider_ready:
         state = "NOT_CONFIGURED"
         hint = "Configure and attest the artifact ACL broker."
@@ -76,39 +77,57 @@ def artifact_collaboration_runtime_capabilities() -> TeamArtifactCapabilities:
             ),
         ),
         automatic_masking=WorkflowCapability(
-            available=False,
-            configured=False,
-            reason_code="ARTIFACT_AUTOMATIC_MASKING_NOT_CONFIGURED",
+            available=local_remediation_available,
+            configured=local_remediation_available,
+            reason_code=(
+                None
+                if local_remediation_available
+                else "ARTIFACT_AUTOMATIC_MASKING_NOT_CONFIGURED"
+            ),
             recovery_hint=(
-                "Configure an attested artifact masking provider before applying "
-                "automatic redaction."
+                None
+                if local_remediation_available
+                else "Configure the governed artifact database and security keys before "
+                "applying deterministic automatic redaction."
             ),
         ),
         synthetic_replacement=WorkflowCapability(
-            available=False,
-            configured=False,
-            reason_code="ARTIFACT_SYNTHETIC_REPLACEMENT_NOT_CONFIGURED",
+            available=local_remediation_available,
+            configured=local_remediation_available,
+            reason_code=(
+                None
+                if local_remediation_available
+                else "ARTIFACT_SYNTHETIC_REPLACEMENT_NOT_CONFIGURED"
+            ),
             recovery_hint=(
-                "Configure an attested synthetic-data provider before replacing "
-                "restricted values."
+                None
+                if local_remediation_available
+                else "Configure the governed artifact database and security keys before "
+                "replacing detected identifiers with deterministic synthetic placeholders."
             ),
         ),
         review_notification=WorkflowCapability(
-            available=False,
-            configured=False,
-            reason_code="ARTIFACT_REVIEW_NOTIFICATION_NOT_CONFIGURED",
+            available=available,
+            configured=available,
+            reason_code=(None if available else "ARTIFACT_REVIEW_NOTIFICATION_NOT_CONFIGURED"),
             recovery_hint=(
-                "Configure the governed review notification provider before resending "
+                None
+                if available
+                else "Configure the governed review notification provider before resending "
                 "a review request."
             ),
         ),
         review_rejection=WorkflowCapability(
-            available=False,
-            configured=False,
-            reason_code="ARTIFACT_REVIEW_REJECTION_NOT_CONFIGURED",
+            available=available,
+            configured=available,
+            reason_code=(
+                None if available else "ARTIFACT_REVIEW_REJECTION_NOT_AVAILABLE"
+            ),
             recovery_hint=(
-                "Configure the governed review workflow provider before rejecting "
-                "a submitted review."
+                "Review rejection is recorded by the governed staged-review ledger."
+                if available
+                else "Configure the governed artifact collaboration database, encryption "
+                "keys, fingerprints, and ACL broker before deciding a review."
             ),
         ),
         provider_state=state,

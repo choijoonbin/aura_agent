@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 from datetime import timedelta
 from functools import lru_cache
 from typing import Any
@@ -12,6 +13,7 @@ from psycopg.rows import dict_row
 from .dwaion_workflow_contracts import (
     CreateResearchDeliveryRequest,
     ResearchDelivery,
+    ResearchDeliveryCapabilities,
     ResearchDeliveryObservation,
     ResearchDeliveryState,
     ResearchDeliveryType,
@@ -24,6 +26,11 @@ from .dwaion_workflow_errors import (
 )
 from .governed_domain_core import GovernedFingerprints, GovernedPayloadCodec, advisory_lock
 from .personal_domain_security import PersonalDomainIdentity
+from .research_delivery_capabilities import research_delivery_capabilities
+from .research_downstream_provider import (
+    normalize_research_downstream_parameters,
+    validate_research_downstream_observation_receipt,
+)
 from .research_run_store import ResearchRunStore, get_research_run_store
 from .transactional_outbox import enqueue_internal_intent
 
@@ -42,6 +49,11 @@ class ResearchDeliveryStore:
         except Exception as error:
             raise DwaionWorkflowUnavailable("Research delivery encryption is unavailable.") from error
 
+    def capabilities(
+        self, identity: PersonalDomainIdentity
+    ) -> ResearchDeliveryCapabilities:
+        return research_delivery_capabilities(self.database_url, identity)
+
     def create(
         self,
         identity: PersonalDomainIdentity,
@@ -54,10 +66,11 @@ class ResearchDeliveryStore:
             raise DwaionWorkflowConflict("The research run version has changed.")
         if run.state != ResearchRunState.COMPLETED or run.receipt_id is None:
             raise DwaionWorkflowConflict("Research delivery requires a completed run receipt.")
+        parameters = _validated_parameters(delivery_type, request.parameters)
         payload = {
             "deliveryType": delivery_type.value,
             "runReceiptId": str(run.receipt_id),
-            "parameters": request.parameters,
+            "parameters": parameters,
         }
         try:
             with connect(self.database_url, row_factory=dict_row) as connection:
@@ -71,12 +84,15 @@ class ResearchDeliveryStore:
                     if existing["run_id"] != run_id or existing["delivery_type"] != delivery_type.value or stored != payload:
                         raise DwaionWorkflowConflict("The research delivery key is already bound to another request.")
                     return self._record(existing)
-                delivery_id = uuid4()
-                state = (
-                    ResearchDeliveryState.AWAITING_APPROVAL
-                    if delivery_type in {ResearchDeliveryType.HANDOFF, ResearchDeliveryType.SHARE}
-                    else ResearchDeliveryState.QUEUED
+                capability = getattr(
+                    self.capabilities(identity), delivery_type.value.lower()
                 )
+                if not capability.available:
+                    raise DwaionWorkflowUnavailable(
+                        capability.reason_code or "RESEARCH_DELIVERY_UNAVAILABLE"
+                    )
+                delivery_id = uuid4()
+                state = ResearchDeliveryState.QUEUED
                 request_envelope = self._payload(identity, delivery_id, "request", payload)
                 row = connection.execute(
                     """INSERT INTO ai_research_deliveries (
@@ -96,7 +112,7 @@ class ResearchDeliveryStore:
                     fingerprints=self.fingerprints,
                     tenant_id=identity.tenant_id,
                     user_id=identity.user_id,
-                    topic="RESEARCH_DELIVERY",
+                    topic="ai.research.delivery-requested.v1",
                     aggregate_type="RESEARCH_DELIVERY",
                     aggregate_id=str(delivery_id),
                     payload={
@@ -168,6 +184,7 @@ class ResearchDeliveryStore:
                 current = ResearchDeliveryState(row["delivery_state"])
                 if request.state not in _delivery_targets(current):
                     raise DwaionWorkflowConflict("The research delivery transition is not allowed.")
+                self._validate_downstream_completion(identity, row, request)
                 receipt_envelope = (
                     self._payload(identity, delivery_id, "receipt", request.receipt or {})
                     if request.receipt_id else None
@@ -176,11 +193,20 @@ class ResearchDeliveryStore:
                     """UPDATE ai_research_deliveries
                           SET delivery_state = %s, receipt_id = %s,
                               receipt_envelope = %s,
+                              safe_error_code = %s, recovery_hint = %s,
                               completed_at = CASE WHEN %s = 'COMPLETED' THEN CURRENT_TIMESTAMP ELSE NULL END,
                               updated_at = CURRENT_TIMESTAMP
                         WHERE delivery_id = %s
                     RETURNING *""",
-                    (request.state.value, request.receipt_id, receipt_envelope, request.state.value, delivery_id),
+                    (
+                        request.state.value,
+                        request.receipt_id,
+                        receipt_envelope,
+                        request.safe_error_code,
+                        request.recovery_hint,
+                        request.state.value,
+                        delivery_id,
+                    ),
                 ).fetchone()
                 self._event(connection, identity, updated, request.command_id, "STATE_CHANGED", current.value)
                 return self._record(updated)
@@ -189,12 +215,54 @@ class ResearchDeliveryStore:
         except (PsycopgError, ValueError, TypeError) as error:
             raise DwaionWorkflowUnavailable("Research delivery storage is unavailable.") from error
 
-    @staticmethod
-    def _record(row: Any) -> ResearchDelivery:
+    def _validate_downstream_completion(
+        self, identity: PersonalDomainIdentity, row: Any,
+        request: ResearchDeliveryObservation,
+    ) -> None:
+        delivery_type = ResearchDeliveryType(row["delivery_type"])
+        if request.state != ResearchDeliveryState.COMPLETED or delivery_type not in {
+            ResearchDeliveryType.HANDOFF, ResearchDeliveryType.SHARE,
+        }:
+            return
+        run = self.run_store.get(identity, row["run_id"])
+        if run.result is None or request.receipt_id is None or request.receipt is None:
+            raise DwaionWorkflowConflict(
+                "A downstream delivery requires a completed bound research result receipt."
+            )
+        try:
+            stored_request = self._request(row)
+            parameters = stored_request.get("parameters")
+            if not isinstance(parameters, dict):
+                raise ValueError("The stored downstream delivery parameters are invalid.")
+            validate_research_downstream_observation_receipt(
+                delivery_id=row["delivery_id"], run_id=row["run_id"],
+                delivery_type=delivery_type, result_sha256=run.result.result_sha256,
+                receipt_id=request.receipt_id, receipt=dict(request.receipt),
+                created_at=row["created_at"], parameters=parameters,
+            )
+        except (TypeError, ValueError) as error:
+            raise DwaionWorkflowConflict(
+                "The downstream delivery receipt is not bound to this governed delivery."
+            ) from error
+
+    def _record(self, row: Any) -> ResearchDelivery:
+        receipt = (
+            self.codec.decrypt_json(
+                row["receipt_envelope"],
+                tenant_id=row["tenant_id"],
+                resource_type="research-delivery",
+                resource_id=str(row["delivery_id"]),
+                field="receipt",
+            )
+            if row["receipt_envelope"]
+            else None
+        )
         return ResearchDelivery(
             delivery_id=row["delivery_id"], run_id=row["run_id"],
             delivery_type=row["delivery_type"], state=row["delivery_state"],
-            receipt_id=row["receipt_id"], created_at=row["created_at"],
+            receipt_id=row["receipt_id"], receipt=receipt,
+            safe_error_code=row["safe_error_code"], recovery_hint=row["recovery_hint"],
+            created_at=row["created_at"],
             updated_at=row["updated_at"], completed_at=row["completed_at"],
         )
 
@@ -243,3 +311,43 @@ def get_research_delivery_store() -> ResearchDeliveryStore:
 
 
 _SELECT = "SELECT d.* FROM ai_research_deliveries d"
+
+
+def _validated_parameters(
+    delivery_type: ResearchDeliveryType, parameters: dict[str, object]
+) -> dict[str, object]:
+    if delivery_type in {
+        ResearchDeliveryType.HANDOFF,
+        ResearchDeliveryType.SHARE,
+    }:
+        try:
+            return normalize_research_downstream_parameters(delivery_type, parameters)
+        except (TypeError, ValueError) as error:
+            raise DwaionWorkflowConflict(
+                f"The {delivery_type.value.lower()} delivery parameters are invalid."
+            ) from error
+    allowed = {
+        ResearchDeliveryType.ARTIFACT: {"locale"},
+        ResearchDeliveryType.EXPORT: {"locale", "format"},
+        ResearchDeliveryType.PROPOSAL: {"locale"},
+        ResearchDeliveryType.ROUTINE: {"locale"},
+    }[delivery_type]
+    if set(parameters) - allowed:
+        raise DwaionWorkflowConflict(
+            "The research delivery parameters contain an unsupported field."
+        )
+    normalized = dict(parameters)
+    locale = normalized.get("locale")
+    if locale is not None and (
+        not isinstance(locale, str)
+        or re.fullmatch(r"[a-z]{2}(?:-[A-Z]{2})?", locale) is None
+    ):
+        raise DwaionWorkflowConflict("The research delivery locale is invalid.")
+    export_format = normalized.get("format")
+    if export_format is not None and (
+        delivery_type != ResearchDeliveryType.EXPORT or export_format != "JSON"
+    ):
+        raise DwaionWorkflowConflict(
+            "Only the governed JSON research export is currently available."
+        )
+    return normalized

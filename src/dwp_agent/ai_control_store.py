@@ -140,12 +140,11 @@ class PostgresAIControlStore:
                 projected = (
                     usage.measured_total_tokens + usage.reserved_tokens + requested_tokens
                 )
-                if (
-                    policy.budget_enforcement_mode == BudgetEnforcementMode.ENFORCED
-                    and policy.period_token_limit is not None
-                    and projected > policy.period_token_limit
-                ):
-                    raise AIControlDenied("AI_TOKEN_BUDGET_HARD_LIMIT")
+                if policy.period_token_limit is not None and projected > policy.period_token_limit:
+                    if policy.budget_enforcement_mode == BudgetEnforcementMode.THROTTLED:
+                        raise AIControlDenied("AI_TOKEN_BUDGET_THROTTLED")
+                    if policy.budget_enforcement_mode == BudgetEnforcementMode.ENFORCED:
+                        raise AIControlDenied("AI_TOKEN_BUDGET_HARD_LIMIT")
                 reservation_id = uuid4()
                 period_start, _ = _period_bounds(now)
                 connection.execute(

@@ -16,6 +16,7 @@ from dwp_agent import artifact_collaboration_api
 from dwp_agent.artifact_collaboration_contracts import (
     CreateTeamArtifactAccessRequest,
     CreateTeamArtifactCommentRequest,
+    ExecuteTeamArtifactRemediationRequest,
     ResolveTeamArtifactConflictRequest,
     ResolveTeamArtifactCommentRequest,
     RunTeamArtifactPreflightRequest,
@@ -30,6 +31,11 @@ from dwp_agent.artifact_collaboration_provider import (
     ArtifactCollaborationProvider,
     ArtifactCollaborationProviderConfiguration,
     ArtifactCollaborationProviderUnavailable,
+    ArtifactReviewNotificationResult,
+)
+from dwp_agent.artifact_collaboration_remediation_store import _remediate_text
+from dwp_agent.artifact_review_notification_contracts import (
+    review_notification_result_sha256,
 )
 from dwp_agent.dwaion_workflow_contracts import WorkflowCapability
 from dwp_agent.artifact_contracts import ArtifactSourceReference
@@ -46,6 +52,15 @@ def _configuration() -> ArtifactCollaborationProviderConfiguration:
         allowed_hosts=frozenset({"artifact-acl.internal.example"}),
         timeout_seconds=5,
     )
+
+
+def test_configured_staged_review_exposes_both_approve_and_reject() -> None:
+    capabilities = _configuration().capabilities()
+
+    assert capabilities.staged_review.available is True
+    assert capabilities.review_rejection.available is True
+    assert capabilities.review_rejection.configured is True
+    assert capabilities.review_rejection.reason_code is None
 
 
 def _provider_result(
@@ -157,6 +172,268 @@ def test_acl_provider_submits_denied_access_request_with_idempotency() -> None:
 
     assert result.accessRequestId == access_request_id
     assert result.state == "PENDING"
+
+
+def test_review_notification_provider_binds_stage_and_attested_receipt() -> None:
+    command_id = uuid4()
+    artifact_id = uuid4()
+    workspace_id = uuid4()
+    stage_id = uuid4()
+    delivered_at = datetime.now(UTC)
+    provider_receipt_id = "notification-receipt-7"
+    result_sha256 = review_notification_result_sha256(
+        command_id=command_id,
+        artifact_id=artifact_id,
+        workspace_id=workspace_id,
+        stage_id=stage_id,
+        assignee_subject_id="primary-reviewer",
+        workspace_revision=4,
+        reason_code="TEAM_REVIEW_NOTIFICATION",
+        change_reason="Resend the governed review request to the assigned reviewer.",
+        delivery_state="DELIVERED",
+        provider_receipt_id=provider_receipt_id,
+        delivered_at=delivered_at,
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        assert request.url.path == "/internal/v1/artifact-acl/review-notifications"
+        assert request.headers["authorization"] == "Bearer test-service-token"
+        assert body == {
+            "commandId": str(command_id),
+            "artifactId": str(artifact_id),
+            "workspaceId": str(workspace_id),
+            "stageId": str(stage_id),
+            "tenantId": 7,
+            "actorUserId": "artifact-owner",
+            "assigneeSubjectId": "primary-reviewer",
+            "workspaceRevision": 4,
+            "reasonCode": "TEAM_REVIEW_NOTIFICATION",
+            "changeReason": "Resend the governed review request to the assigned reviewer.",
+            "requireCurrentAuthorization": True,
+        }
+        return httpx.Response(
+            200,
+            json={
+                "commandId": str(command_id),
+                "artifactId": str(artifact_id),
+                "workspaceId": str(workspace_id),
+                "stageId": str(stage_id),
+                "assigneeSubjectId": "primary-reviewer",
+                "workspaceRevision": 4,
+                "reasonCode": "TEAM_REVIEW_NOTIFICATION",
+                "changeReason": "Resend the governed review request to the assigned reviewer.",
+                "deliveryState": "DELIVERED",
+                "providerReceiptId": provider_receipt_id,
+                "resultSha256": result_sha256,
+                "deliveredAt": delivered_at.isoformat(),
+            },
+        )
+
+    result = ArtifactCollaborationProvider(
+        _configuration(), transport=httpx.MockTransport(handler)
+    ).notify_review(
+        command_id=command_id,
+        artifact_id=artifact_id,
+        workspace_id=workspace_id,
+        stage_id=stage_id,
+        tenant_id=7,
+        actor_user_id="artifact-owner",
+        assignee_subject_id="primary-reviewer",
+        workspace_revision=4,
+        reason_code="TEAM_REVIEW_NOTIFICATION",
+        change_reason="Resend the governed review request to the assigned reviewer.",
+        correlation_id="artifact-collaboration-test",
+    )
+
+    assert result.providerReceiptId == "notification-receipt-7"
+    assert result.resultSha256 == result_sha256
+
+
+def test_review_notification_provider_rejects_unbound_receipt() -> None:
+    command_id = uuid4()
+    artifact_id = uuid4()
+    workspace_id = uuid4()
+    stage_id = uuid4()
+    returned_command_id = uuid4()
+    delivered_at = datetime.now(UTC)
+    provider_receipt_id = "unbound-notification-receipt"
+    result_sha256 = review_notification_result_sha256(
+        command_id=returned_command_id,
+        artifact_id=artifact_id,
+        workspace_id=workspace_id,
+        stage_id=stage_id,
+        assignee_subject_id="primary-reviewer",
+        workspace_revision=4,
+        reason_code="TEAM_REVIEW_NOTIFICATION",
+        change_reason="Resend the governed review request to the assigned reviewer.",
+        delivery_state="DELIVERED",
+        provider_receipt_id=provider_receipt_id,
+        delivered_at=delivered_at,
+    )
+    provider = ArtifactCollaborationProvider(
+        _configuration(),
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(
+                200,
+                json={
+                    "commandId": str(returned_command_id),
+                    "artifactId": str(artifact_id),
+                    "workspaceId": str(workspace_id),
+                    "stageId": str(stage_id),
+                    "assigneeSubjectId": "primary-reviewer",
+                    "workspaceRevision": 4,
+                    "reasonCode": "TEAM_REVIEW_NOTIFICATION",
+                    "changeReason": "Resend the governed review request to the assigned reviewer.",
+                    "deliveryState": "DELIVERED",
+                    "providerReceiptId": provider_receipt_id,
+                    "resultSha256": result_sha256,
+                    "deliveredAt": delivered_at.isoformat(),
+                },
+            )
+        ),
+    )
+
+    with pytest.raises(
+        ArtifactCollaborationProviderUnavailable,
+        match="ARTIFACT_REVIEW_NOTIFICATION_BINDING_INVALID",
+    ):
+        provider.notify_review(
+            command_id=command_id,
+            artifact_id=artifact_id,
+            workspace_id=workspace_id,
+            stage_id=stage_id,
+            tenant_id=7,
+            actor_user_id="artifact-owner",
+            assignee_subject_id="primary-reviewer",
+            workspace_revision=4,
+            reason_code="TEAM_REVIEW_NOTIFICATION",
+            change_reason="Resend the governed review request to the assigned reviewer.",
+            correlation_id="artifact-collaboration-test",
+        )
+
+
+def test_review_notification_provider_rejects_blank_receipt() -> None:
+    with pytest.raises(ValidationError, match="cannot be blank"):
+        ArtifactReviewNotificationResult(
+            commandId=uuid4(),
+            artifactId=uuid4(),
+            workspaceId=uuid4(),
+            stageId=uuid4(),
+            assigneeSubjectId="primary-reviewer",
+            workspaceRevision=4,
+            reasonCode="TEAM_REVIEW_NOTIFICATION",
+            changeReason="Resend the governed review request to the assigned reviewer.",
+            deliveryState="DELIVERED",
+            providerReceiptId="   ",
+            resultSha256="a" * 64,
+            deliveredAt=datetime.now(UTC),
+        )
+
+
+@pytest.mark.parametrize(
+    ("status", "tamper_digest"),
+    ((202, False), (200, True)),
+)
+def test_review_notification_requires_terminal_200_and_canonical_digest(
+    status: int,
+    tamper_digest: bool,
+) -> None:
+    command_id = uuid4()
+    artifact_id = uuid4()
+    workspace_id = uuid4()
+    stage_id = uuid4()
+    delivered_at = datetime.now(UTC)
+    provider_receipt_id = "notification-receipt-terminal"
+    digest = review_notification_result_sha256(
+        command_id=command_id,
+        artifact_id=artifact_id,
+        workspace_id=workspace_id,
+        stage_id=stage_id,
+        assignee_subject_id="primary-reviewer",
+        workspace_revision=4,
+        reason_code="TEAM_REVIEW_NOTIFICATION",
+        change_reason="Resend the governed review request to the assigned reviewer.",
+        delivery_state="DELIVERED",
+        provider_receipt_id=provider_receipt_id,
+        delivered_at=delivered_at,
+    )
+    body = {
+        "commandId": str(command_id),
+        "artifactId": str(artifact_id),
+        "workspaceId": str(workspace_id),
+        "stageId": str(stage_id),
+        "assigneeSubjectId": "primary-reviewer",
+        "workspaceRevision": 4,
+        "reasonCode": "TEAM_REVIEW_NOTIFICATION",
+        "changeReason": "Resend the governed review request to the assigned reviewer.",
+        "deliveryState": "DELIVERED",
+        "providerReceiptId": provider_receipt_id,
+        "resultSha256": "f" * 64 if tamper_digest else digest,
+        "deliveredAt": delivered_at.isoformat(),
+    }
+    provider = ArtifactCollaborationProvider(
+        _configuration(),
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(status, json=body)
+        ),
+    )
+    with pytest.raises(ArtifactCollaborationProviderUnavailable):
+        provider.notify_review(
+            command_id=command_id,
+            artifact_id=artifact_id,
+            workspace_id=workspace_id,
+            stage_id=stage_id,
+            tenant_id=7,
+            actor_user_id="artifact-owner",
+            assignee_subject_id="primary-reviewer",
+            workspace_revision=4,
+            reason_code="TEAM_REVIEW_NOTIFICATION",
+            change_reason="Resend the governed review request to the assigned reviewer.",
+            correlation_id="artifact-collaboration-test",
+        )
+
+
+def test_remediation_contract_and_transform_are_deterministic() -> None:
+    request = ExecuteTeamArtifactRemediationRequest(
+        commandId=uuid4(),
+        expectedRevision=3,
+        reasonCode="TEAM_ARTIFACT_REMEDIATION",
+        changeReason="Mask detected personal identifiers before review.",
+        action="AUTOMATIC_MASKING",
+    )
+    assert request.stage_id is None
+
+    source = (
+        "owner@example.com 010-1234-5678 900101-1234567 "
+        "1234 5678 9012 3456"
+    )
+    masked, masked_count = _remediate_text(source, synthetic=False)
+    synthetic, synthetic_count = _remediate_text(source, synthetic=True)
+
+    assert masked_count == synthetic_count == 4
+    assert masked == (
+        "[MASKED_EMAIL_ADDRESS] [MASKED_PHONE_NUMBER] "
+        "[MASKED_KOREAN_RESIDENT_ID] [MASKED_FINANCIAL_ID]"
+    )
+    assert synthetic == (
+        "[SYNTHETIC_EMAIL_ADDRESS_001] [SYNTHETIC_PHONE_NUMBER_001] "
+        "[SYNTHETIC_KOREAN_RESIDENT_ID_001] [SYNTHETIC_FINANCIAL_ID_001]"
+    )
+    sensitive = (
+        "password=top-secret\n-----BEGIN PRIVATE KEY-----\nsecret-key\n"
+        "-----END PRIVATE KEY-----"
+    )
+    remediated, count = _remediate_text(sensitive, synthetic=False)
+    assert count == 2
+    assert remediated == "[MASKED_CREDENTIAL_ASSIGNMENT]\n[MASKED_PRIVATE_KEY_MATERIAL]"
+    with pytest.raises(ValidationError):
+        ExecuteTeamArtifactRemediationRequest.model_validate(
+            {
+                **request.model_dump(mode="json", by_alias=True),
+                "action": "REVIEW_NOTIFICATION",
+            }
+        )
 
 
 @pytest.mark.parametrize(

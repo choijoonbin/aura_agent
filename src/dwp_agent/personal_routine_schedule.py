@@ -76,6 +76,8 @@ def _matches_cadence(definition: RoutineDefinition, day: date) -> bool:
         return day.weekday() < 5
     if definition.cadence == RoutineCadence.WEEKLY:
         return day.isoweekday() in definition.week_days
+    if definition.cadence == RoutineCadence.MONTHLY:
+        return day.day == definition.month_day
     return True
 
 

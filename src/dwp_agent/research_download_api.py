@@ -39,6 +39,27 @@ def download_research_raw(
 
 
 @router.get(
+    "/v1/research/runs/{run_id}/downloads/pdf",
+    response_class=Response,
+    responses={200: {"content": {"application/pdf": {"schema": {"type": "string", "format": "binary"}}}}},
+)
+def download_research_pdf(
+    run_id: UUID,
+    identity: Annotated[PersonalDomainIdentity, Depends(require_personal_domain_identity)],
+) -> Response:
+    _access(identity)
+    content = _run(lambda: get_research_download_store().pdf(identity, run_id))
+    return Response(
+        content=content,
+        media_type="application/pdf",
+        headers={
+            "Cache-Control": "no-store",
+            "Content-Disposition": f'attachment; filename="research-{run_id}-report.pdf"',
+        },
+    )
+
+
+@router.get(
     "/v1/research/runs/{run_id}/downloads/receipt",
     response_model=ResearchReceiptDownload,
 )

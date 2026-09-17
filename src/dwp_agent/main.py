@@ -1,6 +1,5 @@
 from __future__ import annotations
 import os
-import json
 from contextlib import asynccontextmanager
 from typing import Annotated
 from uuid import UUID
@@ -74,6 +73,7 @@ from .run_store import (
     initialize_database,
 )
 from .stream_runtime import (
+    encode_sse_event as _sse,
     shutdown_ask_stream_pool,
     stream_ask_response,
 )
@@ -497,10 +497,4 @@ def preview_plan(
         roles=plan_roles,
     )
     return PlanPreviewEnvelope(data=plan)
-
-
-def _sse(event: str, payload: dict[str, object]) -> str:
-    return f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
-
-
 install_product_surface_openapi_contract(app)

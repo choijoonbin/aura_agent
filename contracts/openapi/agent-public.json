@@ -791,6 +791,120 @@
         "title": "AdminChangeIntent",
         "type": "object"
       },
+      "AdminCommandCapabilitiesEnvelope": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/AdminCommandCapabilitiesSnapshot"
+          },
+          "message": {
+            "default": "DWAI-ON admin command capabilities loaded.",
+            "title": "Message",
+            "type": "string"
+          },
+          "status": {
+            "default": "SUCCESS",
+            "title": "Status",
+            "type": "string"
+          },
+          "success": {
+            "default": true,
+            "title": "Success",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "title": "AdminCommandCapabilitiesEnvelope",
+        "type": "object"
+      },
+      "AdminCommandCapabilitiesSnapshot": {
+        "additionalProperties": false,
+        "properties": {
+          "commands": {
+            "items": {
+              "$ref": "#/components/schemas/AdminCommandCapability"
+            },
+            "title": "Commands",
+            "type": "array"
+          },
+          "generatedAt": {
+            "format": "date-time",
+            "title": "Generatedat",
+            "type": "string"
+          },
+          "workerAvailable": {
+            "title": "Workeravailable",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "generatedAt",
+          "workerAvailable",
+          "commands"
+        ],
+        "title": "AdminCommandCapabilitiesSnapshot",
+        "type": "object"
+      },
+      "AdminCommandCapability": {
+        "additionalProperties": false,
+        "properties": {
+          "configured": {
+            "title": "Configured",
+            "type": "boolean"
+          },
+          "executionMode": {
+            "pattern": "^(INTERNAL|EXTERNAL_ADAPTER)$",
+            "title": "Executionmode",
+            "type": "string"
+          },
+          "family": {
+            "pattern": "^A0[1-6]$",
+            "title": "Family",
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/GovernedCommandKind"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "maxLength": 500,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "recoveryHint": {
+            "anyOf": [
+              {
+                "maxLength": 500,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Recoveryhint"
+          },
+          "status": {
+            "$ref": "#/components/schemas/CapabilityStatus"
+          }
+        },
+        "required": [
+          "kind",
+          "family",
+          "executionMode",
+          "status",
+          "configured"
+        ],
+        "title": "AdminCommandCapability",
+        "type": "object"
+      },
       "AdminCommandResolution": {
         "additionalProperties": false,
         "properties": {
@@ -2774,6 +2888,108 @@
         "title": "AskState",
         "type": "string"
       },
+      "AttachmentAuditReportReceipt": {
+        "additionalProperties": false,
+        "properties": {
+          "attachmentIds": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "maxItems": 20,
+            "minItems": 1,
+            "title": "Attachmentids",
+            "type": "array"
+          },
+          "commandId": {
+            "format": "uuid",
+            "title": "Commandid",
+            "type": "string"
+          },
+          "contentSha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Contentsha256",
+            "type": "string"
+          },
+          "conversationId": {
+            "format": "uuid",
+            "title": "Conversationid",
+            "type": "string"
+          },
+          "createdAt": {
+            "format": "date-time",
+            "title": "Createdat",
+            "type": "string"
+          },
+          "downloadPath": {
+            "pattern": "^/v1/attachments/audit-reports/[0-9a-f-]+/download$",
+            "title": "Downloadpath",
+            "type": "string"
+          },
+          "reportId": {
+            "format": "uuid",
+            "title": "Reportid",
+            "type": "string"
+          },
+          "signature": {
+            "maxLength": 512,
+            "minLength": 1,
+            "title": "Signature",
+            "type": "string"
+          },
+          "signatureAlgorithm": {
+            "default": "HMAC-SHA256",
+            "title": "Signaturealgorithm",
+            "type": "string"
+          },
+          "signingKeyFingerprint": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Signingkeyfingerprint",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reportId",
+          "commandId",
+          "conversationId",
+          "attachmentIds",
+          "contentSha256",
+          "signature",
+          "signingKeyFingerprint",
+          "downloadPath",
+          "createdAt"
+        ],
+        "title": "AttachmentAuditReportReceipt",
+        "type": "object"
+      },
+      "AttachmentAuditReportReceiptEnvelope": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/AttachmentAuditReportReceipt"
+          },
+          "message": {
+            "default": "Signed secure attachment audit report generated.",
+            "title": "Message",
+            "type": "string"
+          },
+          "status": {
+            "default": "SUCCESS",
+            "title": "Status",
+            "type": "string"
+          },
+          "success": {
+            "default": true,
+            "title": "Success",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "title": "AttachmentAuditReportReceiptEnvelope",
+        "type": "object"
+      },
       "AttachmentCapabilities": {
         "additionalProperties": false,
         "properties": {
@@ -2915,6 +3131,83 @@
         "title": "AttachmentCitation",
         "type": "object"
       },
+      "AttachmentDetachReceipt": {
+        "additionalProperties": false,
+        "properties": {
+          "commandId": {
+            "format": "uuid",
+            "title": "Commandid",
+            "type": "string"
+          },
+          "conversationId": {
+            "format": "uuid",
+            "title": "Conversationid",
+            "type": "string"
+          },
+          "detachedAt": {
+            "format": "date-time",
+            "title": "Detachedat",
+            "type": "string"
+          },
+          "detachedAttachments": {
+            "items": {
+              "$ref": "#/components/schemas/DetachedAttachment"
+            },
+            "maxItems": 20,
+            "minItems": 1,
+            "title": "Detachedattachments",
+            "type": "array"
+          },
+          "integrityFingerprint": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Integrityfingerprint",
+            "type": "string"
+          },
+          "receiptId": {
+            "format": "uuid",
+            "title": "Receiptid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "receiptId",
+          "commandId",
+          "conversationId",
+          "detachedAttachments",
+          "integrityFingerprint",
+          "detachedAt"
+        ],
+        "title": "AttachmentDetachReceipt",
+        "type": "object"
+      },
+      "AttachmentDetachReceiptEnvelope": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/AttachmentDetachReceipt"
+          },
+          "message": {
+            "default": "Secure attachments detached from the conversation.",
+            "title": "Message",
+            "type": "string"
+          },
+          "status": {
+            "default": "SUCCESS",
+            "title": "Status",
+            "type": "string"
+          },
+          "success": {
+            "default": true,
+            "title": "Success",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "title": "AttachmentDetachReceiptEnvelope",
+        "type": "object"
+      },
       "AttachmentEnvelope": {
         "additionalProperties": false,
         "properties": {
@@ -2957,6 +3250,37 @@
             },
             "title": "Citations",
             "type": "array"
+          },
+          "deletionAttemptCount": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Deletionattemptcount",
+            "type": "integer"
+          },
+          "deletionLastErrorCode": {
+            "anyOf": [
+              {
+                "pattern": "^[A-Z][A-Z0-9_.-]{1,127}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deletionlasterrorcode"
+          },
+          "deletionReceiptId": {
+            "anyOf": [
+              {
+                "maxLength": 240,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deletionreceiptid"
           },
           "inspectionLog": {
             "items": {
@@ -3124,6 +3448,27 @@
         "title": "AttachmentListEnvelope",
         "type": "object"
       },
+      "AttachmentRevisionBinding": {
+        "additionalProperties": false,
+        "properties": {
+          "attachmentId": {
+            "format": "uuid",
+            "title": "Attachmentid",
+            "type": "string"
+          },
+          "expectedRevision": {
+            "minimum": 1.0,
+            "title": "Expectedrevision",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "attachmentId",
+          "expectedRevision"
+        ],
+        "title": "AttachmentRevisionBinding",
+        "type": "object"
+      },
       "AttachmentStage": {
         "additionalProperties": false,
         "properties": {
@@ -3154,6 +3499,19 @@
             ],
             "title": "Providercode"
           },
+          "providerReceiptId": {
+            "anyOf": [
+              {
+                "maxLength": 240,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Providerreceiptid"
+          },
           "recoveryHint": {
             "anyOf": [
               {
@@ -3165,6 +3523,18 @@
               }
             ],
             "title": "Recoveryhint"
+          },
+          "resultDigest": {
+            "anyOf": [
+              {
+                "pattern": "^[0-9a-f]{64}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resultdigest"
           },
           "safeErrorCode": {
             "anyOf": [
@@ -3526,6 +3896,7 @@
       "BudgetEnforcementMode": {
         "enum": [
           "ALERT_ONLY",
+          "THROTTLED",
           "ENFORCED"
         ],
         "title": "BudgetEnforcementMode",
@@ -4827,6 +5198,44 @@
         "title": "CreateArtifactVersionRequest",
         "type": "object"
       },
+      "CreateAttachmentAuditReportRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "attachments": {
+            "items": {
+              "$ref": "#/components/schemas/AttachmentRevisionBinding"
+            },
+            "maxItems": 20,
+            "minItems": 1,
+            "title": "Attachments",
+            "type": "array"
+          },
+          "commandId": {
+            "format": "uuid",
+            "title": "Commandid",
+            "type": "string"
+          },
+          "idempotencyKey": {
+            "format": "uuid",
+            "title": "Idempotencykey",
+            "type": "string"
+          },
+          "reason": {
+            "maxLength": 500,
+            "minLength": 5,
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "commandId",
+          "idempotencyKey",
+          "attachments",
+          "reason"
+        ],
+        "title": "CreateAttachmentAuditReportRequest",
+        "type": "object"
+      },
       "CreateAttachmentRequest": {
         "additionalProperties": false,
         "properties": {
@@ -5158,6 +5567,48 @@
         "title": "CreateOperationalGateEvidenceRequest",
         "type": "object"
       },
+      "CreatePersonalDataEvidenceCommandRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "changeReason": {
+            "maxLength": 1000,
+            "minLength": 5,
+            "title": "Changereason",
+            "type": "string"
+          },
+          "commandId": {
+            "format": "uuid",
+            "title": "Commandid",
+            "type": "string"
+          },
+          "expectedRevision": {
+            "minimum": 0.0,
+            "title": "Expectedrevision",
+            "type": "integer"
+          },
+          "parameters": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/JsonValue"
+            },
+            "maxProperties": 20,
+            "title": "Parameters",
+            "type": "object"
+          },
+          "reasonCode": {
+            "pattern": "^[A-Z][A-Z0-9_.-]{1,63}$",
+            "title": "Reasoncode",
+            "type": "string"
+          }
+        },
+        "required": [
+          "commandId",
+          "expectedRevision",
+          "reasonCode",
+          "changeReason"
+        ],
+        "title": "CreatePersonalDataEvidenceCommandRequest",
+        "type": "object"
+      },
       "CreateProposalHandoffRequest": {
         "additionalProperties": false,
         "properties": {
@@ -5268,6 +5719,79 @@
           "definition"
         ],
         "title": "CreateResearchPlanRequest",
+        "type": "object"
+      },
+      "CreateRoutineAdvancedCommandRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "changeReason": {
+            "maxLength": 1000,
+            "minLength": 5,
+            "title": "Changereason",
+            "type": "string"
+          },
+          "commandId": {
+            "format": "uuid",
+            "title": "Commandid",
+            "type": "string"
+          },
+          "expectedRevision": {
+            "minimum": 0.0,
+            "title": "Expectedrevision",
+            "type": "integer"
+          },
+          "payload": {
+            "discriminator": {
+              "mapping": {
+                "AGENT_ENGINE_SWITCH": "#/components/schemas/RoutineAgentEngineSwitchPayload",
+                "CHANGE_APPROVAL": "#/components/schemas/RoutineChangeApprovalPayload",
+                "OAUTH_REAUTHORIZATION": "#/components/schemas/RoutineOAuthReauthorizationPayload",
+                "OPERATOR_ESCALATION": "#/components/schemas/RoutineOperatorEscalationPayload",
+                "PROVIDER_ROLLBACK": "#/components/schemas/RoutineProviderRollbackPayload",
+                "TEMPORARY_BUDGET_INCREASE": "#/components/schemas/RoutineTemporaryBudgetIncreasePayload",
+                "WORM_EVIDENCE_DELIVERY": "#/components/schemas/RoutineWormEvidenceDeliveryPayload"
+              },
+              "propertyName": "kind"
+            },
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/RoutineChangeApprovalPayload"
+              },
+              {
+                "$ref": "#/components/schemas/RoutineAgentEngineSwitchPayload"
+              },
+              {
+                "$ref": "#/components/schemas/RoutineWormEvidenceDeliveryPayload"
+              },
+              {
+                "$ref": "#/components/schemas/RoutineOAuthReauthorizationPayload"
+              },
+              {
+                "$ref": "#/components/schemas/RoutineTemporaryBudgetIncreasePayload"
+              },
+              {
+                "$ref": "#/components/schemas/RoutineOperatorEscalationPayload"
+              },
+              {
+                "$ref": "#/components/schemas/RoutineProviderRollbackPayload"
+              }
+            ],
+            "title": "Payload"
+          },
+          "reasonCode": {
+            "pattern": "^[A-Z][A-Z0-9_.-]{1,63}$",
+            "title": "Reasoncode",
+            "type": "string"
+          }
+        },
+        "required": [
+          "commandId",
+          "expectedRevision",
+          "reasonCode",
+          "changeReason",
+          "payload"
+        ],
+        "title": "CreateRoutineAdvancedCommandRequest",
         "type": "object"
       },
       "CreateRoutineRequest": {
@@ -5777,6 +6301,61 @@
         "title": "DecideOperationalGateRequest",
         "type": "object"
       },
+      "DecideRoutineAdvancedCommandRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "changeReason": {
+            "maxLength": 1000,
+            "minLength": 5,
+            "title": "Changereason",
+            "type": "string"
+          },
+          "commandId": {
+            "format": "uuid",
+            "title": "Commandid",
+            "type": "string"
+          },
+          "decision": {
+            "enum": [
+              "APPROVE",
+              "REJECT"
+            ],
+            "title": "Decision",
+            "type": "string"
+          },
+          "evidenceRefs": {
+            "items": {
+              "maxLength": 240,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 20,
+            "minItems": 1,
+            "title": "Evidencerefs",
+            "type": "array"
+          },
+          "expectedRevision": {
+            "minimum": 0.0,
+            "title": "Expectedrevision",
+            "type": "integer"
+          },
+          "reasonCode": {
+            "pattern": "^[A-Z][A-Z0-9_.-]{1,63}$",
+            "title": "Reasoncode",
+            "type": "string"
+          }
+        },
+        "required": [
+          "commandId",
+          "expectedRevision",
+          "reasonCode",
+          "changeReason",
+          "decision",
+          "evidenceRefs"
+        ],
+        "title": "DecideRoutineAdvancedCommandRequest",
+        "type": "object"
+      },
       "DecideTeamArtifactReviewStageRequest": {
         "additionalProperties": false,
         "properties": {
@@ -6185,6 +6764,65 @@
         ],
         "title": "DeletionTargetState",
         "type": "string"
+      },
+      "DetachAllAttachmentsRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "attachments": {
+            "items": {
+              "$ref": "#/components/schemas/AttachmentRevisionBinding"
+            },
+            "maxItems": 20,
+            "minItems": 1,
+            "title": "Attachments",
+            "type": "array"
+          },
+          "commandId": {
+            "format": "uuid",
+            "title": "Commandid",
+            "type": "string"
+          },
+          "idempotencyKey": {
+            "format": "uuid",
+            "title": "Idempotencykey",
+            "type": "string"
+          },
+          "reason": {
+            "maxLength": 500,
+            "minLength": 5,
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "commandId",
+          "idempotencyKey",
+          "attachments",
+          "reason"
+        ],
+        "title": "DetachAllAttachmentsRequest",
+        "type": "object"
+      },
+      "DetachedAttachment": {
+        "additionalProperties": false,
+        "properties": {
+          "attachmentId": {
+            "format": "uuid",
+            "title": "Attachmentid",
+            "type": "string"
+          },
+          "revision": {
+            "minimum": 2.0,
+            "title": "Revision",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "attachmentId",
+          "revision"
+        ],
+        "title": "DetachedAttachment",
+        "type": "object"
       },
       "DlpFinding": {
         "additionalProperties": false,
@@ -6676,6 +7314,31 @@
             "title": "Createdat",
             "type": "string"
           },
+          "datasetId": {
+            "anyOf": [
+              {
+                "maxLength": 160,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Datasetid"
+          },
+          "datasetVersion": {
+            "anyOf": [
+              {
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Datasetversion"
+          },
           "evaluatorFailureCount": {
             "anyOf": [
               {
@@ -6712,6 +7375,18 @@
               }
             ],
             "title": "Regressioncount"
+          },
+          "resultVersion": {
+            "anyOf": [
+              {
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resultversion"
           },
           "state": {
             "pattern": "^(QUEUED|RUNNING|PARTIAL|COMPLETED|FAILED)$",
@@ -7355,6 +8030,56 @@
           "expectedVersion"
         ],
         "title": "ExecuteResearchRunRequest",
+        "type": "object"
+      },
+      "ExecuteTeamArtifactRemediationRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "$ref": "#/components/schemas/TeamArtifactRemediationKind"
+          },
+          "changeReason": {
+            "maxLength": 1000,
+            "minLength": 5,
+            "title": "Changereason",
+            "type": "string"
+          },
+          "commandId": {
+            "format": "uuid",
+            "title": "Commandid",
+            "type": "string"
+          },
+          "expectedRevision": {
+            "minimum": 0.0,
+            "title": "Expectedrevision",
+            "type": "integer"
+          },
+          "reasonCode": {
+            "pattern": "^[A-Z][A-Z0-9_.-]{1,63}$",
+            "title": "Reasoncode",
+            "type": "string"
+          },
+          "stageId": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stageid"
+          }
+        },
+        "required": [
+          "commandId",
+          "expectedRevision",
+          "reasonCode",
+          "changeReason",
+          "action"
+        ],
+        "title": "ExecuteTeamArtifactRemediationRequest",
         "type": "object"
       },
       "ExecutionSummary": {
@@ -8082,11 +8807,11 @@
           }
         },
         "required": [
+          "reason",
+          "evidenceRefs",
           "commandId",
           "decision",
-          "expectedVersion",
-          "reason",
-          "evidenceRefs"
+          "expectedVersion"
         ],
         "title": "GovernedCommandDecisionRequest",
         "type": "object"
@@ -8219,10 +8944,10 @@
           }
         },
         "required": [
-          "commandId",
-          "expectedVersion",
           "reason",
-          "evidenceRefs"
+          "evidenceRefs",
+          "commandId",
+          "expectedVersion"
         ],
         "title": "GovernedCommandRestartRequest",
         "type": "object"
@@ -8271,10 +8996,10 @@
           }
         },
         "required": [
-          "commandId",
-          "expectedVersion",
           "reason",
-          "evidenceRefs"
+          "evidenceRefs",
+          "commandId",
+          "expectedVersion"
         ],
         "title": "GovernedCommandTransitionRequest",
         "type": "object"
@@ -10216,6 +10941,181 @@
         "title": "PersonalAiControlsEnvelope",
         "type": "object"
       },
+      "PersonalDataEvidenceAction": {
+        "enum": [
+          "BACKUP_LEDGER",
+          "SRE_ESCALATION",
+          "LEGAL_HOLD_APPEAL",
+          "SIGNED_CERTIFICATE",
+          "SIEM_SYNC"
+        ],
+        "title": "PersonalDataEvidenceAction",
+        "type": "string"
+      },
+      "PersonalDataEvidenceCommand": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "$ref": "#/components/schemas/PersonalDataEvidenceAction"
+          },
+          "commandId": {
+            "format": "uuid",
+            "title": "Commandid",
+            "type": "string"
+          },
+          "completedAt": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Completedat"
+          },
+          "createdAt": {
+            "format": "date-time",
+            "title": "Createdat",
+            "type": "string"
+          },
+          "deletionJobId": {
+            "format": "uuid",
+            "title": "Deletionjobid",
+            "type": "string"
+          },
+          "downloadAvailable": {
+            "default": false,
+            "title": "Downloadavailable",
+            "type": "boolean"
+          },
+          "expectedRevision": {
+            "minimum": 0.0,
+            "title": "Expectedrevision",
+            "type": "integer"
+          },
+          "providerReceiptId": {
+            "anyOf": [
+              {
+                "maxLength": 240,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Providerreceiptid"
+          },
+          "receiptId": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Receiptid"
+          },
+          "recoveryHint": {
+            "anyOf": [
+              {
+                "maxLength": 1000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Recoveryhint"
+          },
+          "result": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "$ref": "#/components/schemas/JsonValue"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Result"
+          },
+          "resultFingerprint": {
+            "anyOf": [
+              {
+                "pattern": "^[0-9a-f]{64}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resultfingerprint"
+          },
+          "safeErrorCode": {
+            "anyOf": [
+              {
+                "pattern": "^[A-Z][A-Z0-9_.-]{1,127}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Safeerrorcode"
+          },
+          "state": {
+            "$ref": "#/components/schemas/PersonalDataEvidenceCommandState"
+          }
+        },
+        "required": [
+          "commandId",
+          "deletionJobId",
+          "action",
+          "state",
+          "expectedRevision",
+          "createdAt"
+        ],
+        "title": "PersonalDataEvidenceCommand",
+        "type": "object"
+      },
+      "PersonalDataEvidenceCommandEnvelope": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/PersonalDataEvidenceCommand"
+          },
+          "status": {
+            "default": "SUCCESS",
+            "title": "Status",
+            "type": "string"
+          },
+          "success": {
+            "default": true,
+            "title": "Success",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "title": "PersonalDataEvidenceCommandEnvelope",
+        "type": "object"
+      },
+      "PersonalDataEvidenceCommandState": {
+        "enum": [
+          "PENDING",
+          "COMPLETED",
+          "FAILED"
+        ],
+        "title": "PersonalDataEvidenceCommandState",
+        "type": "string"
+      },
       "PersonalDataGovernanceCapabilities": {
         "additionalProperties": false,
         "properties": {
@@ -11218,6 +12118,100 @@
         "title": "ProposalHandoff",
         "type": "object"
       },
+      "ProposalHandoffDraft": {
+        "additionalProperties": false,
+        "properties": {
+          "contentSha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Contentsha256",
+            "type": "string"
+          },
+          "draftId": {
+            "format": "uuid",
+            "title": "Draftid",
+            "type": "string"
+          },
+          "handoffId": {
+            "format": "uuid",
+            "title": "Handoffid",
+            "type": "string"
+          },
+          "handoffVersion": {
+            "minimum": 1.0,
+            "title": "Handoffversion",
+            "type": "integer"
+          },
+          "proposalId": {
+            "format": "uuid",
+            "title": "Proposalid",
+            "type": "string"
+          },
+          "reviewedInputs": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/JsonValue"
+            },
+            "title": "Reviewedinputs",
+            "type": "object"
+          },
+          "revision": {
+            "minimum": 1.0,
+            "title": "Revision",
+            "type": "integer"
+          },
+          "savedAt": {
+            "format": "date-time",
+            "title": "Savedat",
+            "type": "string"
+          }
+        },
+        "required": [
+          "draftId",
+          "handoffId",
+          "proposalId",
+          "handoffVersion",
+          "revision",
+          "reviewedInputs",
+          "contentSha256",
+          "savedAt"
+        ],
+        "title": "ProposalHandoffDraft",
+        "type": "object"
+      },
+      "ProposalHandoffDraftEnvelope": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProposalHandoffDraft"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "message": {
+            "default": "Proposal handoff draft loaded.",
+            "title": "Message",
+            "type": "string"
+          },
+          "status": {
+            "default": "SUCCESS",
+            "title": "Status",
+            "type": "string"
+          },
+          "success": {
+            "default": true,
+            "title": "Success",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "title": "ProposalHandoffDraftEnvelope",
+        "type": "object"
+      },
       "ProposalHandoffEnvelope": {
         "additionalProperties": false,
         "properties": {
@@ -11764,6 +12758,9 @@
           "cacheFallback": {
             "$ref": "#/components/schemas/WorkflowCapability"
           },
+          "delivery": {
+            "$ref": "#/components/schemas/ResearchDeliveryCapabilities"
+          },
           "fork": {
             "$ref": "#/components/schemas/WorkflowCapability"
           },
@@ -11795,7 +12792,8 @@
           "merge",
           "keepLocal",
           "sensitivityRecalculation",
-          "cacheFallback"
+          "cacheFallback",
+          "delivery"
         ],
         "title": "ResearchCapabilities",
         "type": "object"
@@ -11856,6 +12854,20 @@
           "deliveryType": {
             "$ref": "#/components/schemas/ResearchDeliveryType"
           },
+          "receipt": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "$ref": "#/components/schemas/JsonValue"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Receipt"
+          },
           "receiptId": {
             "anyOf": [
               {
@@ -11868,10 +12880,35 @@
             ],
             "title": "Receiptid"
           },
+          "recoveryHint": {
+            "anyOf": [
+              {
+                "maxLength": 500,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Recoveryhint"
+          },
           "runId": {
             "format": "uuid",
             "title": "Runid",
             "type": "string"
+          },
+          "safeErrorCode": {
+            "anyOf": [
+              {
+                "pattern": "^[A-Z][A-Z0-9_.-]{1,127}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Safeerrorcode"
           },
           "state": {
             "$ref": "#/components/schemas/ResearchDeliveryState"
@@ -11891,6 +12928,39 @@
           "updatedAt"
         ],
         "title": "ResearchDelivery",
+        "type": "object"
+      },
+      "ResearchDeliveryCapabilities": {
+        "additionalProperties": false,
+        "properties": {
+          "artifact": {
+            "$ref": "#/components/schemas/WorkflowCapability"
+          },
+          "export": {
+            "$ref": "#/components/schemas/WorkflowCapability"
+          },
+          "handoff": {
+            "$ref": "#/components/schemas/WorkflowCapability"
+          },
+          "proposal": {
+            "$ref": "#/components/schemas/WorkflowCapability"
+          },
+          "routine": {
+            "$ref": "#/components/schemas/WorkflowCapability"
+          },
+          "share": {
+            "$ref": "#/components/schemas/WorkflowCapability"
+          }
+        },
+        "required": [
+          "artifact",
+          "proposal",
+          "export",
+          "handoff",
+          "share",
+          "routine"
+        ],
+        "title": "ResearchDeliveryCapabilities",
         "type": "object"
       },
       "ResearchDeliveryEnvelope": {
@@ -12283,6 +13353,212 @@
         "title": "ResearchReceiptDownload",
         "type": "object"
       },
+      "ResearchRecoveryAction": {
+        "enum": [
+          "SAVE_AS_FORK",
+          "PULL_AND_MERGE",
+          "KEEP_LOCAL",
+          "RECALCULATE_SENSITIVITY",
+          "USE_CACHE_FALLBACK"
+        ],
+        "title": "ResearchRecoveryAction",
+        "type": "string"
+      },
+      "ResearchRecoveryCommandRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "$ref": "#/components/schemas/ResearchRecoveryAction"
+          },
+          "commandId": {
+            "format": "uuid",
+            "title": "Commandid",
+            "type": "string"
+          },
+          "expectedVersion": {
+            "minimum": 1.0,
+            "title": "Expectedversion",
+            "type": "integer"
+          },
+          "idempotencyKey": {
+            "format": "uuid",
+            "title": "Idempotencykey",
+            "type": "string"
+          },
+          "localDefinition": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ResearchPlanDefinition"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "reason": {
+            "maxLength": 500,
+            "minLength": 5,
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "commandId",
+          "idempotencyKey",
+          "expectedVersion",
+          "action",
+          "reason"
+        ],
+        "title": "ResearchRecoveryCommandRequest",
+        "type": "object"
+      },
+      "ResearchRecoveryReceipt": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "$ref": "#/components/schemas/ResearchRecoveryAction"
+          },
+          "cachedRunId": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cachedrunid"
+          },
+          "commandId": {
+            "format": "uuid",
+            "title": "Commandid",
+            "type": "string"
+          },
+          "completedAt": {
+            "format": "date-time",
+            "title": "Completedat",
+            "type": "string"
+          },
+          "integrityFingerprint": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Integrityfingerprint",
+            "type": "string"
+          },
+          "receiptId": {
+            "format": "uuid",
+            "title": "Receiptid",
+            "type": "string"
+          },
+          "resultSha256": {
+            "anyOf": [
+              {
+                "pattern": "^[0-9a-f]{64}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resultsha256"
+          },
+          "runId": {
+            "format": "uuid",
+            "title": "Runid",
+            "type": "string"
+          },
+          "sensitivity": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ResearchSensitivityAssessment"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "sourcePlanId": {
+            "format": "uuid",
+            "title": "Sourceplanid",
+            "type": "string"
+          },
+          "sourcePlanRevision": {
+            "minimum": 1.0,
+            "title": "Sourceplanrevision",
+            "type": "integer"
+          },
+          "state": {
+            "default": "COMPLETED",
+            "pattern": "^COMPLETED$",
+            "title": "State",
+            "type": "string"
+          },
+          "targetPlanId": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Targetplanid"
+          },
+          "targetPlanRevision": {
+            "anyOf": [
+              {
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Targetplanrevision"
+          }
+        },
+        "required": [
+          "receiptId",
+          "commandId",
+          "action",
+          "runId",
+          "sourcePlanId",
+          "sourcePlanRevision",
+          "integrityFingerprint",
+          "completedAt"
+        ],
+        "title": "ResearchRecoveryReceipt",
+        "type": "object"
+      },
+      "ResearchRecoveryReceiptEnvelope": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/ResearchRecoveryReceipt"
+          },
+          "message": {
+            "default": "Research recovery action completed.",
+            "title": "Message",
+            "type": "string"
+          },
+          "status": {
+            "default": "SUCCESS",
+            "title": "Status",
+            "type": "string"
+          },
+          "success": {
+            "default": true,
+            "title": "Success",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "title": "ResearchRecoveryReceiptEnvelope",
+        "type": "object"
+      },
       "ResearchResult": {
         "additionalProperties": false,
         "properties": {
@@ -12536,6 +13812,36 @@
         ],
         "title": "ResearchRunState",
         "type": "string"
+      },
+      "ResearchSensitivityAssessment": {
+        "additionalProperties": false,
+        "properties": {
+          "classification": {
+            "pattern": "^(PUBLIC|INTERNAL|CONFIDENTIAL|RESTRICTED)$",
+            "title": "Classification",
+            "type": "string"
+          },
+          "matchedIndicators": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 20,
+            "title": "Matchedindicators",
+            "type": "array"
+          },
+          "score": {
+            "maximum": 100.0,
+            "minimum": 0.0,
+            "title": "Score",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "classification",
+          "score"
+        ],
+        "title": "ResearchSensitivityAssessment",
+        "type": "object"
       },
       "ResearchSourcePolicy": {
         "additionalProperties": false,
@@ -12793,6 +14099,439 @@
         "title": "RoutineActivationAction",
         "type": "string"
       },
+      "RoutineAdvancedCommand": {
+        "additionalProperties": false,
+        "properties": {
+          "canApprove": {
+            "default": false,
+            "title": "Canapprove",
+            "type": "boolean"
+          },
+          "checkerUserId": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Checkeruserid"
+          },
+          "commandId": {
+            "format": "uuid",
+            "title": "Commandid",
+            "type": "string"
+          },
+          "createdAt": {
+            "format": "date-time",
+            "title": "Createdat",
+            "type": "string"
+          },
+          "expectedRevision": {
+            "minimum": 1.0,
+            "title": "Expectedrevision",
+            "type": "integer"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/RoutineAdvancedCommandKind"
+          },
+          "makerUserId": {
+            "title": "Makeruserid",
+            "type": "string"
+          },
+          "ownerUserId": {
+            "title": "Owneruserid",
+            "type": "string"
+          },
+          "problem": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RoutineAdvancedCommandProblem"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "proposedDefinition": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RoutineDefinition"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "receipt": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RoutineAdvancedCommandReceipt"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "routineId": {
+            "format": "uuid",
+            "title": "Routineid",
+            "type": "string"
+          },
+          "state": {
+            "$ref": "#/components/schemas/RoutineAdvancedCommandState"
+          },
+          "updatedAt": {
+            "format": "date-time",
+            "title": "Updatedat",
+            "type": "string"
+          },
+          "version": {
+            "minimum": 1.0,
+            "title": "Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "commandId",
+          "routineId",
+          "ownerUserId",
+          "kind",
+          "state",
+          "expectedRevision",
+          "version",
+          "makerUserId",
+          "proposedDefinition",
+          "createdAt",
+          "updatedAt"
+        ],
+        "title": "RoutineAdvancedCommand",
+        "type": "object"
+      },
+      "RoutineAdvancedCommandEnvelope": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/RoutineAdvancedCommand"
+          },
+          "status": {
+            "default": "SUCCESS",
+            "title": "Status",
+            "type": "string"
+          },
+          "success": {
+            "default": true,
+            "title": "Success",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "title": "RoutineAdvancedCommandEnvelope",
+        "type": "object"
+      },
+      "RoutineAdvancedCommandKind": {
+        "enum": [
+          "CHANGE_APPROVAL",
+          "AGENT_ENGINE_SWITCH",
+          "WORM_EVIDENCE_DELIVERY",
+          "OAUTH_REAUTHORIZATION",
+          "TEMPORARY_BUDGET_INCREASE",
+          "OPERATOR_ESCALATION",
+          "PROVIDER_ROLLBACK"
+        ],
+        "title": "RoutineAdvancedCommandKind",
+        "type": "string"
+      },
+      "RoutineAdvancedCommandListEnvelope": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "items": {
+              "$ref": "#/components/schemas/RoutineAdvancedCommand"
+            },
+            "title": "Data",
+            "type": "array"
+          },
+          "status": {
+            "default": "SUCCESS",
+            "title": "Status",
+            "type": "string"
+          },
+          "success": {
+            "default": true,
+            "title": "Success",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "title": "RoutineAdvancedCommandListEnvelope",
+        "type": "object"
+      },
+      "RoutineAdvancedCommandProblem": {
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "pattern": "^[A-Z][A-Z0-9_.-]{1,127}$",
+            "title": "Code",
+            "type": "string"
+          },
+          "detail": {
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Detail",
+            "type": "string"
+          },
+          "recoveryHint": {
+            "maxLength": 1000,
+            "minLength": 1,
+            "title": "Recoveryhint",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "detail",
+          "recoveryHint"
+        ],
+        "title": "RoutineAdvancedCommandProblem",
+        "type": "object"
+      },
+      "RoutineAdvancedCommandReceipt": {
+        "additionalProperties": false,
+        "properties": {
+          "appliedRevision": {
+            "anyOf": [
+              {
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Appliedrevision"
+          },
+          "commandId": {
+            "format": "uuid",
+            "title": "Commandid",
+            "type": "string"
+          },
+          "completedAt": {
+            "format": "date-time",
+            "title": "Completedat",
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/RoutineAdvancedCommandKind"
+          },
+          "providerOutcome": {
+            "$ref": "#/components/schemas/RoutineAdvancedProviderOutcome"
+          },
+          "providerReceiptId": {
+            "maxLength": 240,
+            "minLength": 1,
+            "title": "Providerreceiptid",
+            "type": "string"
+          },
+          "receiptId": {
+            "format": "uuid",
+            "title": "Receiptid",
+            "type": "string"
+          },
+          "resultSha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Resultsha256",
+            "type": "string"
+          },
+          "routineId": {
+            "format": "uuid",
+            "title": "Routineid",
+            "type": "string"
+          },
+          "state": {
+            "enum": [
+              "SUCCEEDED",
+              "PARTIAL"
+            ],
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "receiptId",
+          "commandId",
+          "routineId",
+          "kind",
+          "state",
+          "providerReceiptId",
+          "resultSha256",
+          "providerOutcome",
+          "completedAt"
+        ],
+        "title": "RoutineAdvancedCommandReceipt",
+        "type": "object"
+      },
+      "RoutineAdvancedCommandState": {
+        "enum": [
+          "AWAITING_APPROVAL",
+          "RUNNING",
+          "SUCCEEDED",
+          "PARTIAL",
+          "FAILED",
+          "REJECTED"
+        ],
+        "title": "RoutineAdvancedCommandState",
+        "type": "string"
+      },
+      "RoutineAdvancedProviderOutcome": {
+        "additionalProperties": false,
+        "properties": {
+          "appliedPayload": {
+            "discriminator": {
+              "mapping": {
+                "AGENT_ENGINE_SWITCH": "#/components/schemas/RoutineAgentEngineSwitchPayload",
+                "CHANGE_APPROVAL": "#/components/schemas/RoutineChangeApprovalPayload",
+                "OAUTH_REAUTHORIZATION": "#/components/schemas/RoutineOAuthReauthorizationPayload",
+                "OPERATOR_ESCALATION": "#/components/schemas/RoutineOperatorEscalationPayload",
+                "PROVIDER_ROLLBACK": "#/components/schemas/RoutineProviderRollbackPayload",
+                "TEMPORARY_BUDGET_INCREASE": "#/components/schemas/RoutineTemporaryBudgetIncreasePayload",
+                "WORM_EVIDENCE_DELIVERY": "#/components/schemas/RoutineWormEvidenceDeliveryPayload"
+              },
+              "propertyName": "kind"
+            },
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/RoutineChangeApprovalPayload"
+              },
+              {
+                "$ref": "#/components/schemas/RoutineAgentEngineSwitchPayload"
+              },
+              {
+                "$ref": "#/components/schemas/RoutineWormEvidenceDeliveryPayload"
+              },
+              {
+                "$ref": "#/components/schemas/RoutineOAuthReauthorizationPayload"
+              },
+              {
+                "$ref": "#/components/schemas/RoutineTemporaryBudgetIncreasePayload"
+              },
+              {
+                "$ref": "#/components/schemas/RoutineOperatorEscalationPayload"
+              },
+              {
+                "$ref": "#/components/schemas/RoutineProviderRollbackPayload"
+              }
+            ],
+            "title": "Appliedpayload"
+          },
+          "evidenceRef": {
+            "maxLength": 240,
+            "minLength": 1,
+            "title": "Evidenceref",
+            "type": "string"
+          },
+          "expectedRevision": {
+            "minimum": 1.0,
+            "title": "Expectedrevision",
+            "type": "integer"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/RoutineAdvancedCommandKind"
+          },
+          "outcome": {
+            "enum": [
+              "APPLIED",
+              "PARTIALLY_APPLIED"
+            ],
+            "title": "Outcome",
+            "type": "string"
+          },
+          "routineId": {
+            "format": "uuid",
+            "title": "Routineid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "routineId",
+          "expectedRevision",
+          "kind",
+          "outcome",
+          "appliedPayload",
+          "evidenceRef"
+        ],
+        "title": "RoutineAdvancedProviderOutcome",
+        "type": "object"
+      },
+      "RoutineAgentEngineSwitchPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "default": "APPLY",
+            "enum": [
+              "APPLY",
+              "ROLLBACK"
+            ],
+            "title": "Action",
+            "type": "string"
+          },
+          "agentId": {
+            "anyOf": [
+              {
+                "maxLength": 160,
+                "minLength": 1,
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Agentid"
+          },
+          "engineId": {
+            "anyOf": [
+              {
+                "maxLength": 160,
+                "minLength": 1,
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Engineid"
+          },
+          "expiresAt": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expiresat"
+          },
+          "kind": {
+            "const": "AGENT_ENGINE_SWITCH",
+            "title": "Kind",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "title": "RoutineAgentEngineSwitchPayload",
+        "type": "object"
+      },
       "RoutineBudget": {
         "additionalProperties": false,
         "properties": {
@@ -12825,7 +14564,8 @@
         "enum": [
           "DAILY",
           "WEEKDAYS",
-          "WEEKLY"
+          "WEEKLY",
+          "MONTHLY"
         ],
         "title": "RoutineCadence",
         "type": "string"
@@ -13034,6 +14774,25 @@
         "title": "RoutineCapabilitiesEnvelope",
         "type": "object"
       },
+      "RoutineChangeApprovalPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "definition": {
+            "$ref": "#/components/schemas/RoutineDefinition"
+          },
+          "kind": {
+            "const": "CHANGE_APPROVAL",
+            "title": "Kind",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "definition"
+        ],
+        "title": "RoutineChangeApprovalPayload",
+        "type": "object"
+      },
       "RoutineCompensationPolicy": {
         "additionalProperties": false,
         "properties": {
@@ -13157,6 +14916,19 @@
             "pattern": "^[a-z]{2}(?:-[A-Z]{2})?$",
             "title": "Locale",
             "type": "string"
+          },
+          "monthDay": {
+            "anyOf": [
+              {
+                "maximum": 28.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Monthday"
           },
           "name": {
             "maxLength": 80,
@@ -13533,6 +15305,28 @@
             "title": "Receiptid",
             "type": "string"
           },
+          "recoveryAction": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RoutineRecoveryAction"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "recoveryCommandId": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Recoverycommandid"
+          },
           "resultSha256": {
             "pattern": "^[0-9a-f]{64}$",
             "title": "Resultsha256",
@@ -13661,6 +15455,28 @@
                 "type": "null"
               }
             ]
+          },
+          "recoveryAction": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RoutineRecoveryAction"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "recoveryCommandId": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Recoverycommandid"
           },
           "recoveryHint": {
             "anyOf": [
@@ -13953,6 +15769,112 @@
         "title": "RoutineNotificationState",
         "type": "string"
       },
+      "RoutineOAuthReauthorizationPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "connectionReference": {
+            "maxLength": 240,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$",
+            "title": "Connectionreference",
+            "type": "string"
+          },
+          "kind": {
+            "const": "OAUTH_REAUTHORIZATION",
+            "title": "Kind",
+            "type": "string"
+          },
+          "source": {
+            "$ref": "#/components/schemas/RoutineSource"
+          }
+        },
+        "required": [
+          "kind",
+          "source",
+          "connectionReference"
+        ],
+        "title": "RoutineOAuthReauthorizationPayload",
+        "type": "object"
+      },
+      "RoutineOperatorEscalationPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "const": "OPERATOR_ESCALATION",
+            "title": "Kind",
+            "type": "string"
+          },
+          "routineRunId": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Routinerunid"
+          },
+          "severity": {
+            "enum": [
+              "P1",
+              "P2",
+              "P3"
+            ],
+            "title": "Severity",
+            "type": "string"
+          },
+          "summary": {
+            "maxLength": 1000,
+            "minLength": 10,
+            "title": "Summary",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "severity",
+          "summary"
+        ],
+        "title": "RoutineOperatorEscalationPayload",
+        "type": "object"
+      },
+      "RoutineProviderRollbackPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "const": "PROVIDER_ROLLBACK",
+            "title": "Kind",
+            "type": "string"
+          },
+          "providerReceiptId": {
+            "maxLength": 240,
+            "minLength": 1,
+            "title": "Providerreceiptid",
+            "type": "string"
+          },
+          "routineRunId": {
+            "format": "uuid",
+            "title": "Routinerunid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "routineRunId",
+          "providerReceiptId"
+        ],
+        "title": "RoutineProviderRollbackPayload",
+        "type": "object"
+      },
+      "RoutineRecoveryAction": {
+        "enum": [
+          "SKIP_QUARANTINED_AND_CONTINUE"
+        ],
+        "title": "RoutineRecoveryAction",
+        "type": "string"
+      },
       "RoutineRetryPolicy": {
         "additionalProperties": false,
         "properties": {
@@ -14063,7 +15985,8 @@
         "enum": [
           "RETRY",
           "CANCEL",
-          "COMPENSATE"
+          "COMPENSATE",
+          "SKIP_QUARANTINED_AND_CONTINUE"
         ],
         "title": "RoutineRunCommand",
         "type": "string"
@@ -14101,6 +16024,48 @@
         ],
         "title": "RoutineSource",
         "type": "string"
+      },
+      "RoutineTemporaryBudgetIncreasePayload": {
+        "additionalProperties": false,
+        "properties": {
+          "additionalMinutesPerRun": {
+            "default": 0,
+            "maximum": 240.0,
+            "minimum": 0.0,
+            "title": "Additionalminutesperrun",
+            "type": "integer"
+          },
+          "additionalRuns": {
+            "default": 0,
+            "maximum": 744.0,
+            "minimum": 0.0,
+            "title": "Additionalruns",
+            "type": "integer"
+          },
+          "additionalTokensPerRun": {
+            "default": 0,
+            "maximum": 2000000.0,
+            "minimum": 0.0,
+            "title": "Additionaltokensperrun",
+            "type": "integer"
+          },
+          "expiresAt": {
+            "format": "date-time",
+            "title": "Expiresat",
+            "type": "string"
+          },
+          "kind": {
+            "const": "TEMPORARY_BUDGET_INCREASE",
+            "title": "Kind",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "expiresAt"
+        ],
+        "title": "RoutineTemporaryBudgetIncreasePayload",
+        "type": "object"
       },
       "RoutineTriggerType": {
         "enum": [
@@ -14203,6 +16168,43 @@
           "integrityFingerprint"
         ],
         "title": "RoutineVersionSnapshot",
+        "type": "object"
+      },
+      "RoutineWormEvidenceDeliveryPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "evidenceScope": {
+            "enum": [
+              "ROUTINE_HISTORY",
+              "LATEST_RUN",
+              "FULL_AUDIT"
+            ],
+            "title": "Evidencescope",
+            "type": "string"
+          },
+          "kind": {
+            "const": "WORM_EVIDENCE_DELIVERY",
+            "title": "Kind",
+            "type": "string"
+          },
+          "legalHold": {
+            "default": false,
+            "title": "Legalhold",
+            "type": "boolean"
+          },
+          "retentionDays": {
+            "maximum": 3650.0,
+            "minimum": 1.0,
+            "title": "Retentiondays",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "kind",
+          "evidenceScope",
+          "retentionDays"
+        ],
+        "title": "RoutineWormEvidenceDeliveryPayload",
         "type": "object"
       },
       "RoutingPolicySummary": {
@@ -14606,6 +16608,35 @@
         "title": "SafetyPolicyEnvelope",
         "type": "object"
       },
+      "SaveProposalHandoffDraftRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "commandId": {
+            "format": "uuid",
+            "title": "Commandid",
+            "type": "string"
+          },
+          "expectedVersion": {
+            "minimum": 1.0,
+            "title": "Expectedversion",
+            "type": "integer"
+          },
+          "reviewedInputs": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/JsonValue"
+            },
+            "maxProperties": 20,
+            "title": "Reviewedinputs",
+            "type": "object"
+          }
+        },
+        "required": [
+          "commandId",
+          "expectedVersion"
+        ],
+        "title": "SaveProposalHandoffDraftRequest",
+        "type": "object"
+      },
       "SecureAttachment": {
         "additionalProperties": false,
         "properties": {
@@ -14652,6 +16683,37 @@
               }
             ],
             "title": "Deletedat"
+          },
+          "deletionAttemptCount": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Deletionattemptcount",
+            "type": "integer"
+          },
+          "deletionLastErrorCode": {
+            "anyOf": [
+              {
+                "pattern": "^[A-Z][A-Z0-9_.-]{1,127}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deletionlasterrorcode"
+          },
+          "deletionReceiptId": {
+            "anyOf": [
+              {
+                "maxLength": 240,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deletionreceiptid"
           },
           "fileName": {
             "title": "Filename",
@@ -15714,6 +17776,182 @@
         "title": "TeamArtifactPreflightState",
         "type": "string"
       },
+      "TeamArtifactRemediationEnvelope": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/TeamArtifactRemediationReceipt"
+          },
+          "status": {
+            "default": "SUCCESS",
+            "title": "Status",
+            "type": "string"
+          },
+          "success": {
+            "default": true,
+            "title": "Success",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "title": "TeamArtifactRemediationEnvelope",
+        "type": "object"
+      },
+      "TeamArtifactRemediationKind": {
+        "enum": [
+          "AUTOMATIC_MASKING",
+          "SYNTHETIC_REPLACEMENT",
+          "REVIEW_NOTIFICATION"
+        ],
+        "title": "TeamArtifactRemediationKind",
+        "type": "string"
+      },
+      "TeamArtifactRemediationReceipt": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "$ref": "#/components/schemas/TeamArtifactRemediationKind"
+          },
+          "affectedCount": {
+            "maximum": 100000.0,
+            "minimum": 0.0,
+            "title": "Affectedcount",
+            "type": "integer"
+          },
+          "artifactId": {
+            "format": "uuid",
+            "title": "Artifactid",
+            "type": "string"
+          },
+          "artifactRevision": {
+            "minimum": 1.0,
+            "title": "Artifactrevision",
+            "type": "integer"
+          },
+          "commandId": {
+            "format": "uuid",
+            "title": "Commandid",
+            "type": "string"
+          },
+          "completedAt": {
+            "format": "date-time",
+            "title": "Completedat",
+            "type": "string"
+          },
+          "findingManifestSha256": {
+            "anyOf": [
+              {
+                "pattern": "^[0-9a-f]{64}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Findingmanifestsha256"
+          },
+          "providerReceiptId": {
+            "anyOf": [
+              {
+                "maxLength": 240,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Providerreceiptid"
+          },
+          "receiptId": {
+            "format": "uuid",
+            "title": "Receiptid",
+            "type": "string"
+          },
+          "remediatedCodes": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 32,
+            "title": "Remediatedcodes",
+            "type": "array"
+          },
+          "residualFindingCount": {
+            "anyOf": [
+              {
+                "maximum": 100000.0,
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Residualfindingcount"
+          },
+          "resultContentSha256": {
+            "anyOf": [
+              {
+                "pattern": "^[0-9a-f]{64}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resultcontentsha256"
+          },
+          "resultSha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Resultsha256",
+            "type": "string"
+          },
+          "sourceContentFingerprint": {
+            "anyOf": [
+              {
+                "pattern": "^[0-9a-f]{64}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sourcecontentfingerprint"
+          },
+          "state": {
+            "pattern": "^SUCCEEDED$",
+            "title": "State",
+            "type": "string"
+          },
+          "workspaceRevision": {
+            "anyOf": [
+              {
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Workspacerevision"
+          }
+        },
+        "required": [
+          "receiptId",
+          "commandId",
+          "artifactId",
+          "action",
+          "state",
+          "artifactRevision",
+          "affectedCount",
+          "resultSha256",
+          "completedAt"
+        ],
+        "title": "TeamArtifactRemediationReceipt",
+        "type": "object"
+      },
       "TeamArtifactReviewDecision": {
         "enum": [
           "APPROVE",
@@ -16307,14 +18545,24 @@
         "additionalProperties": false,
         "properties": {
           "budgetTokens": {
-            "exclusiveMinimum": 0.0,
-            "title": "Budgettokens",
-            "type": "integer"
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Budgettokens"
           },
           "consumedTokens": {
             "minimum": 0.0,
             "title": "Consumedtokens",
             "type": "integer"
+          },
+          "enforcementActivationState": {
+            "$ref": "#/components/schemas/EnforcementActivationState"
           },
           "policyMode": {
             "pattern": "^(WARN|THROTTLE|BLOCK)$",
@@ -16350,9 +18598,9 @@
         "required": [
           "scope",
           "consumedTokens",
-          "budgetTokens",
           "spikeDetected",
           "policyMode",
+          "enforcementActivationState",
           "version"
         ],
         "title": "TokenBudgetSummary",
@@ -20008,6 +22256,135 @@
         "summary": "Export Audit Events",
         "tags": [
           "governance"
+        ]
+      }
+    },
+    "/v1/admin/control-plane/command-capabilities": {
+      "get": {
+        "operationId": "command_capabilities_v1_admin_control_plane_command_capabilities_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-DWP-User-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Dwp-User-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Tenant-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Dwp-Tenant-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Correlation-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Correlation-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Roles",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Roles"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Permissions",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Permissions"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Person-Public-ID",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 36,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Person-Public-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Display-Name-B64",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 400,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Display-Name-B64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminCommandCapabilitiesEnvelope"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Command Capabilities",
+        "tags": [
+          "administration"
         ]
       }
     },
@@ -27162,6 +29539,185 @@
         ]
       }
     },
+    "/v1/artifact-collaboration/{artifact_id}/remediation-actions": {
+      "post": {
+        "operationId": "execute_team_artifact_remediation_v1_artifact_collaboration__artifact_id__remediation_actions_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "artifact_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Artifact Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Auth-Session-ID",
+            "required": true,
+            "schema": {
+              "maxLength": 160,
+              "minLength": 1,
+              "title": "X-Dwp-Auth-Session-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-User-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Dwp-User-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Tenant-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Dwp-Tenant-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Correlation-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Correlation-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Roles",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Roles"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Permissions",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Permissions"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Person-Public-ID",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 36,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Person-Public-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Display-Name-B64",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 400,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Display-Name-B64"
+            }
+          },
+          {
+            "description": "Required for product-authorization rollout states 110/111. The gateway rejects a missing or stale value before the state-changing request reaches the Agent owner service; rollout states 000/100 ignore it.",
+            "in": "header",
+            "name": "X-DWP-Expected-Decision-Revision",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Expected-Decision-Revision"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExecuteTeamArtifactRemediationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TeamArtifactRemediationEnvelope"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Execute Team Artifact Remediation",
+        "tags": [
+          "governed-artifact-collaboration"
+        ]
+      }
+    },
     "/v1/artifact-collaboration/{artifact_id}/workspace": {
       "get": {
         "operationId": "get_team_artifact_workspace_v1_artifact_collaboration__artifact_id__workspace_get",
@@ -32199,6 +34755,154 @@
         ]
       }
     },
+    "/v1/attachments/audit-reports/{report_id}/download": {
+      "get": {
+        "operationId": "download_attachment_audit_report_v1_attachments_audit_reports__report_id__download_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "report_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Report Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Auth-Session-ID",
+            "required": true,
+            "schema": {
+              "maxLength": 160,
+              "minLength": 1,
+              "title": "X-Dwp-Auth-Session-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-User-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Dwp-User-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Tenant-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Dwp-Tenant-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Correlation-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Correlation-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Roles",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Roles"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Permissions",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Permissions"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Person-Public-ID",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 36,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Person-Public-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Display-Name-B64",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 400,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Display-Name-B64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Download Attachment Audit Report",
+        "tags": [
+          "attachments"
+        ]
+      }
+    },
     "/v1/attachments/capabilities": {
       "get": {
         "operationId": "attachment_capabilities_v1_attachments_capabilities_get",
@@ -32334,6 +35038,364 @@
           }
         },
         "summary": "Attachment Capabilities",
+        "tags": [
+          "attachments"
+        ]
+      }
+    },
+    "/v1/attachments/conversations/{conversation_id}/audit-reports": {
+      "post": {
+        "operationId": "create_attachment_audit_report_v1_attachments_conversations__conversation_id__audit_reports_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "conversation_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Conversation Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Auth-Session-ID",
+            "required": true,
+            "schema": {
+              "maxLength": 160,
+              "minLength": 1,
+              "title": "X-Dwp-Auth-Session-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-User-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Dwp-User-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Tenant-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Dwp-Tenant-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Correlation-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Correlation-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Roles",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Roles"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Permissions",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Permissions"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Person-Public-ID",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 36,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Person-Public-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Display-Name-B64",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 400,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Display-Name-B64"
+            }
+          },
+          {
+            "description": "Required for product-authorization rollout states 110/111. The gateway rejects a missing or stale value before the state-changing request reaches the Agent owner service; rollout states 000/100 ignore it.",
+            "in": "header",
+            "name": "X-DWP-Expected-Decision-Revision",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Expected-Decision-Revision"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateAttachmentAuditReportRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AttachmentAuditReportReceiptEnvelope"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Attachment Audit Report",
+        "tags": [
+          "attachments"
+        ]
+      }
+    },
+    "/v1/attachments/conversations/{conversation_id}/detach-all": {
+      "post": {
+        "operationId": "detach_conversation_attachments_v1_attachments_conversations__conversation_id__detach_all_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "conversation_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Conversation Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Auth-Session-ID",
+            "required": true,
+            "schema": {
+              "maxLength": 160,
+              "minLength": 1,
+              "title": "X-Dwp-Auth-Session-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-User-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Dwp-User-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Tenant-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Dwp-Tenant-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Correlation-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Correlation-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Roles",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Roles"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Permissions",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Permissions"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Person-Public-ID",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 36,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Person-Public-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Display-Name-B64",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 400,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Display-Name-B64"
+            }
+          },
+          {
+            "description": "Required for product-authorization rollout states 110/111. The gateway rejects a missing or stale value before the state-changing request reaches the Agent owner service; rollout states 000/100 ignore it.",
+            "in": "header",
+            "name": "X-DWP-Expected-Decision-Revision",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Expected-Decision-Revision"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DetachAllAttachmentsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AttachmentDetachReceiptEnvelope"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Detach Conversation Attachments",
         "tags": [
           "attachments"
         ]
@@ -34523,6 +37585,144 @@
         ]
       }
     },
+    "/v1/personal-data/deletions/evidence/receipt-index.json": {
+      "get": {
+        "operationId": "download_personal_data_receipt_index_v1_personal_data_deletions_evidence_receipt_index_json_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-DWP-Auth-Session-ID",
+            "required": true,
+            "schema": {
+              "maxLength": 160,
+              "minLength": 1,
+              "title": "X-Dwp-Auth-Session-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-User-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Dwp-User-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Tenant-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Dwp-Tenant-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Correlation-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Correlation-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Roles",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Roles"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Permissions",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Permissions"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Person-Public-ID",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 36,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Person-Public-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Display-Name-B64",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 400,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Display-Name-B64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Download Personal Data Receipt Index",
+        "tags": [
+          "personal-data-governance"
+        ]
+      }
+    },
     "/v1/personal-data/deletions/{deletion_job_id}": {
       "get": {
         "operationId": "get_personal_data_deletion_v1_personal_data_deletions__deletion_job_id__get",
@@ -34668,6 +37868,659 @@
           }
         },
         "summary": "Get Personal Data Deletion",
+        "tags": [
+          "personal-data-governance"
+        ]
+      }
+    },
+    "/v1/personal-data/deletions/{deletion_job_id}/evidence-actions/{action}": {
+      "post": {
+        "operationId": "execute_personal_data_evidence_action_v1_personal_data_deletions__deletion_job_id__evidence_actions__action__post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "deletion_job_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Deletion Job Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "action",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/PersonalDataEvidenceAction"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Auth-Session-ID",
+            "required": true,
+            "schema": {
+              "maxLength": 160,
+              "minLength": 1,
+              "title": "X-Dwp-Auth-Session-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-User-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Dwp-User-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Tenant-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Dwp-Tenant-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Correlation-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Correlation-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Roles",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Roles"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Permissions",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Permissions"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Person-Public-ID",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 36,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Person-Public-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Display-Name-B64",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 400,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Display-Name-B64"
+            }
+          },
+          {
+            "description": "Required for product-authorization rollout states 110/111. The gateway rejects a missing or stale value before the state-changing request reaches the Agent owner service; rollout states 000/100 ignore it.",
+            "in": "header",
+            "name": "X-DWP-Expected-Decision-Revision",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Expected-Decision-Revision"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreatePersonalDataEvidenceCommandRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PersonalDataEvidenceCommandEnvelope"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Execute Personal Data Evidence Action",
+        "tags": [
+          "personal-data-governance"
+        ]
+      }
+    },
+    "/v1/personal-data/deletions/{deletion_job_id}/evidence-actions/{command_id}": {
+      "get": {
+        "operationId": "get_personal_data_evidence_action_v1_personal_data_deletions__deletion_job_id__evidence_actions__command_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "deletion_job_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Deletion Job Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "command_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Command Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Auth-Session-ID",
+            "required": true,
+            "schema": {
+              "maxLength": 160,
+              "minLength": 1,
+              "title": "X-Dwp-Auth-Session-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-User-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Dwp-User-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Tenant-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Dwp-Tenant-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Correlation-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Correlation-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Roles",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Roles"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Permissions",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Permissions"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Person-Public-ID",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 36,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Person-Public-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Display-Name-B64",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 400,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Display-Name-B64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PersonalDataEvidenceCommandEnvelope"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Personal Data Evidence Action",
+        "tags": [
+          "personal-data-governance"
+        ]
+      }
+    },
+    "/v1/personal-data/deletions/{deletion_job_id}/evidence-actions/{command_id}/download": {
+      "get": {
+        "operationId": "download_personal_data_evidence_action_v1_personal_data_deletions__deletion_job_id__evidence_actions__command_id__download_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "deletion_job_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Deletion Job Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "command_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Command Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Auth-Session-ID",
+            "required": true,
+            "schema": {
+              "maxLength": 160,
+              "minLength": 1,
+              "title": "X-Dwp-Auth-Session-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-User-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Dwp-User-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Tenant-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Dwp-Tenant-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Correlation-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Correlation-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Roles",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Roles"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Permissions",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Permissions"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Person-Public-ID",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 36,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Person-Public-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Display-Name-B64",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 400,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Display-Name-B64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Download Personal Data Evidence Action",
+        "tags": [
+          "personal-data-governance"
+        ]
+      }
+    },
+    "/v1/personal-data/deletions/{deletion_job_id}/evidence/legal-hold.json": {
+      "get": {
+        "operationId": "download_personal_data_legal_hold_evidence_v1_personal_data_deletions__deletion_job_id__evidence_legal_hold_json_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "deletion_job_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Deletion Job Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Auth-Session-ID",
+            "required": true,
+            "schema": {
+              "maxLength": 160,
+              "minLength": 1,
+              "title": "X-Dwp-Auth-Session-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-User-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Dwp-User-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Tenant-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Dwp-Tenant-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Correlation-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Correlation-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Roles",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Roles"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Permissions",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Permissions"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Person-Public-ID",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 36,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Person-Public-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Display-Name-B64",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 400,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Display-Name-B64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Download Personal Data Legal Hold Evidence",
         "tags": [
           "personal-data-governance"
         ]
@@ -35274,6 +39127,333 @@
           }
         },
         "summary": "Get Handoff",
+        "tags": [
+          "proposals"
+        ]
+      }
+    },
+    "/v1/proposal-handoffs/{handoff_id}/drafts/current": {
+      "get": {
+        "operationId": "get_proposal_handoff_draft_v1_proposal_handoffs__handoff_id__drafts_current_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "handoff_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Handoff Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Auth-Session-ID",
+            "required": true,
+            "schema": {
+              "maxLength": 160,
+              "minLength": 1,
+              "title": "X-Dwp-Auth-Session-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-User-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Dwp-User-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Tenant-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Dwp-Tenant-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Correlation-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Correlation-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Roles",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Roles"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Permissions",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Permissions"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Person-Public-ID",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 36,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Person-Public-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Display-Name-B64",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 400,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Display-Name-B64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProposalHandoffDraftEnvelope"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Proposal Handoff Draft",
+        "tags": [
+          "proposals"
+        ]
+      },
+      "put": {
+        "operationId": "save_proposal_handoff_draft_v1_proposal_handoffs__handoff_id__drafts_current_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "handoff_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Handoff Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Auth-Session-ID",
+            "required": true,
+            "schema": {
+              "maxLength": 160,
+              "minLength": 1,
+              "title": "X-Dwp-Auth-Session-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-User-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Dwp-User-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Tenant-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Dwp-Tenant-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Correlation-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Correlation-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Roles",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Roles"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Permissions",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Permissions"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Person-Public-ID",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 36,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Person-Public-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Display-Name-B64",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 400,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Display-Name-B64"
+            }
+          },
+          {
+            "description": "Required for product-authorization rollout states 110/111. The gateway rejects a missing or stale value before the state-changing request reaches the Agent owner service; rollout states 000/100 ignore it.",
+            "in": "header",
+            "name": "X-DWP-Expected-Decision-Revision",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Expected-Decision-Revision"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SaveProposalHandoffDraftRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProposalHandoffDraftEnvelope"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Save Proposal Handoff Draft",
         "tags": [
           "proposals"
         ]
@@ -38704,6 +42884,157 @@
         ]
       }
     },
+    "/v1/research/runs/{run_id}/downloads/pdf": {
+      "get": {
+        "operationId": "download_research_pdf_v1_research_runs__run_id__downloads_pdf_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Run Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Auth-Session-ID",
+            "required": true,
+            "schema": {
+              "maxLength": 160,
+              "minLength": 1,
+              "title": "X-Dwp-Auth-Session-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-User-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Dwp-User-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Tenant-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Dwp-Tenant-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Correlation-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Correlation-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Roles",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Roles"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Permissions",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Permissions"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Person-Public-ID",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 36,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Person-Public-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Display-Name-B64",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 400,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Display-Name-B64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/pdf": {
+                "schema": {
+                  "format": "binary",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Download Research Pdf",
+        "tags": [
+          "research"
+        ]
+      }
+    },
     "/v1/research/runs/{run_id}/downloads/raw": {
       "get": {
         "operationId": "download_research_raw_v1_research_runs__run_id__downloads_raw_get",
@@ -39720,6 +44051,185 @@
         ]
       }
     },
+    "/v1/research/runs/{run_id}/recovery-actions": {
+      "post": {
+        "operationId": "recover_research_run_v1_research_runs__run_id__recovery_actions_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Run Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Auth-Session-ID",
+            "required": true,
+            "schema": {
+              "maxLength": 160,
+              "minLength": 1,
+              "title": "X-Dwp-Auth-Session-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-User-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Dwp-User-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Tenant-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Dwp-Tenant-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Correlation-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Correlation-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Roles",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Roles"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Permissions",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Permissions"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Person-Public-ID",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 36,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Person-Public-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Display-Name-B64",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 400,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Display-Name-B64"
+            }
+          },
+          {
+            "description": "Required for product-authorization rollout states 110/111. The gateway rejects a missing or stale value before the state-changing request reaches the Agent owner service; rollout states 000/100 ignore it.",
+            "in": "header",
+            "name": "X-DWP-Expected-Decision-Revision",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Expected-Decision-Revision"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ResearchRecoveryCommandRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResearchRecoveryReceiptEnvelope"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Recover Research Run",
+        "tags": [
+          "research"
+        ]
+      }
+    },
     "/v1/research/runs/{run_id}/routines": {
       "post": {
         "operationId": "create_research_routine_v1_research_runs__run_id__routines_post",
@@ -40385,6 +44895,337 @@
         ]
       }
     },
+    "/v1/routines/advanced-commands/pending-approvals": {
+      "get": {
+        "operationId": "list_pending_routine_approvals_v1_routines_advanced_commands_pending_approvals_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Auth-Session-ID",
+            "required": true,
+            "schema": {
+              "maxLength": 160,
+              "minLength": 1,
+              "title": "X-Dwp-Auth-Session-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-User-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Dwp-User-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Tenant-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Dwp-Tenant-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Correlation-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Correlation-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Roles",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Roles"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Permissions",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Permissions"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Person-Public-ID",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 36,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Person-Public-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Display-Name-B64",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 400,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Display-Name-B64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RoutineAdvancedCommandListEnvelope"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Pending Routine Approvals",
+        "tags": [
+          "personal-routines"
+        ]
+      }
+    },
+    "/v1/routines/advanced-commands/{command_id}/decision": {
+      "post": {
+        "operationId": "decide_routine_advanced_command_v1_routines_advanced_commands__command_id__decision_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "command_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Command Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Auth-Session-ID",
+            "required": true,
+            "schema": {
+              "maxLength": 160,
+              "minLength": 1,
+              "title": "X-Dwp-Auth-Session-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-User-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Dwp-User-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Tenant-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Dwp-Tenant-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Correlation-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Correlation-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Roles",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Roles"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Permissions",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Permissions"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Person-Public-ID",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 36,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Person-Public-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Display-Name-B64",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 400,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Display-Name-B64"
+            }
+          },
+          {
+            "description": "Required for product-authorization rollout states 110/111. The gateway rejects a missing or stale value before the state-changing request reaches the Agent owner service; rollout states 000/100 ignore it.",
+            "in": "header",
+            "name": "X-DWP-Expected-Decision-Revision",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Expected-Decision-Revision"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DecideRoutineAdvancedCommandRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RoutineAdvancedCommandEnvelope"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Decide Routine Advanced Command",
+        "tags": [
+          "personal-routines"
+        ]
+      }
+    },
     "/v1/routines/capabilities": {
       "get": {
         "operationId": "get_routine_capabilities_v1_routines_capabilities_get",
@@ -41026,6 +45867,493 @@
           }
         },
         "summary": "Change Routine Activation",
+        "tags": [
+          "personal-routines"
+        ]
+      }
+    },
+    "/v1/routines/{routine_id}/advanced-commands": {
+      "get": {
+        "operationId": "list_routine_advanced_commands_v1_routines__routine_id__advanced_commands_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "routine_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Routine Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Auth-Session-ID",
+            "required": true,
+            "schema": {
+              "maxLength": 160,
+              "minLength": 1,
+              "title": "X-Dwp-Auth-Session-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-User-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Dwp-User-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Tenant-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Dwp-Tenant-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Correlation-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Correlation-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Roles",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Roles"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Permissions",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Permissions"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Person-Public-ID",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 36,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Person-Public-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Display-Name-B64",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 400,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Display-Name-B64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RoutineAdvancedCommandListEnvelope"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Routine Advanced Commands",
+        "tags": [
+          "personal-routines"
+        ]
+      },
+      "post": {
+        "operationId": "create_routine_advanced_command_v1_routines__routine_id__advanced_commands_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "routine_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Routine Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Auth-Session-ID",
+            "required": true,
+            "schema": {
+              "maxLength": 160,
+              "minLength": 1,
+              "title": "X-Dwp-Auth-Session-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-User-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Dwp-User-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Tenant-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Dwp-Tenant-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Correlation-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Correlation-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Roles",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Roles"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Permissions",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Permissions"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Person-Public-ID",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 36,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Person-Public-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Display-Name-B64",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 400,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Display-Name-B64"
+            }
+          },
+          {
+            "description": "Required for product-authorization rollout states 110/111. The gateway rejects a missing or stale value before the state-changing request reaches the Agent owner service; rollout states 000/100 ignore it.",
+            "in": "header",
+            "name": "X-DWP-Expected-Decision-Revision",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Expected-Decision-Revision"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateRoutineAdvancedCommandRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RoutineAdvancedCommandEnvelope"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Routine Advanced Command",
+        "tags": [
+          "personal-routines"
+        ]
+      }
+    },
+    "/v1/routines/{routine_id}/advanced-commands/{command_id}": {
+      "get": {
+        "operationId": "get_routine_advanced_command_v1_routines__routine_id__advanced_commands__command_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "routine_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Routine Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "command_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Command Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Auth-Session-ID",
+            "required": true,
+            "schema": {
+              "maxLength": 160,
+              "minLength": 1,
+              "title": "X-Dwp-Auth-Session-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-User-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Dwp-User-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Tenant-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Dwp-Tenant-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Correlation-ID",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "X-Correlation-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Roles",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Roles"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Permissions",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Permissions"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Person-Public-ID",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 36,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Person-Public-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Display-Name-B64",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 400,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Display-Name-B64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RoutineAdvancedCommandEnvelope"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Routine Advanced Command",
         "tags": [
           "personal-routines"
         ]

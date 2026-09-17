@@ -151,14 +151,6 @@ class PersonalRoutineExecutionCommands(PersonalRoutineExecutionQueries):
             now = connection.execute(
                 "SELECT CURRENT_TIMESTAMP AS now"
             ).fetchone()["now"]
-            self._require_monthly_run_budget(
-                connection,
-                identity.tenant_id,
-                identity.user_id,
-                routine_id,
-                definition.budget.maximum_runs_per_month,
-                now,
-            )
             run_id = uuid4()
             connection.execute(
                 """INSERT INTO ai_personal_routine_executions (
@@ -176,6 +168,15 @@ class PersonalRoutineExecutionCommands(PersonalRoutineExecutionQueries):
                     definition.retry_policy.maximum_attempts,
                     identity.correlation_id,
                 ),
+            )
+            self._require_monthly_run_budget(
+                connection,
+                run_id,
+                identity.tenant_id,
+                identity.user_id,
+                routine_id,
+                definition.budget.maximum_runs_per_month,
+                now,
             )
             self._execution_event(
                 connection,
@@ -269,11 +270,24 @@ class PersonalRoutineExecutionCommands(PersonalRoutineExecutionQueries):
             action = request.action
             current = row["run_state"]
             compensation_requested = False
+            recovery_requested = False
             if action == RoutineRunCommand.RETRY:
                 if current not in {"PARTIAL", "FAILED"}:
                     raise GovernedDomainConflict("Only a failed or partial run can retry.")
                 target = "QUEUED"
                 event_type = "RUN_RETRY_REQUESTED"
+            elif action == RoutineRunCommand.SKIP_QUARANTINED_AND_CONTINUE:
+                if current != "PARTIAL":
+                    raise GovernedDomainConflict(
+                        "Only a partial run can continue without quarantined records."
+                    )
+                if not row["provider_receipt_envelope"]:
+                    raise GovernedDomainConflict(
+                        "Continuing a partial run requires verified provider evidence."
+                    )
+                target = "QUEUED"
+                event_type = "RUN_SKIP_QUARANTINED_REQUESTED"
+                recovery_requested = True
             elif action == RoutineRunCommand.CANCEL:
                 if current not in {
                     "QUEUED",
@@ -301,6 +315,29 @@ class PersonalRoutineExecutionCommands(PersonalRoutineExecutionQueries):
                 target = "QUEUED"
                 event_type = "RUN_COMPENSATION_REQUESTED"
                 compensation_requested = True
+            if recovery_requested:
+                recovery_action = action.value
+                recovery_command_id = request.command_id
+                recovery_decision_envelope = self.codec.encrypt_json(
+                    {
+                        "commandId": str(request.command_id),
+                        "reasonCode": request.reason_code,
+                        "changeReason": request.change_reason,
+                        "requestFingerprint": proof.request_fingerprint,
+                    },
+                    tenant_id=identity.tenant_id,
+                    resource_type="personal-routine-execution",
+                    resource_id=str(run_id),
+                    field="recovery-decision",
+                )
+            elif action == RoutineRunCommand.RETRY:
+                recovery_action = None
+                recovery_command_id = None
+                recovery_decision_envelope = None
+            else:
+                recovery_action = row["recovery_action"]
+                recovery_command_id = row["recovery_command_id"]
+                recovery_decision_envelope = row["recovery_decision_envelope"]
             version = int(row["version"]) + 1
             terminal = target == "CANCELLED"
             connection.execute(
@@ -310,6 +347,8 @@ class PersonalRoutineExecutionCommands(PersonalRoutineExecutionQueries):
                           attempt_count = CASE WHEN %s THEN 0 ELSE attempt_count END,
                           lease_token = NULL, lease_expires_at = NULL,
                           compensation_requested = %s,
+                          recovery_action = %s, recovery_command_id = %s,
+                          recovery_decision_envelope = %s,
                           safe_error_code = NULL, recovery_hint = NULL,
                           receipt_id = NULL, receipt_fingerprint = NULL,
                           provider_receipt_envelope = CASE
@@ -324,8 +363,11 @@ class PersonalRoutineExecutionCommands(PersonalRoutineExecutionQueries):
                     terminal,
                     target == "QUEUED",
                     compensation_requested,
-                    compensation_requested,
-                    compensation_requested,
+                    recovery_action,
+                    recovery_command_id,
+                    recovery_decision_envelope,
+                    compensation_requested or recovery_requested,
+                    compensation_requested or recovery_requested,
                     terminal,
                     run_id,
                     identity.tenant_id,

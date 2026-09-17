@@ -1,5 +1,4 @@
 from __future__ import annotations
-
 import hashlib
 from datetime import datetime
 from enum import StrEnum
@@ -8,10 +7,13 @@ from uuid import UUID
 from pydantic import Field, JsonValue, field_validator, model_validator
 
 from .contract_model import ContractModel
-from .admin_model_routing_contracts import (
-    LatestRoutingSimulation,
-    ModelRouteSimulationInput,
-    RoutingRule,
+from .ai_control_contracts import EnforcementActivationState
+from .admin_control_plane_audit_contracts import GovernedCommandEvidenceInput
+from .admin_evaluation_contracts import EvaluationComparisonSummary
+from .admin_model_routing_contracts import LatestRoutingSimulation, ModelRouteSimulationInput, RoutingRule
+from .admin_control_plane_validation import (
+    normalize_command_preflight, normalize_governed_review,
+    normalize_worker_completion, validate_special_admin_command,
 )
 class CapabilityStatus(StrEnum):
     AVAILABLE = "AVAILABLE"
@@ -127,15 +129,6 @@ class EvaluationDatasetSummary(ContractModel):
     pii_state: str = Field(pattern=r"^(PENDING|PASS|REVIEW|BLOCKED)$")
     checksum_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     updated_at: datetime
-class EvaluationComparisonSummary(ContractModel):
-    comparison_id: str
-    baseline_label: str
-    candidate_label: str
-    state: str = Field(pattern=r"^(QUEUED|RUNNING|PARTIAL|COMPLETED|FAILED)$")
-    pass_rate: float | None = Field(default=None, ge=0, le=100)
-    regression_count: int | None = Field(default=None, ge=0)
-    evaluator_failure_count: int | None = Field(default=None, ge=0)
-    created_at: datetime
 class DriftSignal(ContractModel):
     signal_id: str
     label: str
@@ -219,10 +212,11 @@ class ImprovementBacklogItem(ContractModel):
 class TokenBudgetSummary(ContractModel):
     scope: str
     consumed_tokens: int = Field(ge=0)
-    budget_tokens: int = Field(gt=0)
+    budget_tokens: int | None = Field(default=None, gt=0)
     projected_tokens: int | None = Field(default=None, ge=0)
     spike_detected: bool
     policy_mode: str = Field(pattern=r"^(WARN|THROTTLE|BLOCK)$")
+    enforcement_activation_state: EnforcementActivationState
     version: int = Field(ge=1)
 class OutcomesSnapshot(ContractModel):
     generated_at: datetime
@@ -326,11 +320,11 @@ class CommandPreflight(ContractModel):
 
     @model_validator(mode="after")
     def verify_recovery_hash(self) -> "CommandPreflight":
+        self.impact_scopes, self.recovery_plan = normalize_command_preflight(
+            self.changes, self.impact_scopes, self.recovery_plan)
         observed = hashlib.sha256(self.recovery_plan.encode("utf-8")).hexdigest()
         if observed != self.recovery_plan_hash:
             raise ValueError("recoveryPlanHash does not match recoveryPlan.")
-        if len(set(self.impact_scopes)) != len(self.impact_scopes):
-            raise ValueError("impactScopes must be unique.")
         return self
 class CreateGovernedCommandRequest(ContractModel):
     command_id: UUID
@@ -346,10 +340,10 @@ class CreateGovernedCommandRequest(ContractModel):
 
     @model_validator(mode="after")
     def acknowledged(self) -> "CreateGovernedCommandRequest":
+        self.reason, self.evidence_refs, self.ticket_ref = normalize_governed_review(
+            self.reason, self.evidence_refs, self.ticket_ref)
         if not self.impact_acknowledged:
             raise ValueError("impactAcknowledged must be true.")
-        if len(set(self.evidence_refs)) != len(self.evidence_refs):
-            raise ValueError("evidenceRefs must be unique.")
         if (
             self.kind == GovernedCommandKind.EMERGENCY_RECOVERY
             and self.payload.get("requireIndependentSecondFactor") is not True
@@ -357,6 +351,10 @@ class CreateGovernedCommandRequest(ContractModel):
             raise ValueError("Emergency recovery requires an independent second factor.")
         if self.kind == GovernedCommandKind.MODEL_ROUTE_SIMULATE:
             ModelRouteSimulationInput.model_validate(self.payload)
+        validate_special_admin_command(
+            kind=self.kind.value, target_type=self.target.type, target_id=self.target.id,
+            expected_version=self.expected_version, payload=self.payload,
+        )
         return self
 class CommandReview(ContractModel):
     reason: str
@@ -400,28 +398,29 @@ class GovernedCommand(ContractModel):
     problem: CommandProblem | None = None
     version: int = Field(ge=1)
     decision: CommandDecision | None = None
-class GovernedCommandDecisionRequest(ContractModel):
+class GovernedCommandDecisionRequest(GovernedCommandEvidenceInput):
     command_id: UUID
     decision: str = Field(pattern=r"^(APPROVE|REJECT)$")
     expected_version: int = Field(ge=1)
-    reason: str = Field(min_length=5, max_length=2_000)
-    evidence_refs: list[str] = Field(max_length=100)
-class GovernedCommandTransitionRequest(ContractModel):
+class GovernedCommandTransitionRequest(GovernedCommandEvidenceInput):
     command_id: UUID
     expected_version: int = Field(ge=1)
-    reason: str = Field(min_length=5, max_length=2_000)
-    evidence_refs: list[str] = Field(max_length=100)
 class GovernedCommandRestartRequest(GovernedCommandTransitionRequest):
     pass
 class GovernedCommandObservation(ContractModel):
     command_id: UUID
+    attempt_id: UUID | None = None
     expected_version: int = Field(ge=1)
+    tenant_id: int | None = Field(default=None, ge=1)
+    correlation_id: str | None = Field(default=None, min_length=1, max_length=160)
     state: GovernedCommandState
     progress_percent: float | None = Field(default=None, ge=0, le=100)
     result_summary: str | None = Field(default=None, max_length=2_000)
     domain_receipt_ref: str | None = Field(default=None, max_length=500)
+    rollback_ref: str | None = Field(default=None, max_length=500)
     result_snapshot: dict[str, JsonValue] | None = None
     result_version: int | None = Field(default=None, ge=1)
+    result_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     problem: CommandProblem | None = None
 
     @model_validator(mode="after")
@@ -430,11 +429,22 @@ class GovernedCommandObservation(ContractModel):
             GovernedCommandState.SUCCEEDED,
             GovernedCommandState.ROLLED_BACK,
         }
-        if terminal_success and not (
-            self.result_summary and self.domain_receipt_ref
-            and self.result_snapshot is not None and self.result_version is not None
+        if terminal_success:
+            (self.correlation_id, self.result_summary, self.domain_receipt_ref) = (
+                normalize_worker_completion(
+                    tenant_id=self.tenant_id, attempt_id=self.attempt_id,
+                    correlation_id=self.correlation_id,
+                    summary=self.result_summary, receipt_ref=self.domain_receipt_ref,
+                    snapshot=self.result_snapshot, result_version=self.result_version,
+                    result_sha256=self.result_sha256,
+                )
+            )
+        if self.state == GovernedCommandState.ROLLED_BACK and not (
+            self.rollback_ref and self.rollback_ref.strip()
         ):
-            raise ValueError("Successful worker observations require a domain receipt and versioned result snapshot.")
+            raise ValueError("A rollback worker observation must link the receipt it reverses.")
+        if self.rollback_ref:
+            self.rollback_ref = self.rollback_ref.strip()
         if self.state in {GovernedCommandState.PARTIAL, GovernedCommandState.FAILED} and self.problem is None:
             raise ValueError("Incomplete worker observations require a safe problem.")
         if self.state not in {
@@ -444,6 +454,32 @@ class GovernedCommandObservation(ContractModel):
         }:
             raise ValueError("The worker cannot report this command state.")
         return self
+class AdminCommandCapability(ContractModel):
+    kind: GovernedCommandKind
+    family: str = Field(pattern=r"^A0[1-6]$")
+    execution_mode: str = Field(pattern=r"^(INTERNAL|EXTERNAL_ADAPTER)$")
+    status: CapabilityStatus
+    configured: bool
+    reason: str | None = Field(default=None, max_length=500)
+    recovery_hint: str | None = Field(default=None, max_length=500)
+class AdminCommandCapabilitiesSnapshot(ContractModel):
+    generated_at: datetime
+    worker_available: bool
+    commands: list[AdminCommandCapability]
+
+    @model_validator(mode="after")
+    def exhaustive(self) -> "AdminCommandCapabilitiesSnapshot":
+        observed = [entry.kind for entry in self.commands]
+        if len(observed) != len(set(observed)) or set(observed) != set(GovernedCommandKind):
+            raise ValueError("Admin command capabilities must cover every governed command kind once.")
+        return self
+
+
+class AdminCommandCapabilitiesEnvelope(ContractModel):
+    status: str = "SUCCESS"
+    message: str = "DWAI-ON admin command capabilities loaded."
+    success: bool = True
+    data: AdminCommandCapabilitiesSnapshot
 class GovernedCommandEnvelope(ContractModel):
     status: str = "SUCCESS"
     message: str = "DWAI-ON governed command loaded."

@@ -13,6 +13,7 @@ from .contract_model import ContractModel
 
 class BudgetEnforcementMode(StrEnum):
     ALERT_ONLY = "ALERT_ONLY"
+    THROTTLED = "THROTTLED"
     ENFORCED = "ENFORCED"
 
 
@@ -109,9 +110,12 @@ class TenantAIExecutionPolicy(ContractModel):
         routes = {(route.provider, route.model, route.region) for route in self.allowed_model_routes}
         if len(routes) != len(self.allowed_model_routes):
             raise ValueError("Allowed model routes must be unique.")
-        if self.budget_enforcement_mode == BudgetEnforcementMode.ENFORCED:
+        if self.budget_enforcement_mode in {
+            BudgetEnforcementMode.THROTTLED,
+            BudgetEnforcementMode.ENFORCED,
+        }:
             if self.period_token_limit is None:
-                raise ValueError("Enforced budgets require a period token limit.")
+                raise ValueError("Throttled and enforced budgets require a period token limit.")
         if self.evaluation_gate_status == EvaluationGateStatus.PASSED:
             if self.evaluation_observed_at is None or self.evaluation_policy_version is None:
                 raise ValueError("A passed evaluation gate requires versioned observation evidence.")

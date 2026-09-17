@@ -8,6 +8,8 @@ from .personal_routine_contracts import RoutineCapabilities
 from .personal_routine_execution_provider import (
     RoutineExecutionProviderConfiguration,
 )
+from .personal_routine_advanced_contracts import RoutineAdvancedCommandKind
+from .personal_routine_advanced_provider import routine_advanced_capability
 
 
 def routine_runtime_capabilities() -> RoutineCapabilities:
@@ -68,56 +70,30 @@ def routine_runtime_capabilities() -> RoutineCapabilities:
             reason_code=None if available else "ROUTINE_RUNTIME_GOVERNANCE_UNAVAILABLE",
             recovery_hint=None if available else hint,
         ),
-        automatic_quarantine=_unsupported(
-            "ROUTINE_AUTOMATIC_QUARANTINE_NOT_CONFIGURED",
-            "Configure an attested quarantine policy and operator recovery workflow.",
+        automatic_quarantine=_supported(
+            "The governed worker atomically pauses and versions the exact routine revision "
+            "when its bounded retry policy is exhausted."
         ),
-        change_approval=_unsupported(
-            "ROUTINE_CHANGE_APPROVAL_NOT_CONFIGURED",
-            "Configure an independent maker-checker provider for routine definition changes.",
+        change_approval=routine_advanced_capability(
+            RoutineAdvancedCommandKind.CHANGE_APPROVAL
         ),
-        agent_switching=_unsupported(
-            "ROUTINE_AGENT_SWITCHING_NOT_CONFIGURED",
-            "Configure an approved agent registry before switching the routine execution kernel.",
+        agent_switching=routine_advanced_capability(
+            RoutineAdvancedCommandKind.AGENT_ENGINE_SWITCH
         ),
-        worm_delivery=_unsupported(
-            "ROUTINE_WORM_DELIVERY_NOT_CONFIGURED",
-            "Configure an immutable artifact retention provider before enabling WORM delivery.",
+        worm_delivery=routine_advanced_capability(
+            RoutineAdvancedCommandKind.WORM_EVIDENCE_DELIVERY
         ),
-        oauth_reauthorization=WorkflowCapability(
-            available=False,
-            configured=False,
-            reason_code="ROUTINE_OAUTH_REAUTHORIZATION_NOT_CONFIGURED",
-            recovery_hint=(
-                "Configure a governed OAuth reauthorization provider before requesting "
-                "credential recovery."
-            ),
+        oauth_reauthorization=routine_advanced_capability(
+            RoutineAdvancedCommandKind.OAUTH_REAUTHORIZATION
         ),
-        temporary_budget_increase=WorkflowCapability(
-            available=False,
-            configured=False,
-            reason_code="ROUTINE_TEMPORARY_BUDGET_PROVIDER_NOT_CONFIGURED",
-            recovery_hint=(
-                "Configure a maker-checker budget exception provider before requesting "
-                "a temporary limit increase."
-            ),
+        temporary_budget_increase=routine_advanced_capability(
+            RoutineAdvancedCommandKind.TEMPORARY_BUDGET_INCREASE
         ),
-        operator_escalation=WorkflowCapability(
-            available=False,
-            configured=False,
-            reason_code="ROUTINE_OPERATOR_ESCALATION_NOT_CONFIGURED",
-            recovery_hint=(
-                "Configure the governed operator escalation queue before escalating a run."
-            ),
+        operator_escalation=routine_advanced_capability(
+            RoutineAdvancedCommandKind.OPERATOR_ESCALATION
         ),
-        provider_rollback=WorkflowCapability(
-            available=False,
-            configured=False,
-            reason_code="ROUTINE_PROVIDER_ROLLBACK_NOT_CONFIGURED",
-            recovery_hint=(
-                "Configure an attested provider rollback adapter before restoring an "
-                "external side effect."
-            ),
+        provider_rollback=routine_advanced_capability(
+            RoutineAdvancedCommandKind.PROVIDER_ROLLBACK
         ),
         execution_provider_state=state,
         recovery_hint=hint,
@@ -130,13 +106,4 @@ def _supported(evidence: str) -> WorkflowCapability:
         configured=True,
         reason_code=None,
         recovery_hint=evidence,
-    )
-
-
-def _unsupported(reason_code: str, recovery_hint: str) -> WorkflowCapability:
-    return WorkflowCapability(
-        available=False,
-        configured=False,
-        reason_code=reason_code,
-        recovery_hint=recovery_hint,
     )

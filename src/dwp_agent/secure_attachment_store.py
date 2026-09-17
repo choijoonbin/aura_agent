@@ -16,11 +16,9 @@ from .dwaion_workflow_contracts import (
     AttachmentStageKey,
     AttachmentStageState,
     AttachmentState,
-    AttachmentWorkerObservation,
-    CompleteAttachmentUploadRequest,
     CreateAttachmentRequest,
-    DeleteAttachmentRequest,
     SecureAttachment,
+    WorkflowCapability,
 )
 from .dwaion_workflow_errors import (
     DwaionWorkflowConflict,
@@ -28,34 +26,104 @@ from .dwaion_workflow_errors import (
     DwaionWorkflowUnavailable,
 )
 from .governed_domain_core import GovernedFingerprints, GovernedPayloadCodec, advisory_lock
+from .governed_worker_runtime import governed_worker_available
 from .personal_domain_security import PersonalDomainIdentity
 from .secure_attachment_provider import (
     AttachmentProviderUnavailable,
     SecureAttachmentProvider,
 )
+from .secure_attachment_deletion import SecureAttachmentDeletionCommands
+from .secure_attachment_actions import SecureAttachmentGovernedActions
+from .secure_attachment_logic import (
+    derive_attachment_state,
+    initial_attachment_stages,
+    matches_attachment_create,
+    safe_attachment_error,
+)
+from .secure_attachment_pipeline import (
+    ATTACHMENT_PIPELINE_TOPIC,
+    SecureAttachmentPipelineCommands,
+)
+from .attachment_audit_signing import (
+    AttachmentAuditSigningProvider,
+    EnvironmentAttachmentAuditSigningProvider,
+)
+from .transactional_outbox import enqueue_internal_intent
 
 
-class SecureAttachmentStore:
+class SecureAttachmentStore(
+    SecureAttachmentPipelineCommands,
+    SecureAttachmentDeletionCommands,
+    SecureAttachmentGovernedActions,
+):
     def __init__(
         self,
         database_url: str,
         provider: SecureAttachmentProvider | None = None,
+        audit_signer: AttachmentAuditSigningProvider | None = None,
     ) -> None:
         self.database_url = database_url
         self.provider = provider or SecureAttachmentProvider()
+        self.audit_signer = audit_signer or EnvironmentAttachmentAuditSigningProvider()
         try:
             self.codec = GovernedPayloadCodec()
             self.fingerprints = GovernedFingerprints.load()
         except Exception as error:
             raise DwaionWorkflowUnavailable("Attachment encryption is unavailable.") from error
 
-    def capabilities(self) -> AttachmentCapabilities:
-        return self.provider.capabilities()
+    def capabilities(
+        self, identity: PersonalDomainIdentity | None = None
+    ) -> AttachmentCapabilities:
+        capabilities = self.provider.capabilities()
+        if not governed_worker_available("SECURE_ATTACHMENT_PIPELINE"):
+            worker_configured = (
+                os.getenv("DWP_GOVERNED_WORKERS_ENABLED", "false")
+                .strip()
+                .lower()
+                == "true"
+            )
+            unavailable = WorkflowCapability(
+                available=False,
+                configured=worker_configured,
+                reason_code=(
+                    "ATTACHMENT_PIPELINE_WORKER_UNAVAILABLE"
+                    if worker_configured
+                    else "ATTACHMENT_PIPELINE_WORKER_NOT_CONFIGURED"
+                ),
+                recovery_hint=(
+                    "Restore the governed secure attachment pipeline worker."
+                    if worker_configured
+                    else "Enable the governed worker runtime before uploading attachments."
+                ),
+            )
+            capabilities = capabilities.model_copy(
+                update={
+                    name: unavailable
+                    for name in ("antivirus", "dlp", "parser", "ocr", "index")
+                    if getattr(capabilities, name).available
+                }
+            )
+        signing = (
+            self.audit_signer.capability(identity.tenant_id)
+            if identity is not None
+            else WorkflowCapability(
+                available=False,
+                configured=False,
+                reason_code="ATTACHMENT_AUDIT_SIGNING_IDENTITY_REQUIRED",
+                recovery_hint="Resolve the tenant identity before checking signing capability.",
+            )
+        )
+        return capabilities.model_copy(
+            update={
+                "detach_all": WorkflowCapability(available=True, configured=True),
+                "signed_audit_report": signing,
+            }
+        )
 
     def create(
         self, identity: PersonalDomainIdentity, request: CreateAttachmentRequest
     ) -> SecureAttachment:
-        capabilities = self.capabilities()
+        capabilities = self.capabilities(identity)
         if request.media_type.lower() not in capabilities.allowed_media_types:
             raise DwaionWorkflowConflict("ATTACHMENT_MEDIA_TYPE_BLOCKED")
         if request.size_bytes > capabilities.maximum_file_bytes:
@@ -64,7 +132,7 @@ class SecureAttachmentStore:
             "fileName": request.file_name,
             "mediaType": request.media_type.lower(),
         }
-        stages = _initial_stages(capabilities, request.media_type.lower())
+        stages = initial_attachment_stages(capabilities, request.media_type.lower())
         initial_state = (
             AttachmentState.UPLOADING
             if capabilities.upload.available
@@ -80,7 +148,7 @@ class SecureAttachmentStore:
                 ).fetchone()
                 if existing is not None:
                     current = self._record(existing, capabilities)
-                    if not _same_create(current, request):
+                    if not matches_attachment_create(current, request):
                         raise DwaionWorkflowConflict("The attachment command ID is already in use.")
                     return current
                 envelope = self.codec.encrypt_json(
@@ -139,7 +207,7 @@ class SecureAttachmentStore:
             return self.get(identity, attachment_id)
 
     def list(self, identity: PersonalDomainIdentity) -> list[SecureAttachment]:
-        capabilities = self.capabilities()
+        capabilities = self.capabilities(identity)
         try:
             with connect(self.database_url, row_factory=dict_row) as connection:
                 rows = connection.execute(
@@ -151,7 +219,7 @@ class SecureAttachmentStore:
             raise DwaionWorkflowUnavailable("Attachment storage is unavailable.") from error
 
     def get(self, identity: PersonalDomainIdentity, attachment_id: UUID) -> SecureAttachment:
-        capabilities = self.capabilities()
+        capabilities = self.capabilities(identity)
         try:
             with connect(self.database_url, row_factory=dict_row) as connection:
                 row = connection.execute(
@@ -189,6 +257,9 @@ class SecureAttachmentStore:
             return AttachmentEvidence(
                 attachment_id=attachment.attachment_id,
                 source_sha256=attachment.source_sha256,
+                deletion_attempt_count=attachment.deletion_attempt_count,
+                deletion_last_error_code=attachment.deletion_last_error_code,
+                deletion_receipt_id=attachment.deletion_receipt_id,
                 stages=attachment.stages,
                 citations=attachment.citations,
                 inspection_log=events,
@@ -197,91 +268,6 @@ class SecureAttachmentStore:
             )
         except (PsycopgError, ValueError, TypeError) as error:
             raise DwaionWorkflowUnavailable("Attachment evidence is unavailable.") from error
-
-    def complete_upload(
-        self,
-        identity: PersonalDomainIdentity,
-        attachment_id: UUID,
-        request: CompleteAttachmentUploadRequest,
-    ) -> SecureAttachment:
-        fingerprint = self._request_fingerprint(identity, "complete", request)
-        current = self.get(identity, attachment_id)
-        if current.state not in {AttachmentState.UPLOADING, AttachmentState.PARTIAL}:
-            return self._replay_or_conflict(identity, attachment_id, request.command_id, fingerprint)
-        try:
-            observed = self.provider.verify_upload(
-                attachment_id=attachment_id,
-                upload_reference=request.upload_reference,
-                correlation_id=identity.correlation_id,
-            )
-        except AttachmentProviderUnavailable as error:
-            self._transition(
-                identity, attachment_id, request.command_id, request.expected_revision,
-                AttachmentState.PARTIAL, "UPLOAD_VERIFY_PARTIAL", fingerprint,
-                safe_error_code=str(error),
-            )
-            return self.get(identity, attachment_id)
-        integrity_ok = (
-            observed.uploadReference == request.upload_reference
-            and observed.observedSizeBytes == current.size_bytes == request.observed_size_bytes
-            and observed.observedSha256 == current.source_sha256 == request.observed_sha256
-            and observed.observedMediaType.lower() == current.media_type.lower()
-        )
-        if not integrity_ok:
-            self._transition(
-                identity, attachment_id, request.command_id, request.expected_revision,
-                AttachmentState.BLOCKED, "INTEGRITY_BLOCKED", fingerprint,
-                safe_error_code="ATTACHMENT_INTEGRITY_MISMATCH",
-            )
-            return self.get(identity, attachment_id)
-        self._transition(
-            identity, attachment_id, request.command_id, request.expected_revision,
-            AttachmentState.SCANNING, "UPLOAD_VERIFIED", fingerprint,
-        )
-        return self.get(identity, attachment_id)
-
-    def observe(
-        self,
-        identity: PersonalDomainIdentity,
-        attachment_id: UUID,
-        request: AttachmentWorkerObservation,
-    ) -> SecureAttachment:
-        fingerprint = self._request_fingerprint(identity, "observe", request)
-        current = self.get(identity, attachment_id)
-        if current.revision != request.expected_revision:
-            return self._replay_or_conflict(identity, attachment_id, request.command_id, fingerprint)
-        if current.state == AttachmentState.DELETION_PENDING and request.provider_deleted:
-            state = AttachmentState.DELETED
-        else:
-            state = _derive_state(request.stages, request.citations, current.media_type)
-        self._transition(
-            identity,
-            attachment_id,
-            request.command_id,
-            request.expected_revision,
-            state,
-            "WORKER_OBSERVED",
-            fingerprint,
-            stages=request.stages,
-            citations=request.citations,
-        )
-        return self.get(identity, attachment_id)
-
-    def delete(
-        self,
-        identity: PersonalDomainIdentity,
-        attachment_id: UUID,
-        request: DeleteAttachmentRequest,
-    ) -> SecureAttachment:
-        fingerprint = self._request_fingerprint(identity, "delete", request)
-        current = self.get(identity, attachment_id)
-        if current.state == AttachmentState.DELETED:
-            return self._replay_or_conflict(identity, attachment_id, request.command_id, fingerprint)
-        self._transition(
-            identity, attachment_id, request.command_id, request.expected_revision,
-            AttachmentState.DELETION_PENDING, "DELETE_REQUESTED", fingerprint,
-        )
-        return self.get(identity, attachment_id)
 
     def _transition(
         self,
@@ -296,6 +282,7 @@ class SecureAttachmentStore:
         safe_error_code: str | None = None,
         stages: list[AttachmentStage] | None = None,
         citations: list[AttachmentCitation] | None = None,
+        pipeline_payload: dict[str, object] | None = None,
     ) -> None:
         with connect(self.database_url, row_factory=dict_row) as connection:
             row = connection.execute(
@@ -327,6 +314,22 @@ class SecureAttachmentStore:
                 (state.value, stage_envelope, citation_envelope, state.value, attachment_id),
             ).fetchone()
             self._event(connection, identity, updated, command_id, event_type, row["attachment_state"], fingerprint, safe_error_code)
+            if pipeline_payload is not None:
+                enqueue_internal_intent(
+                    connection,
+                    codec=self.codec,
+                    fingerprints=self.fingerprints,
+                    tenant_id=identity.tenant_id,
+                    user_id=identity.user_id,
+                    topic=ATTACHMENT_PIPELINE_TOPIC,
+                    aggregate_type="SECURE_ATTACHMENT_PIPELINE",
+                    aggregate_id=str(attachment_id),
+                    payload={
+                        **pipeline_payload,
+                        "attachmentRevision": int(updated["revision"]),
+                    },
+                    retention_until=updated["retention_expires_at"],
+                )
 
     def _replay_or_conflict(self, identity: PersonalDomainIdentity, attachment_id: UUID, command_id: UUID, fingerprint: str) -> SecureAttachment:
         with connect(self.database_url, row_factory=dict_row) as connection:
@@ -354,15 +357,42 @@ class SecureAttachmentStore:
             )
             if row["citation_manifest_envelope"] else {"items": []}
         )
+        deletion_receipt = (
+            self.codec.decrypt_json(
+                row["deletion_receipt_envelope"], tenant_id=row["tenant_id"],
+                resource_type="secure-attachment", resource_id=str(row["attachment_id"]),
+                field="deletion-receipt",
+            )
+            if row["deletion_receipt_envelope"] else None
+        )
+        stored_state = AttachmentState(row["attachment_state"])
+        derived_state = derive_attachment_state(
+            [AttachmentStage.model_validate(item) for item in stages["items"]],
+            [AttachmentCitation.model_validate(item) for item in citations["items"]],
+            descriptor["mediaType"],
+        )
+        projected_state = (
+            derived_state
+            if stored_state == AttachmentState.READY
+            and derived_state != AttachmentState.READY
+            else stored_state
+        )
         return SecureAttachment(
             attachment_id=row["attachment_id"], conversation_id=row["conversation_id"],
             file_name=descriptor["fileName"], media_type=descriptor["mediaType"],
             size_bytes=row["size_bytes"], source_sha256=row["source_sha256"],
-            revision=row["revision"], state=row["attachment_state"],
+            revision=row["revision"], state=projected_state,
             stages=[AttachmentStage.model_validate(item) for item in stages["items"]],
             citations=[AttachmentCitation.model_validate(item) for item in citations["items"]],
             retention_expires_at=row["retention_expires_at"], capabilities=capabilities,
             created_at=row["created_at"], updated_at=row["updated_at"], deleted_at=row["deleted_at"],
+            deletion_attempt_count=row["deletion_attempt_count"],
+            deletion_last_error_code=row["deletion_last_error_code"],
+            deletion_receipt_id=(
+                str(deletion_receipt["providerReceiptId"])
+                if deletion_receipt and deletion_receipt.get("providerReceiptId")
+                else None
+            ),
         )
 
     def _stage_envelope(self, identity: PersonalDomainIdentity, attachment_id: UUID, stages: list[AttachmentStage]) -> str:
@@ -403,7 +433,7 @@ class SecureAttachmentStore:
             "UPLOAD_PROVIDER_UNAVAILABLE", self.fingerprints.value(
                 tenant_id=identity.tenant_id, purpose="secure-attachment:provider-failure",
                 payload={"attachmentId": str(attachment_id), "code": code},
-            ), safe_error_code=_safe_error(code),
+            ), safe_error_code=safe_attachment_error(code),
         )
 
     @staticmethod
@@ -418,58 +448,6 @@ class SecureAttachmentStore:
              identity.user_id, identity.correlation_id, command_id, event_type,
              previous, row["attachment_state"], row["revision"], fingerprint, safe_error_code),
         )
-
-
-def _initial_stages(capabilities: AttachmentCapabilities, media_type: str) -> list[AttachmentStage]:
-    mapping = (
-        (AttachmentStageKey.UPLOAD, capabilities.upload, True),
-        (AttachmentStageKey.AV, capabilities.antivirus, True),
-        (AttachmentStageKey.DLP, capabilities.dlp, True),
-        (AttachmentStageKey.PARSER, capabilities.parser, True),
-        (AttachmentStageKey.OCR, capabilities.ocr, media_type.startswith("image/")),
-        (AttachmentStageKey.INDEX, capabilities.index, True),
-    )
-    return [
-        AttachmentStage(
-            key=key,
-            state=(AttachmentStageState.PENDING if capability.available else AttachmentStageState.NOT_CONFIGURED)
-            if required else AttachmentStageState.NOT_REQUIRED,
-            safe_error_code=None if capability.available or not required else capability.reason_code,
-            recovery_hint=None if capability.available or not required else capability.recovery_hint,
-        )
-        for key, capability, required in mapping
-    ]
-
-
-def _derive_state(stages: list[AttachmentStage], citations: list[AttachmentCitation], media_type: str) -> AttachmentState:
-    values = {stage.key: stage.state for stage in stages}
-    required = {AttachmentStageKey.UPLOAD, AttachmentStageKey.AV, AttachmentStageKey.DLP, AttachmentStageKey.PARSER, AttachmentStageKey.INDEX}
-    if media_type.startswith("image/"):
-        required.add(AttachmentStageKey.OCR)
-    if any(values.get(key) == AttachmentStageState.BLOCKED for key in required):
-        return AttachmentState.BLOCKED
-    if any(values.get(key) == AttachmentStageState.FAILED for key in required):
-        return AttachmentState.FAILED
-    if any(values.get(key) == AttachmentStageState.NOT_CONFIGURED for key in required):
-        return AttachmentState.PARTIAL
-    if all(values.get(key) == AttachmentStageState.PASSED for key in required):
-        return AttachmentState.READY if citations else AttachmentState.PARTIAL
-    return AttachmentState.SCANNING
-
-
-def _same_create(current: SecureAttachment, request: CreateAttachmentRequest) -> bool:
-    return (
-        current.conversation_id == request.conversation_id
-        and current.file_name == request.file_name
-        and current.media_type == request.media_type.lower()
-        and current.size_bytes == request.size_bytes
-        and current.source_sha256 == request.source_sha256
-    )
-
-
-def _safe_error(value: str) -> str:
-    candidate = value.strip().upper().replace(" ", "_")
-    return candidate if candidate and all(ch.isalnum() or ch in "_.-" for ch in candidate) else "ATTACHMENT_PROVIDER_UNAVAILABLE"
 
 
 @lru_cache(maxsize=1)

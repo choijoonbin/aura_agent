@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import threading
 from collections.abc import Callable
@@ -18,6 +19,10 @@ from .workspace_authorization import WorkspaceRequestAuthorization
 
 
 T = TypeVar("T")
+
+
+def encode_sse_event(event: str, payload: dict[str, object]) -> str:
+    return f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
 
 class AskStreamPool:

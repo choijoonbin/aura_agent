@@ -29,6 +29,7 @@ class RoutineCadence(StrEnum):
     DAILY = "DAILY"
     WEEKDAYS = "WEEKDAYS"
     WEEKLY = "WEEKLY"
+    MONTHLY = "MONTHLY"
 
 
 class RoutineTriggerType(StrEnum):
@@ -92,6 +93,11 @@ class RoutineRunCommand(StrEnum):
     RETRY = "RETRY"
     CANCEL = "CANCEL"
     COMPENSATE = "COMPENSATE"
+    SKIP_QUARANTINED_AND_CONTINUE = "SKIP_QUARANTINED_AND_CONTINUE"
+
+
+class RoutineRecoveryAction(StrEnum):
+    SKIP_QUARANTINED_AND_CONTINUE = "SKIP_QUARANTINED_AND_CONTINUE"
 
 
 class RoutineNotificationState(StrEnum):
@@ -144,6 +150,7 @@ class RoutineDefinition(ContractModel):
     locale: str = Field(pattern=r"^[a-z]{2}(?:-[A-Z]{2})?$")
     sources: list[RoutineSource] = Field(min_length=1, max_length=3)
     week_days: list[int] = Field(default_factory=list, max_length=7)
+    month_day: int | None = Field(default=None, ge=1, le=28)
     active_from: date | None = None
     active_until: date | None = None
     quiet_hours_start: str | None = Field(
@@ -203,6 +210,7 @@ class RoutineDefinition(ContractModel):
             ) or self.week_days or any(
                 value is not None
                 for value in (
+                    self.month_day,
                     self.active_from,
                     self.active_until,
                     self.quiet_hours_start,
@@ -216,6 +224,10 @@ class RoutineDefinition(ContractModel):
             raise ValueError("A weekly routine requires at least one weekDay.")
         if self.cadence != RoutineCadence.WEEKLY and self.week_days:
             raise ValueError("weekDays can only be set for a weekly routine.")
+        if self.cadence == RoutineCadence.MONTHLY and self.month_day is None:
+            raise ValueError("A monthly routine requires monthDay.")
+        if self.cadence != RoutineCadence.MONTHLY and self.month_day is not None:
+            raise ValueError("monthDay can only be set for a monthly routine.")
         if self.active_from and self.active_until and self.active_until < self.active_from:
             raise ValueError("activeUntil cannot precede activeFrom.")
         if (self.quiet_hours_start is None) != (self.quiet_hours_end is None):
@@ -358,6 +370,8 @@ class RoutineExecutionReceipt(ContractModel):
     notification_state: RoutineNotificationState
     authorization_decision_revision: int = Field(ge=1)
     authorized_sources: list[RoutineSource] = Field(min_length=1, max_length=3)
+    recovery_action: RoutineRecoveryAction | None = None
+    recovery_command_id: UUID | None = None
     completed_at: datetime
 
     @model_validator(mode="after")
@@ -369,6 +383,8 @@ class RoutineExecutionReceipt(ContractModel):
             raise ValueError("A routine receipt requires a completed terminal state.")
         if self.external_writes_performed != 0:
             raise ValueError("Routine execution can only create approval-gated actions.")
+        if (self.recovery_action is None) != (self.recovery_command_id is None):
+            raise ValueError("Recovery action evidence must include its command ID.")
         return self
 
 
@@ -396,6 +412,8 @@ class RoutineExecutionRun(ContractModel):
     )
     recovery_hint: str | None = Field(default=None, max_length=1_000)
     compensation_required: bool = False
+    recovery_action: RoutineRecoveryAction | None = None
+    recovery_command_id: UUID | None = None
     receipt: RoutineExecutionReceipt | None = None
     created_at: datetime
     updated_at: datetime
@@ -418,6 +436,8 @@ class RoutineExecutionRun(ContractModel):
             RoutineRunState.COMPENSATED,
         }:
             raise ValueError("A success receipt cannot be attached before completion.")
+        if (self.recovery_action is None) != (self.recovery_command_id is None):
+            raise ValueError("Recovery action evidence must include its command ID.")
         return self
 
 

@@ -130,12 +130,14 @@ class MemoryAIControlStore:
             raise AIControlDenied("AI_RUNTIME_EMERGENCY_DISABLED")
         current = self.usages[tenant_id]
         if (
-            tenant_policy.budget_enforcement_mode == BudgetEnforcementMode.ENFORCED
-            and tenant_policy.period_token_limit is not None
+            tenant_policy.period_token_limit is not None
             and current.measured_total_tokens + current.reserved_tokens + requested_tokens
             > tenant_policy.period_token_limit
         ):
-            raise AIControlDenied("AI_TOKEN_BUDGET_HARD_LIMIT")
+            if tenant_policy.budget_enforcement_mode == BudgetEnforcementMode.THROTTLED:
+                raise AIControlDenied("AI_TOKEN_BUDGET_THROTTLED")
+            if tenant_policy.budget_enforcement_mode == BudgetEnforcementMode.ENFORCED:
+                raise AIControlDenied("AI_TOKEN_BUDGET_HARD_LIMIT")
         reservation = AIUsageReservation(
             reservation_id=uuid4(), tenant_id=tenant_id, run_id=run_id,
             attempt_generation=attempt_generation,
@@ -348,6 +350,21 @@ def test_alert_only_budget_warns_but_enforced_budget_blocks_before_model() -> No
     with pytest.raises(AIControlDenied, match="AI_TOKEN_BUDGET_HARD_LIMIT"):
         enforced.reserve(
             plan=enforced_plan, run_id=str(uuid4()), attempt_generation=1,
+            input_token_ceiling=100, now=NOW,
+        )
+
+    throttled_store = MemoryAIControlStore({
+        "1": policy(budget_mode=BudgetEnforcementMode.THROTTLED, token_limit=300),
+    })
+    throttled_store.usages["1"] = usage(total=100)
+    throttled = AIRuntimeControl(throttled_store)
+    throttled_plan = throttled.preflight(
+        tenant_id="1", provider="OPENAI", model="gpt-tenant-allowed",
+        knowledge_sources=("WORK_ITEM",), now=NOW,
+    )
+    with pytest.raises(AIControlDenied, match="AI_TOKEN_BUDGET_THROTTLED"):
+        throttled.reserve(
+            plan=throttled_plan, run_id=str(uuid4()), attempt_generation=1,
             input_token_ceiling=100, now=NOW,
         )
 

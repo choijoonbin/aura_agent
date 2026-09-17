@@ -2,44 +2,37 @@ from __future__ import annotations
 
 import os
 from hmac import compare_digest
-from typing import Annotated, Callable, TypeVar
+from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Body, Depends, Header, HTTPException, Request, Response, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
 
-from .attachment_evidence_contracts import AttachmentEvidenceEnvelope
+from .attachment_stage_contracts import AttachmentWorkerObservation
+
+from .dwaion_workflow_api_support import (
+    prevent_response_storage as _no_store,
+    require_research_access as _research_access,
+    run_workflow as _run,
+)
 from .dwaion_workflow_contracts import (
-    AttachmentCapabilitiesEnvelope,
     AttachmentEnvelope,
-    AttachmentListEnvelope,
-    AttachmentWorkerObservation,
-    CompleteAttachmentUploadRequest,
-    CreateAttachmentRequest,
     CreateProposalHandoffRequest,
     CreateResearchDeliveryRequest,
     CreateResearchPlanRequest,
-    DeleteAttachmentRequest,
     ExecuteResearchRunRequest,
     ProposalHandoffEnvelope,
     ProposalHandoffObservation,
     ResearchDeliveryEnvelope,
     ResearchDeliveryListEnvelope,
-    ResearchDeliveryObservation,
     ResearchDeliveryType,
     ResearchCapabilities,
     ResearchCapabilitiesEnvelope,
     ResearchPlanEnvelope,
     ResearchRunCommandRequest,
     ResearchRunEnvelope,
-    ResearchWorkerObservation,
     StartResearchRunRequest,
     UpdateResearchPlanRequest,
     WorkflowCapability,
-)
-from .dwaion_workflow_errors import (
-    DwaionWorkflowConflict,
-    DwaionWorkflowNotFound,
-    DwaionWorkflowUnavailable,
 )
 from .governance_contracts import ActionExecutionPolicy
 from .governance_store import GovernanceStoreUnavailable, get_governance_store
@@ -53,11 +46,23 @@ from .proposal_handoff_store import (
     get_proposal_handoff_store,
     require_accepted_proposal,
 )
+from .proposal_handoff_draft_contracts import (
+    ProposalHandoffDraftEnvelope,
+    SaveProposalHandoffDraftRequest,
+)
+from .proposal_handoff_draft_store import get_proposal_handoff_draft_store
 from .research_delivery_store import get_research_delivery_store
+from .research_delivery_capabilities import research_delivery_capabilities
+from .research_recovery_contracts import (
+    ResearchRecoveryCommandRequest,
+    ResearchRecoveryReceiptEnvelope,
+)
+from .research_recovery_store import get_research_recovery_store
 from .research_plan_store import get_research_plan_store
 from .research_executor import ResearchExecutor
 from .research_run_store import get_research_run_store
 from .secure_attachment_store import get_secure_attachment_store
+from .secure_attachment_api import router as secure_attachment_router
 from .workspace_authorization import resolve_workspace_request_authorization
 from .workplace_actions import (
     WorkplaceActionForbidden,
@@ -69,7 +74,7 @@ from .workplace_actions import (
 
 
 router = APIRouter(dependencies=personal_domain_dependencies)
-T = TypeVar("T")
+router.include_router(secure_attachment_router)
 
 
 @router.post(
@@ -148,95 +153,45 @@ def get_handoff(
 
 
 @router.get(
-    "/v1/attachments/capabilities",
-    response_model=AttachmentCapabilitiesEnvelope,
-    tags=["attachments"],
+    "/v1/proposal-handoffs/{handoff_id}/drafts/current",
+    response_model=ProposalHandoffDraftEnvelope,
+    tags=["proposals"],
 )
-def attachment_capabilities(
+def get_proposal_handoff_draft(
+    handoff_id: UUID,
     identity: Annotated[PersonalDomainIdentity, Depends(require_personal_domain_identity)],
     response: Response,
-) -> AttachmentCapabilitiesEnvelope:
-    _attachment_access(identity, write=False)
+) -> ProposalHandoffDraftEnvelope:
+    identity.require("APP.ASK:VIEW")
     _no_store(response)
-    return AttachmentCapabilitiesEnvelope(data=_run(get_secure_attachment_store().capabilities))
-
-
-@router.get("/v1/attachments", response_model=AttachmentListEnvelope, tags=["attachments"])
-def list_attachments(
-    identity: Annotated[PersonalDomainIdentity, Depends(require_personal_domain_identity)],
-    response: Response,
-) -> AttachmentListEnvelope:
-    _attachment_access(identity, write=False)
-    _no_store(response)
-    return AttachmentListEnvelope(data=_run(lambda: get_secure_attachment_store().list(identity)))
-
-
-@router.post(
-    "/v1/attachments",
-    status_code=status.HTTP_201_CREATED,
-    response_model=AttachmentEnvelope,
-    tags=["attachments"],
-)
-def create_attachment(
-    request: CreateAttachmentRequest,
-    identity: Annotated[PersonalDomainIdentity, Depends(require_personal_domain_identity)],
-    response: Response,
-) -> AttachmentEnvelope:
-    _attachment_access(identity, write=True)
-    _no_store(response)
-    return AttachmentEnvelope(data=_run(lambda: get_secure_attachment_store().create(identity, request)))
-
-
-@router.get("/v1/attachments/{attachment_id}", response_model=AttachmentEnvelope, tags=["attachments"])
-def get_attachment(
-    attachment_id: UUID,
-    identity: Annotated[PersonalDomainIdentity, Depends(require_personal_domain_identity)],
-    response: Response,
-) -> AttachmentEnvelope:
-    _attachment_access(identity, write=False)
-    _no_store(response)
-    return AttachmentEnvelope(data=_run(lambda: get_secure_attachment_store().get(identity, attachment_id)))
-
-
-@router.get(
-    "/v1/attachments/{attachment_id}/evidence",
-    response_model=AttachmentEvidenceEnvelope,
-    tags=["attachments"],
-)
-def get_attachment_evidence(
-    attachment_id: UUID,
-    identity: Annotated[PersonalDomainIdentity, Depends(require_personal_domain_identity)],
-    response: Response,
-) -> AttachmentEvidenceEnvelope:
-    _attachment_access(identity, write=False)
-    _no_store(response)
-    return AttachmentEvidenceEnvelope(
-        data=_run(lambda: get_secure_attachment_store().evidence(identity, attachment_id))
+    return ProposalHandoffDraftEnvelope(
+        data=_run(
+            lambda: get_proposal_handoff_draft_store().current(identity, handoff_id)
+        )
     )
 
 
-@router.post("/v1/attachments/{attachment_id}/complete", response_model=AttachmentEnvelope, tags=["attachments"])
-def complete_attachment(
-    attachment_id: UUID,
-    request: CompleteAttachmentUploadRequest,
+@router.put(
+    "/v1/proposal-handoffs/{handoff_id}/drafts/current",
+    response_model=ProposalHandoffDraftEnvelope,
+    tags=["proposals"],
+)
+def save_proposal_handoff_draft(
+    handoff_id: UUID,
+    request: SaveProposalHandoffDraftRequest,
     identity: Annotated[PersonalDomainIdentity, Depends(require_personal_domain_identity)],
     response: Response,
-) -> AttachmentEnvelope:
-    _attachment_access(identity, write=True)
+) -> ProposalHandoffDraftEnvelope:
+    identity.require("APP.ASK:VIEW")
     _no_store(response)
-    return AttachmentEnvelope(data=_run(lambda: get_secure_attachment_store().complete_upload(identity, attachment_id, request)))
-
-
-@router.delete("/v1/attachments/{attachment_id}", response_model=AttachmentEnvelope, tags=["attachments"])
-def delete_attachment(
-    attachment_id: UUID,
-    request: Annotated[DeleteAttachmentRequest, Body()],
-    identity: Annotated[PersonalDomainIdentity, Depends(require_personal_domain_identity)],
-    response: Response,
-) -> AttachmentEnvelope:
-    _attachment_access(identity, write=True)
-    _no_store(response)
-    return AttachmentEnvelope(data=_run(lambda: get_secure_attachment_store().delete(identity, attachment_id, request)))
+    return ProposalHandoffDraftEnvelope(
+        message="Proposal handoff draft saved.",
+        data=_run(
+            lambda: get_proposal_handoff_draft_store().save(
+                identity, handoff_id, request
+            )
+        ),
+    )
 
 
 @router.post("/v1/research/plans", status_code=201, response_model=ResearchPlanEnvelope, tags=["research"])
@@ -258,20 +213,19 @@ def research_capabilities(
     _research_access(identity, write=False)
     _no_store(response)
     available = WorkflowCapability(available=True, configured=True)
-    def unavailable(code: str, hint: str) -> WorkflowCapability:
-        return WorkflowCapability(
-            available=False, configured=False, reason_code=code, recovery_hint=hint,
-        )
     return ResearchCapabilitiesEnvelope(data=ResearchCapabilities(
         raw_export=available,
-        pdf_export=unavailable("RESEARCH_PDF_EXPORT_NOT_CONFIGURED", "Configure the governed research export renderer."),
+        pdf_export=available,
         receipt_download=available,
         audit_download=available,
-        fork=unavailable("RESEARCH_FORK_NOT_CONFIGURED", "Configure the governed research branch worker."),
-        merge=unavailable("RESEARCH_MERGE_NOT_CONFIGURED", "Configure the governed research merge worker."),
-        keep_local=unavailable("RESEARCH_KEEP_LOCAL_NOT_CONFIGURED", "Configure the governed research conflict resolver."),
-        sensitivity_recalculation=unavailable("RESEARCH_SENSITIVITY_NOT_CONFIGURED", "Configure the governed sensitivity classifier."),
-        cache_fallback=unavailable("RESEARCH_CACHE_FALLBACK_NOT_CONFIGURED", "Configure an attested research cache provider."),
+        fork=available,
+        merge=available,
+        keep_local=available,
+        sensitivity_recalculation=available,
+        cache_fallback=available,
+        delivery=research_delivery_capabilities(
+            os.getenv("DWP_AGENT_DATABASE_URL", "").strip(), identity
+        ),
     ))
 
 
@@ -304,10 +258,32 @@ def get_research_run(run_id: UUID, identity: Annotated[PersonalDomainIdentity, D
 
 
 @router.post("/v1/research/runs/{run_id}/commands", response_model=ResearchRunEnvelope, tags=["research"])
-def command_research_run(run_id: UUID, request: ResearchRunCommandRequest, identity: Annotated[PersonalDomainIdentity, Depends(require_personal_domain_identity)], response: Response) -> ResearchRunEnvelope:
+def command_research_run(run_id: UUID, request: ResearchRunCommandRequest, http_request: Request, identity: Annotated[PersonalDomainIdentity, Depends(require_personal_domain_identity)], response: Response) -> ResearchRunEnvelope:
     _research_access(identity, write=True)
     _no_store(response)
-    return ResearchRunEnvelope(data=_run(lambda: get_research_run_store().command(identity, run_id, request)))
+    return ResearchRunEnvelope(data=_run(lambda: get_research_run_store().command(
+        identity, run_id, request, resolve_workspace_request_authorization(http_request)
+    )))
+
+
+@router.post(
+    "/v1/research/runs/{run_id}/recovery-actions",
+    response_model=ResearchRecoveryReceiptEnvelope,
+    tags=["research"],
+)
+def recover_research_run(
+    run_id: UUID,
+    request: ResearchRecoveryCommandRequest,
+    identity: Annotated[PersonalDomainIdentity, Depends(require_personal_domain_identity)],
+    response: Response,
+) -> ResearchRecoveryReceiptEnvelope:
+    _research_access(identity, write=True)
+    _no_store(response)
+    return ResearchRecoveryReceiptEnvelope(
+        data=_run(
+            lambda: get_research_recovery_store().execute(identity, run_id, request)
+        )
+    )
 
 
 @router.post("/v1/research/runs/{run_id}/execute", response_model=ResearchRunEnvelope, tags=["research"])
@@ -369,16 +345,6 @@ for _type, _suffix in (
     _delivery_route(_type, _suffix)
 
 
-def _attachment_access(identity: PersonalDomainIdentity, *, write: bool) -> None:
-    identity.require("APP.ASK:VIEW")
-    identity.require("APP.DWAION_ATTACHMENTS:MANAGE" if write else "APP.DWAION_ATTACHMENTS:VIEW")
-
-
-def _research_access(identity: PersonalDomainIdentity, *, write: bool) -> None:
-    identity.require("APP.ASK:VIEW")
-    identity.require("APP.DWAION_RESEARCH:MANAGE" if write else "APP.DWAION_RESEARCH:VIEW")
-
-
 def _require_action_policy(identity: PersonalDomainIdentity, action_key: str) -> None:
     try:
         policy = next(
@@ -395,21 +361,6 @@ def _require_action_policy(identity: PersonalDomainIdentity, action_key: str) ->
         raise HTTPException(status_code=503, detail=str(error)) from error
     if policy is None or not policy.enabled or policy.execution_policy == ActionExecutionPolicy.BLOCKED:
         raise HTTPException(status_code=403, detail="The proposal action is disabled by DWAI-ON governance.")
-
-
-def _run(operation: Callable[[], T]) -> T:
-    try:
-        return operation()
-    except DwaionWorkflowNotFound as error:
-        raise HTTPException(status_code=404, detail=str(error)) from error
-    except DwaionWorkflowConflict as error:
-        raise HTTPException(status_code=409, detail=str(error)) from error
-    except DwaionWorkflowUnavailable as error:
-        raise HTTPException(status_code=503, detail=str(error)) from error
-
-
-def _no_store(response: Response) -> None:
-    response.headers["Cache-Control"] = "no-store"
 
 
 def require_workflow_worker(
@@ -439,13 +390,3 @@ def observe_handoff(handoff_id: UUID, request: ProposalHandoffObservation, ident
 @internal_router.post("/attachments/{attachment_id}/observations", response_model=AttachmentEnvelope)
 def observe_attachment(attachment_id: UUID, request: AttachmentWorkerObservation, identity: Annotated[PersonalDomainIdentity, Depends(require_personal_domain_identity)]) -> AttachmentEnvelope:
     return AttachmentEnvelope(data=_run(lambda: get_secure_attachment_store().observe(identity, attachment_id, request)))
-
-
-@internal_router.post("/research/runs/{run_id}/observations", response_model=ResearchRunEnvelope)
-def observe_research_run(run_id: UUID, request: ResearchWorkerObservation, identity: Annotated[PersonalDomainIdentity, Depends(require_personal_domain_identity)]) -> ResearchRunEnvelope:
-    return ResearchRunEnvelope(data=_run(lambda: get_research_run_store().observe(identity, run_id, request)))
-
-
-@internal_router.post("/research/runs/{run_id}/deliveries/{delivery_id}/observations", response_model=ResearchDeliveryEnvelope)
-def observe_research_delivery(run_id: UUID, delivery_id: UUID, request: ResearchDeliveryObservation, identity: Annotated[PersonalDomainIdentity, Depends(require_personal_domain_identity)]) -> ResearchDeliveryEnvelope:
-    return ResearchDeliveryEnvelope(data=_run(lambda: get_research_delivery_store().observe(identity, run_id, delivery_id, request)))

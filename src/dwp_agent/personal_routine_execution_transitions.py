@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-from uuid import UUID, uuid4
+from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 from psycopg import connect
 from psycopg.rows import dict_row
 
 from .personal_routine_contracts import RoutineDefinition
+from .personal_routine_capabilities import routine_runtime_capabilities
 from .personal_routine_execution_provider import RoutineExecutionProviderUnavailable
 
 
@@ -28,18 +29,25 @@ class PersonalRoutineExecutionTransitions:
         recovery_hint: str | None,
         authorization_decision_revision: int,
         authorized_sources: list[str],
+        runtime_controls: dict[str, object] | None = None,
     ) -> None:
         with connect(self.database_url, row_factory=dict_row) as connection:
             now = connection.execute(
                 "SELECT CURRENT_TIMESTAMP AS now"
             ).fetchone()["now"]
             receipt_id = uuid4() if state in {"COMPLETED", "COMPENSATED"} else None
+            provider_evidence: dict[str, object] = {
+                "providerReceiptId": provider_receipt_id,
+                "authorizationDecisionRevision": authorization_decision_revision,
+                "authorizedSources": authorized_sources,
+            }
+            if lease.recovery_action is not None:
+                provider_evidence["recoveryAction"] = lease.recovery_action
+                provider_evidence["recoveryCommandId"] = str(lease.recovery_command_id)
+            if runtime_controls is not None:
+                provider_evidence["runtimeControls"] = runtime_controls
             envelope = self.codec.encrypt_json(
-                {
-                    "providerReceiptId": provider_receipt_id,
-                    "authorizationDecisionRevision": authorization_decision_revision,
-                    "authorizedSources": authorized_sources,
-                },
+                provider_evidence,
                 tenant_id=lease.tenant_id,
                 resource_type="personal-routine-execution",
                 resource_id=str(lease.routine_run_id),
@@ -64,7 +72,20 @@ class PersonalRoutineExecutionTransitions:
                         "notificationState": notification_state,
                         "authorizationDecisionRevision": authorization_decision_revision,
                         "authorizedSources": authorized_sources,
+                        **(
+                            {"runtimeControls": runtime_controls}
+                            if runtime_controls is not None
+                            else {}
+                        ),
                         "completedAt": now.isoformat(),
+                        **(
+                            {
+                                "recoveryAction": lease.recovery_action,
+                                "recoveryCommandId": str(lease.recovery_command_id),
+                            }
+                            if lease.recovery_action is not None
+                            else {}
+                        ),
                     },
                 )
             row = connection.execute(
@@ -182,6 +203,17 @@ class PersonalRoutineExecutionTransitions:
                 generation=row["lease_generation"],
                 safe_error_code=safe_error_code,
             )
+            if exhausted:
+                self._auto_quarantine(
+                    connection,
+                    routine_run_id=lease.routine_run_id,
+                    routine_id=lease.routine_id,
+                    tenant_id=lease.tenant_id,
+                    user_id=lease.user_id,
+                    routine_revision=lease.routine_revision,
+                    correlation_id=lease.correlation_id,
+                    safe_error_code=safe_error_code,
+                )
 
     def _transition_claimed(self, lease: RoutineExecutionLease, target: str) -> bool:
         with connect(self.database_url, row_factory=dict_row) as connection:
@@ -221,18 +253,28 @@ class PersonalRoutineExecutionTransitions:
     def _fail_exhausted_leases(self) -> None:
         with connect(self.database_url, row_factory=dict_row) as connection:
             rows = connection.execute(
-                """UPDATE ai_personal_routine_executions
+                """WITH exhausted AS (
+                       SELECT routine_run_id, run_state AS previous_state
+                         FROM ai_personal_routine_executions
+                        WHERE run_state IN ('CLAIMED', 'RUNNING', 'COMPENSATING')
+                          AND lease_expires_at <= CURRENT_TIMESTAMP
+                          AND attempt_count >= maximum_attempts
+                        FOR UPDATE SKIP LOCKED
+                   )
+                   UPDATE ai_personal_routine_executions AS execution
                       SET run_state = 'FAILED', version = version + 1,
                           lease_token = NULL, lease_expires_at = NULL,
                           safe_error_code = 'ROUTINE_EXECUTION_LEASE_EXHAUSTED',
                           recovery_hint = 'Review the interrupted run and retry it explicitly.',
                           completed_at = CURRENT_TIMESTAMP,
                           updated_at = CURRENT_TIMESTAMP
-                    WHERE run_state IN ('CLAIMED', 'RUNNING', 'COMPENSATING')
-                      AND lease_expires_at <= CURRENT_TIMESTAMP
-                      AND attempt_count >= maximum_attempts
-                    RETURNING routine_run_id, routine_id, tenant_id, user_id,
-                              version, attempt_count, lease_generation"""
+                     FROM exhausted
+                    WHERE execution.routine_run_id = exhausted.routine_run_id
+                    RETURNING execution.routine_run_id, execution.routine_id,
+                              execution.tenant_id, execution.user_id,
+                              execution.routine_revision, execution.correlation_id,
+                              execution.version, execution.attempt_count,
+                              execution.lease_generation, exhausted.previous_state"""
             ).fetchall()
             for row in rows:
                 self._event(
@@ -242,13 +284,152 @@ class PersonalRoutineExecutionTransitions:
                     tenant_id=row["tenant_id"],
                     user_id=row["user_id"],
                     event_type="FAILED",
-                    previous_state="RUNNING",
+                    previous_state=row["previous_state"],
                     current_state="FAILED",
                     version=row["version"],
                     attempt_count=row["attempt_count"],
                     generation=row["lease_generation"],
                     safe_error_code="ROUTINE_EXECUTION_LEASE_EXHAUSTED",
                 )
+                self._auto_quarantine(
+                    connection,
+                    routine_run_id=row["routine_run_id"],
+                    routine_id=row["routine_id"],
+                    tenant_id=int(row["tenant_id"]),
+                    user_id=row["user_id"],
+                    routine_revision=int(row["routine_revision"]),
+                    correlation_id=row["correlation_id"],
+                    safe_error_code="ROUTINE_EXECUTION_LEASE_EXHAUSTED",
+                )
+
+    def _auto_quarantine(
+        self,
+        connection,
+        *,
+        routine_run_id: UUID,
+        routine_id: UUID,
+        tenant_id: int,
+        user_id: str,
+        routine_revision: int,
+        correlation_id: str,
+        safe_error_code: str,
+    ) -> None:
+        """Pause the exact failing revision and seal one replay-safe audit snapshot."""
+        row = connection.execute(
+            """UPDATE ai_personal_routines
+                  SET lifecycle_state = 'PAUSED', execution_mode = 'DRY_RUN_ONLY',
+                      next_run_at = NULL, revision = revision + 1,
+                      updated_at = CURRENT_TIMESTAMP
+                WHERE routine_id = %s AND tenant_id = %s AND user_id = %s
+                  AND revision = %s AND lifecycle_state = 'ACTIVE'
+                RETURNING routine_id, tenant_id, user_id, lifecycle_state,
+                          consent_state, source_access_consent_state,
+                          analysis_consent_state, proposal_delivery_consent_state,
+                          execution_mode, revision, definition_envelope,
+                          next_run_at, created_at, updated_at""",
+            (routine_id, tenant_id, user_id, routine_revision),
+        ).fetchone()
+        if row is None:
+            return
+
+        command_id = uuid5(
+            NAMESPACE_URL,
+            f"dwp:routine:auto-quarantine:{tenant_id}:{routine_run_id}:{routine_revision}",
+        )
+        request_fingerprint = self.fingerprints.value(
+            tenant_id=tenant_id,
+            purpose="personal-routine-auto-quarantine",
+            payload={
+                "routineRunId": str(routine_run_id),
+                "routineId": str(routine_id),
+                "failedRevision": routine_revision,
+                "safeErrorCode": safe_error_code,
+            },
+        )
+        session_fingerprint = self.fingerprints.value(
+            tenant_id=tenant_id,
+            purpose="auth-session",
+            payload={"sessionId": "SYSTEM_ROUTINE_EXECUTION_WORKER"},
+        )
+        definition = self._definition(row)
+        capabilities = routine_runtime_capabilities()
+        snapshot = {
+            "routineId": str(routine_id),
+            "lifecycleState": row["lifecycle_state"],
+            "consentState": row["consent_state"],
+            "consents": {
+                "sourceAccess": row["source_access_consent_state"],
+                "analysis": row["analysis_consent_state"],
+                "proposalDelivery": row["proposal_delivery_consent_state"],
+            },
+            "executionMode": row["execution_mode"],
+            "revision": int(row["revision"]),
+            "definition": definition.model_dump(mode="json", by_alias=True),
+            "schedulingAvailable": False,
+            "nextRunAt": None,
+            "capabilities": capabilities.model_dump(mode="json", by_alias=True),
+            "createdAt": row["created_at"].isoformat(),
+            "updatedAt": row["updated_at"].isoformat(),
+        }
+        result_envelope = self.codec.encrypt_json(
+            snapshot,
+            tenant_id=tenant_id,
+            resource_type="personal-routine-command",
+            resource_id=str(command_id),
+            field="result",
+        )
+        connection.execute(
+            """INSERT INTO ai_personal_routine_commands (
+                   tenant_id, user_id, command_id, routine_id, command_type,
+                   session_fingerprint, request_fingerprint, result_envelope)
+               VALUES (%s, %s, %s, %s, 'AUTO_QUARANTINE', %s, %s, %s)
+               ON CONFLICT (tenant_id, user_id, command_id) DO NOTHING""",
+            (
+                tenant_id,
+                user_id,
+                command_id,
+                routine_id,
+                session_fingerprint,
+                request_fingerprint,
+                result_envelope,
+            ),
+        )
+        event_id = uuid4()
+        change_reason_envelope = self.codec.encrypt_json(
+            {
+                "changeReason": (
+                    "The governed routine worker quarantined the failing revision after "
+                    "its bounded retry policy was exhausted."
+                ),
+                "routineRunId": str(routine_run_id),
+                "safeErrorCode": safe_error_code,
+            },
+            tenant_id=tenant_id,
+            resource_type="personal-routine-event",
+            resource_id=str(event_id),
+            field="change-reason",
+        )
+        connection.execute(
+            """INSERT INTO ai_personal_routine_events (
+                   event_id, routine_id, tenant_id, user_id, actor_user_id,
+                   correlation_id, command_id, event_type, previous_state,
+                   current_state, revision, request_fingerprint, reason_code,
+                   change_reason_envelope)
+               VALUES (%s, %s, %s, %s, 'SYSTEM_ROUTINE_EXECUTION_WORKER',
+                       %s, %s, 'AUTO_QUARANTINED', 'ACTIVE', 'PAUSED',
+                       %s, %s, 'ROUTINE_RETRY_POLICY_EXHAUSTED', %s)""",
+            (
+                event_id,
+                routine_id,
+                tenant_id,
+                user_id,
+                correlation_id,
+                command_id,
+                row["revision"],
+                request_fingerprint,
+                change_reason_envelope,
+            ),
+        )
 
     def _load_definition(self, lease: RoutineExecutionLease) -> RoutineDefinition:
         with connect(self.database_url, row_factory=dict_row) as connection:

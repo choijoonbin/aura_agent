@@ -43,6 +43,12 @@ class _ListStore:
         return []
 
 
+class _AdvancedStore:
+    def list_pending_for_checker(self, _identity, *, limit):
+        assert limit == 50
+        return []
+
+
 class _ArtifactStore(_ListStore):
     def __init__(self) -> None:
         self.create_calls = 0
@@ -74,6 +80,11 @@ def client(
     artifacts = _ArtifactStore()
     monkeypatch.setattr(personal_memory_api, "get_personal_memory_store", lambda: memory)
     monkeypatch.setattr(personal_routine_api, "get_personal_routine_store", lambda: _ListStore())
+    monkeypatch.setattr(
+        personal_routine_api,
+        "get_personal_routine_advanced_store",
+        lambda: _AdvancedStore(),
+    )
     monkeypatch.setattr(artifact_api, "get_artifact_store", lambda: artifacts)
     monkeypatch.setattr(domain_retention_api, "get_domain_retention_store", lambda: _RetentionStore())
     app = FastAPI()
@@ -195,6 +206,26 @@ def test_app_ask_alone_cannot_open_new_personal_domains(
 
     assert response.status_code == 403
     assert memory.calls == 0
+
+
+def test_routine_checker_queue_requires_dedicated_approve_authority(
+    client: tuple[TestClient, _MemoryStore, _ArtifactStore],
+) -> None:
+    http, _, _ = client
+    path = "/v1/routines/advanced-commands/pending-approvals"
+
+    denied = http.get(
+        path,
+        headers=_headers("APP.ASK:VIEW", "APP.DWAION_ROUTINES:MANAGE"),
+    )
+    allowed = http.get(
+        path,
+        headers=_headers("APP.ASK:VIEW", "APP.DWAION_ROUTINES:APPROVE"),
+    )
+
+    assert denied.status_code == 403
+    assert allowed.status_code == 200
+    assert allowed.json()["data"] == []
 
 
 def test_runtime_personalization_requires_manage_permission_and_explicit_command(

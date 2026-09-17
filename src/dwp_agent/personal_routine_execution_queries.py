@@ -1,16 +1,16 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Any
 from uuid import UUID, uuid4
 
 from .governed_domain_core import (
-    GovernedDomainConflict,
     GovernedDomainNotFound,
     GovernedDomainUnavailable,
 )
 from .personal_domain_security import PersonalDomainIdentity
 from .personal_routine_contracts import RoutineExecutionReceipt, RoutineExecutionRun
+from .personal_routine_advanced_effects import reserve_monthly_run_budget
 
 
 class PersonalRoutineExecutionQueries:
@@ -65,6 +65,8 @@ class PersonalRoutineExecutionQueries:
                     "authorizationDecisionRevision"
                 ],
                 authorized_sources=provider["authorizedSources"],
+                recovery_action=provider.get("recoveryAction"),
+                recovery_command_id=provider.get("recoveryCommandId"),
                 completed_at=row["completed_at"],
             )
         return RoutineExecutionRun(
@@ -89,6 +91,8 @@ class PersonalRoutineExecutionQueries:
             safe_error_code=row["safe_error_code"],
             recovery_hint=row["recovery_hint"],
             compensation_required=row["compensation_required"],
+            recovery_action=row["recovery_action"],
+            recovery_command_id=row["recovery_command_id"],
             receipt=receipt,
             created_at=row["created_at"],
             updated_at=row["updated_at"],
@@ -109,7 +113,7 @@ class PersonalRoutineExecutionQueries:
 
     @staticmethod
     def _receipt_payload(row: Any, provider: dict[str, object]) -> dict[str, object]:
-        return {
+        payload = {
             "receiptId": str(row["receipt_id"]),
             "routineRunId": str(row["routine_run_id"]),
             "routineId": str(row["routine_id"]),
@@ -129,28 +133,32 @@ class PersonalRoutineExecutionQueries:
             "authorizedSources": list(provider["authorizedSources"]),
             "completedAt": row["completed_at"].isoformat(),
         }
+        if row["recovery_action"] is not None:
+            payload["recoveryAction"] = row["recovery_action"]
+            payload["recoveryCommandId"] = str(row["recovery_command_id"])
+        if "runtimeControls" in provider:
+            payload["runtimeControls"] = provider["runtimeControls"]
+        return payload
 
     @staticmethod
     def _require_monthly_run_budget(
         connection: Any,
+        routine_run_id: UUID,
         tenant_id: int,
         user_id: str,
         routine_id: UUID,
         maximum_runs: int,
         reference: datetime,
     ) -> None:
-        month = reference.astimezone(UTC).replace(
-            day=1, hour=0, minute=0, second=0, microsecond=0
+        reserve_monthly_run_budget(
+            connection,
+            routine_run_id=routine_run_id,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            routine_id=routine_id,
+            maximum_runs=maximum_runs,
+            reference=reference,
         )
-        row = connection.execute(
-            """SELECT COUNT(*) AS count
-                 FROM ai_personal_routine_executions
-                WHERE tenant_id = %s AND user_id = %s AND routine_id = %s
-                  AND created_at >= %s""",
-            (tenant_id, user_id, routine_id, month),
-        ).fetchone()
-        if int(row["count"]) >= maximum_runs:
-            raise GovernedDomainConflict("The routine monthly run budget is exhausted.")
 
     @staticmethod
     def _execution_event(
@@ -202,5 +210,6 @@ EXECUTION_SELECT = """SELECT routine_run_id, routine_id, tenant_id, user_id,
        notification_state, provider_receipt_envelope, result_sha256,
        receipt_id, receipt_fingerprint, safe_error_code, recovery_hint,
        compensation_required, compensation_requested, created_at, updated_at,
+       recovery_action, recovery_command_id, recovery_decision_envelope,
        started_at, completed_at
   FROM ai_personal_routine_executions"""

@@ -19,11 +19,17 @@ from .governed_worker_runtime import (
     remove_governed_worker_heartbeat,
 )
 from .personal_routine_contracts import RoutineDefinition
+from .personal_routine_advanced_effects import (
+    load_routine_runtime_policy,
+    reserve_monthly_run_budget,
+)
 from .personal_routine_execution_transitions import PersonalRoutineExecutionTransitions
 from .personal_routine_execution_provider import (
     RoutineExecutionProvider,
     RoutineExecutionProviderUnavailable,
+    RoutineExecutionRuntimeControls,
 )
+from .personal_routine_recovery import load_routine_recovery_directive
 from .personal_routine_schedule import preview_next_run
 
 
@@ -44,6 +50,8 @@ class RoutineExecutionLease:
     maximum_attempts: int
     correlation_id: str
     compensation_requested: bool
+    recovery_action: str | None = None
+    recovery_command_id: UUID | None = None
 
 
 class PostgresPersonalRoutineExecutionWorker(PersonalRoutineExecutionTransitions):
@@ -73,7 +81,8 @@ class PostgresPersonalRoutineExecutionWorker(PersonalRoutineExecutionTransitions
         with connect(self.database_url, row_factory=dict_row) as connection:
             row = connection.execute(
                 """SELECT routine_id, tenant_id, user_id, revision,
-                          definition_envelope, next_run_at
+                          definition_envelope, next_run_at,
+                          CURRENT_TIMESTAMP AS evaluated_at
                      FROM ai_personal_routines
                     WHERE lifecycle_state = 'ACTIVE'
                       AND execution_mode = 'SCHEDULED'
@@ -85,64 +94,46 @@ class PostgresPersonalRoutineExecutionWorker(PersonalRoutineExecutionTransitions
                 return False
             definition = self._definition(row)
             scheduled_for = row["next_run_at"]
-            count = connection.execute(
-                """SELECT COUNT(*) AS count
-                     FROM ai_personal_routine_executions
-                    WHERE tenant_id = %s AND user_id = %s AND routine_id = %s
-                      AND created_at >= date_trunc('month', CURRENT_TIMESTAMP)""",
-                (row["tenant_id"], row["user_id"], row["routine_id"]),
-            ).fetchone()["count"]
             run_id = uuid4()
             correlation_id = f"routine-scheduler:{run_id}"
-            budget_exhausted = int(count) >= definition.budget.maximum_runs_per_month
-            if budget_exhausted:
-                connection.execute(
-                    """INSERT INTO ai_personal_routine_executions (
-                           routine_run_id, routine_id, tenant_id, user_id,
-                           routine_revision, trigger_type, run_state, scheduled_for,
-                           maximum_attempts, correlation_id, safe_error_code,
-                           recovery_hint, completed_at)
-                       VALUES (%s, %s, %s, %s, %s, 'SCHEDULED', 'FAILED', %s,
-                               %s, %s, 'ROUTINE_MONTHLY_BUDGET_EXHAUSTED',
-                               'Increase the approved monthly budget or wait for the next budget window.',
-                               CURRENT_TIMESTAMP)
-                       ON CONFLICT (routine_id, routine_revision, scheduled_for, trigger_type)
-                       DO NOTHING""",
-                    (
-                        run_id,
-                        row["routine_id"],
-                        row["tenant_id"],
-                        row["user_id"],
-                        row["revision"],
-                        scheduled_for,
-                        definition.retry_policy.maximum_attempts,
-                        correlation_id,
-                    ),
-                )
-                current_state = "FAILED"
-                safe_error = "ROUTINE_MONTHLY_BUDGET_EXHAUSTED"
-            else:
-                connection.execute(
-                    """INSERT INTO ai_personal_routine_executions (
-                           routine_run_id, routine_id, tenant_id, user_id,
-                           routine_revision, trigger_type, scheduled_for,
-                           maximum_attempts, correlation_id)
-                       VALUES (%s, %s, %s, %s, %s, 'SCHEDULED', %s, %s, %s)
-                       ON CONFLICT (routine_id, routine_revision, scheduled_for, trigger_type)
-                       DO NOTHING""",
-                    (
-                        run_id,
-                        row["routine_id"],
-                        row["tenant_id"],
-                        row["user_id"],
-                        row["revision"],
-                        scheduled_for,
-                        definition.retry_policy.maximum_attempts,
-                        correlation_id,
-                    ),
-                )
-                current_state = "QUEUED"
-                safe_error = None
+            created = connection.execute(
+                """INSERT INTO ai_personal_routine_executions (
+                       routine_run_id, routine_id, tenant_id, user_id,
+                       routine_revision, trigger_type, scheduled_for,
+                       maximum_attempts, correlation_id)
+                   VALUES (%s, %s, %s, %s, %s, 'SCHEDULED', %s, %s, %s)
+                   ON CONFLICT (routine_id, routine_revision, scheduled_for, trigger_type)
+                   DO NOTHING RETURNING routine_run_id""",
+                (
+                    run_id, row["routine_id"], row["tenant_id"], row["user_id"],
+                    row["revision"], scheduled_for,
+                    definition.retry_policy.maximum_attempts, correlation_id,
+                ),
+            ).fetchone()
+            current_state = "QUEUED"
+            safe_error = None
+            if created is not None:
+                try:
+                    reserve_monthly_run_budget(
+                        connection, routine_run_id=run_id,
+                        tenant_id=row["tenant_id"], user_id=row["user_id"],
+                        routine_id=row["routine_id"],
+                        maximum_runs=definition.budget.maximum_runs_per_month,
+                        reference=row["evaluated_at"],
+                    )
+                except GovernedDomainConflict:
+                    current_state = "FAILED"
+                    safe_error = "ROUTINE_MONTHLY_BUDGET_EXHAUSTED"
+                    connection.execute(
+                        """UPDATE ai_personal_routine_executions
+                              SET run_state = 'FAILED', safe_error_code = %s,
+                                  recovery_hint = %s, completed_at = CURRENT_TIMESTAMP,
+                                  updated_at = CURRENT_TIMESTAMP
+                            WHERE routine_run_id = %s""",
+                        (safe_error,
+                         "Increase the approved monthly budget or wait for the next budget window.",
+                         run_id),
+                    )
             inserted = connection.execute(
                 """SELECT routine_run_id, run_state, version, attempt_count,
                           lease_generation, safe_error_code
@@ -196,7 +187,8 @@ class PostgresPersonalRoutineExecutionWorker(PersonalRoutineExecutionTransitions
                 """SELECT routine_run_id, routine_id, tenant_id, user_id,
                           routine_revision, run_state, version, attempt_count,
                           maximum_attempts, lease_generation, correlation_id,
-                          compensation_requested
+                          compensation_requested, recovery_action,
+                          recovery_command_id
                      FROM ai_personal_routine_executions
                     WHERE (
                         (run_state IN ('QUEUED', 'RETRY_SCHEDULED')
@@ -254,6 +246,8 @@ class PostgresPersonalRoutineExecutionWorker(PersonalRoutineExecutionTransitions
                 maximum_attempts=int(row["maximum_attempts"]),
                 correlation_id=row["correlation_id"],
                 compensation_requested=bool(row["compensation_requested"]),
+                recovery_action=row["recovery_action"],
+                recovery_command_id=row["recovery_command_id"],
             )
 
     def _process(self, lease: RoutineExecutionLease) -> None:
@@ -276,7 +270,26 @@ class PostgresPersonalRoutineExecutionWorker(PersonalRoutineExecutionTransitions
             self._retry_or_fail(lease, "ROUTINE_EXECUTION_INTERNAL_ERROR")
 
     def _execute(self, lease: RoutineExecutionLease) -> None:
-        definition = self._load_definition(lease)
+        with connect(self.database_url, row_factory=dict_row) as connection:
+            definition = self._definition_for_run(connection, lease)
+            now = connection.execute(
+                "SELECT CURRENT_TIMESTAMP AS now"
+            ).fetchone()["now"]
+            runtime_policy = load_routine_runtime_policy(
+                connection,
+                tenant_id=lease.tenant_id,
+                user_id=lease.user_id,
+                routine_id=lease.routine_id,
+                reference=now,
+            )
+        recovery = load_routine_recovery_directive(
+            self.database_url,
+            self.codec,
+            routine_run_id=lease.routine_run_id,
+            tenant_id=lease.tenant_id,
+            recovery_action=lease.recovery_action,
+            recovery_command_id=lease.recovery_command_id,
+        )
         result = self.provider.execute(
             routine_run_id=lease.routine_run_id,
             routine_id=lease.routine_id,
@@ -285,10 +298,32 @@ class PostgresPersonalRoutineExecutionWorker(PersonalRoutineExecutionTransitions
             user_id=lease.user_id,
             correlation_id=lease.correlation_id,
             definition=definition,
+            runtime_controls=runtime_policy.provider_payload(),
+            recovery_directive=(
+                recovery.provider_payload() if recovery is not None else None
+            ),
         )
+        expected_controls = RoutineExecutionRuntimeControls.model_validate(
+            runtime_policy.provider_payload()
+        )
+        if (
+            result.routineId != lease.routine_id
+            or result.routineRevision != lease.routine_revision
+            or result.appliedRuntimeControls != expected_controls
+        ):
+            raise RoutineExecutionProviderUnavailable(
+                "ROUTINE_EXECUTION_RUNTIME_BINDING_MISMATCH"
+            )
         budget_exceeded = (
-            result.tokensUsed > definition.budget.maximum_tokens_per_run
-            or result.elapsedMs > definition.budget.maximum_minutes_per_run * 60_000
+            result.tokensUsed
+            > definition.budget.maximum_tokens_per_run
+            + runtime_policy.additional_tokens_per_run
+            or result.elapsedMs
+            > (
+                definition.budget.maximum_minutes_per_run
+                + runtime_policy.additional_minutes_per_run
+            )
+            * 60_000
         )
         notification_incomplete = (
             (definition.notification_policy.notify_on_partial or definition.notification_policy.notify_on_failure)
@@ -322,6 +357,7 @@ class PostgresPersonalRoutineExecutionWorker(PersonalRoutineExecutionTransitions
             recovery_hint=recovery_hint,
             authorization_decision_revision=result.authorizationDecisionRevision,
             authorized_sources=result.authorizedSources,
+            runtime_controls=runtime_policy.provider_payload(),
         )
 
     def _compensate(self, lease: RoutineExecutionLease) -> None:
@@ -369,11 +405,6 @@ class PostgresPersonalRoutineExecutionWorker(PersonalRoutineExecutionTransitions
             ),
             authorized_sources=list(receipt["authorizedSources"]),
         )
-
-
-
-
-
 
 class PersonalRoutineExecutionMaintenance:
     def __init__(self) -> None:

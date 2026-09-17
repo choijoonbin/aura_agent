@@ -97,7 +97,7 @@ class ArtifactCollaborationAccess:
     def _owner_artifact(self, connection, identity, artifact_id):
         row = connection.execute(
             """SELECT a.artifact_id, a.tenant_id, a.user_id, a.artifact_state,
-                      a.revision, d.content_envelope
+                      a.revision, d.content_envelope, d.content_fingerprint
                  FROM ai_artifacts a
                  JOIN ai_artifact_drafts d ON d.artifact_id = a.artifact_id
                 WHERE a.artifact_id = %s AND a.tenant_id = %s AND a.user_id = %s

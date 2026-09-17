@@ -11,6 +11,7 @@ from .artifact_collaboration_contracts import (
     CreateTeamArtifactShareRequest,
     CreateTeamArtifactWorkspaceRequest,
     DecideTeamArtifactReviewStageRequest,
+    ExecuteTeamArtifactRemediationRequest,
     ReplyTeamArtifactCommentRequest,
     ResolveTeamArtifactConflictRequest,
     ResolveTeamArtifactCommentRequest,
@@ -23,6 +24,7 @@ from .artifact_collaboration_contracts import (
     TeamArtifactCommentsEnvelope,
     TeamArtifactEditEnvelope,
     TeamArtifactPreflightEnvelope,
+    TeamArtifactRemediationEnvelope,
     TeamArtifactShareEnvelope,
     TeamArtifactWorkspaceEnvelope,
     UpdateTeamArtifactMembersRequest,
@@ -100,6 +102,27 @@ def request_team_artifact_access(
     return _run(
         lambda: TeamArtifactAccessRequestEnvelope(
             data=get_artifact_collaboration_store().request_access(
+                identity, artifact_id, request
+            )
+        )
+    )
+
+
+@router.post(
+    "/{artifact_id}/remediation-actions",
+    response_model=TeamArtifactRemediationEnvelope,
+)
+def execute_team_artifact_remediation(
+    artifact_id: UUID,
+    request: ExecuteTeamArtifactRemediationRequest,
+    identity: Annotated[PersonalDomainIdentity, Depends(require_personal_domain_identity)],
+    response: Response,
+) -> TeamArtifactRemediationEnvelope:
+    _access(identity, "UPDATE")
+    _no_store(response)
+    return _run(
+        lambda: TeamArtifactRemediationEnvelope(
+            data=get_artifact_collaboration_store().remediate(
                 identity, artifact_id, request
             )
         )

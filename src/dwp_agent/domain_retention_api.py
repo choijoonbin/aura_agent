@@ -31,6 +31,13 @@ from .personal_domain_security import (
 )
 from .governed_worker_runtime import governed_worker_available
 from .dwaion_workflow_contracts import WorkflowCapability
+from .personal_data_evidence_contracts import (
+    CreatePersonalDataEvidenceCommandRequest,
+    PersonalDataEvidenceAction,
+    PersonalDataEvidenceCommandEnvelope,
+)
+from .personal_data_evidence_provider import personal_data_evidence_capability
+from .personal_data_evidence_store import PersonalDataEvidenceStore
 
 
 router = APIRouter(
@@ -67,35 +74,43 @@ def get_personal_data_governance_capabilities(
     identity.require("APP.ASK:VIEW", "APP.DWAION_PRIVACY:VIEW")
     response.headers["Cache-Control"] = "no-store"
     execution_available = governed_worker_available("DATA_DELETION")
+    backup_capability = personal_data_evidence_capability(
+        PersonalDataEvidenceAction.BACKUP_LEDGER
+    )
     return PersonalDataGovernanceCapabilitiesEnvelope(
         data=PersonalDataGovernanceCapabilities(
             deletion_execution_available=execution_available,
             deletion_completion_claim_available=execution_available,
             active_store_physical_purge_available=execution_available,
             active_store_crypto_shred_available=False,
-            backup_destruction_log=_provider_capability(
-                False, "BACKUP_DESTRUCTION_LOG_NOT_CONFIGURED",
-                "Connect the backup retention provider and its signed destruction ledger.",
-            ),
-            sre_support=_provider_capability(
-                False, "DELETION_SRE_SUPPORT_NOT_CONFIGURED",
-                "Configure the audited SRE escalation connector.",
+            backup_disposition_available=backup_capability.available,
+            backup_destruction_log=backup_capability,
+            sre_support=personal_data_evidence_capability(
+                PersonalDataEvidenceAction.SRE_ESCALATION
             ),
             legal_hold_evidence=_provider_capability(True, None, None),
-            legal_hold_appeal=_provider_capability(
-                False, "LEGAL_HOLD_APPEAL_NOT_CONFIGURED",
-                "Configure the governed compliance appeal provider.",
+            legal_hold_appeal=personal_data_evidence_capability(
+                PersonalDataEvidenceAction.LEGAL_HOLD_APPEAL
             ),
-            signed_certificate=_provider_capability(
-                False, "SIGNED_DELETION_CERTIFICATE_NOT_CONFIGURED",
-                "Configure the tenant signing key and certificate renderer.",
+            signed_certificate=personal_data_evidence_capability(
+                PersonalDataEvidenceAction.SIGNED_CERTIFICATE
             ),
-            siem_sync=_provider_capability(
-                False, "DELETION_SIEM_SYNC_NOT_CONFIGURED",
-                "Configure the governed SIEM delivery connector.",
+            siem_sync=personal_data_evidence_capability(
+                PersonalDataEvidenceAction.SIEM_SYNC
             ),
         )
     )
+
+
+@router.get("/deletions/evidence/receipt-index.json")
+def download_personal_data_receipt_index(
+    identity: Annotated[PersonalDomainIdentity, Depends(require_personal_domain_identity)],
+) -> Response:
+    identity.require("APP.ASK:VIEW", "APP.DWAION_PRIVACY:VIEW")
+    try:
+        return _download_response(get_personal_data_evidence_store().receipt_index(identity))
+    except GovernedDomainUnavailable as error:
+        _unavailable(error)
 
 
 @admin_router.put("/retention/{domain}", response_model=RetentionPolicyEnvelope)
@@ -176,6 +191,98 @@ def list_personal_data_deletions(
         _unavailable(error)
 
 
+@router.get("/deletions/{deletion_job_id}/evidence/legal-hold.json")
+def download_personal_data_legal_hold_evidence(
+    deletion_job_id: UUID,
+    identity: Annotated[PersonalDomainIdentity, Depends(require_personal_domain_identity)],
+) -> Response:
+    identity.require("APP.ASK:VIEW", "APP.DWAION_PRIVACY:VIEW")
+    try:
+        return _download_response(
+            get_personal_data_evidence_store().legal_hold_snapshot(
+                identity, deletion_job_id
+            )
+        )
+    except GovernedDomainNotFound as error:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(error)) from error
+    except GovernedDomainUnavailable as error:
+        _unavailable(error)
+
+
+@router.post(
+    "/deletions/{deletion_job_id}/evidence-actions/{action}",
+    response_model=PersonalDataEvidenceCommandEnvelope,
+)
+def execute_personal_data_evidence_action(
+    deletion_job_id: UUID,
+    action: PersonalDataEvidenceAction,
+    request: CreatePersonalDataEvidenceCommandRequest,
+    identity: Annotated[PersonalDomainIdentity, Depends(require_personal_domain_identity)],
+    response: Response,
+) -> PersonalDataEvidenceCommandEnvelope:
+    identity.require("APP.ASK:VIEW", "APP.DWAION_PRIVACY:MANAGE")
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        return PersonalDataEvidenceCommandEnvelope(
+            data=get_personal_data_evidence_store().execute(
+                identity, deletion_job_id, action, request
+            )
+        )
+    except GovernedDomainNotFound as error:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(error)) from error
+    except GovernedDomainConflict as error:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+    except GovernedDomainUnavailable as error:
+        _unavailable(error)
+
+
+@router.get(
+    "/deletions/{deletion_job_id}/evidence-actions/{command_id}",
+    response_model=PersonalDataEvidenceCommandEnvelope,
+)
+def get_personal_data_evidence_action(
+    deletion_job_id: UUID,
+    command_id: UUID,
+    identity: Annotated[PersonalDomainIdentity, Depends(require_personal_domain_identity)],
+    response: Response,
+) -> PersonalDataEvidenceCommandEnvelope:
+    identity.require("APP.ASK:VIEW", "APP.DWAION_PRIVACY:VIEW")
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        return PersonalDataEvidenceCommandEnvelope(
+            data=get_personal_data_evidence_store().get(
+                identity, deletion_job_id, command_id
+            )
+        )
+    except GovernedDomainNotFound as error:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(error)) from error
+    except GovernedDomainUnavailable as error:
+        _unavailable(error)
+
+
+@router.get(
+    "/deletions/{deletion_job_id}/evidence-actions/{command_id}/download"
+)
+def download_personal_data_evidence_action(
+    deletion_job_id: UUID,
+    command_id: UUID,
+    identity: Annotated[PersonalDomainIdentity, Depends(require_personal_domain_identity)],
+) -> Response:
+    identity.require("APP.ASK:VIEW", "APP.DWAION_PRIVACY:VIEW")
+    try:
+        return _download_response(
+            get_personal_data_evidence_store().certificate(
+                identity, deletion_job_id, command_id
+            )
+        )
+    except GovernedDomainNotFound as error:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(error)) from error
+    except GovernedDomainConflict as error:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+    except GovernedDomainUnavailable as error:
+        _unavailable(error)
+
+
 @router.post(
     "/deletions/{deletion_job_id}/retry",
     status_code=status.HTTP_202_ACCEPTED,
@@ -210,6 +317,23 @@ def _provider_capability(
         configured=available,
         reason_code=reason_code,
         recovery_hint=recovery_hint,
+    )
+
+
+def get_personal_data_evidence_store() -> PersonalDataEvidenceStore:
+    return PersonalDataEvidenceStore(get_domain_retention_store())
+
+
+def _download_response(download: object) -> Response:
+    return Response(
+        content=download.content,
+        media_type=download.media_type,
+        headers={
+            "Cache-Control": "no-store",
+            "Content-Disposition": f'attachment; filename="{download.filename}"',
+            "X-DWP-Evidence-Fingerprint": download.fingerprint,
+            "X-DWP-Evidence-Receipt-ID": str(download.receipt_id),
+        },
     )
 
 

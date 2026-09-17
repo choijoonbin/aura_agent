@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, field_validator
 
 from .contract_model import ContractModel
 
@@ -39,3 +39,10 @@ class ModelRouteSimulationInput(ContractModel):
     estimated_tokens: int = Field(ge=1)
     modality: str = Field(min_length=1, max_length=80)
     constraints: list[str] = Field(max_length=100)
+
+    @field_validator("constraints", mode="before")
+    @classmethod
+    def normalize_constraints(cls, value: object) -> object:
+        if isinstance(value, str):
+            return [item.strip() for item in value.split(",") if item.strip()]
+        return value

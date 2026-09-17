@@ -1,6 +1,5 @@
 from __future__ import annotations
 import hashlib
-
 from datetime import datetime
 from enum import StrEnum
 from uuid import UUID
@@ -8,14 +7,26 @@ from uuid import UUID
 from pydantic import Field, JsonValue, field_validator, model_validator
 
 from .contract_model import ContractModel
+from .proposal_handoff_receipt_contracts import ProposalHandoffCompletionReceipt
+from .secure_attachment_contracts import (
+    AttachmentCapabilities,
+    AttachmentCapabilitiesEnvelope,
+    AttachmentCitation,
+    AttachmentEnvelope,
+    AttachmentListEnvelope,
+    AttachmentStage,
+    AttachmentStageKey,
+    AttachmentStageState,
+    AttachmentState,
+    AttachmentUploadTicket,
+    CompleteAttachmentUploadRequest,
+    CreateAttachmentRequest,
+    DeleteAttachmentRequest,
+    SecureAttachment,
+)
+from .workflow_capability_contracts import ResearchCapabilities, ResearchCapabilitiesEnvelope
+from .workflow_capability_contracts import ResearchDeliveryCapabilities, WorkflowCapability
 
-class WorkflowCapability(ContractModel):
-    available: bool
-    configured: bool
-    reason_code: str | None = Field(
-        default=None, pattern=r"^[A-Z][A-Z0-9_.-]{1,127}$"
-    )
-    recovery_hint: str | None = Field(default=None, max_length=500)
 
 class ProposalHandoffState(StrEnum):
     REVIEW_REQUIRED = "REVIEW_REQUIRED"
@@ -57,7 +68,7 @@ class ProposalHandoffObservation(ContractModel):
     command_id: UUID
     expected_version: int = Field(ge=1)
     state: ProposalHandoffState
-    receipt: dict[str, JsonValue] | None = None
+    receipt: ProposalHandoffCompletionReceipt | None = None
 
     @model_validator(mode="after")
     def completed_has_receipt(self) -> "ProposalHandoffObservation":
@@ -66,183 +77,6 @@ class ProposalHandoffObservation(ContractModel):
         if self.state != ProposalHandoffState.COMPLETED and self.receipt is not None:
             raise ValueError("A domain completion receipt is only accepted for COMPLETED.")
         return self
-
-class AttachmentState(StrEnum):
-    UPLOADING = "UPLOADING"
-    SCANNING = "SCANNING"
-    READY = "READY"
-    PARTIAL = "PARTIAL"
-    BLOCKED = "BLOCKED"
-    FAILED = "FAILED"
-    CANCELLED = "CANCELLED"
-    DELETION_PENDING = "DELETION_PENDING"
-    DELETED = "DELETED"
-
-class AttachmentStageKey(StrEnum):
-    UPLOAD = "UPLOAD"
-    AV = "AV"
-    DLP = "DLP"
-    PARSER = "PARSER"
-    OCR = "OCR"
-    INDEX = "INDEX"
-
-class AttachmentStageState(StrEnum):
-    PENDING = "PENDING"
-    RUNNING = "RUNNING"
-    PASSED = "PASSED"
-    BLOCKED = "BLOCKED"
-    FAILED = "FAILED"
-    NOT_REQUIRED = "NOT_REQUIRED"
-    NOT_CONFIGURED = "NOT_CONFIGURED"
-
-class AttachmentStage(ContractModel):
-    key: AttachmentStageKey
-    state: AttachmentStageState
-    provider_code: str | None = Field(default=None, max_length=80)
-    observed_at: datetime | None = None
-    safe_error_code: str | None = Field(
-        default=None, pattern=r"^[A-Z][A-Z0-9_.-]{1,127}$"
-    )
-    recovery_hint: str | None = Field(default=None, max_length=500)
-
-class AttachmentCitation(ContractModel):
-    citation_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$")
-    locator: str = Field(min_length=1, max_length=500)
-    label: str = Field(min_length=1, max_length=240)
-    content_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
-    evidence: str = Field(min_length=1, max_length=4_000)
-
-    @model_validator(mode="after")
-    def verified_content_hash(self) -> "AttachmentCitation":
-        if hashlib.sha256(self.evidence.encode("utf-8")).hexdigest() != self.content_sha256:
-            raise ValueError("Attachment citation contentSha256 does not match its evidence.")
-        return self
-
-class AttachmentCapabilities(ContractModel):
-    upload: WorkflowCapability
-    antivirus: WorkflowCapability
-    dlp: WorkflowCapability
-    parser: WorkflowCapability
-    ocr: WorkflowCapability
-    index: WorkflowCapability
-    deletion: WorkflowCapability
-    detach_all: WorkflowCapability
-    inspection_log: WorkflowCapability
-    masking_history: WorkflowCapability
-    ocr_viewer: WorkflowCapability
-    signed_audit_report: WorkflowCapability
-    maximum_file_bytes: int = Field(ge=1)
-    allowed_media_types: list[str]
-
-class AttachmentCapabilitiesEnvelope(ContractModel):
-    status: str = "SUCCESS"
-    message: str = "Secure attachment capabilities loaded."
-    success: bool = True
-    data: AttachmentCapabilities
-
-class AttachmentUploadTicket(ContractModel):
-    method: str = "PUT"
-    upload_url: str = Field(min_length=8, max_length=8_192)
-    upload_reference: str = Field(min_length=8, max_length=1_000)
-    expires_at: datetime
-
-class CreateAttachmentRequest(ContractModel):
-    command_id: UUID
-    expected_revision: int = Field(default=0, ge=0, le=0)
-    conversation_id: UUID | None = None
-    file_name: str = Field(min_length=1, max_length=255)
-    media_type: str = Field(min_length=3, max_length=120)
-    size_bytes: int = Field(ge=1, le=104_857_600)
-    source_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
-    retention_hours: int = Field(default=24, ge=1, le=720)
-
-    @field_validator("file_name")
-    @classmethod
-    def safe_file_name(cls, value: str) -> str:
-        normalized = value.strip()
-        if not normalized or any(part in normalized for part in ("/", "\\", "\x00")):
-            raise ValueError("Attachment fileName must be a leaf name.")
-        return normalized
-
-class CompleteAttachmentUploadRequest(ContractModel):
-    command_id: UUID
-    expected_revision: int = Field(ge=1)
-    upload_reference: str = Field(min_length=8, max_length=1_000)
-    observed_size_bytes: int = Field(ge=1, le=104_857_600)
-    observed_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
-
-    @field_validator("upload_reference")
-    @classmethod
-    def opaque_reference(cls, value: str) -> str:
-        normalized = value.strip()
-        if "://" in normalized or "?" in normalized or "#" in normalized:
-            raise ValueError("Upload references must be opaque provider identifiers.")
-        return normalized
-
-class DeleteAttachmentRequest(ContractModel):
-    command_id: UUID
-    expected_revision: int = Field(ge=1)
-    reason: str = Field(min_length=5, max_length=500)
-
-class AttachmentWorkerObservation(ContractModel):
-    command_id: UUID
-    expected_revision: int = Field(ge=1)
-    stages: list[AttachmentStage] = Field(min_length=1, max_length=6)
-    citations: list[AttachmentCitation] = Field(default_factory=list, max_length=2_000)
-    provider_deleted: bool = False
-
-    @model_validator(mode="after")
-    def unique_stages(self) -> "AttachmentWorkerObservation":
-        if len({stage.key for stage in self.stages}) != len(self.stages):
-            raise ValueError("Attachment stage keys must be unique.")
-        return self
-
-class SecureAttachment(ContractModel):
-    attachment_id: UUID
-    conversation_id: UUID | None = None
-    file_name: str
-    media_type: str
-    size_bytes: int = Field(ge=1)
-    source_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
-    revision: int = Field(ge=1)
-    state: AttachmentState
-    stages: list[AttachmentStage]
-    citations: list[AttachmentCitation] = Field(default_factory=list)
-    retention_expires_at: datetime
-    capabilities: AttachmentCapabilities
-    upload_ticket: AttachmentUploadTicket | None = None
-    created_at: datetime
-    updated_at: datetime
-    deleted_at: datetime | None = None
-
-class AttachmentEnvelope(ContractModel):
-    status: str = "SUCCESS"
-    message: str = "Secure attachment loaded."
-    success: bool = True
-    data: SecureAttachment
-
-class AttachmentListEnvelope(ContractModel):
-    status: str = "SUCCESS"
-    message: str = "Secure attachments loaded."
-    success: bool = True
-    data: list[SecureAttachment]
-
-class ResearchCapabilities(ContractModel):
-    raw_export: WorkflowCapability
-    pdf_export: WorkflowCapability
-    receipt_download: WorkflowCapability
-    audit_download: WorkflowCapability
-    fork: WorkflowCapability
-    merge: WorkflowCapability
-    keep_local: WorkflowCapability
-    sensitivity_recalculation: WorkflowCapability
-    cache_fallback: WorkflowCapability
-
-class ResearchCapabilitiesEnvelope(ContractModel):
-    status: str = "SUCCESS"
-    message: str = "Research capabilities loaded."
-    success: bool = True
-    data: ResearchCapabilities
 
 class ResearchPlanState(StrEnum):
     DRAFT = "DRAFT"
@@ -347,6 +181,14 @@ class ResearchRunCommandRequest(ContractModel):
     )
     extension_minutes: int | None = Field(default=None, ge=1, le=120)
 
+    @field_validator("reason")
+    @classmethod
+    def valid_reason(cls, value: str) -> str:
+        normalized = " ".join(value.split())
+        if len(normalized) < 5:
+            raise ValueError("Research command reason must contain at least 5 characters.")
+        return normalized
+
     @model_validator(mode="after")
     def coherent_action(self) -> "ResearchRunCommandRequest":
         if self.action in {
@@ -445,6 +287,11 @@ class ResearchDelivery(ContractModel):
     delivery_type: ResearchDeliveryType
     state: ResearchDeliveryState
     receipt_id: UUID | None = None
+    receipt: dict[str, JsonValue] | None = None
+    safe_error_code: str | None = Field(
+        default=None, pattern=r"^[A-Z][A-Z0-9_.-]{1,127}$"
+    )
+    recovery_hint: str | None = Field(default=None, min_length=1, max_length=500)
     created_at: datetime
     updated_at: datetime
     completed_at: datetime | None = None
@@ -454,17 +301,30 @@ class ResearchDeliveryObservation(ContractModel):
     state: ResearchDeliveryState
     receipt_id: UUID | None = None
     receipt: dict[str, JsonValue] | None = None
+    safe_error_code: str | None = Field(
+        default=None, pattern=r"^[A-Z][A-Z0-9_.-]{1,127}$"
+    )
+    recovery_hint: str | None = Field(default=None, min_length=1, max_length=500)
 
     @model_validator(mode="after")
     def completed_has_receipt(self) -> "ResearchDeliveryObservation":
-        if self.state == ResearchDeliveryState.COMPLETED and (
-            self.receipt_id is None or not self.receipt
-        ):
+        completed = self.state == ResearchDeliveryState.COMPLETED
+        incomplete = self.state in {
+            ResearchDeliveryState.PARTIAL,
+            ResearchDeliveryState.FAILED,
+        }
+        has_receipt = self.receipt_id is not None or self.receipt is not None
+        has_recovery = self.safe_error_code is not None or self.recovery_hint is not None
+        if completed and (self.receipt_id is None or not self.receipt):
             raise ValueError("A completed delivery requires a target-system receipt.")
-        if self.state != ResearchDeliveryState.COMPLETED and (
-            self.receipt_id is not None or self.receipt is not None
-        ):
+        if not completed and has_receipt:
             raise ValueError("A receipt is only accepted for a completed delivery.")
+        if completed and has_recovery:
+            raise ValueError("A completed delivery cannot include recovery evidence.")
+        if incomplete and (self.safe_error_code is None or self.recovery_hint is None):
+            raise ValueError("An incomplete delivery requires safe recovery evidence.")
+        if not incomplete and has_recovery:
+            raise ValueError("Recovery evidence is only accepted for an incomplete delivery.")
         return self
 
 class ResearchDeliveryEnvelope(ContractModel):

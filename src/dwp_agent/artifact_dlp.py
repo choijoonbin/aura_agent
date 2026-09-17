@@ -41,6 +41,36 @@ _RULES = (
         DlpOutcome.REVIEW,
         re.compile(r"(?<!\d)(?:\+?82[- ]?)?0?1[016789][- ]?\d{3,4}[- ]?\d{4}(?!\d)"),
     ),
+    (
+        "FINANCIAL_ID",
+        DlpOutcome.REVIEW,
+        re.compile(r"(?<![A-Za-z0-9])(?:\d[ -]?){10,16}(?![A-Za-z0-9])"),
+    ),
+)
+
+_REMEDIATION_RULES = (
+    (
+        "PRIVATE_KEY_MATERIAL",
+        re.compile(
+            r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----.*?"
+            r"(?:-----END (?:RSA |EC |OPENSSH )?PRIVATE KEY-----|\Z)",
+            re.IGNORECASE | re.DOTALL,
+        ),
+    ),
+    (
+        "CREDENTIAL_ASSIGNMENT",
+        re.compile(
+            r"\b(?:password|passwd|api[_ -]?key|access[_ -]?token|secret)\b\s*[:=]\s*\S+",
+            re.IGNORECASE,
+        ),
+    ),
+    ("KOREAN_RESIDENT_ID", _RULES[2][2]),
+    ("EMAIL_ADDRESS", _RULES[3][2]),
+    ("PHONE_NUMBER", _RULES[4][2]),
+    (
+        "FINANCIAL_ID",
+        re.compile(r"(?<![A-Za-z0-9])(?:\d[ -]?){10,16}(?![A-Za-z0-9])"),
+    ),
 )
 
 
@@ -69,3 +99,45 @@ def assess_artifact(
     elif findings:
         outcome = DlpOutcome.REVIEW
     return DlpAssessment(outcome=outcome, findings=findings)
+
+
+def remediate_artifact_content(
+    content: ArtifactDraftContent,
+    *,
+    synthetic: bool,
+) -> tuple[ArtifactDraftContent, int, list[str]]:
+    title, title_count, title_codes = remediate_artifact_text(
+        content.title, synthetic=synthetic
+    )
+    body, body_count, body_codes = remediate_artifact_text(
+        content.body, synthetic=synthetic
+    )
+    return (
+        ArtifactDraftContent(title=title, body=body, format=content.format),
+        title_count + body_count,
+        sorted(title_codes | body_codes),
+    )
+
+
+def remediate_artifact_text(
+    value: str,
+    *,
+    synthetic: bool,
+) -> tuple[str, int, set[str]]:
+    result = value
+    total = 0
+    remediated_codes: set[str] = set()
+    counters: dict[str, int] = {}
+    for code, pattern in _REMEDIATION_RULES:
+
+        def replacement(_: re.Match[str], *, category: str = code) -> str:
+            counters[category] = counters.get(category, 0) + 1
+            if synthetic:
+                return f"[SYNTHETIC_{category}_{counters[category]:03d}]"
+            return f"[MASKED_{category}]"
+
+        result, count = pattern.subn(replacement, result)
+        if count:
+            remediated_codes.add(code)
+            total += count
+    return result, total, remediated_codes

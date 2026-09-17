@@ -110,7 +110,15 @@ class ProposalHandoffStore:
                         envelope,
                     ),
                 ).fetchone()
-                self._event(connection, identity, row, request.command_id, "CREATED", None)
+                self._event(
+                    connection,
+                    identity,
+                    row,
+                    request.command_id,
+                    "CREATED",
+                    None,
+                    proof,
+                )
                 return self._record(row)
         except (DwaionWorkflowConflict, DwaionWorkflowNotFound):
             raise
@@ -131,6 +139,14 @@ class ProposalHandoffStore:
         handoff_id: UUID,
         request: ProposalHandoffObservation,
     ) -> ProposalHandoff:
+        request_fingerprint = self.fingerprints.value(
+            tenant_id=identity.tenant_id,
+            purpose="proposal-handoff-observation",
+            payload={
+                "handoffId": str(handoff_id),
+                "request": request.model_dump(mode="json", by_alias=True),
+            },
+        )
         allowed = {
             ProposalHandoffState.REVIEW_REQUIRED: {ProposalHandoffState.HANDED_OFF, ProposalHandoffState.CANCELLED},
             ProposalHandoffState.AWAITING_APPROVAL: {ProposalHandoffState.HANDED_OFF, ProposalHandoffState.CANCELLED},
@@ -160,22 +176,45 @@ class ProposalHandoffStore:
                 if row is None:
                     raise DwaionWorkflowNotFound("The proposal handoff is unavailable.")
                 replay = connection.execute(
-                    "SELECT current_state FROM ai_proposal_handoff_events WHERE tenant_id = %s AND user_id = %s AND command_id = %s",
+                    """SELECT handoff_id, current_state, revision, request_fingerprint
+                         FROM ai_proposal_handoff_events
+                        WHERE tenant_id = %s AND user_id = %s AND command_id = %s""",
                     (identity.tenant_id, identity.user_id, request.command_id),
                 ).fetchone()
                 if replay is not None:
-                    if replay["current_state"] != request.state.value:
+                    if (
+                        replay["handoff_id"] != handoff_id
+                        or replay["request_fingerprint"] != request_fingerprint
+                        or replay["current_state"] != request.state.value
+                    ):
                         raise DwaionWorkflowConflict("The handoff command ID is already in use.")
+                    if (
+                        int(row["revision"]) != int(replay["revision"])
+                        or row["handoff_state"] != replay["current_state"]
+                    ):
+                        raise DwaionWorkflowConflict(
+                            "The handoff advanced after this command was applied."
+                        )
                     return self._record(row)
                 if int(row["revision"]) != request.expected_version:
                     raise DwaionWorkflowConflict("The proposal handoff version has changed.")
                 current = ProposalHandoffState(row["handoff_state"])
                 if request.state not in allowed.get(current, set()):
                     raise DwaionWorkflowConflict("The requested handoff state transition is not allowed.")
+                if request.receipt is not None and (
+                    request.receipt.handoff_id != handoff_id
+                    or request.receipt.proposal_id != row["proposal_id"]
+                    or request.receipt.action_key != row["action_key"]
+                    or request.receipt.handoff_version != request.expected_version
+                    or request.receipt.correlation_id != identity.correlation_id
+                ):
+                    raise DwaionWorkflowConflict(
+                        "The domain completion receipt does not match the reviewed handoff."
+                    )
                 receipt_id = uuid4() if request.receipt is not None else None
                 receipt_envelope = (
                     self.codec.encrypt_json(
-                        request.receipt or {},
+                        request.receipt.model_dump(mode="json", by_alias=True),
                         tenant_id=identity.tenant_id,
                         resource_type="proposal-handoff-receipt",
                         resource_id=str(receipt_id),
@@ -194,7 +233,15 @@ class ProposalHandoffStore:
                     RETURNING *""",
                     (request.state.value, receipt_id, receipt_envelope, request.state.value, handoff_id),
                 ).fetchone()
-                self._event(connection, identity, updated, request.command_id, "STATE_CHANGED", current.value)
+                self._event(
+                    connection,
+                    identity,
+                    updated,
+                    request.command_id,
+                    "STATE_CHANGED",
+                    current.value,
+                    request_fingerprint,
+                )
                 return self._record(updated)
         except (DwaionWorkflowConflict, DwaionWorkflowNotFound):
             raise
@@ -232,17 +279,28 @@ class ProposalHandoffStore:
         )
 
     @staticmethod
-    def _event(connection: Any, identity: PersonalDomainIdentity, row: Any, command_id: UUID, event_type: str, previous: str | None) -> None:
+    def _event(
+        connection: Any,
+        identity: PersonalDomainIdentity,
+        row: Any,
+        command_id: UUID,
+        event_type: str,
+        previous: str | None,
+        request_fingerprint: str,
+    ) -> None:
         connection.execute(
             """INSERT INTO ai_proposal_handoff_events (
                    event_id, handoff_id, tenant_id, user_id, actor_user_id,
                    correlation_id, command_id, event_type, previous_state,
-                   current_state, revision)
-               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                   current_state, revision, request_fingerprint)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
             (
                 uuid4(), row["handoff_id"], identity.tenant_id, identity.user_id,
                 identity.user_id, identity.correlation_id, command_id, event_type,
-                previous, row["handoff_state"], row["revision"],
+                previous,
+                row["handoff_state"],
+                row["revision"],
+                request_fingerprint,
             ),
         )
 

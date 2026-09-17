@@ -1,11 +1,10 @@
 from __future__ import annotations
 
 from datetime import timedelta
-from functools import wraps
-from typing import Any, Callable, TypeVar
+from typing import Any
 from uuid import UUID, uuid4
 
-from psycopg import Error as PsycopgError, connect
+from psycopg import connect
 from psycopg.rows import dict_row
 from .artifact_contracts import (
     ArtifactExportReceipt,
@@ -24,33 +23,16 @@ from .artifact_dlp import assess_artifact
 from .artifact_home_projection import ArtifactHomeProjectionQueries
 from .artifact_export_queries import ArtifactExportQueries
 from .artifact_postgres_base import ArtifactPostgresBase, _ARTIFACT_SELECT
+from .artifact_postgres_errors import translated_artifact_operation as _translated
 from .artifact_read_queries import ArtifactReadQueries
 from .artifact_source_verification import ArtifactSourceVerification
 from .governed_domain_core import (
     GovernedDomainConflict,
-    GovernedDomainNotFound,
-    GovernedDomainUnavailable,
     retention_deadline,
 )
 from .governed_worker_runtime import governed_worker_available
 from .personal_domain_security import PersonalDomainIdentity
 from .transactional_outbox import enqueue_internal_intent
-
-
-T = TypeVar("T")
-
-
-def _translated(function: Callable[..., T]) -> Callable[..., T]:
-    @wraps(function)
-    def wrapped(*args: object, **kwargs: object) -> T:
-        try:
-            return function(*args, **kwargs)
-        except (GovernedDomainConflict, GovernedDomainNotFound, GovernedDomainUnavailable):
-            raise
-        except (PsycopgError, ValueError, TypeError, KeyError) as error:
-            raise GovernedDomainUnavailable("Governed artifacts are unavailable.") from error
-
-    return wrapped
 
 
 class PostgresArtifactStore(

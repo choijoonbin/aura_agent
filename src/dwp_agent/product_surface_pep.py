@@ -63,6 +63,8 @@ _READINESS_FLAGS = {
     21: "DWP_AGENT_PRODUCT_AUTHORIZATION_V21_ENABLED",
     22: "DWP_AGENT_PRODUCT_AUTHORIZATION_V22_ENABLED",
     24: "DWP_AGENT_PRODUCT_AUTHORIZATION_V24_ENABLED",
+    30: "DWP_AGENT_PRODUCT_AUTHORIZATION_V30_ENABLED",
+    31: "DWP_AGENT_PRODUCT_AUTHORIZATION_V31_ENABLED",
 }
 _CONTEXT = re.compile(r"^psc-[a-f0-9]{64}$")
 _ROLLOUT_REVISION = re.compile(r"^rollout-[a-f0-9]{64}$")
@@ -352,6 +354,7 @@ def install_product_surface_openapi_contract(app: FastAPI) -> None:
                 path
                 for path in paths
                 if _path_shape(path) == _path_shape(pattern.path_template)
+                and pattern.method.lower() in paths[path]
             ]
             if len(candidates) != 1:
                 raise RuntimeError(

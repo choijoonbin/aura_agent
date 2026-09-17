@@ -43,16 +43,28 @@ def _remove_heartbeats(*worker_types: str) -> None:
 
 
 class GovernedWorkerMaintenance:
-    worker_types = ("ARTIFACT_EXPORT", "DATA_DELETION")
+    worker_types = (
+        "ARTIFACT_EXPORT",
+        "DATA_DELETION",
+        "RESEARCH_DELIVERY",
+        "RESEARCH_RUN",
+        "ADMIN_CONTROL_COMMAND",
+        "SECURE_ATTACHMENT_PIPELINE",
+    )
     topics = (
         "ai.artifact.export-requested.v1",
         "ai.personal-data.deletion-requested.v1",
+        "ai.research.delivery-requested.v1",
+        "RESEARCH_DELIVERY",
+        "ADMIN_CONTROL_COMMAND",
+        "ai.secure-attachment.processing-requested.v1",
     )
 
     def __init__(self) -> None:
         self._stop = threading.Event()
         self._ready = threading.Event()
         self._thread: threading.Thread | None = None
+        self._research_turn = True
 
     def start(self) -> None:
         if self._thread is not None or not _workers_enabled():
@@ -83,28 +95,68 @@ class GovernedWorkerMaintenance:
         return self._process_once(*self._build_services(database_url))
 
     @staticmethod
-    def _build_services(database_url: str) -> tuple[object, object, object]:
+    def _build_services(
+        database_url: str,
+    ) -> tuple[object, object, object, object, object, object, object]:
+        from .admin_control_plane_executor import PostgresAdminControlCommandExecutor
         from .artifact_export_worker import PostgresArtifactExportWorker
         from .personal_data_deletion_worker import PostgresPersonalDataDeletionWorker
+        from .research_delivery_worker import PostgresResearchDeliveryWorker
+        from .research_run_worker import PostgresResearchRunWorker
+        from .secure_attachment_worker import PostgresSecureAttachmentWorker
         from .transactional_outbox import PostgresTransactionalOutboxStore
 
         return (
             PostgresTransactionalOutboxStore(database_url),
             PostgresArtifactExportWorker(database_url),
             PostgresPersonalDataDeletionWorker(database_url),
+            PostgresResearchDeliveryWorker(database_url),
+            PostgresResearchRunWorker(database_url),
+            PostgresAdminControlCommandExecutor(database_url),
+            PostgresSecureAttachmentWorker(database_url),
         )
 
     def _process_once(
-        self, outbox: object, export_worker: object, deletion_worker: object
+        self,
+        outbox: object,
+        export_worker: object,
+        deletion_worker: object,
+        research_delivery_worker: object,
+        research_run_worker: object,
+        admin_control_worker: object,
+        secure_attachment_worker: object,
     ) -> bool:
+        research_enabled = (
+            os.getenv("DWP_DEEP_RESEARCH_WORKER_ENABLED", "false")
+            .strip()
+            .lower()
+            == "true"
+        )
+        tried_research = research_enabled and self._research_turn
+        self._research_turn = not self._research_turn
+        if tried_research and research_run_worker.process_once():
+            return True
         lease = outbox.claim_any(topics=self.topics, lease_seconds=300)
         if lease is None:
-            return False
+            return bool(
+                research_enabled
+                and not tried_research
+                and research_run_worker.process_once()
+            )
         try:
             if lease.topic == "ai.artifact.export-requested.v1":
                 export_worker.process(lease)
             elif lease.topic == "ai.personal-data.deletion-requested.v1":
                 deletion_worker.process(lease)
+            elif lease.topic in {
+                "ai.research.delivery-requested.v1",
+                "RESEARCH_DELIVERY",
+            }:
+                research_delivery_worker.process(lease)
+            elif lease.topic == "ADMIN_CONTROL_COMMAND":
+                admin_control_worker.process(lease)
+            elif lease.topic == "ai.secure-attachment.processing-requested.v1":
+                secure_attachment_worker.process(lease)
             else:
                 raise ValueError("The governed worker topic is unsupported.")
             outbox.acknowledge(lease)
@@ -115,11 +167,26 @@ class GovernedWorkerMaintenance:
                 type(error).__name__,
             )
             try:
-                outbox.retry(
+                retry_state = outbox.retry(
                     lease,
                     safe_error_code="GOVERNED_WORKER_RETRY",
                     retry_after_seconds=5,
                 )
+                if (
+                    retry_state == "DEAD_LETTER"
+                    and lease.topic
+                    in {"ai.research.delivery-requested.v1", "RESEARCH_DELIVERY"}
+                ):
+                    research_delivery_worker.mark_retry_exhausted(lease)
+                elif retry_state == "DEAD_LETTER" and lease.topic == "ADMIN_CONTROL_COMMAND":
+                    admin_control_worker.fail_dead_letter(
+                        lease, safe_error_code="ADMIN_EXECUTION_RETRY_EXHAUSTED"
+                    )
+                elif (
+                    retry_state == "DEAD_LETTER"
+                    and lease.topic == "ai.secure-attachment.processing-requested.v1"
+                ):
+                    secure_attachment_worker.mark_retry_exhausted(lease)
             except Exception as retry_error:
                 LOGGER.warning(
                     "Governed worker retry bookkeeping failed; error=%s",
@@ -155,9 +222,11 @@ class GovernedWorkerMaintenance:
                 """SELECT to_regclass('ai_transactional_outbox') IS NOT NULL
                           AND to_regclass('ai_artifact_export_outputs') IS NOT NULL
                           AND to_regclass('ai_data_disposition_receipts') IS NOT NULL
+                          AND to_regclass('ai_admin_control_resource_versions') IS NOT NULL
+                          AND to_regclass('ai_secure_attachments') IS NOT NULL
                           AND EXISTS (
                               SELECT 1 FROM sys_schema_history
-                               WHERE version = 'V34'
+                               WHERE version = 'V70'
                           )"""
             ).fetchone()
         if row != (True,):

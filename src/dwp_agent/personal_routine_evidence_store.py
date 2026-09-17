@@ -87,10 +87,6 @@ class PersonalRoutineEvidenceStore(
             self._require_source_access(identity, definition)
             self._require_source_preferences(connection, identity, definition)
             now = connection.execute("SELECT CURRENT_TIMESTAMP AS now").fetchone()["now"]
-            self._require_monthly_run_budget(
-                connection, identity.tenant_id, identity.user_id, routine_id,
-                definition.budget.maximum_runs_per_month, now,
-            )
             payload_fingerprint = self.fingerprints.value(
                 tenant_id=identity.tenant_id,
                 purpose="personal-routine-webhook-payload",
@@ -120,6 +116,10 @@ class PersonalRoutineEvidenceStore(
                     identity.correlation_id, request.event_id, request.event_type,
                     request.occurred_at, payload_fingerprint,
                 ),
+            )
+            self._require_monthly_run_budget(
+                connection, run_id, identity.tenant_id, identity.user_id, routine_id,
+                definition.budget.maximum_runs_per_month, now,
             )
             self._execution_event(
                 connection, run_id=run_id, routine_id=routine_id,
@@ -270,7 +270,7 @@ class PersonalRoutineEvidenceStore(
                     WHERE tenant_id = %s AND user_id = %s AND routine_id = %s
                       AND command_type IN (
                           'CREATE', 'UPDATE', 'CONSENT', 'LIFECYCLE',
-                          'ACTIVATION', 'ARCHIVE', 'ROLLBACK')
+                          'ACTIVATION', 'ARCHIVE', 'ROLLBACK', 'AUTO_QUARANTINE')
                  ORDER BY created_at DESC, command_id DESC""",
                 (identity.tenant_id, identity.user_id, routine_id),
             ).fetchall()
@@ -318,7 +318,7 @@ class PersonalRoutineEvidenceStore(
                 WHERE tenant_id = %s AND user_id = %s AND routine_id = %s
                   AND command_type IN (
                       'CREATE', 'UPDATE', 'CONSENT', 'LIFECYCLE',
-                      'ACTIVATION', 'ARCHIVE', 'ROLLBACK')
+                      'ACTIVATION', 'ARCHIVE', 'ROLLBACK', 'AUTO_QUARANTINE')
              ORDER BY created_at DESC, command_id DESC""",
             (identity.tenant_id, identity.user_id, routine_id),
         ).fetchall()

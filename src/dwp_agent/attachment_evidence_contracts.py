@@ -30,6 +30,11 @@ class AttachmentEvidenceEvent(ContractModel):
 class AttachmentEvidence(ContractModel):
     attachment_id: UUID
     source_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    deletion_attempt_count: int = Field(default=0, ge=0)
+    deletion_last_error_code: str | None = Field(
+        default=None, pattern=r"^[A-Z][A-Z0-9_.-]{1,127}$"
+    )
+    deletion_receipt_id: str | None = Field(default=None, min_length=1, max_length=240)
     stages: list[AttachmentStage]
     citations: list[AttachmentCitation]
     inspection_log: list[AttachmentEvidenceEvent]

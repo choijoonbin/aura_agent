@@ -20,6 +20,9 @@ from .admin_control_plane_contracts import (
 )
 from .admin_model_routing_contracts import LatestRoutingSimulation
 from .admin_control_plane_errors import AdminControlPlaneUnavailable
+from .ai_control_activation import ai_runtime_control_activation_state
+from .ai_control_contracts import EnforcementActivationState
+from .ai_control_store_queries import period_bounds
 from .governed_domain_core import GovernedPayloadCodec
 
 
@@ -112,7 +115,11 @@ class AdminControlPlaneSnapshots:
                         "failClosed": bool(route.get("fail_closed", route.get("failClosed", True))),
                         "version": int(route.get("version", policy["policy_version"])),
                     })
-                budget_mode = "BLOCK" if policy["budget_enforcement_mode"] == "ENFORCED" else "WARN"
+                budget_mode = {
+                    "ALERT_ONLY": "WARN",
+                    "THROTTLED": "THROTTLE",
+                    "ENFORCED": "BLOCK",
+                }[policy["budget_enforcement_mode"]]
                 routing = [{
                     "policyId": "ASK_RUNTIME", "name": "ASK runtime routing",
                     "scope": "ASK_RUNTIME", "primaryModelId": model_ids[0],
@@ -164,7 +171,10 @@ class AdminControlPlaneSnapshots:
 
     def evaluation_safety(self, tenant_id: int) -> EvaluationSafetySnapshot:
         datasets = [self._snapshot(row) for row in self._resources(tenant_id, "EVALUATION_DATASET")]
-        comparisons = [self._snapshot(row) for row in self._resources(tenant_id, "EVALUATION_COMPARISON")]
+        comparisons = [
+            self._snapshot(row)
+            for row in self._resources(tenant_id, "EVALUATION_COMPARISON")
+        ]
         signals = [self._snapshot(row) for row in self._resources(tenant_id, "DRIFT_SIGNAL")]
         configured = bool(datasets or comparisons or signals)
         return EvaluationSafetySnapshot(
@@ -194,32 +204,121 @@ class AdminControlPlaneSnapshots:
     ) -> OutcomesSnapshot:
         cutoff = datetime.now(UTC) - timedelta(days=period_days)
         resources = self._resources(tenant_id, None)
-        snapshots = [self._snapshot(row) for row in resources if row["updated_at"] >= cutoff]
-        scoped = [item for item in snapshots if _in_scope(item, organization, work_type)]
-        metrics = [item for item in scoped if item.get("resourceKind") == "OUTCOME_METRIC"]
-        cohorts = [item for item in scoped if item.get("resourceKind") == "OUTCOME_COHORT"]
-        backlog = [item for item in scoped if item.get("resourceKind") == "IMPROVEMENT_BACKLOG"]
-        budgets = [item for item in scoped if item.get("resourceKind") == "TOKEN_BUDGET"]
+        scoped = [
+            (row["resource_type"], snapshot)
+            for row in resources
+            if row["updated_at"] >= cutoff
+            and not (snapshot := self._snapshot(row)).get("tombstoned", False)
+            and _in_scope(snapshot, organization, work_type)
+        ]
+        metrics = [item for kind, item in scoped if kind == "OUTCOME_METRIC"]
+        cohorts = [item for kind, item in scoped if kind == "OUTCOME_COHORT"]
+        backlog = [item for kind, item in scoped if kind == "IMPROVEMENT_BACKLOG"]
+        budget = self._tenant_token_budget(tenant_id)
+        budgets = [budget] if budget is not None else []
         privacy_threshold = int(os.getenv("DWP_OUTCOME_PRIVACY_THRESHOLD", "10"))
         visible_cohorts = [item for item in cohorts if int(item.get("completedWorkCount", 0)) >= privacy_threshold]
+        capability = _resource_capability(
+            metrics + visible_cohorts + backlog + budgets,
+            "No measured outcome aggregates exist for this scope.",
+        )
+        if (
+            budget is not None
+            and budget["enforcementActivationState"]
+            == EnforcementActivationState.DISABLED.value
+        ):
+            capability = ControlPlaneCapability(
+                status=CapabilityStatus.PARTIAL,
+                configured=True,
+                reason=(
+                    "Runtime AI policy enforcement is disabled. Token budget modes are "
+                    "stored preconfiguration and do not currently block ASK execution."
+                ),
+                recovery_hint=(
+                    "Set DWP_AI_RUNTIME_CONTROL_ENFORCEMENT_ENABLED=true in the controlled "
+                    "runtime deployment and restart it after release approval."
+                ),
+            )
         return OutcomesSnapshot(
             generated_at=datetime.now(UTC), period_days=period_days,
-            capability=_resource_capability(metrics + visible_cohorts + backlog + budgets,
-                                            "No measured outcome aggregates exist for this scope."),
+            capability=capability,
             privacy_threshold=privacy_threshold,
             suppressed_cohort_count=len(cohorts) - len(visible_cohorts),
             metrics=metrics, cohorts=visible_cohorts, backlog=backlog,
             token_budgets=budgets, currency=os.getenv("DWP_OUTCOME_CURRENCY", "USD"),
         )
 
+    def _tenant_token_budget(self, tenant_id: int) -> dict[str, object] | None:
+        now = datetime.now(UTC)
+        period_start, _ = period_bounds(now)
+        try:
+            with connect(self.database_url, row_factory=dict_row) as connection:
+                policy = connection.execute(
+                    """SELECT budget_enforcement_mode, period_token_limit,
+                              policy_version, alert_threshold_percent
+                         FROM ai_execution_policies
+                        WHERE tenant_id = %s""",
+                    (tenant_id,),
+                ).fetchone()
+                if policy is None:
+                    return None
+                usage = connection.execute(
+                    """SELECT
+                           COALESCE(period.measured_total_tokens, 0) AS measured_tokens,
+                           COALESCE(reservations.reserved_tokens, 0) AS reserved_tokens
+                         FROM (
+                               SELECT COALESCE(SUM(reserved_tokens), 0) AS reserved_tokens
+                                 FROM ai_runtime_usage_reservations
+                                WHERE tenant_id = %s AND period_start = %s
+                                  AND state IN ('ACTIVE', 'MEASUREMENT_MISSING')
+                                  AND (state = 'MEASUREMENT_MISSING' OR expires_at > %s)
+                              ) reservations
+                    LEFT JOIN ai_runtime_usage_periods period
+                           ON period.tenant_id = %s AND period.period_start = %s""",
+                    (tenant_id, period_start, now, tenant_id, period_start),
+                ).fetchone()
+            measured = int(usage["measured_tokens"])
+            reserved = int(usage["reserved_tokens"])
+            modes = {
+                "ALERT_ONLY": "WARN",
+                "THROTTLED": "THROTTLE",
+                "ENFORCED": "BLOCK",
+            }
+            return {
+                "scope": "ASK_RUNTIME",
+                "consumedTokens": measured,
+                "budgetTokens": (
+                    int(policy["period_token_limit"])
+                    if policy["period_token_limit"] is not None
+                    else None
+                ),
+                "projectedTokens": measured + reserved,
+                "spikeDetected": False,
+                "policyMode": modes[str(policy["budget_enforcement_mode"])],
+                "enforcementActivationState": (
+                    ai_runtime_control_activation_state().value
+                ),
+                "version": int(policy["policy_version"]),
+            }
+        except (PsycopgError, KeyError, TypeError, ValueError) as error:
+            raise AdminControlPlaneUnavailable(
+                "The authoritative runtime token budget is unavailable."
+            ) from error
+
     def _resources(self, tenant_id: int, resource_type: str | None) -> list[Any]:
         try:
             with connect(self.database_url, row_factory=dict_row) as connection:
+                if resource_type is None:
+                    return connection.execute(
+                        """SELECT * FROM ai_admin_control_resources
+                            WHERE tenant_id = %s ORDER BY updated_at DESC""",
+                        (tenant_id,),
+                    ).fetchall()
                 return connection.execute(
                     """SELECT * FROM ai_admin_control_resources
-                        WHERE tenant_id = %s AND (%s IS NULL OR resource_type = %s)
+                        WHERE tenant_id = %s AND resource_type = %s
                         ORDER BY updated_at DESC""",
-                    (tenant_id, resource_type, resource_type),
+                    (tenant_id, resource_type),
                 ).fetchall()
         except PsycopgError as error:
             raise AdminControlPlaneUnavailable("Control-plane snapshots are unavailable.") from error

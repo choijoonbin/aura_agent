@@ -33,6 +33,13 @@ from .personal_routine_contracts import (
     UpdateRoutineRequest,
 )
 from .personal_routine_capabilities import routine_runtime_capabilities
+from .personal_routine_advanced_contracts import (
+    CreateRoutineAdvancedCommandRequest,
+    DecideRoutineAdvancedCommandRequest,
+    RoutineAdvancedCommandEnvelope,
+    RoutineAdvancedCommandListEnvelope,
+)
+from .personal_routine_advanced_store import get_personal_routine_advanced_store
 from .personal_routine_store import get_personal_routine_store
 
 
@@ -63,6 +70,26 @@ def get_routine_capabilities(
     _access(identity, write=False)
     _no_store(response)
     return RoutineCapabilitiesEnvelope(data=routine_runtime_capabilities())
+
+
+@router.get(
+    "/advanced-commands/pending-approvals",
+    response_model=RoutineAdvancedCommandListEnvelope,
+)
+def list_pending_routine_approvals(
+    identity: Annotated[PersonalDomainIdentity, Depends(require_personal_domain_identity)],
+    response: Response,
+    limit: Annotated[int, Query(ge=1, le=100)] = 50,
+) -> RoutineAdvancedCommandListEnvelope:
+    _approval_access(identity)
+    _no_store(response)
+    return _run(
+        lambda: RoutineAdvancedCommandListEnvelope(
+            data=get_personal_routine_advanced_store().list_pending_for_checker(
+                identity, limit=limit
+            )
+        )
+    )
 
 
 @router.get("/{routine_id}", response_model=RoutineEnvelope)
@@ -154,6 +181,87 @@ def change_routine_activation(
         lambda: RoutineEnvelope(
             data=get_personal_routine_store().change_activation(
                 identity, routine_id, request
+            )
+        )
+    )
+
+
+@router.get(
+    "/{routine_id}/advanced-commands",
+    response_model=RoutineAdvancedCommandListEnvelope,
+)
+def list_routine_advanced_commands(
+    routine_id: UUID,
+    identity: Annotated[PersonalDomainIdentity, Depends(require_personal_domain_identity)],
+    response: Response,
+) -> RoutineAdvancedCommandListEnvelope:
+    _access(identity, write=False)
+    _no_store(response)
+    return _run(
+        lambda: RoutineAdvancedCommandListEnvelope(
+            data=get_personal_routine_advanced_store().list(identity, routine_id)
+        )
+    )
+
+
+@router.post(
+    "/{routine_id}/advanced-commands",
+    response_model=RoutineAdvancedCommandEnvelope,
+)
+def create_routine_advanced_command(
+    routine_id: UUID,
+    request: CreateRoutineAdvancedCommandRequest,
+    identity: Annotated[PersonalDomainIdentity, Depends(require_personal_domain_identity)],
+    response: Response,
+) -> RoutineAdvancedCommandEnvelope:
+    _access(identity, write=True)
+    _no_store(response)
+    return _run(
+        lambda: RoutineAdvancedCommandEnvelope(
+            data=get_personal_routine_advanced_store().create(
+                identity, routine_id, request
+            )
+        )
+    )
+
+
+@router.get(
+    "/{routine_id}/advanced-commands/{command_id}",
+    response_model=RoutineAdvancedCommandEnvelope,
+)
+def get_routine_advanced_command(
+    routine_id: UUID,
+    command_id: UUID,
+    identity: Annotated[PersonalDomainIdentity, Depends(require_personal_domain_identity)],
+    response: Response,
+) -> RoutineAdvancedCommandEnvelope:
+    _access(identity, write=False)
+    _no_store(response)
+    return _run(
+        lambda: RoutineAdvancedCommandEnvelope(
+            data=get_personal_routine_advanced_store().get(
+                identity, routine_id, command_id
+            )
+        )
+    )
+
+
+@router.post(
+    "/advanced-commands/{command_id}/decision",
+    response_model=RoutineAdvancedCommandEnvelope,
+)
+def decide_routine_advanced_command(
+    command_id: UUID,
+    request: DecideRoutineAdvancedCommandRequest,
+    identity: Annotated[PersonalDomainIdentity, Depends(require_personal_domain_identity)],
+    response: Response,
+) -> RoutineAdvancedCommandEnvelope:
+    _approval_access(identity)
+    _no_store(response)
+    return _run(
+        lambda: RoutineAdvancedCommandEnvelope(
+            data=get_personal_routine_advanced_store().decide(
+                identity, command_id, request
             )
         )
     )
@@ -276,6 +384,11 @@ def archive_routine(
 def _access(identity: PersonalDomainIdentity, *, write: bool) -> None:
     identity.require("APP.ASK:VIEW")
     identity.require("APP.DWAION_ROUTINES:MANAGE" if write else "APP.DWAION_ROUTINES:VIEW")
+
+
+def _approval_access(identity: PersonalDomainIdentity) -> None:
+    identity.require("APP.ASK:VIEW")
+    identity.require("APP.DWAION_ROUTINES:APPROVE")
 
 
 def _run(operation: Callable[[], T]) -> T:

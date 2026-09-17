@@ -29,7 +29,13 @@ from .admin_control_plane_errors import (
     AdminControlPlaneNotFound,
     AdminControlPlaneUnavailable,
 )
+from .admin_control_plane_registry import (
+    ADMIN_COMMAND_REGISTRY,
+    AdminCommandResourceStrategy,
+    command_spec,
+)
 from .canonical_json import canonical_json_bytes
+from .admin_evaluation_gate import EvaluationDatasetMissing, EvaluationDatasetNotApproved, require_pii_approved_dataset
 from .governed_domain_core import (
     GovernedDomainConflict,
     GovernedFingerprints,
@@ -41,16 +47,19 @@ from .transactional_outbox import enqueue_internal_intent
 
 
 _CREATE_KINDS = {
-    GovernedCommandKind.CONNECTOR_DRAFT_SAVE,
-    GovernedCommandKind.CONNECTOR_CREATE,
-    GovernedCommandKind.DATASET_IMPORT,
-    GovernedCommandKind.BACKLOG_CREATE,
+    kind for kind, spec in ADMIN_COMMAND_REGISTRY.items()
+    if spec.resource_strategy == AdminCommandResourceStrategy.CREATE_TARGET
 }
 _SIMULATION_KINDS = {
     GovernedCommandKind.MODEL_ROUTE_SIMULATE,
     GovernedCommandKind.EMERGENCY_RECOVERY_SIMULATE,
     GovernedCommandKind.SAFETY_SIMULATE,
     GovernedCommandKind.COST_SIMULATE,
+}
+_PII_GATED_EVALUATION_KINDS = {
+    GovernedCommandKind.EVALUATION_COMPARE,
+    GovernedCommandKind.EVALUATION_RUN,
+    GovernedCommandKind.EVALUATION_RERUN,
 }
 
 
@@ -85,11 +94,32 @@ class AdminControlPlaneStore:
                         existing["request_fingerprint"], proof,
                     )
                     return self._record(existing, actor_user_id)
+                if request.kind in _PII_GATED_EVALUATION_KINDS:
+                    try:
+                        require_pii_approved_dataset(
+                            connection,
+                            self.codec,
+                            tenant_id=tenant_id,
+                            dataset_id=str(
+                                request.payload.get("datasetId") or request.target.id
+                            ),
+                            lock=True,
+                        )
+                    except EvaluationDatasetMissing as error:
+                        raise AdminControlPlaneNotFound(str(error)) from error
+                    except EvaluationDatasetNotApproved as error:
+                        raise AdminControlPlaneDenied(str(error)) from error
                 snapshot, current_version = self._target_snapshot(
                     connection, tenant_id, request.target.type, request.target.id,
+                    kind=request.kind,
+                    expected_version=request.expected_version,
                     allow_absent=request.kind in _CREATE_KINDS or request.kind in _SIMULATION_KINDS,
                 )
-                if current_version != request.expected_version:
+                spec = command_spec(request.kind)
+                unversioned_target = (
+                    spec.allow_unversioned_target and request.expected_version == 0
+                )
+                if current_version != request.expected_version and not unversioned_target:
                     raise AdminControlPlaneConflict(
                         "The control-plane target changed. Reload its authoritative snapshot."
                     )
@@ -117,7 +147,7 @@ class AdminControlPlaneStore:
                         request.command_id, tenant_id, actor_user_id, correlation_id,
                         proof.session_fingerprint, proof.request_fingerprint,
                         request.kind.value, request.target.type, request.target.id,
-                        request.expected_version, snapshot_hash, state.value,
+                        current_version, snapshot_hash, state.value,
                         request.kind not in _SIMULATION_KINDS,
                         self._encrypt(tenant_id, request.command_id, "review", review.model_dump(mode="json", by_alias=True)),
                         self._encrypt(tenant_id, request.command_id, "payload", request.payload),
@@ -130,7 +160,11 @@ class AdminControlPlaneStore:
                 return self._record(row, actor_user_id)
         except GovernedDomainConflict as error:
             raise AdminControlPlaneConflict(str(error)) from error
-        except (AdminControlPlaneConflict, AdminControlPlaneNotFound):
+        except (
+            AdminControlPlaneConflict,
+            AdminControlPlaneDenied,
+            AdminControlPlaneNotFound,
+        ):
             raise
         except (PsycopgError, ValueError, TypeError) as error:
             raise AdminControlPlaneUnavailable("Control-plane command storage is unavailable.") from error
@@ -225,12 +259,35 @@ class AdminControlPlaneStore:
         self, *, tenant_id: int, actor_user_id: str, correlation_id: str,
         command_id: UUID, request: GovernedCommandRestartRequest,
     ) -> GovernedCommand:
-        def transition(_: Any, row: Any) -> tuple[GovernedCommandState, dict[str, object]]:
+        def transition(connection: Any, row: Any) -> tuple[GovernedCommandState, dict[str, object]]:
             if row["command_state"] != GovernedCommandState.SUCCEEDED.value:
                 raise AdminControlPlaneConflict("Only a completed command may request rollback.")
+            if not row["receipt_envelope"]:
+                raise AdminControlPlaneConflict("The completed command receipt is unavailable.")
+            receipt = self._decrypt(
+                tenant_id, command_id, "receipt", row["receipt_envelope"]
+            )
+            snapshot, current_version = self._target_snapshot(
+                connection,
+                tenant_id,
+                row["target_type"],
+                row["target_id"],
+                kind=GovernedCommandKind(row["command_kind"]),
+                expected_version=None,
+                allow_absent=False,
+            )
+            snapshot_hash = hashlib.sha256(canonical_json_bytes(snapshot)).hexdigest()
             return GovernedCommandState.AWAITING_APPROVAL, {
                 "reason": request.reason, "evidenceRefs": request.evidence_refs,
                 "rollbackRequested": True,
+                "rollbackSourceReceiptRef": receipt.get("domainReceiptRef"),
+                "__commandUpdates": {
+                    "makerUserId": actor_user_id,
+                    "checkerUserId": None,
+                    "decisionEnvelope": None,
+                    "expectedTargetVersion": current_version,
+                    "targetSnapshotHash": snapshot_hash,
+                },
             }
 
         return self._transition(tenant_id, actor_user_id, correlation_id, command_id,
@@ -262,6 +319,7 @@ class AdminControlPlaneStore:
                     raise AdminControlPlaneConflict("The command version changed. Reload and retry.")
                 previous = row["command_state"]
                 next_state, evidence = apply(connection, row)
+                command_updates = evidence.pop("__commandUpdates", {})
                 decision_envelope = row["decision_envelope"]
                 checker_user_id = row["checker_user_id"]
                 if "decision" in evidence:
@@ -270,13 +328,22 @@ class AdminControlPlaneStore:
                 updated = connection.execute(
                     """UPDATE ai_admin_control_commands
                           SET command_state = %s, revision = revision + 1,
-                              checker_user_id = %s, decision_envelope = %s,
+                              maker_user_id = %s, checker_user_id = %s,
+                              decision_envelope = %s,
+                              expected_target_version = %s,
+                              target_snapshot_hash = %s,
                               receipt_envelope = CASE WHEN %s THEN NULL ELSE receipt_envelope END,
                               completed_at = CASE WHEN %s THEN NULL ELSE completed_at END,
                               updated_at = CURRENT_TIMESTAMP
                         WHERE tenant_id = %s AND command_id = %s
                     RETURNING *""",
-                    (next_state.value, checker_user_id, decision_envelope,
+                    (
+                     next_state.value,
+                     command_updates.get("makerUserId", row["maker_user_id"]),
+                     command_updates.get("checkerUserId", checker_user_id),
+                     command_updates.get("decisionEnvelope", decision_envelope),
+                     command_updates.get("expectedTargetVersion", row["expected_target_version"]),
+                     command_updates.get("targetSnapshotHash", row["target_snapshot_hash"]),
                      reset_completion, reset_completion, tenant_id, command_id),
                 ).fetchone()
                 self._event(connection, updated, attempt_id, actor_user_id, correlation_id,
@@ -289,9 +356,21 @@ class AdminControlPlaneStore:
 
     def _target_snapshot(
         self, connection: Any, tenant_id: int, resource_type: str,
-        resource_id: str, *, allow_absent: bool,
+        resource_id: str, *, kind: GovernedCommandKind,
+        expected_version: int | None, allow_absent: bool,
     ) -> tuple[dict[str, object], int]:
-        if resource_type in {"MODEL_ROUTING", "AI_POLICY", "SAFETY_POLICY"}:
+        spec = command_spec(kind)
+        if spec.resource_strategy == AdminCommandResourceStrategy.DELEGATED_TARGET:
+            if expected_version is None:
+                raise AdminControlPlaneConflict(
+                    "A delegated command requires an explicit provider target version."
+                )
+            return {
+                "resourceType": resource_type,
+                "resourceId": resource_id,
+                "delegatedExpectedVersion": expected_version,
+            }, expected_version
+        if spec.resource_strategy == AdminCommandResourceStrategy.AI_POLICY:
             policy = connection.execute(
                 """SELECT policy_version, emergency_disabled, allowed_model_routes,
                           budget_enforcement_mode, period_token_limit,
@@ -303,8 +382,16 @@ class AdminControlPlaneStore:
                 snapshot = {key: (value.isoformat() if isinstance(value, datetime) else value)
                             for key, value in dict(policy).items()}
                 return snapshot, int(policy["policy_version"])
+            if allow_absent:
+                return {"resourceType": resource_type, "resourceId": resource_id, "absent": True}, 0
+            raise AdminControlPlaneNotFound("The tenant AI execution policy is unavailable.")
+        if (
+            spec.resource_strategy == AdminCommandResourceStrategy.RESULT
+            and expected_version == 0
+        ):
+            return {"resourceType": resource_type, "resourceId": resource_id, "absent": True}, 0
         row = connection.execute(
-            """SELECT resource_version, snapshot_hash
+            """SELECT resource_version, snapshot_hash, snapshot_envelope
                  FROM ai_admin_control_resources
                 WHERE tenant_id = %s AND resource_type = %s AND resource_id = %s""",
             (tenant_id, resource_type, resource_id),
@@ -314,6 +401,7 @@ class AdminControlPlaneStore:
         if allow_absent:
             return {"resourceType": resource_type, "resourceId": resource_id, "absent": True}, 0
         raise AdminControlPlaneNotFound("The authoritative target snapshot is unavailable.")
+
 
     def _record(self, row: Any, actor_user_id: str) -> GovernedCommand:
         command_id = row["command_id"]

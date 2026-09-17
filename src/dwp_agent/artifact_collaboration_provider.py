@@ -16,6 +16,9 @@ from .artifact_collaboration_contracts import (
     TeamArtifactMemberRequest,
 )
 from .artifact_contracts import ArtifactSourceReference
+from .artifact_review_notification_contracts import (
+    ArtifactReviewNotificationResult,
+)
 from .dwaion_workflow_contracts import WorkflowCapability
 
 
@@ -154,6 +157,18 @@ class ArtifactCollaborationProviderConfiguration:
                     else "Configure and attest the artifact collaboration provider."
                 ),
             ),
+            staged_review=WorkflowCapability(
+                available=available,
+                configured=available,
+                reason_code=(
+                    None if available else "ARTIFACT_STAGED_REVIEW_NOT_AVAILABLE"
+                ),
+                recovery_hint=(
+                    None
+                    if available
+                    else "Configure and attest the artifact collaboration provider."
+                ),
+            ),
             automatic_masking=WorkflowCapability(
                 available=False,
                 configured=False,
@@ -182,12 +197,16 @@ class ArtifactCollaborationProviderConfiguration:
                 ),
             ),
             review_rejection=WorkflowCapability(
-                available=False,
-                configured=False,
-                reason_code="ARTIFACT_REVIEW_REJECTION_NOT_CONFIGURED",
+                available=available,
+                configured=available,
+                reason_code=(
+                    None if available else "ARTIFACT_REVIEW_REJECTION_NOT_AVAILABLE"
+                ),
                 recovery_hint=(
-                    "Configure the governed review workflow provider before rejecting "
-                    "a submitted review."
+                    "Review rejection is recorded by the governed staged-review ledger."
+                    if available
+                    else "Configure and attest the artifact collaboration provider before "
+                    "deciding a review."
                 ),
             ),
             provider_state="AVAILABLE" if available else "NOT_CONFIGURED",
@@ -314,6 +333,56 @@ class ArtifactCollaborationProvider:
         ):
             raise ArtifactCollaborationProviderUnavailable(
                 "ARTIFACT_ACL_RESPONSE_MISMATCH"
+            )
+        return result
+
+    def notify_review(
+        self,
+        *,
+        command_id: UUID,
+        artifact_id: UUID,
+        workspace_id: UUID,
+        stage_id: UUID,
+        tenant_id: int,
+        actor_user_id: str,
+        assignee_subject_id: str,
+        workspace_revision: int,
+        reason_code: str,
+        change_reason: str,
+        correlation_id: str,
+    ) -> ArtifactReviewNotificationResult:
+        result = self._request(
+            "/internal/v1/artifact-acl/review-notifications",
+            {
+                "commandId": str(command_id),
+                "artifactId": str(artifact_id),
+                "workspaceId": str(workspace_id),
+                "stageId": str(stage_id),
+                "tenantId": tenant_id,
+                "actorUserId": actor_user_id,
+                "assigneeSubjectId": assignee_subject_id,
+                "workspaceRevision": workspace_revision,
+                "reasonCode": reason_code,
+                "changeReason": change_reason,
+                "requireCurrentAuthorization": True,
+            },
+            correlation_id,
+            ArtifactReviewNotificationResult,
+            frozenset({200}),
+        )
+        if (
+            result.commandId != command_id
+            or result.artifactId != artifact_id
+            or result.workspaceId != workspace_id
+            or result.stageId != stage_id
+            or result.assigneeSubjectId != assignee_subject_id
+            or result.workspaceRevision != workspace_revision
+            or result.reasonCode != reason_code
+            or result.changeReason != change_reason
+            or result.deliveryState != "DELIVERED"
+        ):
+            raise ArtifactCollaborationProviderUnavailable(
+                "ARTIFACT_REVIEW_NOTIFICATION_BINDING_INVALID"
             )
         return result
 
