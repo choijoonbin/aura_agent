@@ -15,6 +15,7 @@ from pydantic import ValidationError
 from dwp_agent import artifact_collaboration_api
 from dwp_agent.artifact_collaboration_contracts import (
     ResolveTeamArtifactConflictRequest,
+    RunTeamArtifactPreflightRequest,
     TeamArtifactCapabilities,
     TeamArtifactMemberRequest,
     TeamArtifactShare,
@@ -184,6 +185,22 @@ def test_contracts_require_merged_content_and_sealed_revocation_receipt() -> Non
     assert valid.state == "REVOKED"
 
 
+def test_preflight_contract_rejects_duplicate_sources() -> None:
+    source = {"sourceType": "MAIL", "reference": "mail:thread-77"}
+    with pytest.raises(ValidationError):
+        RunTeamArtifactPreflightRequest.model_validate(
+            {
+                "commandId": str(uuid4()),
+                "expectedRevision": 3,
+                "reasonCode": "TEAM_ACL_PREFLIGHT",
+                "teamId": str(uuid4()),
+                "artifactRevision": 3,
+                "members": [{"subjectId": "member-2", "role": "EDITOR"}],
+                "sources": [source, source],
+            }
+        )
+
+
 class _CapabilityStore:
     @staticmethod
     def capabilities() -> TeamArtifactCapabilities:
@@ -257,6 +274,7 @@ def test_v40_migration_seals_team_versions_conflicts_and_share_revocation() -> N
     assert "ai_artifact_team_versions" in sql
     assert "uq_ai_artifact_team_open_conflict" in sql
     assert "revocation_receipt_sha256" in sql
+    assert "NOT allowed AND reason_code IS NOT NULL" in sql
     assert "expires_at > created_at" in sql
     assert "reject_ai_audit_event_mutation" in sql
     assert "SHARE_REVOKED" in sql

@@ -100,6 +100,10 @@ CREATE TABLE ai_artifact_team_members (
     CONSTRAINT ck_ai_artifact_team_member_decision CHECK (
         denied_source_count >= 0 AND decision_revision > 0
         AND (reason_code IS NULL OR reason_code ~ '^[A-Z][A-Z0-9_.-]{1,127}$')
+        AND (
+            (allowed AND denied_source_count = 0 AND reason_code IS NULL)
+            OR (NOT allowed AND reason_code IS NOT NULL)
+        )
     )
 );
 
