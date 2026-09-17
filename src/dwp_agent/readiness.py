@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 from urllib.parse import urlparse
 
 from .crypto import DataKeyConfigurationError
@@ -23,6 +24,9 @@ from .model_provider import (
 
 class RuntimeConfigurationError(RuntimeError):
     pass
+
+
+_HOME_IDENTITY_KEY_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{2,79}$")
 
 
 def validate_runtime_configuration(key_provider: KeyProvider | None = None) -> None:
@@ -78,8 +82,17 @@ def validate_runtime_configuration(key_provider: KeyProvider | None = None) -> N
         "DWP_API_HISTORY_PRIVACY_HASH_SECRET",
     )
     for name in required_secrets:
-        if not _managed_secret(name):
+        minimum_length = (
+            32 if name == "DWP_DWAION_HOME_IDENTITY_SIGNING_SECRET" else 24
+        )
+        if not _managed_secret(name, minimum_length=minimum_length):
             errors.append(name)
+
+    home_identity_key_id = os.getenv(
+        "DWP_DWAION_HOME_IDENTITY_KEY_ID", "platform-dwaion-home-v1"
+    ).strip()
+    if not _HOME_IDENTITY_KEY_ID.fullmatch(home_identity_key_id):
+        errors.append("DWP_DWAION_HOME_IDENTITY_KEY_ID")
 
     required_values = (
         "DWP_AGENT_DATABASE_URL",
@@ -140,10 +153,14 @@ def validate_runtime_configuration(key_provider: KeyProvider | None = None) -> N
     _raise_if_errors(errors, environment)
 
 
-def _managed_secret(name: str) -> bool:
+def _managed_secret(name: str, *, minimum_length: int = 24) -> bool:
     value = os.getenv(name, "").strip()
     lowered = value.lower()
-    return len(value) >= 24 and "replace-with" not in lowered and "change-me" not in lowered
+    return (
+        len(value) >= minimum_length
+        and "replace-with" not in lowered
+        and "change-me" not in lowered
+    )
 
 
 def _require_distinct(errors: list[str], label: str, *names: str) -> None:

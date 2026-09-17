@@ -40,6 +40,28 @@ def test_production_runtime_accepts_complete_distinct_configuration(
     validate_runtime_configuration(ManagedTestKeyProvider())
 
 
+@pytest.mark.parametrize(
+    ("name", "value"),
+    (
+        ("DWP_DWAION_HOME_IDENTITY_SIGNING_SECRET", "h" * 31),
+        ("DWP_DWAION_HOME_IDENTITY_KEY_ID", "bad key id"),
+        ("DWP_DWAION_HOME_IDENTITY_KEY_ID", "x"),
+    ),
+)
+def test_production_runtime_rejects_home_identity_configuration_that_request_verifier_rejects(
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    value: str,
+) -> None:
+    _configure_production(monkeypatch)
+    monkeypatch.setenv(name, value)
+
+    with pytest.raises(RuntimeConfigurationError) as captured:
+        validate_runtime_configuration(ManagedTestKeyProvider())
+
+    assert name in str(captured.value)
+
+
 def test_production_runtime_rejects_shared_identity_and_insecure_model_endpoint(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -22,7 +22,7 @@ import psycopg
 ASSERTION_HEADER = "X-DWP-Home-Assertion"
 DEFAULT_KEY_ID = "platform-dwaion-home-v1"
 _SEGMENT = re.compile(r"^[A-Za-z0-9_-]+$")
-_KEY_ID = re.compile(r"^[A-Za-z0-9._:-]{1,80}$")
+_KEY_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{2,79}$")
 MAX_ASSERTION_LENGTH = 16_384
 
 
