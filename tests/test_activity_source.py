@@ -122,8 +122,15 @@ def test_lease_expiration_is_unknown_not_forever_running(source):
     assert row.run_state == "RUNNING"  # Reads never change the source ledger.
     assert row.activity_state(now) == "UNKNOWN"
     assert row.execution_version(now) == 2  # Clock expiry must not mint a source version.
-    counts = activity.counts(tenant_id=tenant, user_id="7", filters=ActivityFilters(), now=now)
+    counts, attention = activity.summary(
+        tenant_id=tenant,
+        user_id="7",
+        filters=ActivityFilters(),
+        now=now,
+        attention_limit=5,
+    )
     assert counts == {"UNKNOWN": 1}
+    assert attention == []
     with pytest.raises(RunStoreUnavailable):
         runs.complete(response_for(run, lease.run_id), lease=lease, tenant_id=tenant, user_id="7")
     retry = runs.begin(replace(run, run_id=str(uuid4())))
@@ -146,7 +153,15 @@ def test_full_summary_is_not_limited_by_recent_page_and_owner_isolation(source):
     rows, more = activity.page(tenant_id=tenant, user_id="7", filters=ActivityFilters(),
                                snapshot_at=now, now=now, after=None, limit=100)
     assert len(rows) == 100 and more and all(str(row.run_id) != old.run_id for row in rows)
-    assert activity.counts(tenant_id=tenant, user_id="7", filters=ActivityFilters(), now=now) == {"RUNNING": 1, "COMPLETED": 103}
+    counts, attention = activity.summary(
+        tenant_id=tenant,
+        user_id="7",
+        filters=ActivityFilters(),
+        now=now,
+        attention_limit=5,
+    )
+    assert counts == {"RUNNING": 1, "COMPLETED": 103}
+    assert attention == []
     assert activity.detail(tenant_id=tenant, user_id="other-user", run_id=UUID(old.run_id)) is None
     assert activity.detail(tenant_id="1", user_id="7", run_id=UUID(old.run_id)) is None
     tail, more = activity.page(tenant_id=tenant, user_id="7", filters=ActivityFilters(),
@@ -154,8 +169,22 @@ def test_full_summary_is_not_limited_by_recent_page_and_owner_isolation(source):
     assert len(tail) == 4 and not more and str(tail[-1].run_id) == old.run_id
     assert not set(row.run_id for row in rows) & set(row.run_id for row in tail)
     for filters in (ActivityFilters(actor="PERSON"), ActivityFilters(source="WORKSPACE"), ActivityFilters(object_type="WORK_ITEM")):
-        assert activity.counts(tenant_id=tenant, user_id="7", filters=filters, now=now) == {}
-    assert activity.counts(tenant_id=tenant, user_id="7", filters=ActivityFilters(query=old.run_id), now=now) == {"RUNNING": 1}
+        assert activity.summary(
+            tenant_id=tenant,
+            user_id="7",
+            filters=filters,
+            now=now,
+            attention_limit=5,
+        ) == ({}, [])
+    query_counts, query_attention = activity.summary(
+        tenant_id=tenant,
+        user_id="7",
+        filters=ActivityFilters(query=old.run_id),
+        now=now,
+        attention_limit=5,
+    )
+    assert query_counts == {"RUNNING": 1}
+    assert query_attention == []
 
 
 def test_source_provider_tracks_executor_on_memory_database_transition(source, monkeypatch):
@@ -168,8 +197,18 @@ def test_source_provider_tracks_executor_on_memory_database_transition(source, m
     selected = get_agent_activity_store()
     assert type(selected) is type(activity)
     assert selected.detail(tenant_id=tenant, user_id="7", run_id=UUID(run.run_id)) is not None
-    legacy_rows = get_user_run_store().list(tenant_id=tenant, user_id="7", limit=50, run_state=None)
-    assert [row.run_id for row in legacy_rows] == [UUID(run.run_id)]
+    run_rows, has_more = get_user_run_store().page(
+        tenant_id=tenant,
+        user_id="7",
+        limit=50,
+        run_state=None,
+        from_at=None,
+        to_at=None,
+        snapshot_at=datetime.now(timezone.utc),
+        after=None,
+    )
+    assert [row.run_id for row in run_rows] == [UUID(run.run_id)]
+    assert has_more is False
     assert get_user_run_store().get(
         tenant_id=tenant, user_id="7", run_id=UUID(run.run_id)
     ) is not None
@@ -185,7 +224,13 @@ def test_source_provider_tracks_executor_on_memory_database_transition(source, m
     selected = get_agent_activity_store()
     assert isinstance(selected, InMemoryAgentActivityStore)
     assert selected.detail(tenant_id=tenant, user_id="7", run_id=UUID(run.run_id)) is None
-    assert selected.counts(tenant_id=tenant, user_id="7", filters=ActivityFilters(), now=datetime.now(timezone.utc)) == {}
+    assert selected.summary(
+        tenant_id=tenant,
+        user_id="7",
+        filters=ActivityFilters(),
+        now=datetime.now(timezone.utc),
+        attention_limit=5,
+    ) == ({}, [])
 
 
 @pytest.fixture
@@ -354,19 +399,42 @@ def test_api_unavailable_not_empty_and_validates_time_filters(configured, monkey
     assert request("/v1/activity/events?limit=101").status_code == 422
 
 
-def test_factory_and_legacy_user_list_read_same_memory_execution_source(configured, monkeypatch):
+def test_factory_and_user_page_read_same_memory_execution_source(configured, monkeypatch):
     monkeypatch.setattr(run_store_module, "_STORE", configured)
     # A changed env does not silently switch away from the initialized executor.
     monkeypatch.setenv("DWP_AGENT_DATABASE_URL", "postgresql://not-used/other")
     run = start()
     configured.begin(run)
     assert isinstance(get_agent_activity_store(), InMemoryAgentActivityStore)
-    legacy = get_user_run_store()
-    assert isinstance(legacy, InMemoryUserRunStore)
-    assert legacy.list(tenant_id="42", user_id="7", limit=10, run_state=None)[0].run_id == UUID(run.run_id)
-    assert legacy.list(tenant_id="42", user_id="8", limit=10, run_state=None) == []
-    assert legacy.get(tenant_id="42", user_id="7", run_id=UUID(run.run_id)) is not None
-    assert legacy.get(tenant_id="42", user_id="8", run_id=UUID(run.run_id)) is None
+    reader = get_user_run_store()
+    assert isinstance(reader, InMemoryUserRunStore)
+    snapshot_at = datetime.now(timezone.utc)
+    rows, has_more = reader.page(
+        tenant_id="42",
+        user_id="7",
+        limit=10,
+        run_state=None,
+        from_at=None,
+        to_at=None,
+        snapshot_at=snapshot_at,
+        after=None,
+    )
+    foreign_rows, foreign_has_more = reader.page(
+        tenant_id="42",
+        user_id="8",
+        limit=10,
+        run_state=None,
+        from_at=None,
+        to_at=None,
+        snapshot_at=snapshot_at,
+        after=None,
+    )
+    assert [row.run_id for row in rows] == [UUID(run.run_id)]
+    assert has_more is False
+    assert foreign_rows == []
+    assert foreign_has_more is False
+    assert reader.get(tenant_id="42", user_id="7", run_id=UUID(run.run_id)) is not None
+    assert reader.get(tenant_id="42", user_id="8", run_id=UUID(run.run_id)) is None
 
 
 def test_cursor_requires_real_secret_and_expires(configured, monkeypatch):

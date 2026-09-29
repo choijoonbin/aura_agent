@@ -125,9 +125,18 @@ def test_unexpected_model_failure_keeps_actual_partial_progress() -> None:
             AskRequest(request_id="measurement-failed", query="What needs attention?"),
             identity=_identity(),
         )
-    summary = InMemoryUserRunStore(store).list(
-        tenant_id="1", user_id="900018", limit=1, run_state=None,
-    )[0]
+    summaries, has_more = InMemoryUserRunStore(store).page(
+        tenant_id="1",
+        user_id="900018",
+        limit=1,
+        run_state=None,
+        from_at=None,
+        to_at=None,
+        snapshot_at=datetime.now(timezone.utc),
+        after=None,
+    )
+    summary = summaries[0]
+    assert has_more is False
     assert summary.run_state == "FAILED"
     assert summary.progress_percent == 40
     assert summary.measurement_status == "PARTIAL"

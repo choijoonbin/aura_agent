@@ -203,10 +203,6 @@ class ActivityStoreStub:
         self.calls.append(("detail", tenant_id, user_id))
         return self.snapshot if run_id == RUN_ID else None
 
-    def counts(self, *, tenant_id, user_id, filters, now):
-        self.calls.append(("summary", tenant_id, user_id))
-        return {"COMPLETED": 1}
-
     def summary(self, *, tenant_id, user_id, filters, now, attention_limit):
         self.calls.append(("summary", tenant_id, user_id))
         return {"COMPLETED": 1}, []
@@ -227,10 +223,6 @@ class UserRunStoreStub:
             created_at=datetime.now(timezone.utc),
             completed_at=datetime.now(timezone.utc),
         )
-
-    def list(self, *, tenant_id, user_id, limit, run_state):
-        self.calls.append(("list", tenant_id, user_id))
-        return [self.run]
 
     def page(
         self,

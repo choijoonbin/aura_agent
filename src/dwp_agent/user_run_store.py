@@ -34,15 +34,6 @@ from .run_observability import (
 
 
 class UserRunStore(Protocol):
-    def list(
-        self,
-        *,
-        tenant_id: str,
-        user_id: str,
-        limit: int,
-        run_state: AgentRunState | None,
-    ) -> list[UserAgentRunSummary]: ...
-
     def page(
         self,
         *,
@@ -65,54 +56,9 @@ class UserRunStore(Protocol):
     ) -> UserAgentRunSummary | None: ...
 
 
-class EmptyUserRunStore:
-    def list(
-        self,
-        *,
-        tenant_id: str,
-        user_id: str,
-        limit: int,
-        run_state: AgentRunState | None,
-    ) -> list[UserAgentRunSummary]:
-        return []
-
-    def page(
-        self,
-        *,
-        tenant_id: str,
-        user_id: str,
-        limit: int,
-        run_state: AgentRunState | None,
-        from_at: datetime | None,
-        to_at: datetime | None,
-        snapshot_at: datetime,
-        after: tuple[datetime, UUID] | None,
-    ) -> tuple[list[UserAgentRunSummary], bool]:
-        return [], False
-
-    def get(
-        self,
-        *,
-        tenant_id: str,
-        user_id: str,
-        run_id: UUID,
-    ) -> UserAgentRunSummary | None:
-        return None
-
-
 class InMemoryUserRunStore:
     def __init__(self, runs: InMemoryRunStore) -> None:
         self.runs = runs
-
-    def list(self, *, tenant_id: str, user_id: str, limit: int,
-             run_state: AgentRunState | None) -> list[UserAgentRunSummary]:
-        rows = self.runs.activity_snapshots(tenant_id=tenant_id, user_id=user_id)
-        rows.sort(key=lambda row: (row.created_at, row.run_id), reverse=True)
-        return [
-            _in_memory_summary(row, self.runs)
-            for row in rows
-            if run_state is None or row.run_state == run_state
-        ][:limit]
 
     def page(
         self,
@@ -157,26 +103,6 @@ class InMemoryUserRunStore:
 class PostgresUserRunStore:
     def __init__(self, database_url: str) -> None:
         self.database_url = database_url
-
-    def list(
-        self,
-        *,
-        tenant_id: str,
-        user_id: str,
-        limit: int,
-        run_state: AgentRunState | None,
-    ) -> list[UserAgentRunSummary]:
-        rows, _ = self.page(
-            tenant_id=tenant_id,
-            user_id=user_id,
-            limit=limit,
-            run_state=run_state,
-            from_at=None,
-            to_at=None,
-            snapshot_at=datetime.max.replace(tzinfo=timezone.utc),
-            after=None,
-        )
-        return rows
 
     def page(
         self,

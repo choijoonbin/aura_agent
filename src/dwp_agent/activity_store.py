@@ -55,8 +55,6 @@ class AgentActivityStore(Protocol):
              snapshot_at: datetime, now: datetime, after: tuple[datetime, UUID] | None,
              limit: int) -> tuple[list[ActivityRunSnapshot], bool]: ...
     def detail(self, *, tenant_id: str, user_id: str, run_id: UUID) -> ActivityRunSnapshot | None: ...
-    def counts(self, *, tenant_id: str, user_id: str, filters: ActivityFilters,
-               now: datetime) -> dict[str, int]: ...
     def summary(
         self,
         *,
@@ -84,11 +82,6 @@ class InMemoryAgentActivityStore:
     def detail(self, *, tenant_id: str, user_id: str, run_id: UUID) -> ActivityRunSnapshot | None:
         return next((row for row in self.runs.activity_snapshots(tenant_id=tenant_id, user_id=user_id)
                      if row.run_id == run_id and row.data_provenance == "LIVE"), None)
-
-    def counts(self, *, tenant_id: str, user_id: str, filters: ActivityFilters,
-               now: datetime) -> dict[str, int]:
-        return dict(Counter(row.activity_state(now) for row in self.runs.activity_snapshots(
-            tenant_id=tenant_id, user_id=user_id) if filters.matches(row, now)))
 
     def summary(
         self,
@@ -190,12 +183,6 @@ class PostgresAgentActivityStore:
     def detail(self, *, tenant_id: str, user_id: str, run_id: UUID) -> ActivityRunSnapshot | None:
         rows = self._query(f"SELECT {_COLUMNS} FROM ai_agent_runs WHERE tenant_id = %s AND user_id = %s AND run_id = %s AND data_provenance = 'LIVE'", [int(tenant_id), user_id, run_id])
         return _snapshot(rows[0]) if rows else None
-
-    def counts(self, *, tenant_id: str, user_id: str, filters: ActivityFilters,
-               now: datetime) -> dict[str, int]:
-        where, params = self._where(tenant_id, user_id, filters, now)
-        rows = self._query(f"SELECT {_STATE} AS activity_state, COUNT(*) FROM ai_agent_runs WHERE {where} GROUP BY 1", [now, *params])
-        return {str(row[0]): int(row[1]) for row in rows}
 
     def summary(
         self,

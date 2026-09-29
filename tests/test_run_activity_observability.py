@@ -139,8 +139,15 @@ def test_sample_runs_are_visible_only_in_dwaion_run_views_not_activity_kpis() ->
         store._activity[lease.run_id], data_provenance="SAMPLE"
     )
 
-    user_rows = InMemoryUserRunStore(store).list(
-        tenant_id="1", user_id="900018", limit=10, run_state=None
+    user_rows, user_has_more = InMemoryUserRunStore(store).page(
+        tenant_id="1",
+        user_id="900018",
+        limit=10,
+        run_state=None,
+        from_at=None,
+        to_at=None,
+        snapshot_at=datetime.now(timezone.utc),
+        after=None,
     )
     activity = InMemoryAgentActivityStore(store)
     page, has_more = activity.page(
@@ -149,11 +156,15 @@ def test_sample_runs_are_visible_only_in_dwaion_run_views_not_activity_kpis() ->
         after=None, limit=10,
     )
     assert user_rows[0].data_provenance == "SAMPLE"
+    assert user_has_more is False
     assert page == [] and has_more is False
-    assert activity.counts(
-        tenant_id="1", user_id="900018", filters=ActivityFilters(),
+    assert activity.summary(
+        tenant_id="1",
+        user_id="900018",
+        filters=ActivityFilters(),
         now=datetime.now(timezone.utc),
-    ) == {}
+        attention_limit=5,
+    ) == ({}, [])
 
 
 def test_user_run_pages_apply_owner_time_range_and_stable_keyset() -> None:

@@ -21,7 +21,6 @@ RUN_ID = UUID("00000000-0000-4000-8000-000000000101")
 
 class FakeUserRunStore:
     def __init__(self) -> None:
-        self.received: tuple[str, str, int, AgentRunState | None] | None = None
         self.received_page: tuple[
             str,
             str,
@@ -35,17 +34,6 @@ class FakeUserRunStore:
         self.received_get: tuple[str, str, UUID] | None = None
         self.missing = False
         self.has_more = False
-
-    def list(
-        self,
-        *,
-        tenant_id: str,
-        user_id: str,
-        limit: int,
-        run_state: AgentRunState | None,
-    ) -> list[UserAgentRunSummary]:
-        self.received = (tenant_id, user_id, limit, run_state)
-        return [self._run()]
 
     def page(
         self,
