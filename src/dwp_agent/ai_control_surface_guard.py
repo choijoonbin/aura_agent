@@ -73,6 +73,7 @@ _BINDINGS = {
 _CONTEXT = re.compile(r"^psc-[a-f0-9]{64}$")
 _ROLLOUT_REVISION = re.compile(r"^rollout-[a-f0-9]{64}$")
 _DECISION_REVISION = re.compile(r"^psr-[a-f0-9]{64}$")
+AI_CONTROL_ROLLOUT_UNAVAILABLE = "AI_CONTROL_ROLLOUT_UNAVAILABLE"
 
 
 def require_ai_control_product_surface(
@@ -167,8 +168,17 @@ def _require_rollout(values: dict[str, list[str]]) -> None:
         _deny(
             status.HTTP_503_SERVICE_UNAVAILABLE,
             "Trusted AI control rollout evidence is missing or invalid.",
+            error_code=AI_CONTROL_ROLLOUT_UNAVAILABLE,
         )
 
 
-def _deny(status_code: int, detail: str) -> NoReturn:
-    raise HTTPException(status_code=status_code, detail=detail)
+def _deny(
+    status_code: int,
+    detail: str,
+    *,
+    error_code: str | None = None,
+) -> NoReturn:
+    safe_detail: str | dict[str, str] = detail
+    if error_code is not None:
+        safe_detail = {"errorCode": error_code, "message": detail}
+    raise HTTPException(status_code=status_code, detail=safe_detail)

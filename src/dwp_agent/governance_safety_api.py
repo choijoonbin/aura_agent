@@ -38,6 +38,8 @@ def get_safety_policy(
                 tenant_id=tenant, actor_user_id=user))
     except GovernancePolicyNotInitialized as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
+    except GovernanceStoreUnavailable as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
 
 
 @router.post(
@@ -87,3 +89,5 @@ def update_safety_policy(
         raise HTTPException(status_code=409, detail=str(error)) from error
     except GovernancePolicyNotInitialized as error:
         raise HTTPException(status_code=409, detail=str(error)) from error
+    except GovernanceStoreUnavailable as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error

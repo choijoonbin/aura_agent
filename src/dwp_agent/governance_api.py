@@ -154,9 +154,12 @@ def list_action_policies(
 ):
     tenant, user, correlation, permissions = headers
     _context(tenant, user, correlation, permissions, "ADMIN.DWAION_ACTIONS", "VIEW")
-    return ActionPolicyListEnvelope(
-        data=get_governance_store().action_policies(
-            tenant_id=tenant, actor_user_id=user))
+    try:
+        return ActionPolicyListEnvelope(
+            data=get_governance_store().action_policies(
+                tenant_id=tenant, actor_user_id=user))
+    except GovernanceStoreUnavailable as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
 
 
 @router.post(
@@ -214,6 +217,8 @@ def update_action_policy(
         raise HTTPException(status_code=409, detail=str(error)) from error
     except GovernancePolicyConflict as error:
         raise HTTPException(status_code=409, detail=str(error)) from error
+    except GovernanceStoreUnavailable as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
 
 
 @router.get(
@@ -226,8 +231,11 @@ def list_evaluation_sets(
 ):
     tenant, user, correlation, permissions = headers
     _context(tenant, user, correlation, permissions, "ADMIN.DWAION_EVALUATION", "VIEW")
-    return EvaluationSetListEnvelope(
-        data=get_evaluation_store().list_sets(tenant_id=tenant))
+    try:
+        return EvaluationSetListEnvelope(
+            data=get_evaluation_store().list_sets(tenant_id=tenant))
+    except GovernanceStoreUnavailable as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
 
 
 @router.get(
@@ -247,6 +255,8 @@ def get_evaluation_set(
                 tenant_id=tenant, evaluation_set_id=evaluation_set_id))
     except EvaluationSetNotFound as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
+    except GovernanceStoreUnavailable as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
 
 
 @router.post(
@@ -261,15 +271,18 @@ def create_evaluation_set(
 ):
     tenant, user, correlation, permissions = headers
     _context(tenant, user, correlation, permissions, "ADMIN.DWAION_EVALUATION", "CREATE")
-    return EvaluationSetEnvelope(
-        message="DWAI-ON evaluation set created.",
-        data=get_evaluation_store().create_set(
-            tenant_id=tenant,
-            actor_user_id=user,
-            correlation_id=correlation,
-            request=request,
-        ),
-    )
+    try:
+        return EvaluationSetEnvelope(
+            message="DWAI-ON evaluation set created.",
+            data=get_evaluation_store().create_set(
+                tenant_id=tenant,
+                actor_user_id=user,
+                correlation_id=correlation,
+                request=request,
+            ),
+        )
+    except GovernanceStoreUnavailable as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
 
 
 @router.post(
@@ -300,6 +313,8 @@ def add_evaluation_case(
         raise HTTPException(status_code=404, detail=str(error)) from error
     except EvaluationSetNotRunnable as error:
         raise HTTPException(status_code=409, detail=str(error)) from error
+    except GovernanceStoreUnavailable as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
 
 
 @router.patch(
@@ -329,6 +344,8 @@ def transition_evaluation_set(
         raise HTTPException(status_code=404, detail=str(error)) from error
     except (EvaluationSetNotRunnable, GovernancePolicyConflict) as error:
         raise HTTPException(status_code=409, detail=str(error)) from error
+    except GovernanceStoreUnavailable as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
 
 
 @router.post(
@@ -365,6 +382,8 @@ def execute_evaluation(
         raise HTTPException(status_code=409, detail=str(error)) from error
     except EvaluationSetNotRunnable as error:
         raise HTTPException(status_code=409, detail=str(error)) from error
+    except GovernanceStoreUnavailable as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
 
 
 @router.get(
@@ -379,13 +398,16 @@ def list_evaluation_runs(
 ):
     tenant, user, correlation, permissions = headers
     _context(tenant, user, correlation, permissions, "ADMIN.DWAION_EVALUATION", "VIEW")
-    return EvaluationRunListEnvelope(
-        data=get_evaluation_store().list_runs(
-            tenant_id=tenant,
-            evaluation_set_id=evaluation_set_id,
-            limit=max(1, min(limit, 50)),
+    try:
+        return EvaluationRunListEnvelope(
+            data=get_evaluation_store().list_runs(
+                tenant_id=tenant,
+                evaluation_set_id=evaluation_set_id,
+                limit=max(1, min(limit, 50)),
+            )
         )
-    )
+    except GovernanceStoreUnavailable as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
 
 
 @router.get(
@@ -411,6 +433,8 @@ def get_evaluation_run(
         )
     except EvaluationRunNotFound as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
+    except GovernanceStoreUnavailable as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
 
 
 @router.get(
@@ -431,6 +455,8 @@ def export_evaluation_run(
         )
     except EvaluationRunNotFound as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
+    except GovernanceStoreUnavailable as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
     return Response(
         content=content,
         media_type="text/csv; charset=utf-8",
@@ -453,9 +479,12 @@ def list_audit_events(
 ):
     tenant, user, correlation, permissions = headers
     _context(tenant, user, correlation, permissions, "ADMIN.DWAION_AUDIT", "VIEW")
-    return GovernanceAuditEnvelope(
-        data=get_governance_store().audit_events(
-            tenant_id=tenant, category=category, query=query, page=page, size=size))
+    try:
+        return GovernanceAuditEnvelope(
+            data=get_governance_store().audit_events(
+                tenant_id=tenant, category=category, query=query, page=page, size=size))
+    except GovernanceStoreUnavailable as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
 
 
 @router.get("/audit/export")
@@ -466,8 +495,11 @@ def export_audit_events(
 ):
     tenant, user, correlation, permissions = headers
     _context(tenant, user, correlation, permissions, "ADMIN.DWAION_AUDIT", "EXPORT")
-    content, truncated = get_governance_store().audit_csv(
-        tenant_id=tenant, category=category, query=query)
+    try:
+        content, truncated = get_governance_store().audit_csv(
+            tenant_id=tenant, category=category, query=query)
+    except GovernanceStoreUnavailable as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
     return Response(
         content=content,
         media_type="text/csv; charset=utf-8",

@@ -7,6 +7,7 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 import dwp_agent.governance_api as governance_api_module
+import dwp_agent.governance_safety_api as governance_safety_api_module
 from dwp_agent.contracts import CitationSourceType
 from dwp_agent.governance_contracts import (
     BootstrapGovernancePoliciesRequest,
@@ -25,11 +26,15 @@ from dwp_agent.governance_contracts import (
 )
 from dwp_agent.evaluation_store import EvaluationRunAlreadyActive, EvaluationRunLeaseLost
 from dwp_agent.evaluation_evidence_store import EvaluationEvidenceStoreMixin
-from dwp_agent.governance_store import GovernancePolicyNotInitialized
+from dwp_agent.governance_store import (
+    GovernancePolicyNotInitialized,
+    GovernanceStoreUnavailable,
+)
 from dwp_agent.main import app
 
 
 SERVICE_TOKEN = "test-gateway-service-token"
+STORE_UNAVAILABLE_DETAIL = "GOVERNANCE_STORE_UNAVAILABLE"
 
 
 @pytest.fixture(autouse=True)
@@ -201,6 +206,10 @@ async def request(
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         return await client.request(method, path, headers=headers, json=json)
+
+
+def unavailable_store():
+    raise GovernanceStoreUnavailable(STORE_UNAVAILABLE_DETAIL)
 
 
 def test_source_governance_requires_granular_permissions(
@@ -427,6 +436,231 @@ def test_expired_evaluation_run_completion_returns_conflict(
     )
 
     assert response.status_code == 409
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "permissions", "payload"),
+    [
+        pytest.param(
+            "GET",
+            "/v1/admin/actions",
+            "ADMIN.DWAION_ACTIONS:VIEW",
+            None,
+            id="list",
+        ),
+        pytest.param(
+            "PATCH",
+            "/v1/admin/actions/CALENDAR.EVENT.CREATE",
+            "ADMIN.DWAION_ACTIONS:UPDATE",
+            {
+                "enabled": False,
+                "confirmationRequired": True,
+                "executionPolicy": "BLOCKED",
+                "expectedVersion": 1,
+                "changeReason": "Keep this unavailable action blocked.",
+            },
+            id="update",
+        ),
+    ],
+)
+def test_action_store_unavailable_returns_stable_503(
+    monkeypatch: pytest.MonkeyPatch,
+    method: str,
+    path: str,
+    permissions: str,
+    payload: dict | None,
+) -> None:
+    monkeypatch.setattr(governance_api_module, "get_governance_store", unavailable_store)
+
+    response = asyncio.run(
+        request(method, path, permissions=permissions, json=payload)
+    )
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": STORE_UNAVAILABLE_DETAIL}
+
+
+@pytest.mark.parametrize(
+    ("method", "permissions", "payload"),
+    [
+        pytest.param("GET", "ADMIN.DWAION_SAFETY:VIEW", None, id="get"),
+        pytest.param(
+            "PATCH",
+            "ADMIN.DWAION_SAFETY:UPDATE",
+            {
+                "privilegedDataOutcome": "DENY",
+                "mutationOutcome": "HANDOFF",
+                "requireCitations": True,
+                "maxSourceScopes": 3,
+                "maxToolCalls": 2,
+                "expectedVersion": 1,
+                "changeReason": "Keep unavailable safety controls fail closed.",
+            },
+            id="update",
+        ),
+    ],
+)
+def test_safety_store_unavailable_returns_stable_503(
+    monkeypatch: pytest.MonkeyPatch,
+    method: str,
+    permissions: str,
+    payload: dict | None,
+) -> None:
+    monkeypatch.setattr(
+        governance_safety_api_module,
+        "get_governance_store",
+        unavailable_store,
+    )
+
+    response = asyncio.run(
+        request(method, "/v1/admin/safety", permissions=permissions, json=payload)
+    )
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": STORE_UNAVAILABLE_DETAIL}
+
+
+@pytest.mark.parametrize(
+    ("path", "permissions"),
+    [
+        pytest.param(
+            "/v1/admin/audit",
+            "ADMIN.DWAION_AUDIT:VIEW",
+            id="list",
+        ),
+        pytest.param(
+            "/v1/admin/audit/export",
+            "ADMIN.DWAION_AUDIT:EXPORT",
+            id="export",
+        ),
+    ],
+)
+def test_audit_store_unavailable_returns_stable_503(
+    monkeypatch: pytest.MonkeyPatch,
+    path: str,
+    permissions: str,
+) -> None:
+    monkeypatch.setattr(governance_api_module, "get_governance_store", unavailable_store)
+
+    response = asyncio.run(request("GET", path, permissions=permissions))
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": STORE_UNAVAILABLE_DETAIL}
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "permissions", "payload"),
+    [
+        pytest.param(
+            "GET",
+            "/v1/admin/evaluations",
+            "ADMIN.DWAION_EVALUATION:VIEW",
+            None,
+            id="list-sets",
+        ),
+        pytest.param(
+            "GET",
+            f"/v1/admin/evaluations/{uuid4()}",
+            "ADMIN.DWAION_EVALUATION:VIEW",
+            None,
+            id="get-set",
+        ),
+        pytest.param(
+            "POST",
+            "/v1/admin/evaluations",
+            "ADMIN.DWAION_EVALUATION:CREATE",
+            {"name": "Unavailable evaluation"},
+            id="create-set",
+        ),
+        pytest.param(
+            "POST",
+            f"/v1/admin/evaluations/{uuid4()}/cases",
+            "ADMIN.DWAION_EVALUATION:UPDATE",
+            {
+                "name": "Unavailable case",
+                "prompt": "Summarize the unavailable work item.",
+                "sourceScopes": ["WORK_ITEM"],
+            },
+            id="add-case",
+        ),
+        pytest.param(
+            "PATCH",
+            f"/v1/admin/evaluations/{uuid4()}/lifecycle",
+            "ADMIN.DWAION_EVALUATION:MANAGE",
+            {
+                "lifecycleState": "ACTIVE",
+                "expectedVersion": 1,
+                "changeReason": "Activate this evaluation after review.",
+            },
+            id="transition-set",
+        ),
+        pytest.param(
+            "POST",
+            f"/v1/admin/evaluations/{uuid4()}/runs",
+            "APP.ASK:VIEW,ADMIN.DWAION_EVALUATION:EXECUTE",
+            None,
+            id="execute-run",
+        ),
+        pytest.param(
+            "GET",
+            f"/v1/admin/evaluations/{uuid4()}/runs",
+            "ADMIN.DWAION_EVALUATION:VIEW",
+            None,
+            id="list-runs",
+        ),
+        pytest.param(
+            "GET",
+            f"/v1/admin/evaluations/{uuid4()}/runs/{uuid4()}",
+            "ADMIN.DWAION_EVALUATION:VIEW",
+            None,
+            id="get-run",
+        ),
+        pytest.param(
+            "GET",
+            f"/v1/admin/evaluations/{uuid4()}/runs/{uuid4()}/export",
+            "ADMIN.DWAION_EVALUATION:EXPORT",
+            None,
+            id="export-run",
+        ),
+    ],
+)
+def test_evaluation_store_unavailable_returns_stable_503(
+    monkeypatch: pytest.MonkeyPatch,
+    method: str,
+    path: str,
+    permissions: str,
+    payload: dict | None,
+) -> None:
+    monkeypatch.setattr(governance_api_module, "get_evaluation_store", unavailable_store)
+
+    response = asyncio.run(
+        request(method, path, permissions=permissions, json=payload)
+    )
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": STORE_UNAVAILABLE_DETAIL}
+
+
+def test_action_store_mapping_does_not_hide_unrelated_exceptions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def unexpected_failure():
+        raise RuntimeError("unexpected governance failure")
+
+    monkeypatch.setattr(
+        governance_api_module,
+        "get_governance_store",
+        unexpected_failure,
+    )
+
+    with pytest.raises(RuntimeError, match="unexpected governance failure"):
+        asyncio.run(
+            request(
+                "GET",
+                "/v1/admin/actions",
+                permissions="ADMIN.DWAION_ACTIONS:VIEW",
+            )
+        )
 
 
 def test_evaluation_csv_neutralizes_spreadsheet_formulas() -> None:

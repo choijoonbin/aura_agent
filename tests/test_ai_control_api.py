@@ -344,6 +344,29 @@ def test_ai_control_surface_guard_rejects_untrusted_identity_and_stale_actions(
     assert store.emergency_actor is None
 
 
+def test_ai_control_rollout_unavailable_has_a_stable_safe_error_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = FakeAIControlStore()
+    monkeypatch.setattr(ai_control_api_module, "get_ai_control_store", lambda: store)
+
+    response = asyncio.run(request(
+        "GET", "/v1/admin/ai-control",
+        permissions="ADMIN.DWAION_SAFETY:VIEW",
+        header_overrides={"X-DWP-Rollout-State": "100"},
+    ))
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "detail": {
+            "errorCode": "AI_CONTROL_ROLLOUT_UNAVAILABLE",
+            "message": "Trusted AI control rollout evidence is missing or invalid.",
+        }
+    }
+    assert "X-DWP-" not in response.text
+    assert store.last_tenant is None
+
+
 def test_v6_readiness_cannot_open_v21_ai_control_routes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
