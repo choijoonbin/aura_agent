@@ -8,12 +8,20 @@ from .dwaion_workflow_errors import DwaionWorkflowNotFound, DwaionWorkflowUnavai
 from .grounded_context import ContextBrokerUnavailable, GroundedContext, GroundedSource
 from .personal_domain_security import PersonalDomainIdentity
 from .policy import AskIdentity
+from .run_observability import RunSourceHealthStatus, SourceHealthObservation
 from .secure_attachment_store import get_secure_attachment_store
 from .workspace_authorization import WorkspaceRequestAuthorization
 
 
 class AttachmentContextUnavailable(RuntimeError):
-    pass
+    def __init__(
+        self,
+        message: str,
+        *,
+        source_health: tuple[SourceHealthObservation, ...] = (),
+    ) -> None:
+        super().__init__(message)
+        self.source_health = source_health
 
 
 def collect_with_ready_attachments(
@@ -47,11 +55,28 @@ def collect_with_ready_attachments(
     except ContextBrokerUnavailable:
         if not request.attachment_ids:
             raise
-        context = GroundedContext(sources=(), attempted_sources=(), unavailable_sources=())
+        observed_at = datetime.now(timezone.utc)
+        unavailable = tuple(scope.value for scope in source_scopes)
+        context = GroundedContext(
+            sources=(),
+            attempted_sources=unavailable,
+            unavailable_sources=unavailable,
+            source_health=tuple(
+                SourceHealthObservation(
+                    source_type=source_type,
+                    status=RunSourceHealthStatus.NOT_CONFIGURED,
+                    observed_at=observed_at,
+                )
+                for source_type in unavailable
+            ),
+        )
     try:
         return bind_ready_attachments(context, request, identity)
     except ContextBrokerUnavailable as error:
-        raise AttachmentContextUnavailable(str(error)) from error
+        raise AttachmentContextUnavailable(
+            str(error),
+            source_health=context.source_health,
+        ) from error
 
 
 def bind_ready_attachments(
@@ -123,6 +148,13 @@ def bind_ready_attachments(
         sources=context.sources + appended,
         attempted_sources=context.attempted_sources + ("ATTACHMENT",),
         unavailable_sources=context.unavailable_sources,
-        source_health=context.source_health,
+        source_health=context.source_health + (
+            SourceHealthObservation(
+                source_type="ATTACHMENT",
+                status=RunSourceHealthStatus.SUCCESS,
+                observed_at=now,
+                operational=False,
+            ),
+        ),
         status_code=context.status_code,
     )

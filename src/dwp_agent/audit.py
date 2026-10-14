@@ -177,6 +177,7 @@ def record_ask_run(
     tenant_id: str,
     user_id: str,
     roles: list[str] | None = None,
+    model_safe_error_code: str | None = None,
 ) -> None:
     event = {
         "id": response.audit_id,
@@ -207,6 +208,8 @@ def record_ask_run(
             "agentRevision": response.agent_registry.revision,
         },
     }
+    if model_safe_error_code is not None:
+        event["data"]["modelSafeErrorCode"] = model_safe_error_code
     AUDIT_LOGGER.info(dumps(event, ensure_ascii=True, separators=(",", ":")))
     if not AUDIT_PUBLISHER.enabled:
         return

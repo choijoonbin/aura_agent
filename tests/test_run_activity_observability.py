@@ -127,6 +127,47 @@ def test_failed_attempt_is_partial_and_rejects_backward_or_cross_owner_updates()
     ]
 
 
+def test_newer_source_failure_replaces_success_with_constraint_safe_snapshot() -> None:
+    now = datetime(2026, 9, 7, 2, 30, tzinfo=timezone.utc)
+    store = InMemoryRunStore(clock=lambda: now)
+    start = _start(audit_id=str(uuid4()))
+    lease = store.begin(start)
+    assert lease is not None
+
+    store.record_source_health(
+        lease,
+        tenant_id="1",
+        user_id="900018",
+        request_id=start.request_id,
+        observations=(SourceHealthObservation(
+            source_type="WORK_ITEM",
+            status=RunSourceHealthStatus.SUCCESS,
+            observed_at=now,
+        ),),
+    )
+    store.record_source_health(
+        lease,
+        tenant_id="1",
+        user_id="900018",
+        request_id=start.request_id,
+        observations=(SourceHealthObservation(
+            source_type="WORK_ITEM",
+            status=RunSourceHealthStatus.UNAVAILABLE,
+            observed_at=now + timedelta(seconds=1),
+        ),),
+    )
+
+    health = store.run_source_health(
+        tenant_id="1",
+        user_id="900018",
+        run_id=UUID(lease.run_id),
+        generation=lease.generation,
+    )
+    assert [(item.status, item.last_success_at) for item in health] == [
+        ("UNAVAILABLE", None)
+    ]
+
+
 def test_sample_runs_are_visible_only_in_dwaion_run_views_not_activity_kpis() -> None:
     store = InMemoryRunStore()
     start = _start(audit_id=str(uuid4()))
@@ -298,11 +339,16 @@ def test_postgres_completion_is_fenced_by_tenant_user_request_and_audit() -> Non
         assert before == ("RUNNING", start.request_id, start.audit_id)
 
         store.complete(
-            response, lease=lease, tenant_id=tenant_id, user_id=user_id
+            response,
+            lease=lease,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            safe_error_code="MODEL_PROVIDER_UNAVAILABLE",
         )
         with connect(database_url) as connection:
             completed = connection.execute(
                 """SELECT run_state, audit_link_state,
+                          MIN(safe_error_code),
                           COUNT(stage_key) FILTER (WHERE stage_key = 'COMPLETED')
                      FROM ai_agent_runs
                      LEFT JOIN ai_agent_run_stages USING (run_id)
@@ -310,7 +356,131 @@ def test_postgres_completion_is_fenced_by_tenant_user_request_and_audit() -> Non
                     GROUP BY run_state, audit_link_state""",
                 (UUID(lease.run_id),),
             ).fetchone()
-        assert completed == ("COMPLETED", "PENDING", 1)
+        assert completed == (
+            "COMPLETED",
+            "PENDING",
+            "MODEL_PROVIDER_UNAVAILABLE",
+            1,
+        )
+    finally:
+        with connect(database_url) as connection:
+            connection.execute(
+                "DELETE FROM ai_agent_runs WHERE tenant_id = %s", (int(tenant_id),)
+            )
+
+
+@pytest.mark.integration
+def test_postgres_newer_source_failure_replaces_success_without_constraint_error() -> None:
+    database_url = _integration_database_url()
+    _apply_migrations(database_url)
+    tenant_id = str(700_000_000 + uuid4().int % 100_000_000)
+    user_id = "source-recheck-owner"
+    start = _start(audit_id=str(uuid4()), tenant_id=tenant_id, user_id=user_id)
+    store = PostgresRunStore(database_url, _IntegrationEncryption())  # type: ignore[arg-type]
+    lease = store.begin(start)
+    assert lease is not None
+    observed_at = datetime.now(timezone.utc)
+
+    try:
+        store.record_source_health(
+            lease,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            request_id=start.request_id,
+            observations=(SourceHealthObservation(
+                source_type="WORK_ITEM",
+                status=RunSourceHealthStatus.SUCCESS,
+                observed_at=observed_at,
+            ),),
+        )
+        store.record_source_health(
+            lease,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            request_id=start.request_id,
+            observations=(SourceHealthObservation(
+                source_type="WORK_ITEM",
+                status=RunSourceHealthStatus.UNAVAILABLE,
+                observed_at=observed_at + timedelta(seconds=1),
+            ),),
+        )
+        with connect(database_url) as connection:
+            row = connection.execute(
+                """SELECT health_status, last_success_at
+                     FROM ai_agent_run_source_health
+                    WHERE run_id = %s AND lease_generation = %s
+                      AND source_type = 'WORK_ITEM'""",
+                (UUID(lease.run_id), lease.generation),
+            ).fetchone()
+        assert row == ("UNAVAILABLE", None)
+    finally:
+        with connect(database_url) as connection:
+            connection.execute(
+                "DELETE FROM ai_agent_runs WHERE tenant_id = %s", (int(tenant_id),)
+            )
+
+
+@pytest.mark.integration
+def test_postgres_completion_accepts_governed_attachment_citation() -> None:
+    database_url = _integration_database_url()
+    _apply_migrations(database_url)
+    tenant_id = str(700_000_000 + uuid4().int % 100_000_000)
+    user_id = "attachment-citation-owner"
+    start = _start(audit_id=str(uuid4()), tenant_id=tenant_id, user_id=user_id)
+    store = PostgresRunStore(database_url, _IntegrationEncryption())  # type: ignore[arg-type]
+    lease = store.begin(start)
+    assert lease is not None
+    response = AskResponse.model_validate({
+        "runId": lease.run_id,
+        "auditId": start.audit_id,
+        "requestId": start.request_id,
+        "correlationId": start.correlation_id,
+        "state": "COMPLETED",
+        "answer": "The verified attachment contains the requested evidence [src-01].",
+        "confidence": "HIGH",
+        "citations": [{
+            "sourceId": "src-01",
+            "sourceType": "ATTACHMENT",
+            "title": "evidence.txt: page 1",
+            "sourceSystem": "DWAI_ON_ATTACHMENT",
+        }],
+        "sourceCount": 1,
+        "policy": {
+            "outcome": "ALLOW",
+            "riskTier": "L1",
+            "code": "ALLOW",
+            "explanation": "Grounded attachment evidence is available.",
+            "modelAllowed": True,
+        },
+        "modelRoute": {
+            "state": "COMPLETED",
+            "provider": "OPENAI",
+            "model": "gpt-test",
+        },
+        "agentRegistry": {
+            "entryKey": "DWP_ASSISTANT",
+            "revision": 1,
+            "artifactVersion": "test-v1",
+            "riskTier": "LOW",
+            "resolution": "ACTIVE",
+        },
+        "statusCode": "ANSWER_GROUNDED",
+        "completedAt": datetime.now(timezone.utc),
+    })
+
+    try:
+        store.complete(
+            response,
+            lease=lease,
+            tenant_id=tenant_id,
+            user_id=user_id,
+        )
+        with connect(database_url) as connection:
+            source_type = connection.execute(
+                "SELECT source_type FROM ai_agent_citations WHERE run_id = %s",
+                (UUID(lease.run_id),),
+            ).fetchone()[0]
+        assert source_type == "ATTACHMENT"
     finally:
         with connect(database_url) as connection:
             connection.execute(

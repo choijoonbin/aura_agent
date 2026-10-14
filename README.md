@@ -20,7 +20,7 @@ DWP_AGENT_SERVICE_TOKEN=<local-secret> \
   uv run uvicorn --app-dir src dwp_agent.main:app --host 127.0.0.1 --port 8010 --reload
 ```
 
-- Health: `GET /health`
+- Health: `GET /health`, `GET /readyz`, `GET /operational-health`
 - Governed plan contract: `POST /v1/plans/preview`
 - Grounded Ask Runtime: `POST /v1/ask`
 - Grounded Ask progress stream: `POST /v1/ask/stream`
@@ -34,6 +34,14 @@ DWP_AGENT_SERVICE_TOKEN=<local-secret> \
 - Operational delivery gates: `GET /v1/admin/gates`,
   `GET/PATCH /v1/admin/gates/{gateKey}`
 - OpenAPI: `GET /docs`
+
+`/health`와 `/readyz`는 기존 DB readiness 응답 계약을 유지합니다. 내부 서비스 인증 및
+DWAI·ON 운영 조회 권한이 필요한 `/operational-health`에서는 모델 구성·최근
+모델 호출·검색 소스 상태를
+`degraded`, `degradationReasons`, `components`로 확인할 수 있습니다. 근거 기반 폴백이
+가능한 모델·소스 열화는 readiness를 차단하지 않으며, 기본 최근 관찰 구간은 300초
+(`DWP_OPERATIONAL_HEALTH_WINDOW_SECONDS`)입니다. 요청별 인증 실패는 실행 이력에만 남고
+전역 운영 열화에는 반영되지 않습니다.
 
 OpenAPI 정본은 `contracts/openapi/agent-public.json`이며 다음 명령으로 런타임 계약과의
 일치 여부를 검증합니다.

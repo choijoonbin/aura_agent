@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Response, status
 
 from .contracts import CitationSourceType
 from .evaluation_runner import run_evaluation
@@ -32,6 +32,10 @@ from .governance_contracts import (
     UpdateDataSourcePolicyRequest,
     UpdateEvaluationLifecycleRequest,
 )
+from .governance_api_dependencies import (
+    governance_context as _context,
+    governance_headers as _headers,
+)
 from .governance_store import (
     GovernancePolicyConflict,
     GovernancePolicyNotInitialized,
@@ -39,7 +43,7 @@ from .governance_store import (
     get_governance_store,
 )
 from .policy import AskIdentity
-from .security import header_values, require_gateway_service, verified_ask_identity
+from .security import require_gateway_service, verified_ask_identity
 
 
 router = APIRouter(
@@ -47,34 +51,6 @@ router = APIRouter(
     tags=["governance"],
     dependencies=[Depends(require_gateway_service)],
 )
-
-
-def _context(
-    tenant_id: str,
-    user_id: str,
-    correlation_id: str,
-    permissions: str | None,
-    resource: str,
-    *allowed: str,
-) -> tuple[str, str, str]:
-    authorities = set(header_values(permissions))
-    if f"{resource}:MANAGE" not in authorities and not any(
-        f"{resource}:{permission}" in authorities for permission in allowed
-    ):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"{resource} permission is required.",
-        )
-    return tenant_id, user_id, correlation_id
-
-
-def _headers(
-    tenant_id: Annotated[str, Header(alias="X-DWP-Tenant-ID", min_length=1)],
-    user_id: Annotated[str, Header(alias="X-DWP-User-ID", min_length=1)],
-    correlation_id: Annotated[str, Header(alias="X-Correlation-ID", min_length=1)],
-    permissions: Annotated[str | None, Header(alias="X-DWP-Permissions")] = None,
-) -> tuple[str, str, str, str | None]:
-    return tenant_id, user_id, correlation_id, permissions
 
 
 @router.get("/sources", response_model=DataSourcePolicyListEnvelope, response_model_by_alias=True)

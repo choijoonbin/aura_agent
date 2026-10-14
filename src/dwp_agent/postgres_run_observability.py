@@ -98,7 +98,13 @@ def record_source_health(
                        run_id, lease_generation, source_type, health_status,
                        latency_ms, last_attempt_at, last_success_at)
                    VALUES (%s, %s, %s, %s, %s, %s, %s)
-                   ON CONFLICT (run_id, lease_generation, source_type) DO NOTHING""",
+                   ON CONFLICT (run_id, lease_generation, source_type) DO UPDATE
+                      SET health_status = EXCLUDED.health_status,
+                          latency_ms = EXCLUDED.latency_ms,
+                          last_attempt_at = EXCLUDED.last_attempt_at,
+                          last_success_at = EXCLUDED.last_success_at
+                    WHERE EXCLUDED.last_attempt_at >=
+                          ai_agent_run_source_health.last_attempt_at""",
                 (
                     UUID(lease.run_id), lease.generation, observation.source_type,
                     observation.status.value, observation.latency_ms,

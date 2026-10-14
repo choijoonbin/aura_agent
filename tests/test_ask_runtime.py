@@ -3,14 +3,21 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
+from uuid import UUID, uuid4
 
 import httpx
 import pytest
 
 from dwp_agent import ask_runtime as ask_runtime_module
+from dwp_agent import attachment_context as attachment_context_module
 from dwp_agent.approval_context import approval_tasks
 from dwp_agent.ask_runtime import AskRuntime
+from dwp_agent.attachment_context import (
+    AttachmentContextUnavailable,
+    collect_with_ready_attachments,
+)
 from dwp_agent.context_broker import GroundedContext, GroundedSource, WorkspaceContextBroker
 from dwp_agent.conversation_store import InMemoryConversationStore
 from dwp_agent.contracts import (
@@ -28,7 +35,14 @@ from dwp_agent.model_gateway import (
     ModelAnswer,
     ModelCallFailed,
     OpenAIResponsesGateway,
+    _safe_error_code,
     _system_instruction,
+)
+from dwp_agent.model_error_codes import safe_model_error_code
+from dwp_agent.grounded_context import ContextBrokerUnavailable
+from dwp_agent.operational_health import (
+    operational_health_snapshot,
+    reset_operational_health_for_tests,
 )
 from dwp_agent.personal_memory_runtime import ResolvedPersonalization
 from dwp_agent.policy import AskIdentity, evaluate_ask_policy
@@ -39,6 +53,14 @@ from dwp_agent.run_store import (
     RunStart,
     RunInProgress,
     RunStoreUnavailable,
+)
+from dwp_agent.run_observability import (
+    RunSourceHealthStatus,
+    SourceHealthObservation,
+)
+from dwp_agent.dwaion_workflow_contracts import (
+    AttachmentStageState,
+    AttachmentState,
 )
 
 
@@ -91,6 +113,11 @@ class FakeBroker:
         self.calls += 1
         self.agent_key = _kwargs.get("agent_key")
         return context()
+
+
+class UnconfiguredBroker:
+    def collect(self, *_args, **_kwargs) -> GroundedContext:
+        raise ContextBrokerUnavailable("Source broker is not configured.")
 
 
 class FakeModel:
@@ -223,7 +250,10 @@ def test_contended_request_does_not_create_an_orphan_conversation() -> None:
     assert conversation_store.list(tenant_id="1", user_id="7") == []
 
 
-def test_model_failure_returns_a_cited_grounded_fallback() -> None:
+def test_model_failure_returns_a_cited_grounded_fallback(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO, logger="uvicorn.error.dwp.audit")
     run_store = InMemoryRunStore()
     conversation_store = InMemoryConversationStore(run_store)
     runtime = AskRuntime(
@@ -254,12 +284,243 @@ def test_model_failure_returns_a_cited_grounded_fallback() -> None:
     assert "[src-01]" in response.answer
     assert [citation.source_id for citation in response.citations] == ["src-01"]
     assert response.conversation_id is not None
+    assert "MODEL_PROVIDER_UNAVAILABLE" not in response.model_dump_json()
+    run = next(
+        item
+        for item in run_store.activity_snapshots(tenant_id="1", user_id="7")
+        if str(item.run_id) == response.run_id
+    )
+    assert run.run_state == "COMPLETED"
+    assert run.safe_error_code == "MODEL_PROVIDER_UNAVAILABLE"
+    event = json.loads(caplog.records[-1].message)
+    assert event["data"]["modelSafeErrorCode"] == "MODEL_PROVIDER_UNAVAILABLE"
     detail = conversation_store.get(
         tenant_id="1",
         user_id="7",
         conversation_id=response.conversation_id,
     )
     assert detail.messages[-1].status_code == "ANSWER_GROUNDED_FALLBACK"
+
+
+def test_attachment_failure_preserves_successful_broker_source_health() -> None:
+    observed_at = datetime.now(timezone.utc)
+
+    class MixedBroker:
+        def collect(self, *_args, **_kwargs) -> GroundedContext:
+            base = context()
+            return GroundedContext(
+                sources=base.sources,
+                attempted_sources=base.attempted_sources,
+                unavailable_sources=base.unavailable_sources,
+                source_health=(SourceHealthObservation(
+                    source_type="WORK_ITEM",
+                    status=RunSourceHealthStatus.SUCCESS,
+                    observed_at=observed_at,
+                ),),
+            )
+
+    reset_operational_health_for_tests()
+    run_store = InMemoryRunStore()
+    runtime = AskRuntime(
+        context_broker=MixedBroker(),
+        model_gateway=FakeModel(),
+        run_store=run_store,
+    )
+    response = runtime.answer(
+        AskRequest(
+            request_id="request-mixed-attachment-failure",
+            query="Use my work item and attachment.",
+            source_scopes=[CitationSourceType.WORK_ITEM, CitationSourceType.ATTACHMENT],
+            attachment_ids=[uuid4()],
+        ),
+        identity=identity("APP.ASK:VIEW", "APP.WORK:VIEW"),
+    )
+
+    assert response.status_code == "ATTACHMENT_NOT_READY"
+    health = run_store.run_source_health(
+        tenant_id="1",
+        user_id="7",
+        run_id=UUID(response.run_id),
+        generation=1,
+    )
+    assert [(item.source_type, item.status) for item in health] == [
+        ("ATTACHMENT", "UNAVAILABLE"),
+        ("WORK_ITEM", "SUCCESS"),
+    ]
+    operational = operational_health_snapshot(tenant_id="1")
+    assert operational["sources"]["status"] == "HEALTHY"
+    assert set(operational["sources"]["recent"]) == {"WORK_ITEM"}
+    reset_operational_health_for_tests()
+
+
+def test_attachment_only_fallback_preserves_unconfigured_broker_health(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attachment_id = uuid4()
+    attachment = SimpleNamespace(
+        attachment_id=attachment_id,
+        file_name="evidence.txt",
+        state=AttachmentState.READY,
+        deleted_at=None,
+        retention_expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
+        stages=(SimpleNamespace(state=AttachmentStageState.PASSED),),
+        citations=(SimpleNamespace(
+            label="page 1",
+            evidence="Verified attachment evidence.",
+        ),),
+    )
+    monkeypatch.setattr(
+        attachment_context_module,
+        "get_secure_attachment_store",
+        lambda: SimpleNamespace(get=lambda *_args: attachment),
+    )
+    request = AskRequest(
+        request_id="request-attachment-with-unconfigured-source",
+        query="Use both sources.",
+        source_scopes=[CitationSourceType.WORK_ITEM, CitationSourceType.ATTACHMENT],
+        attachment_ids=[attachment_id],
+    )
+
+    grounded = collect_with_ready_attachments(
+        UnconfiguredBroker(),
+        request,
+        identity("APP.ASK:VIEW", "APP.WORK:VIEW", "APP.DWAION_ATTACHMENTS:VIEW"),
+        locale="en",
+        agent_key="DWP_ASSISTANT",
+        workspace_authorization=None,
+    )
+
+    assert [(item.source_type, item.status) for item in grounded.source_health] == [
+        ("WORK_ITEM", "NOT_CONFIGURED"),
+        ("ATTACHMENT", "SUCCESS"),
+    ]
+
+
+def test_unready_attachment_keeps_unconfigured_broker_health() -> None:
+    request = AskRequest(
+        request_id="request-unready-attachment-with-unconfigured-source",
+        query="Use both sources.",
+        source_scopes=[CitationSourceType.WORK_ITEM, CitationSourceType.ATTACHMENT],
+        attachment_ids=[uuid4()],
+    )
+
+    with pytest.raises(AttachmentContextUnavailable) as captured:
+        collect_with_ready_attachments(
+            UnconfiguredBroker(),
+            request,
+            identity("APP.ASK:VIEW", "APP.WORK:VIEW"),
+            locale="en",
+            agent_key="DWP_ASSISTANT",
+            workspace_authorization=None,
+        )
+
+    assert [(item.source_type, item.status) for item in captured.value.source_health] == [
+        ("WORK_ITEM", "NOT_CONFIGURED")
+    ]
+
+
+def test_model_failure_safe_code_never_reuses_an_exception_message() -> None:
+    error = ModelCallFailed(
+        "MODEL_PROVIDER_TENANTKEYABC123_400"
+    )
+
+    assert safe_model_error_code(error) == "MODEL_CALL_FAILED"
+    assert _safe_error_code(400) == "MODEL_PROVIDER_HTTP_400"
+
+
+def test_grounding_violation_degrades_model_operational_health(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class InvalidGroundingModel(FakeModel):
+        def generate(self, *_args, **_kwargs) -> ModelAnswer:
+            raise GroundingViolation("MODEL_CITATION_OUT_OF_SCOPE")
+
+    monkeypatch.setenv("DWP_MODEL_PROVIDER", "openai")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("DWP_OPENAI_MODEL", "gpt-test")
+    monkeypatch.setenv("DWP_OPENAI_BASE_URL", "https://api.openai.com/v1")
+    reset_operational_health_for_tests()
+    runtime = AskRuntime(
+        context_broker=FakeBroker(),
+        model_gateway=InvalidGroundingModel(),
+        run_store=InMemoryRunStore(),
+    )
+
+    response = runtime.answer(
+        AskRequest(request_id="request-invalid-grounding", query="What is urgent?"),
+        identity=identity("APP.ASK:VIEW", "APP.WORK:VIEW"),
+    )
+
+    assert response.state == "ABSTAINED"
+    model_health = operational_health_snapshot(tenant_id="1")["modelProvider"]
+    assert model_health["status"] == "UNAVAILABLE"
+    assert model_health["safeErrorCode"] == "MODEL_GROUNDING_CONTRACT_INVALID"
+    reset_operational_health_for_tests()
+
+
+def test_missing_agent_safety_secret_does_not_misclassify_model_configuration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DWP_MODEL_PROVIDER", "openai")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("DWP_OPENAI_MODEL", "gpt-test")
+    monkeypatch.setenv("DWP_OPENAI_BASE_URL", "https://api.openai.com/v1")
+    monkeypatch.delenv("DWP_AGENT_SAFETY_SECRET", raising=False)
+    monkeypatch.delenv("DWP_AGENT_PRIVACY_HASH_SECRET", raising=False)
+    monkeypatch.setattr(ask_runtime_module, "privacy_hash", lambda _value: "a" * 64)
+    reset_operational_health_for_tests()
+    run_store = InMemoryRunStore()
+    runtime = AskRuntime(
+        context_broker=FakeBroker(),
+        model_gateway=FakeModel(),
+        run_store=run_store,
+    )
+
+    response = runtime.answer(
+        AskRequest(request_id="request-missing-safety-secret", query="What is urgent?"),
+        identity=identity("APP.ASK:VIEW", "APP.WORK:VIEW"),
+    )
+
+    assert response.state == "CONFIGURATION_REQUIRED"
+    assert response.status_code == "MODEL_ROUTE_CONFIGURATION_REQUIRED"
+    run = next(
+        item
+        for item in run_store.activity_snapshots(tenant_id="1", user_id="7")
+        if str(item.run_id) == response.run_id
+    )
+    assert run.safe_error_code == "AGENT_SAFETY_CONFIGURATION_REQUIRED"
+    model_health = operational_health_snapshot(tenant_id="1")["modelProvider"]
+    assert model_health["status"] == "CONFIGURED"
+    assert model_health["configured"] is True
+    reset_operational_health_for_tests()
+
+
+def test_invalid_model_endpoint_remains_invalid_after_runtime_rejection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DWP_MODEL_PROVIDER", "openai")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("DWP_OPENAI_MODEL", "gpt-test")
+    monkeypatch.setenv("DWP_OPENAI_BASE_URL", "https://unapproved.example/v1")
+    reset_operational_health_for_tests()
+    runtime = AskRuntime(
+        context_broker=FakeBroker(),
+        model_gateway=OpenAIResponsesGateway(),
+        run_store=InMemoryRunStore(),
+    )
+
+    response = runtime.answer(
+        AskRequest(request_id="request-invalid-model-route", query="What is urgent?"),
+        identity=identity("APP.ASK:VIEW", "APP.WORK:VIEW"),
+    )
+
+    assert response.state == "CONFIGURATION_REQUIRED"
+    assert response.status_code == "MODEL_ROUTE_CONFIGURATION_REQUIRED"
+    model_health = operational_health_snapshot(tenant_id="1")["modelProvider"]
+    assert model_health["status"] == "INVALID_CONFIGURATION"
+    assert model_health["configured"] is False
+    assert model_health["safeErrorCode"] == "MODEL_ROUTE_CONFIGURATION_INVALID"
+    reset_operational_health_for_tests()
 
 
 def test_approval_expert_is_permission_gated_and_forwarded_to_runtime_components(

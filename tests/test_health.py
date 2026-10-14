@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import httpx
@@ -9,7 +10,13 @@ from httpx import ASGITransport, AsyncClient
 
 import dwp_agent.system_api as system_api_module
 from dwp_agent.main import app
+from dwp_agent.operational_health import (
+    OPERATIONAL_HEALTH,
+    OperationalHealthRegistry,
+    reset_operational_health_for_tests,
+)
 from dwp_agent.registry import resolve_agent
+from dwp_agent.run_observability import RunSourceHealthStatus, SourceHealthObservation
 
 
 SERVICE_TOKEN = "test-gateway-service-token"
@@ -19,15 +26,26 @@ ROOT = Path(__file__).resolve().parents[1]
 @pytest.fixture(autouse=True)
 def configured_service_identity(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DWP_AGENT_SERVICE_TOKEN", SERVICE_TOKEN)
+    monkeypatch.delenv("DWP_AGENT_IDENTITY_SIGNING_SECRET", raising=False)
     monkeypatch.setenv("DWP_AGENT_REGISTRY_MODE", "optional")
     monkeypatch.delenv("SERVICE_PLATFORM_URL", raising=False)
     monkeypatch.delenv("DWP_PLATFORM_RUNTIME_SERVICE_TOKEN", raising=False)
+    for name in (
+        "DWP_MODEL_PROVIDER",
+        "AZURE_OPENAI_API_KEY",
+        "AZURE_OPENAI_ENDPOINT",
+        "OPENAI_API_KEY",
+        "DWP_OPENAI_BASE_URL",
+        "DWP_OPENAI_MODEL",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    reset_operational_health_for_tests()
 
 
-async def get(path: str):
+async def get(path: str, *, headers: dict[str, str] | None = None):
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        return await client.get(path)
+        return await client.get(path, headers=headers)
 
 
 async def post(path: str, *, json: dict, headers: dict[str, str] | None = None):
@@ -59,6 +77,202 @@ def test_liveness_and_local_readiness_are_distinct() -> None:
     assert ready.json()["components"] == {"database": "DISABLED"}
 
 
+def test_operational_degradation_is_visible_without_failing_readiness(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DWP_MODEL_PROVIDER", "openai")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("DWP_OPENAI_MODEL", "gpt-test")
+    monkeypatch.setenv("DWP_OPENAI_BASE_URL", "https://api.openai.com/v1")
+    observed_at = datetime.now(timezone.utc)
+    OPERATIONAL_HEALTH.record_model_unavailable(
+        tenant_id="1",
+        provider="OPENAI",
+        safe_error_code="MODEL_PROVIDER_UNAVAILABLE",
+    )
+    OPERATIONAL_HEALTH.record_sources(
+        tenant_id="1",
+        observations=(
+            SourceHealthObservation(
+                source_type="CALENDAR",
+                status=RunSourceHealthStatus.UNAVAILABLE,
+                observed_at=observed_at,
+            ),
+            SourceHealthObservation(
+                source_type="MAIL",
+                status=RunSourceHealthStatus.SUCCESS,
+                observed_at=observed_at,
+            ),
+        )
+    )
+
+    denied = asyncio.run(get(
+        "/operational-health",
+        headers={"X-DWP-Tenant-ID": "1"},
+    ))
+    non_admin = asyncio.run(get(
+        "/operational-health",
+        headers={
+            "X-DWP-Service-Token": SERVICE_TOKEN,
+            "X-DWP-Tenant-ID": "1",
+        },
+    ))
+    response = asyncio.run(get(
+        "/operational-health",
+        headers={
+            "X-DWP-Service-Token": SERVICE_TOKEN,
+            "X-DWP-Permissions": "ADMIN.DWAION_OPERATIONS:VIEW",
+            "X-DWP-Tenant-ID": "1",
+        },
+    ))
+
+    assert denied.status_code == 401
+    assert non_admin.status_code == 403
+    assert response.status_code == 200
+    assert response.headers["Cache-Control"] == "private, no-store, max-age=0"
+    payload = response.json()
+    assert payload["status"] == "ok"
+    assert payload["degraded"] is True
+    assert payload["degradationReasons"] == [
+        "MODEL_PROVIDER_UNAVAILABLE",
+        "SOURCE_CALENDAR_UNAVAILABLE",
+    ]
+    model_health = payload["components"]["modelProvider"]
+    assert model_health["status"] == "UNAVAILABLE"
+    assert model_health["provider"] == "OPENAI"
+    assert model_health["configured"] is True
+    assert model_health["lastObservedAt"] is not None
+    assert model_health["safeErrorCode"] == "MODEL_PROVIDER_UNAVAILABLE"
+    assert payload["components"]["sources"]["status"] == "DEGRADED"
+    assert payload["components"]["sources"]["recent"]["CALENDAR"]["status"] == (
+        "UNAVAILABLE"
+    )
+
+
+def test_source_degradation_expires_after_the_observation_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DWP_MODEL_PROVIDER", "openai")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("DWP_OPENAI_MODEL", "gpt-test")
+    monkeypatch.setenv("DWP_OPENAI_BASE_URL", "https://api.openai.com/v1")
+    monkeypatch.setenv("DWP_OPERATIONAL_HEALTH_WINDOW_SECONDS", "30")
+    now = [datetime(2026, 10, 14, tzinfo=timezone.utc)]
+    registry = OperationalHealthRegistry(clock=lambda: now[0])
+    registry.record_sources(
+        tenant_id="1",
+        observations=(
+            SourceHealthObservation(
+                source_type="CALENDAR",
+                status=RunSourceHealthStatus.UNAVAILABLE,
+                observed_at=now[0],
+            ),
+        )
+    )
+
+    assert registry.snapshot(tenant_id="1")["degraded"] is True
+
+    now[0] += timedelta(seconds=31)
+    snapshot = registry.snapshot(tenant_id="1")
+    assert snapshot["degraded"] is False
+    assert snapshot["sources"]["status"] == "UNKNOWN"
+    assert snapshot["sources"]["recent"] == {}
+    assert registry._sources == {}
+
+
+def test_older_model_observation_cannot_overwrite_a_newer_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DWP_MODEL_PROVIDER", "openai")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("DWP_OPENAI_MODEL", "gpt-test")
+    monkeypatch.setenv("DWP_OPENAI_BASE_URL", "https://api.openai.com/v1")
+    observed_at = [
+        datetime(2026, 10, 14, 1, 0, 1, tzinfo=timezone.utc),
+        datetime(2026, 10, 14, 1, 0, 0, tzinfo=timezone.utc),
+        datetime(2026, 10, 14, 1, 0, 2, tzinfo=timezone.utc),
+    ]
+    registry = OperationalHealthRegistry(clock=lambda: observed_at.pop(0))
+
+    registry.record_model_available(tenant_id="1", provider="OPENAI")
+    registry.record_model_unavailable(
+        tenant_id="1",
+        provider="OPENAI",
+        safe_error_code="MODEL_PROVIDER_UNAVAILABLE",
+    )
+
+    snapshot = registry.snapshot(tenant_id="1")
+    assert snapshot["modelProvider"]["status"] == "AVAILABLE"
+
+
+def test_operational_observations_are_isolated_by_tenant(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DWP_MODEL_PROVIDER", "openai")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("DWP_OPENAI_MODEL", "gpt-test")
+    monkeypatch.setenv("DWP_OPENAI_BASE_URL", "https://api.openai.com/v1")
+    observed_at = datetime.now(timezone.utc)
+    registry = OperationalHealthRegistry()
+    registry.record_model_unavailable(
+        tenant_id="tenant-a",
+        provider="OPENAI",
+        safe_error_code="MODEL_PROVIDER_UNAVAILABLE",
+    )
+    registry.record_sources(
+        tenant_id="tenant-a",
+        observations=(
+            SourceHealthObservation(
+                source_type="CALENDAR",
+                status=RunSourceHealthStatus.UNAVAILABLE,
+                observed_at=observed_at,
+            ),
+        ),
+    )
+
+    tenant_a = registry.snapshot(tenant_id="tenant-a")
+    tenant_b = registry.snapshot(tenant_id="tenant-b")
+
+    assert tenant_a["degraded"] is True
+    assert tenant_a["sources"]["status"] == "DEGRADED"
+    assert tenant_b["degraded"] is False
+    assert tenant_b["modelProvider"]["status"] == "CONFIGURED"
+    assert tenant_b["sources"]["status"] == "UNKNOWN"
+
+
+def test_operational_health_openapi_is_explicitly_typed() -> None:
+    response = asyncio.run(get("/openapi.json"))
+
+    schema = response.json()["paths"]["/operational-health"]["get"][
+        "responses"
+    ]["200"]["content"]["application/json"]["schema"]
+    assert schema == {"$ref": "#/components/schemas/OperationalHealthEnvelope"}
+    unavailable_schema = response.json()["paths"]["/operational-health"][
+        "get"
+    ]["responses"]["503"]["content"]["application/json"]["schema"]
+    assert unavailable_schema == {
+        "anyOf": [
+            {"$ref": "#/components/schemas/OperationalHealthEnvelope"},
+            {"$ref": "#/components/schemas/OperationalHealthError"},
+        ],
+        "title": "Response 503 Operational Health Operational Health Get",
+    }
+
+
+def test_operational_health_reports_unconfigured_service_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("DWP_AGENT_SERVICE_TOKEN", raising=False)
+
+    response = asyncio.run(get(
+        "/operational-health",
+        headers={"X-DWP-Tenant-ID": "1"},
+    ))
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "Agent service identity is not configured."}
+
+
 def test_readiness_reports_a_runtime_database_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -67,12 +281,23 @@ def test_readiness_reports_a_runtime_database_failure(
     live = asyncio.run(get("/livez"))
     ready = asyncio.run(get("/readyz"))
     health = asyncio.run(get("/health"))
+    operational = asyncio.run(get(
+        "/operational-health",
+        headers={
+            "X-DWP-Service-Token": SERVICE_TOKEN,
+            "X-DWP-Permissions": "ADMIN.DWAION_OPERATIONS:VIEW",
+            "X-DWP-Tenant-ID": "1",
+        },
+    ))
 
     assert live.status_code == 200
     assert ready.status_code == 503
     assert ready.json()["status"] == "not_ready"
     assert health.status_code == 503
     assert health.json()["status"] == "unavailable"
+    assert operational.status_code == 503
+    assert operational.json()["status"] == "unavailable"
+    assert operational.json()["degradationReasons"][0] == "DATABASE_FAILED"
 
 
 def test_public_openapi_contains_only_explicit_runtime_apis() -> None:
@@ -134,6 +359,7 @@ def test_public_openapi_contains_only_explicit_runtime_apis() -> None:
         "/v1/routines/advanced-commands/pending-approvals",
         "/v1/routines/advanced-commands/{command_id}/decision",
         "/v1/ai-controls",
+        "/operational-health",
         "/v1/ai-controls/runtime",
         "/v1/ai-controls/sources/{source_key}",
         "/v1/ai-controls/memories",

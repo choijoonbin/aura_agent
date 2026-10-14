@@ -88,6 +88,7 @@ class RunStore(Protocol):
         tenant_id: str,
         user_id: str,
         provider_request_hash: str | None = None,
+        safe_error_code: str | None = None,
     ) -> None: ...
 
     def fail(self, lease: RunLease, safe_error_code: str) -> None: ...
@@ -296,6 +297,7 @@ class PostgresRunStore:
         tenant_id: str,
         user_id: str,
         provider_request_hash: str | None = None,
+        safe_error_code: str | None = None,
     ) -> None:
         if response.run_id != lease.run_id:
             raise RunStoreUnavailable("Agent response does not match the claimed run lease.")
@@ -319,6 +321,7 @@ class PostgresRunStore:
                        total_tokens = %s,
                        latency_ms = %s,
                        source_count = %s,
+                       safe_error_code = %s,
                        response_envelope = %s,
                        response_key_version = NULL,
                        response_nonce = NULL,
@@ -345,6 +348,7 @@ class PostgresRunStore:
                     route.total_tokens,
                     route.latency_ms,
                     response.source_count,
+                    safe_error_code[:120] if safe_error_code else None,
                     envelope,
                     response.completed_at,
                     response.audit_id,
@@ -385,7 +389,9 @@ class PostgresRunStore:
                         route.total_tokens,
                         route.latency_ms,
                         provider_request_hash,
-                        None if route.state == "COMPLETED" else response.status_code,
+                        safe_error_code or (
+                            None if route.state == "COMPLETED" else response.status_code
+                        ),
                     ),
                 )
             for citation in response.citations:

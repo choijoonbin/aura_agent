@@ -18,6 +18,11 @@ from .run_observability import (
     RunSourceHealthStatus,
     SourceHealthObservation,
 )
+from .source_health import (
+    elapsed_ms as _elapsed_ms,
+    operational_http_failure as _operational_http_failure,
+    source_observation as _source_observation,
+)
 
 MAX_SOURCES = 12
 MAX_EVIDENCE_TEXT = 1_200
@@ -132,6 +137,14 @@ class WorkspaceContextBroker:
                     source_health.append(_source_observation(
                         "WORK_ITEM", RunSourceHealthStatus.SUCCESS, _elapsed_ms(started)
                     ))
+                except httpx.HTTPStatusError as error:
+                    unavailable.append("WORK_ITEM")
+                    source_health.append(_source_observation(
+                        "WORK_ITEM",
+                        RunSourceHealthStatus.UNAVAILABLE,
+                        _elapsed_ms(started),
+                        operational=_operational_http_failure(error),
+                    ))
                 except (httpx.HTTPError, ValueError, KeyError, TypeError):
                     unavailable.append("WORK_ITEM")
                     source_health.append(_source_observation(
@@ -155,6 +168,14 @@ class WorkspaceContextBroker:
                     source_health.append(_source_observation(
                         "MAIL", RunSourceHealthStatus.SUCCESS, _elapsed_ms(started)
                     ))
+                except httpx.HTTPStatusError as error:
+                    unavailable.append("MAIL")
+                    source_health.append(_source_observation(
+                        "MAIL",
+                        RunSourceHealthStatus.UNAVAILABLE,
+                        _elapsed_ms(started),
+                        operational=_operational_http_failure(error),
+                    ))
                 except (httpx.HTTPError, ValueError, KeyError, TypeError):
                     unavailable.append("MAIL")
                     source_health.append(_source_observation(
@@ -167,14 +188,21 @@ class WorkspaceContextBroker:
                 and "APP.CALENDAR:VIEW" in permissions
             ):
                 attempted.append("CALENDAR")
-                if (
-                    not self.gateway_url
-                    or workspace_authorization is None
+                if not self.gateway_url:
+                    unavailable.append("CALENDAR")
+                    source_health.append(_source_observation(
+                        "CALENDAR", RunSourceHealthStatus.NOT_CONFIGURED, None
+                    ))
+                elif (
+                    workspace_authorization is None
                     or not workspace_authorization.available
                 ):
                     unavailable.append("CALENDAR")
                     source_health.append(_source_observation(
-                        "CALENDAR", RunSourceHealthStatus.NOT_CONFIGURED, None
+                        "CALENDAR",
+                        RunSourceHealthStatus.NOT_CONFIGURED,
+                        None,
+                        operational=False,
                     ))
                 else:
                     started = monotonic_ns()
@@ -184,7 +212,11 @@ class WorkspaceContextBroker:
                             f"{self.gateway_url}/api/platform/v1/calendar/events",
                             headers={
                                 **workspace_authorization.outbound_headers(),
-                                "X-DWP-Tenant-ID": identity.tenant_id,
+                                # Gateway ingress requires the public tenant assertion. Its
+                                # verified-identity filter replaces internal X-DWP-* identity
+                                # headers with values resolved from the authenticated session
+                                # before forwarding the request to Platform.
+                                "X-Tenant-ID": identity.tenant_id,
                                 "X-Correlation-ID": identity.correlation_id,
                                 "Accept-Language": locale,
                                 "Accept": "application/json",
@@ -197,6 +229,17 @@ class WorkspaceContextBroker:
                         candidates.extend(self._calendar_events(response))
                         source_health.append(_source_observation(
                             "CALENDAR", RunSourceHealthStatus.SUCCESS, _elapsed_ms(started)
+                        ))
+                    except httpx.HTTPStatusError as error:
+                        unavailable.append("CALENDAR")
+                        source_health.append(_source_observation(
+                            "CALENDAR",
+                            RunSourceHealthStatus.UNAVAILABLE,
+                            _elapsed_ms(started),
+                            operational=_operational_http_failure(
+                                error,
+                                non_operational_statuses=frozenset({401, 403}),
+                            ),
                         ))
                     except (httpx.HTTPError, ValueError, KeyError, TypeError):
                         unavailable.append("CALENDAR")
@@ -440,20 +483,3 @@ def _datetime(value: Any) -> datetime | None:
         return datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:
         return None
-
-
-def _elapsed_ms(started: int) -> int:
-    return max(0, (monotonic_ns() - started) // 1_000_000)
-
-
-def _source_observation(
-    source_type: str,
-    status: RunSourceHealthStatus,
-    latency_ms: int | None,
-) -> SourceHealthObservation:
-    return SourceHealthObservation(
-        source_type=source_type,
-        status=status,
-        observed_at=datetime.now(timezone.utc),
-        latency_ms=latency_ms,
-    )

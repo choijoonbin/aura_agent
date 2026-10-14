@@ -16,6 +16,12 @@ from .model_provider import (
     ProviderConfigurationError,
     ResponsesProviderConfiguration,
 )
+from .model_error_codes import (
+    GroundingViolation,
+    ModelCallFailed,
+    ModelConfigurationRequired,
+    ModelRefused,
+)
 
 
 ANSWER_SCHEMA = {
@@ -41,22 +47,6 @@ ANSWER_SCHEMA = {
 def _camel(value: str) -> str:
     first, *rest = value.split("_")
     return first + "".join(part.capitalize() for part in rest)
-
-
-class ModelConfigurationRequired(RuntimeError):
-    provider_attempted = False
-
-
-class ModelCallFailed(RuntimeError):
-    provider_attempted = True
-
-
-class ModelRefused(RuntimeError):
-    provider_attempted = True
-
-
-class GroundingViolation(RuntimeError):
-    provider_attempted = True
 
 
 class _StructuredAnswer(BaseModel):
@@ -108,7 +98,10 @@ class OpenAIResponsesGateway:
                 )
             )
         except ProviderConfigurationError as error:
-            raise ModelConfigurationRequired(str(error)) from error
+            raise ModelConfigurationRequired(
+                str(error),
+                safe_error_code="MODEL_ROUTE_CONFIGURATION_INVALID",
+            ) from error
         self.api_key = self.provider_configuration.api_key
         self.model = self.provider_configuration.model
         self.base_url = self.provider_configuration.base_url
@@ -187,9 +180,9 @@ class OpenAIResponsesGateway:
         try:
             body = response.json()
         except ValueError as error:
-            raise ModelCallFailed("Model response is not valid JSON.") from error
+            raise ModelCallFailed("MODEL_RESPONSE_INVALID_JSON") from error
         if response.status_code < 200 or response.status_code >= 300:
-            raise ModelCallFailed(_safe_error_code(response.status_code, body))
+            raise ModelCallFailed(_safe_error_code(response.status_code))
         usage = body.get("usage") if isinstance(body.get("usage"), dict) else {}
         usage_observed = _usage_is_observed(usage)
         provider = self.provider_configuration.audit_label
@@ -297,7 +290,10 @@ class OpenAIResponsesGateway:
                 allow_test_override=test_override
             )
         except ProviderConfigurationError as error:
-            raise ModelConfigurationRequired(str(error)) from error
+            raise ModelConfigurationRequired(
+                str(error),
+                safe_error_code="MODEL_ROUTE_CONFIGURATION_INVALID",
+            ) from error
 
 
 def _extract_output_text(body: dict[str, Any]) -> str:
@@ -434,11 +430,10 @@ def _personal_preferences_json(preferences: tuple[tuple[str, str], ...]) -> str:
     )
 
 
-def _safe_error_code(status_code: int, body: dict[str, Any]) -> str:
-    error = body.get("error") if isinstance(body.get("error"), dict) else {}
-    code = str(error.get("code") or "MODEL_PROVIDER_ERROR").upper()
-    safe = "".join(character if character.isalnum() or character in "_.-" else "_" for character in code)
-    return f"{safe[:80]}_{status_code}"
+def _safe_error_code(status_code: int) -> str:
+    if 100 <= status_code <= 599:
+        return f"MODEL_PROVIDER_HTTP_{status_code}"
+    return "MODEL_PROVIDER_HTTP_ERROR"
 
 
 def _nonnegative_int(value: Any) -> int:

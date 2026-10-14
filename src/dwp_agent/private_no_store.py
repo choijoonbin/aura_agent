@@ -7,7 +7,7 @@ from fastapi import FastAPI
 
 
 PRIVATE_NO_STORE_CACHE_CONTROL = "private, no-store, max-age=0"
-_PRIVATE_API_PREFIXES = ("/v1/activity", "/v1/runs")
+_PRIVATE_API_PREFIXES = ("/operational-health", "/v1/activity", "/v1/runs")
 
 AsgiReceive = Callable[[], Awaitable[dict[str, Any]]]
 AsgiSend = Callable[[dict[str, Any]], Awaitable[None]]

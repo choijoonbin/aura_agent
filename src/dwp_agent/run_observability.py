@@ -68,6 +68,7 @@ class SourceHealthObservation:
     status: RunSourceHealthStatus
     observed_at: datetime
     latency_ms: int | None = None
+    operational: bool = True
 
 
 @dataclass(frozen=True)

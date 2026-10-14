@@ -13,6 +13,7 @@ from .run_observability import (
     RunSourceHealthStatus,
     SourceHealthObservation,
 )
+from .source_health import operational_http_failure
 
 
 MAX_EVIDENCE_TEXT = 1_200
@@ -84,6 +85,7 @@ def collect_approval_context(
             continue
         attempted.append(source_type.value)
         started = monotonic_ns()
+        operational = True
         try:
             response = client.get(
                 f"{approval_url}{path}",
@@ -92,6 +94,13 @@ def collect_approval_context(
             )
             candidates.extend(parser(response))
             outcome = RunSourceHealthStatus.SUCCESS
+        except httpx.HTTPStatusError as error:
+            unavailable.append(source_type.value)
+            outcome = RunSourceHealthStatus.UNAVAILABLE
+            operational = operational_http_failure(
+                error,
+                non_operational_statuses=frozenset({403}),
+            )
         except (httpx.HTTPError, ValueError, KeyError, TypeError):
             unavailable.append(source_type.value)
             outcome = RunSourceHealthStatus.UNAVAILABLE
@@ -100,6 +109,7 @@ def collect_approval_context(
             status=outcome,
             observed_at=datetime.now(timezone.utc),
             latency_ms=max(0, (monotonic_ns() - started) // 1_000_000),
+            operational=operational,
         ))
     return candidates, attempted, unavailable, health
 

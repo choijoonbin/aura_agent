@@ -106,6 +106,10 @@ def test_selected_work_uses_exact_owner_read_without_collection_or_raw_document(
     assert "DO_NOT_FORWARD" not in result.model_evidence()
     assert "owner metadata v3" in result.sources[0].citation.source_system
     assert result.sources[0].citation.route.startswith("/work/queue?work=")
+    expected_health_source = source if source.startswith("APPROVAL_") else "WORK_ITEM"
+    assert [(item.source_type, item.status, item.operational) for item in result.source_health] == [
+        (expected_health_source, "SUCCESS", False)
+    ]
     for request in seen:
         assert request.method == "GET"
         assert request.headers["cookie"] == "DWP_SESSION=test-only-session"
@@ -124,6 +128,7 @@ def test_selected_work_rejects_cross_identity_or_revoked_ask_before_owner_read(f
     principal = {**me(), field: value}
     result, seen = collect(principal=principal)
     assert result.status_code == "SELECTED_WORK_FORBIDDEN"
+    assert result.source_health[0].operational is False
     assert len(seen) == 1
 
 

@@ -4,6 +4,7 @@ from starlette.requests import Request
 
 from dwp_agent.context_broker import ContextBrokerUnavailable, WorkspaceContextBroker
 from dwp_agent.contracts import CitationSourceType
+from dwp_agent.operational_health import OperationalHealthRegistry
 from dwp_agent.policy import AskIdentity, evaluate_ask_policy
 from dwp_agent.workspace_authorization import (
     WorkspaceRequestAuthorization,
@@ -74,6 +75,93 @@ def test_unpermitted_sources_are_never_requested() -> None:
     assert [request.url.path for request in captured] == ["/v1/workspace/work-items"]
 
 
+def test_calendar_request_auth_failures_do_not_degrade_process_health() -> None:
+    registry = OperationalHealthRegistry()
+    broker = WorkspaceContextBroker(
+        platform_url="http://platform.test",
+        service_token="runtime-token",
+        gateway_url="http://gateway.test",
+    )
+    missing_auth = broker.collect(
+        "What is next?",
+        identity=identity("APP.ASK:VIEW", "APP.CALENDAR:VIEW"),
+        locale="en",
+        source_scopes=[CitationSourceType.CALENDAR],
+    )
+    registry.record_sources(tenant_id="1", observations=missing_auth.source_health)
+
+    def unauthorized(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(401)
+
+    broker = WorkspaceContextBroker(
+        platform_url="http://platform.test",
+        service_token="runtime-token",
+        gateway_url="http://gateway.test",
+        transport=httpx.MockTransport(unauthorized),
+    )
+    expired_auth = broker.collect(
+        "What is next?",
+        identity=identity("APP.ASK:VIEW", "APP.CALENDAR:VIEW"),
+        locale="en",
+        source_scopes=[CitationSourceType.CALENDAR],
+        workspace_authorization=WorkspaceRequestAuthorization(
+            cookie_header="DWP_SESSION=expired",
+            session_family_id="expired-family",
+        ),
+    )
+    registry.record_sources(tenant_id="1", observations=expired_auth.source_health)
+
+    assert all(not item.operational for item in missing_auth.source_health)
+    assert all(not item.operational for item in expired_auth.source_health)
+    snapshot = registry.snapshot(tenant_id="1")
+    assert snapshot["sources"]["status"] == "UNKNOWN"
+
+
+def test_dependency_contract_and_service_identity_failures_degrade_process_health() -> None:
+    registry = OperationalHealthRegistry()
+
+    def calendar_bad_request(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(400)
+
+    calendar = WorkspaceContextBroker(
+        platform_url="http://platform.test",
+        service_token="runtime-token",
+        gateway_url="http://gateway.test",
+        transport=httpx.MockTransport(calendar_bad_request),
+    ).collect(
+        "What is next?",
+        identity=identity("APP.ASK:VIEW", "APP.CALENDAR:VIEW"),
+        locale="en",
+        source_scopes=[CitationSourceType.CALENDAR],
+        workspace_authorization=WorkspaceRequestAuthorization(
+            cookie_header="DWP_SESSION=valid",
+            session_family_id="valid-family",
+        ),
+    )
+
+    def service_unauthorized(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(401)
+
+    work_item = WorkspaceContextBroker(
+        platform_url="http://platform.test",
+        service_token="runtime-token",
+        transport=httpx.MockTransport(service_unauthorized),
+    ).collect(
+        "What is next?",
+        identity=identity("APP.ASK:VIEW", "APP.WORK:VIEW"),
+        locale="en",
+        source_scopes=[CitationSourceType.WORK_ITEM],
+    )
+    registry.record_sources(
+        tenant_id="1",
+        observations=calendar.source_health + work_item.source_health,
+    )
+
+    assert all(item.operational for item in calendar.source_health)
+    assert all(item.operational for item in work_item.source_health)
+    assert registry.snapshot(tenant_id="1")["sources"]["status"] == "DEGRADED"
+
+
 def test_injected_or_restricted_source_content_never_enters_model_evidence() -> None:
     def handler(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(
@@ -116,11 +204,16 @@ def test_injected_or_restricted_source_content_never_enters_model_evidence() -> 
     assert "board-only" not in context.model_evidence().lower()
 
 
-def test_calendar_context_is_reauthorized_through_gateway_without_raw_identity_headers() -> None:
+def test_calendar_context_satisfies_gateway_tenant_contract_without_raw_identity_headers() -> None:
     captured: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         captured.append(request)
+        # Mirrors RequiredHeaderFilter's protected-route ingress contract. Gateway then
+        # strips caller-provided X-DWP-* headers and VerifiedIdentityFilter reissues them
+        # from the authenticated session for downstream services.
+        if not request.headers.get("X-Tenant-ID", "").strip():
+            return httpx.Response(400)
         return httpx.Response(200, json={"data": []})
 
     broker = WorkspaceContextBroker(
@@ -151,10 +244,11 @@ def test_calendar_context_is_reauthorized_through_gateway_without_raw_identity_h
     assert captured[0].url.path == "/api/platform/v1/calendar/events"
     assert captured[0].headers["Cookie"] == "DWP_SESSION=session-secret"
     assert captured[0].headers["Authorization"] == "Bearer access-secret"
-    assert captured[0].headers["X-DWP-Tenant-ID"] == "1"
+    assert captured[0].headers["X-Tenant-ID"] == "1"
     assert captured[0].headers["X-Correlation-ID"] == "security-gate-2"
     assert "X-DWP-Service-Token" not in captured[0].headers
     assert "X-DWP-User-ID" not in captured[0].headers
+    assert "X-DWP-Tenant-ID" not in captured[0].headers
     assert "X-DWP-Roles" not in captured[0].headers
     assert "X-DWP-Permissions" not in captured[0].headers
     assert "X-DWP-Person-Public-ID" not in captured[0].headers

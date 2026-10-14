@@ -87,6 +87,13 @@ def test_runtime_uses_installable_src_package() -> None:
     assert (
         PACKAGE_ROOT / "migrations" / "V35__index_user_run_activity_pages.sql"
     ).is_file()
+    attachment_citation_migration = (
+        PACKAGE_ROOT
+        / "migrations"
+        / "V71__persist_attachment_grounding_citations.sql"
+    )
+    assert attachment_citation_migration.is_file()
+    assert "'ATTACHMENT'" in attachment_citation_migration.read_text(encoding="utf-8")
 
 
 def test_migration_versions_are_unique() -> None:

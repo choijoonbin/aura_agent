@@ -4,7 +4,10 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from .governance_api import _context, _headers
+from .governance_api_dependencies import (
+    governance_context as _context,
+    governance_headers as _headers,
+)
 from .governance_contracts import (
     BootstrapGovernancePoliciesRequest,
     SafetyPolicyEnvelope,

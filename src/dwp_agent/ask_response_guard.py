@@ -3,16 +3,19 @@ from __future__ import annotations
 import hashlib
 import hmac
 import os
+from typing import Callable
 
 from .contracts import AskRequest, AskResponse, AskState
 from .model_gateway import ModelConfigurationRequired
 from .policy import AskIdentity
+from .run_observability import SourceHealthObservation
 from .workspace_authorization import WorkspaceRequestAuthorization
 
 
 def selected_response_guard(
     broker, request: AskRequest, identity: AskIdentity, response: AskResponse,
     authorization: WorkspaceRequestAuthorization | None,
+    on_recheck: Callable[[tuple[SourceHealthObservation, ...]], None] | None = None,
 ) -> AskResponse:
     if request.page_context is None or request.page_context.selected_work is None:
         return response
@@ -23,6 +26,8 @@ def selected_response_guard(
         source_scopes=request.source_scopes, page_context=request.page_context,
         workspace_authorization=authorization,
     )
+    if on_recheck is not None:
+        on_recheck(current.source_health)
     if not current.sources:
         return response.model_copy(update={
             "state": AskState.ABSTAINED, "answer": None, "confidence": None,
@@ -37,7 +42,10 @@ def safety_identifier(identity: AskIdentity) -> str:
     if not secret:
         secret = os.getenv("DWP_AGENT_PRIVACY_HASH_SECRET", "").strip()
     if not secret:
-        raise ModelConfigurationRequired("Agent safety identifier secret is required.")
+        raise ModelConfigurationRequired(
+            "Agent safety identifier secret is required.",
+            safe_error_code="AGENT_SAFETY_CONFIGURATION_REQUIRED",
+        )
     digest = hmac.new(
         secret.encode("utf-8"),
         f"{identity.tenant_id}:{identity.user_id}".encode("utf-8"),

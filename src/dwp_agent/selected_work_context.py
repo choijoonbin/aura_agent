@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from urllib.parse import quote
 
 import httpx
@@ -8,6 +9,7 @@ import httpx
 from .contracts import AskCitation, AskSelectedWork, CitationSourceType
 from .grounded_context import GroundedContext, GroundedSource
 from .policy import AskIdentity, contains_privileged_data, contains_prompt_injection
+from .run_observability import RunSourceHealthStatus, SourceHealthObservation
 from .workspace_authorization import WorkspaceRequestAuthorization
 
 
@@ -20,10 +22,17 @@ _OWNERS = {
 }
 
 
-def unavailable(code: str) -> GroundedContext:
+def unavailable(code: str, source_system: str) -> GroundedContext:
     return GroundedContext(
         sources=(), attempted_sources=("SELECTED_WORK",),
-        unavailable_sources=("SELECTED_WORK",), status_code=f"SELECTED_WORK_{code}",
+        unavailable_sources=("SELECTED_WORK",),
+        source_health=(
+            _selected_work_health(
+                _citation_source_type(source_system),
+                RunSourceHealthStatus.UNAVAILABLE,
+            ),
+        ),
+        status_code=f"SELECTED_WORK_{code}",
     )
 
 
@@ -34,14 +43,14 @@ def collect_selected_work(
 ) -> GroundedContext:
     owner = _OWNERS.get(selection.source_system)
     if owner is None:
-        return unavailable("UNSUPPORTED")
+        return unavailable("UNSUPPORTED", selection.source_system)
     app, base, id_field = owner
     required = {"APP.ASK:VIEW", f"{app}:VIEW"}
     if not required.issubset({value.upper() for value in identity.permissions}):
-        return unavailable("FORBIDDEN")
+        return unavailable("FORBIDDEN", selection.source_system)
     if (not gateway_url or authorization is None or not authorization.available
             or not authorization.session_family_id):
-        return unavailable("AUTHORIZATION_REQUIRED")
+        return unavailable("AUTHORIZATION_REQUIRED", selection.source_system)
     headers = {
         **authorization.outbound_headers(), "X-Tenant-ID": identity.tenant_id,
         "X-Correlation-ID": identity.correlation_id, "Accept-Language": locale,
@@ -57,7 +66,7 @@ def collect_selected_work(
                 params={"permissionPrefix": f"APP.ASK,{app}"},
             ))
             if not _authorized(me, identity, required, authorization.session_family_id):
-                return unavailable("FORBIDDEN")
+                return unavailable("FORBIDDEN", selection.source_system)
             data = _data(client.get(f"{gateway_url}{base}/{source_id}{suffix}", headers=headers))
         record = data
         if selection.source_system == "APPROVAL_TASK":
@@ -65,28 +74,28 @@ def collect_selected_work(
         elif selection.source_system in {"APPROVAL_REQUEST", "SERVICE_REQUEST"}:
             record = data["request"]
         if not isinstance(record, dict) or record.get(id_field) != source_id:
-            return unavailable("INVALID_SOURCE")
+            return unavailable("INVALID_SOURCE", selection.source_system)
         version = record.get("version")
         if type(version) is not int or version != selection.expected_version:
-            return unavailable("STALE")
+            return unavailable("STALE", selection.source_system)
         if selection.source_system == "APPROVAL_TASK" and (
             not selection.obligation_key or record.get("stepKey") != selection.obligation_key
         ):
-            return unavailable("STALE")
+            return unavailable("STALE", selection.source_system)
         classification = (
             "INTERNAL" if selection.source_system == "PERSONAL_TASK"
             else data.get("dataClassification", record.get("dataClassification"))
         )
         if classification not in {"PUBLIC", "INTERNAL"}:
-            return unavailable("RESTRICTED")
+            return unavailable("RESTRICTED", selection.source_system)
         return _context(selection, record)
     except httpx.HTTPStatusError as error:
         code = {401: "FORBIDDEN", 403: "FORBIDDEN", 404: "NOT_FOUND", 409: "STALE"}.get(
             error.response.status_code, "UNAVAILABLE"
         )
-        return unavailable(code)
+        return unavailable(code, selection.source_system)
     except (httpx.HTTPError, ValueError, KeyError, TypeError):
-        return unavailable("UNAVAILABLE")
+        return unavailable("UNAVAILABLE", selection.source_system)
 
 
 def _data(response: httpx.Response) -> dict:
@@ -130,17 +139,14 @@ def _context(selection: AskSelectedWork, record: dict) -> GroundedContext:
         "dueAt": _text(record.get("dueAt") or record.get("slaDueAt"), 60),
     }
     if not title or not fields["status"]:
-        return unavailable("INVALID_SOURCE")
+        return unavailable("INVALID_SOURCE", selection.source_system)
     evidence = json.dumps(fields, ensure_ascii=False, separators=(",", ":"))
     if contains_privileged_data(evidence) or contains_prompt_injection(evidence):
-        return unavailable("RESTRICTED")
+        return unavailable("RESTRICTED", selection.source_system)
     key = ":".join(quote(value, safe="") for value in (
         selection.source_system, str(selection.source_reference), selection.obligation_key or "",
     ))
-    source_type = (
-        CitationSourceType(selection.source_system)
-        if selection.source_system.startswith("APPROVAL_") else CitationSourceType.WORK_ITEM
-    )
+    source_type = _citation_source_type(selection.source_system)
     return GroundedContext(
         sources=(GroundedSource(
             citation=AskCitation(
@@ -148,7 +154,33 @@ def _context(selection: AskSelectedWork, record: dict) -> GroundedContext:
                 source_system=f"{selection.source_system} / owner metadata v{selection.expected_version}",
                 route=f"/work/queue?work={quote(key, safe='')}", excerpt=evidence[:500],
             ), evidence=evidence, rank=1,
-        ),), attempted_sources=("SELECTED_WORK",), unavailable_sources=(),
+        ),),
+        attempted_sources=("SELECTED_WORK",),
+        unavailable_sources=(),
+        source_health=(
+            _selected_work_health(source_type, RunSourceHealthStatus.SUCCESS),
+        ),
+    )
+
+
+def _citation_source_type(source_system: str) -> CitationSourceType:
+    if source_system in {
+        CitationSourceType.APPROVAL_TASK.value,
+        CitationSourceType.APPROVAL_REQUEST.value,
+    }:
+        return CitationSourceType(source_system)
+    return CitationSourceType.WORK_ITEM
+
+
+def _selected_work_health(
+    source_type: CitationSourceType,
+    status: RunSourceHealthStatus,
+) -> SourceHealthObservation:
+    return SourceHealthObservation(
+        source_type=source_type.value,
+        status=status,
+        observed_at=datetime.now(timezone.utc),
+        operational=False,
     )
 
 

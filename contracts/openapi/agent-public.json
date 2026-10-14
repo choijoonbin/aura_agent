@@ -9690,6 +9690,62 @@
         "title": "MemoryState",
         "type": "string"
       },
+      "ModelProviderOperationalHealth": {
+        "additionalProperties": false,
+        "properties": {
+          "configured": {
+            "title": "Configured",
+            "type": "boolean"
+          },
+          "lastObservedAt": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Lastobservedat"
+          },
+          "provider": {
+            "maxLength": 40,
+            "minLength": 1,
+            "title": "Provider",
+            "type": "string"
+          },
+          "safeErrorCode": {
+            "anyOf": [
+              {
+                "maxLength": 120,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Safeerrorcode"
+          },
+          "status": {
+            "enum": [
+              "AVAILABLE",
+              "CONFIGURED",
+              "INVALID_CONFIGURATION",
+              "NOT_CONFIGURED",
+              "UNAVAILABLE"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "provider",
+          "configured"
+        ],
+        "title": "ModelProviderOperationalHealth",
+        "type": "object"
+      },
       "ModelRoutePolicy": {
         "additionalProperties": false,
         "properties": {
@@ -10603,6 +10659,87 @@
         ],
         "title": "OperationalHealth",
         "type": "string"
+      },
+      "OperationalHealthComponents": {
+        "additionalProperties": false,
+        "properties": {
+          "database": {
+            "title": "Database",
+            "type": "string"
+          },
+          "modelProvider": {
+            "$ref": "#/components/schemas/ModelProviderOperationalHealth"
+          },
+          "sources": {
+            "$ref": "#/components/schemas/SourcesOperationalHealth"
+          }
+        },
+        "required": [
+          "database",
+          "modelProvider",
+          "sources"
+        ],
+        "title": "OperationalHealthComponents",
+        "type": "object"
+      },
+      "OperationalHealthEnvelope": {
+        "additionalProperties": false,
+        "properties": {
+          "components": {
+            "$ref": "#/components/schemas/OperationalHealthComponents"
+          },
+          "degradationReasons": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Degradationreasons",
+            "type": "array"
+          },
+          "degraded": {
+            "title": "Degraded",
+            "type": "boolean"
+          },
+          "service": {
+            "title": "Service",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "ok",
+              "unavailable"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "version": {
+            "title": "Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "service",
+          "version",
+          "degraded",
+          "degradationReasons",
+          "components"
+        ],
+        "title": "OperationalHealthEnvelope",
+        "type": "object"
+      },
+      "OperationalHealthError": {
+        "additionalProperties": false,
+        "properties": {
+          "detail": {
+            "title": "Detail",
+            "type": "string"
+          }
+        },
+        "required": [
+          "detail"
+        ],
+        "title": "OperationalHealthError",
+        "type": "object"
       },
       "OutcomeCohort": {
         "additionalProperties": false,
@@ -16867,6 +17004,64 @@
         "title": "SourceAccessMode",
         "type": "string"
       },
+      "SourceOperationalHealth": {
+        "additionalProperties": false,
+        "properties": {
+          "lastObservedAt": {
+            "title": "Lastobservedat",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "SUCCESS",
+              "UNAVAILABLE",
+              "NOT_CONFIGURED"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "lastObservedAt"
+        ],
+        "title": "SourceOperationalHealth",
+        "type": "object"
+      },
+      "SourcesOperationalHealth": {
+        "additionalProperties": false,
+        "properties": {
+          "recent": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/SourceOperationalHealth"
+            },
+            "title": "Recent",
+            "type": "object"
+          },
+          "status": {
+            "enum": [
+              "UNKNOWN",
+              "HEALTHY",
+              "DEGRADED"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "windowSeconds": {
+            "maximum": 3600.0,
+            "minimum": 30.0,
+            "title": "Windowseconds",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "status",
+          "windowSeconds",
+          "recent"
+        ],
+        "title": "SourcesOperationalHealth",
+        "type": "object"
+      },
       "StartResearchRunRequest": {
         "additionalProperties": false,
         "properties": {
@@ -20390,6 +20585,84 @@
           }
         },
         "summary": "Livez",
+        "tags": [
+          "system"
+        ]
+      }
+    },
+    "/operational-health": {
+      "get": {
+        "operationId": "operational_health_operational_health_get",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "X-DWP-Tenant-ID",
+            "required": true,
+            "schema": {
+              "maxLength": 64,
+              "minLength": 1,
+              "title": "X-Dwp-Tenant-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-DWP-Permissions",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Dwp-Permissions"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OperationalHealthEnvelope"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/OperationalHealthEnvelope"
+                    },
+                    {
+                      "$ref": "#/components/schemas/OperationalHealthError"
+                    }
+                  ],
+                  "title": "Response 503 Operational Health Operational Health Get"
+                }
+              }
+            },
+            "description": "Runtime dependency unavailable"
+          }
+        },
+        "summary": "Operational Health",
         "tags": [
           "system"
         ]

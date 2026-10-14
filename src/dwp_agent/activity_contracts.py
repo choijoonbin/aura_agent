@@ -26,6 +26,7 @@ class ActivityRunSnapshot:
     generation: int = 1
     answer_state: str | None = None
     status_code: str | None = None
+    safe_error_code: str | None = None
     source_count: int = 0
     latency_ms: int = 0
     completed_at: datetime | None = None

@@ -4,7 +4,7 @@ import asyncio
 import os
 from dataclasses import replace
 from urllib.parse import urlparse
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import httpx
 import pytest
@@ -19,6 +19,7 @@ from dwp_agent.model_gateway import ModelAnswer
 from dwp_agent.policy import SafetyControls
 from dwp_agent.run_store import InMemoryRunStore
 from dwp_agent.stream_runtime import stream_ask_response, shutdown_ask_stream_pool
+from dwp_agent.user_run_contracts import UserAgentRunSourceHealth
 
 from test_selected_work_context import AUTHORIZATION, IDENTITY, me, owner, selected_request
 
@@ -92,6 +93,22 @@ def test_selected_owner_response_persists_and_continues_by_conversation_id(sourc
     assert detail.messages[-1].content == result.answer
     assert detail.messages[-1].agent_key == request.agent_key
     assert detail.messages[-1].selected_work == request.page_context.selected_work
+    source_health = runtime.run_store.run_source_health(
+        tenant_id=IDENTITY.tenant_id,
+        user_id=IDENTITY.user_id,
+        run_id=UUID(result.run_id),
+        generation=1,
+    )
+    assert len(source_health) == 1
+    projected_health = UserAgentRunSourceHealth(
+        source_type=source_health[0].source_type,
+        status=source_health[0].status,
+        latency_ms=source_health[0].latency_ms,
+        last_attempt_at=source_health[0].last_attempt_at,
+        last_success_at=source_health[0].last_success_at,
+    )
+    expected_source = source if source.startswith("APPROVAL_") else "WORK_ITEM"
+    assert projected_health.source_type == expected_source
     assert len(state["reads"]) == 4  # session + exact owner before and after generation
     continued = runtime.answer(
         request.model_copy(update={"request_id": "follow-up", "conversation_id": result.conversation_id}),
@@ -146,6 +163,16 @@ def test_changed_source_or_revoked_access_during_model_never_publishes_late_answ
     assert result.status_code == f"SELECTED_WORK_{code}"
     assert result.answer is None and result.citations == []
     assert result.model_route.total_tokens == 55  # truthful accounting of the already-spent call
+    source_health = runtime.run_store.run_source_health(
+        tenant_id=IDENTITY.tenant_id,
+        user_id=IDENTITY.user_id,
+        run_id=UUID(result.run_id),
+        generation=1,
+    )
+    assert [(item.source_type, item.status) for item in source_health] == [
+        ("WORK_ITEM", "UNAVAILABLE")
+    ]
+    assert source_health[0].last_success_at is None
     detail = runtime.conversation_store.get(
         tenant_id=IDENTITY.tenant_id, user_id=IDENTITY.user_id, conversation_id=result.conversation_id,
     )

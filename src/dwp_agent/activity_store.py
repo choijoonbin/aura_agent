@@ -119,7 +119,8 @@ _COLUMNS = """run_id, tenant_id, user_id, agent_key, agent_revision, run_state,
       WHERE stage.run_id = ai_agent_runs.run_id
         AND stage.lease_generation = ai_agent_runs.lease_generation
         AND stage.stage_key NOT IN ('COMPLETED', 'FAILED')
-        AND stage.stage_state IN ('COMPLETED', 'SKIPPED'))"""
+        AND stage.stage_state IN ('COMPLETED', 'SKIPPED')),
+    safe_error_code"""
 
 # No source payload, query, response envelope, correlation text or citation is read.
 _STATE = """CASE WHEN run_state = 'RUNNING' THEN
@@ -232,6 +233,7 @@ def _snapshot(row: tuple) -> ActivityRunSnapshot:
         run_id=row[0], tenant_id=str(row[1]), user_id=row[2], agent_key=row[3],
         agent_revision=row[4], run_state=row[5], risk_tier=row[6], policy_outcome=row[7],
         created_at=row[8], generation=row[9], answer_state=row[10], status_code=row[11],
+        safe_error_code=row[22],
         source_count=row[12], latency_ms=row[13], completed_at=row[14], lease_expires_at=row[15],
         audit_id=row[16], audit_record_id=row[17], audit_link_state=row[18],
         data_provenance=RunDataProvenance(row[19]), current_stage=current_stage,

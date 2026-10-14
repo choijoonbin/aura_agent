@@ -152,15 +152,18 @@ class InMemoryRunStore:
                 raise RunStoreUnavailable("Agent run lease is no longer owned.")
             for observation in observations:
                 source_key = (lease.run_id, lease.generation, observation.source_type)
-                self._source_health.setdefault(
-                    source_key,
-                    RunSourceHealthSnapshot(
-                        source_type=observation.source_type,
-                        status=observation.status,
-                        latency_ms=observation.latency_ms,
-                        last_attempt_at=observation.observed_at,
-                        last_success_at=(observation.observed_at
-                                         if observation.status == "SUCCESS" else None),
+                current = self._source_health.get(source_key)
+                if current is not None and current.last_attempt_at > observation.observed_at:
+                    continue
+                self._source_health[source_key] = RunSourceHealthSnapshot(
+                    source_type=observation.source_type,
+                    status=observation.status,
+                    latency_ms=observation.latency_ms,
+                    last_attempt_at=observation.observed_at,
+                    last_success_at=(
+                        observation.observed_at
+                        if observation.status == "SUCCESS"
+                        else None
                     ),
                 )
 
@@ -203,6 +206,7 @@ class InMemoryRunStore:
         tenant_id: str,
         user_id: str,
         provider_request_hash: str | None = None,
+        safe_error_code: str | None = None,
     ) -> None:
         key = (tenant_id, user_id, response.request_id)
         with self._lock:
@@ -218,6 +222,7 @@ class InMemoryRunStore:
             self._activity[lease.run_id] = replace(
                 snapshot, run_state="COMPLETED",
                 answer_state=str(response.state), status_code=response.status_code,
+                safe_error_code=safe_error_code,
                 source_count=response.source_count, latency_ms=response.model_route.latency_ms,
                 completed_at=response.completed_at, lease_expires_at=None,
                 current_stage=RunStageKey.COMPLETED,
@@ -238,6 +243,7 @@ class InMemoryRunStore:
                 self._terminal_stage_locked(lease, RunStageKey.FAILED, terminal_at)
                 self._activity[lease.run_id] = replace(
                     self._activity[lease.run_id], run_state="FAILED",
+                    safe_error_code=safe_error_code[:120],
                     completed_at=terminal_at, lease_expires_at=None,
                     current_stage=RunStageKey.FAILED,
                     progress_percent=progress_percent(self._current_stages_locked(lease)),
