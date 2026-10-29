@@ -172,7 +172,10 @@ def test_changed_source_or_revoked_access_during_model_never_publishes_late_answ
     assert [(item.source_type, item.status) for item in source_health] == [
         ("WORK_ITEM", "UNAVAILABLE")
     ]
-    assert source_health[0].last_success_at is None
+    # The later authority recheck failed, but the earlier successful source read
+    # remains useful recovery evidence for the same attempt.
+    assert source_health[0].last_success_at is not None
+    assert source_health[0].last_success_at <= source_health[0].last_attempt_at
     detail = runtime.conversation_store.get(
         tenant_id=IDENTITY.tenant_id, user_id=IDENTITY.user_id, conversation_id=result.conversation_id,
     )

@@ -7,9 +7,12 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from pathlib import Path
 from typing import Literal
 from uuid import uuid4
+
+from .audit_delivery_ack import acknowledge_agent_run_delivery
 
 
 LOGGER = logging.getLogger("uvicorn.error.dwp.audit.delivery")
@@ -20,7 +23,10 @@ _DeliveryDisposition = Literal["DELIVERED", "PERMANENT_FAILURE", "RETRYABLE_FAIL
 class DurableAuditPublisher:
     """Disk-backed audit delivery used when the central collector is unavailable."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        acknowledge_delivery: Callable[[object], bool] | None = None,
+    ) -> None:
         self.collector_url = os.getenv("DWP_AUDIT_COLLECTOR_URL", "").strip()
         self.ingest_token = os.getenv("DWP_AUDIT_INGEST_TOKEN", "").strip()
         self.service_name = os.getenv("DWP_AUDIT_SERVICE_NAME", "dwp-agent-runtime").strip()
@@ -32,6 +38,7 @@ class DurableAuditPublisher:
         self._wake = threading.Event()
         self._started = False
         self._lock = threading.Lock()
+        self._acknowledge_delivery = acknowledge_delivery or acknowledge_agent_run_delivery
 
     @property
     def enabled(self) -> bool:
@@ -62,7 +69,10 @@ class DurableAuditPublisher:
         if not self.enabled or not self.spool_dir.exists():
             return True
         recovery_succeeded = self._recover_staged_quarantines()
-        files = sorted(self.spool_dir.glob("*.json"))[: self.batch_size]
+        files = sorted(
+            self.spool_dir.glob("*.json"),
+            key=self._spool_order,
+        )[: self.batch_size]
         if not files:
             return recovery_succeeded
 
@@ -96,8 +106,29 @@ class DurableAuditPublisher:
 
         disposition, status = self._send_events([event for _, event in entries])
         if disposition == "DELIVERED":
-            deleted_all = True
-            for path, _ in entries:
+            acknowledged_all = True
+            for path, event in entries:
+                try:
+                    acknowledged = self._acknowledge_delivery(event)
+                except Exception as error:  # A hook failure must retain the durable spool entry.
+                    LOGGER.warning(
+                        "Delivered audit local acknowledgement deferred; file=%r error=%s",
+                        path.name,
+                        type(error).__name__,
+                    )
+                    acknowledged = False
+                if not acknowledged:
+                    acknowledged_all = False
+                    try:
+                        path.touch()
+                    except OSError as error:
+                        LOGGER.warning(
+                            "Delivered audit acknowledgement retry could not rotate; "
+                            "file=%r error=%s",
+                            path.name,
+                            type(error).__name__,
+                        )
+                    continue
                 try:
                     path.unlink(missing_ok=True)
                 except OSError as error:
@@ -106,8 +137,8 @@ class DurableAuditPublisher:
                         path.name,
                         type(error).__name__,
                     )
-                    deleted_all = False
-            return deleted_all
+                    acknowledged_all = False
+            return acknowledged_all
 
         if disposition == "RETRYABLE_FAILURE":
             return False
@@ -124,6 +155,13 @@ class DurableAuditPublisher:
         left_succeeded = self._deliver_entries(entries[:midpoint])
         right_succeeded = self._deliver_entries(entries[midpoint:])
         return left_succeeded and right_succeeded
+
+    @staticmethod
+    def _spool_order(path: Path) -> tuple[int, str]:
+        try:
+            return path.stat().st_mtime_ns, path.name
+        except OSError:
+            return 0, path.name
 
     def _send_events(self, events: list[object]) -> tuple[_DeliveryDisposition, int | None]:
         request = urllib.request.Request(

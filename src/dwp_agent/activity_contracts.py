@@ -23,6 +23,7 @@ class ActivityRunSnapshot:
     risk_tier: str
     policy_outcome: str
     created_at: datetime
+    state_changed_at: datetime
     generation: int = 1
     answer_state: str | None = None
     status_code: str | None = None
@@ -52,6 +53,16 @@ class ActivityRunSnapshot:
         if self.policy_outcome == "HANDOFF":
             return "NEEDS_INPUT"
         return "COMPLETED"
+
+    def effective_state_changed_at(self, now: datetime) -> datetime:
+        """Return the observable transition time without mutating the source ledger."""
+        if (
+            self.run_state == "RUNNING"
+            and self.lease_expires_at is not None
+            and self.lease_expires_at <= now
+        ):
+            return self.lease_expires_at
+        return self.state_changed_at
 
     def execution_version(self, now: datetime) -> int:
         # Each fenced attempt can only progress from running to one terminal state.
@@ -98,6 +109,7 @@ class ActivityEvent(ContractModel):
     audit_status: str = "NOT_LINKED"
     resume_cursor: str | None = None
     source_observed_at: datetime
+    state_changed_at: datetime | None = None
     updated_at: datetime | None = None
 
 

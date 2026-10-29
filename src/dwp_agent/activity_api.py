@@ -55,8 +55,11 @@ def activity_filters(
         raise HTTPException(422, "Activity time filters must include a UTC offset.")
     if from_at is not None and to_at is not None and from_at >= to_at:
         raise HTTPException(422, "Activity time range is invalid.")
+    normalized_query = (query or q).strip()
+    if normalized_query and len(normalized_query) < 3:
+        raise HTTPException(422, "Activity search requires at least three characters.")
     return ActivityFilters(actor=actor.strip().upper(), state=state.strip().upper().replace("-", "_"),
-                           query=(query or q).strip(), source=source.strip(), object_type=object_type.strip().upper(),
+                           query=normalized_query, source=source.strip(), object_type=object_type.strip().upper(),
                            object_id=object_id.strip(), execution_id=execution_id.strip(),
                            from_at=from_at.astimezone(timezone.utc) if from_at else None,
                            to_at=to_at.astimezone(timezone.utc) if to_at else None)
@@ -79,6 +82,7 @@ def _event(row: ActivityRunSnapshot, *, now: datetime, locale: str, resume_curso
         audit_status=row.audit_link_state or "NOT_LINKED",
         data_provenance=row.data_provenance,
         resume_cursor=resume_cursor, source_observed_at=now,
+        state_changed_at=row.effective_state_changed_at(now),
         updated_at=row.completed_at,
     )
 

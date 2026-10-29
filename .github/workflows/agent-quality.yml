@@ -44,3 +44,143 @@ jobs:
       - name: Build package
         if: matrix.python-version == '3.13'
         run: uv build
+
+  activity-postgres:
+    name: Activity PostgreSQL integration (Python 3.13)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:18.4-alpine
+        env:
+          POSTGRES_USER: dwp_agent
+          POSTGRES_PASSWORD: activity_test
+          POSTGRES_DB: dwp_agent_activity_integration
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U dwp_agent -d dwp_agent_activity_integration"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      DWP_AGENT_INTEGRATION_DATABASE_URL: postgresql://dwp_agent:activity_test@127.0.0.1:5432/dwp_agent_activity_integration
+      DWP_AGENT_LEASE_UPGRADE_TEST_DATABASE_URL: postgresql://dwp_agent:activity_test@127.0.0.1:5432/dwp_agent_activity_upgrade_verify
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: '0.11.28'
+          enable-cache: true
+
+      - name: Install Python 3.13
+        run: uv python install 3.13
+
+      - name: Synchronize locked dependencies
+        run: uv sync --locked --all-groups --python 3.13
+
+      - name: Create and verify isolated PostgreSQL integration databases
+        run: |
+          uv run --locked --python 3.13 python - <<'PY'
+          import os
+          from urllib.parse import urlparse
+
+          import psycopg
+          from psycopg import sql
+
+          activity_url = os.environ["DWP_AGENT_INTEGRATION_DATABASE_URL"]
+          upgrade_url = os.environ["DWP_AGENT_LEASE_UPGRADE_TEST_DATABASE_URL"]
+          activity_name = urlparse(activity_url).path.removeprefix("/")
+          upgrade_name = urlparse(upgrade_url).path.removeprefix("/")
+          if not activity_name.endswith(("_integration", "_test", "_verify")):
+              raise SystemExit("Activity integration database must use a guarded test suffix.")
+          if not upgrade_name.endswith("_verify") or activity_name == upgrade_name:
+              raise SystemExit("Lease upgrade verification requires a separate _verify database.")
+
+          admin_url = urlparse(upgrade_url)._replace(path="/postgres").geturl()
+          with psycopg.connect(admin_url, connect_timeout=5, autocommit=True) as connection:
+              exists = connection.execute(
+                  "SELECT 1 FROM pg_database WHERE datname = %s", (upgrade_name,)
+              ).fetchone()
+              if exists is None:
+                  connection.execute(
+                      sql.SQL("CREATE DATABASE {}").format(sql.Identifier(upgrade_name))
+                  )
+
+          for database_url in (activity_url, upgrade_url):
+              with psycopg.connect(database_url, connect_timeout=5) as connection:
+                  version = connection.execute("SHOW server_version").fetchone()[0]
+                  if not version.startswith("18.4"):
+                      raise SystemExit(f"Expected PostgreSQL 18.4, received {version}.")
+          with psycopg.connect(upgrade_url, connect_timeout=5) as connection:
+              history = connection.execute(
+                  "SELECT to_regclass('public.sys_schema_history')"
+              ).fetchone()[0]
+              if history is not None:
+                  raise SystemExit("Lease upgrade verification database is not empty.")
+          PY
+
+      - name: Run Activity PostgreSQL integration tests
+        run: >-
+          uv run --locked --python 3.13 pytest
+          tests/test_activity_source.py
+          tests/test_run_activity_observability.py
+          tests/test_user_run_api.py
+          tests/test_conversation_lease_upgrade_postgres.py
+          -ra --junitxml=activity-postgres-results.xml
+
+      - name: Reject skipped or missing PostgreSQL Activity cases
+        if: ${{ always() }}
+        run: |
+          uv run --locked --python 3.13 python - <<'PY'
+          from pathlib import Path
+          import xml.etree.ElementTree as ET
+
+          report = Path("activity-postgres-results.xml")
+          if not report.is_file():
+              raise SystemExit("Activity PostgreSQL test report was not produced.")
+          root = ET.parse(report).getroot()
+          cases = list(root.iter("testcase"))
+          skipped = [case.attrib.get("name", "") for case in cases
+                     if case.find("skipped") is not None]
+          postgres_cases = [case.attrib.get("name", "") for case in cases
+                            if case.attrib.get("name", "").endswith("[postgres]")]
+          required_cases = {
+              "test_postgres_activity_search_installs_a_valid_online_trigram_index",
+              "test_postgres_retry_preserves_and_acknowledges_each_audit_attempt",
+              "test_postgres_current_projection_ack_is_safe_before_audit_backfill",
+              "test_postgres_pre_v73_orphan_receipt_does_not_starve_or_link_latest_attempt",
+              "test_postgres_rolling_upgrade_trigger_captures_old_writer_and_transition_time",
+              "test_legacy_database_upgrades_through_applied_v33_to_latest",
+          }
+          executed = {case.attrib.get("name", "") for case in cases}
+          if skipped:
+              raise SystemExit(
+                  f"Activity PostgreSQL gate skipped {len(skipped)} test(s): {skipped}"
+              )
+          if len(postgres_cases) < 4:
+              raise SystemExit(
+                  "Expected all four parameterized Activity [postgres] cases; "
+                  f"received {postgres_cases}."
+              )
+          missing = required_cases - executed
+          if missing:
+              raise SystemExit(
+                  f"Required Activity PostgreSQL upgrade/attempt cases did not run: {sorted(missing)}"
+              )
+          recovery_cases = [
+              name for name in executed
+              if name.startswith(
+                  "test_nontransactional_backfill_migration_recovers_after_interrupted_call"
+              )
+          ]
+          if len(recovery_cases) != 2:
+              raise SystemExit(
+                  "Expected both interrupted-migration recovery cases; "
+                  f"received {sorted(recovery_cases)}"
+              )
+          PY

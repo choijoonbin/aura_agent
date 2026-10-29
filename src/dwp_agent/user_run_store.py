@@ -13,6 +13,8 @@ from .user_run_contracts import (
     RunAuditEvidenceStatus,
     RunLeaseStatus,
     RunMeasurementStatus,
+    RunRecoveryHint,
+    RunSafeErrorCode,
     UserAgentRunAuditEvidence,
     UserAgentRunLease,
     UserAgentRunSourceHealth,
@@ -132,7 +134,7 @@ class PostgresUserRunStore:
             params.extend(after)
         params.append(limit + 1)
         try:
-            with connect(self.database_url) as connection:
+            with connect(self.database_url, connect_timeout=5) as connection:
                 _configure_read_snapshot(connection)
                 rows = connection.execute(
                     f"""
@@ -142,7 +144,8 @@ class PostgresUserRunStore:
                            MIN(conversation.conversation_id::text)::uuid, run.created_at,
                            run.completed_at, run.lease_generation, run.lease_expires_at,
                            run.current_audit_id, run.audit_record_id,
-                           run.audit_link_state, run.data_provenance
+                           run.audit_link_state, run.data_provenance,
+                           run.state_changed_at, run.safe_error_code
                       FROM ai_agent_runs run
                       LEFT JOIN ai_conversation_messages message
                         ON message.run_id = run.run_id
@@ -189,7 +192,8 @@ class PostgresUserRunStore:
                            MIN(conversation.conversation_id::text)::uuid, run.created_at,
                            run.completed_at, run.lease_generation, run.lease_expires_at,
                            run.current_audit_id, run.audit_record_id,
-                           run.audit_link_state, run.data_provenance
+                           run.audit_link_state, run.data_provenance,
+                           run.state_changed_at, run.safe_error_code
                       FROM ai_agent_runs run
                       LEFT JOIN ai_conversation_messages message
                         ON message.run_id = run.run_id
@@ -232,6 +236,7 @@ def _in_memory_summary(
         policy_outcome=row.policy_outcome, status_code=row.status_code,
         source_count=row.source_count, latency_ms=row.latency_ms,
         conversation_id=None, created_at=row.created_at, completed_at=row.completed_at,
+        state_changed_at=row.state_changed_at, safe_error_code=row.safe_error_code,
         generation=row.generation, lease_expires_at=row.lease_expires_at,
         audit_id=row.audit_id, audit_record_id=row.audit_record_id,
         audit_link_state=row.audit_link_state, data_provenance=row.data_provenance,
@@ -260,13 +265,15 @@ def _postgres_summary(
         completed_at=row[12],
         generation=row[13], lease_expires_at=row[14], audit_id=row[15],
         audit_record_id=row[16], audit_link_state=row[17],
-        data_provenance=row[18], stages=stages, sources=sources,
+        data_provenance=row[18], state_changed_at=row[19], safe_error_code=row[20],
+        stages=stages, sources=sources,
     )
 
 
 def _summary(*, generation: int, lease_expires_at: datetime | None,
              audit_id: str | None, audit_record_id: UUID | None,
              audit_link_state: str | None, data_provenance: str,
+             state_changed_at: datetime, safe_error_code: str | None,
              stages: tuple[RunStageSnapshot, ...],
              sources: tuple[RunSourceHealthSnapshot, ...], **values) -> UserAgentRunSummary:
     now = datetime.now(timezone.utc)
@@ -287,6 +294,12 @@ def _summary(*, generation: int, lease_expires_at: datetime | None,
             if lease_expires_at is not None and lease_expires_at > now
             else RunLeaseStatus.EXPIRED
         )
+    effective_state_changed_at = (
+        lease_expires_at
+        if lease_status == RunLeaseStatus.EXPIRED and lease_expires_at is not None
+        else state_changed_at
+    )
+    privacy_safe_error = _privacy_safe_error_code(safe_error_code)
     current_stage = stages[-1].key if stages else None
     audit_status = RunAuditEvidenceStatus.NOT_AVAILABLE
     if audit_id and audit_record_id:
@@ -297,6 +310,9 @@ def _summary(*, generation: int, lease_expires_at: datetime | None,
         )
     return UserAgentRunSummary(
         **values,
+        state_changed_at=effective_state_changed_at,
+        safe_error_code=privacy_safe_error,
+        recovery_hint=_recovery_hint(privacy_safe_error),
         activity_title=safe_activity_title(str(values["agent_key"])),
         attempt=max(1, generation),
         lease=UserAgentRunLease(status=lease_status, expires_at=lease_expires_at),
@@ -318,6 +334,41 @@ def _summary(*, generation: int, lease_expires_at: datetime | None,
         ) for source in sources],
         data_provenance=data_provenance,
     )
+
+
+_PUBLIC_ERROR_RECOVERY: dict[RunSafeErrorCode, RunRecoveryHint] = {
+    RunSafeErrorCode.AGENT_EXECUTION_FAILED: RunRecoveryHint.CONTACT_SUPPORT,
+    RunSafeErrorCode.AGENT_SAFETY_CONFIGURATION_REQUIRED: RunRecoveryHint.REVIEW_CONFIGURATION,
+    RunSafeErrorCode.ASK_RUNTIME_FAILED: RunRecoveryHint.RETRY_LATER,
+    RunSafeErrorCode.CONTEXT_SOURCE_NOT_CONFIGURED: RunRecoveryHint.CHECK_SOURCE_CONNECTION,
+    RunSafeErrorCode.CONTEXT_SOURCE_UNAVAILABLE: RunRecoveryHint.CHECK_SOURCE_CONNECTION,
+    RunSafeErrorCode.MODEL_CALL_FAILED: RunRecoveryHint.RETRY_LATER,
+    RunSafeErrorCode.MODEL_GROUNDING_CONTRACT_INVALID: RunRecoveryHint.REVIEW_REQUEST,
+    RunSafeErrorCode.MODEL_OUTPUT_CONTRACT_INVALID: RunRecoveryHint.RETRY_LATER,
+    RunSafeErrorCode.MODEL_OUTPUT_MISSING: RunRecoveryHint.RETRY_LATER,
+    RunSafeErrorCode.MODEL_PROVIDER_UNAVAILABLE: RunRecoveryHint.RETRY_LATER,
+    RunSafeErrorCode.MODEL_RESPONSE_INVALID_JSON: RunRecoveryHint.RETRY_LATER,
+    RunSafeErrorCode.MODEL_ROUTE_CONFIGURATION_INVALID: RunRecoveryHint.REVIEW_CONFIGURATION,
+    RunSafeErrorCode.MODEL_ROUTE_CONFIGURATION_REQUIRED: RunRecoveryHint.REVIEW_CONFIGURATION,
+    RunSafeErrorCode.NO_SCOPED_EVIDENCE: RunRecoveryHint.REVIEW_REQUEST,
+}
+
+
+def _privacy_safe_error_code(value: str | None) -> RunSafeErrorCode | None:
+    if value is None:
+        return None
+    if value.startswith("MODEL_PROVIDER_HTTP_"):
+        return RunSafeErrorCode.MODEL_PROVIDER_UNAVAILABLE
+    try:
+        return RunSafeErrorCode(value)
+    except ValueError:
+        return RunSafeErrorCode.AGENT_EXECUTION_FAILED
+
+
+def _recovery_hint(value: RunSafeErrorCode | None) -> RunRecoveryHint | None:
+    if value is None:
+        return None
+    return _PUBLIC_ERROR_RECOVERY[value]
 
 
 def _configure_read_snapshot(connection) -> None:

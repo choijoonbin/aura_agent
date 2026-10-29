@@ -248,6 +248,7 @@ class AskRuntime:
                 user_id=identity.user_id,
                 roles=list(identity.roles),
                 model_safe_error_code=model_safe_error_code,
+                lease_generation=lease.generation,
             )
             _progress(on_progress, "COMPLETED")
             return response
@@ -261,7 +262,8 @@ class AskRuntime:
                     run_id=run_id, audit_id=audit_id, tenant_id=identity.tenant_id,
                     user_id=identity.user_id, correlation_id=identity.correlation_id,
                     agent_key=registry.entry_key, agent_revision=registry.revision,
-                    risk_tier=str(policy.risk_tier), roles=list(identity.roles),
+                    risk_tier=str(policy.risk_tier), lease_generation=lease.generation,
+                    roles=list(identity.roles),
                 )
             raise
 

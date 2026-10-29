@@ -94,6 +94,93 @@ def test_runtime_uses_installable_src_package() -> None:
     )
     assert attachment_citation_migration.is_file()
     assert "'ATTACHMENT'" in attachment_citation_migration.read_text(encoding="utf-8")
+    activity_state_migration = (
+        PACKAGE_ROOT
+        / "migrations"
+        / "V72__track_agent_run_state_changes.sql"
+    )
+    assert activity_state_migration.is_file()
+    activity_state_sql = activity_state_migration.read_text(encoding="utf-8")
+    assert "ALTER COLUMN state_changed_at SET DEFAULT CURRENT_TIMESTAMP" in activity_state_sql
+    assert "CREATE TRIGGER trg_ai_agent_runs_state_changed_at" in activity_state_sql
+    activity_audit_link_migration = (
+        PACKAGE_ROOT
+        / "migrations"
+        / "V73__preserve_agent_run_audit_attempt_links.sql"
+    )
+    assert activity_audit_link_migration.is_file()
+    activity_audit_link_sql = activity_audit_link_migration.read_text(encoding="utf-8")
+    assert "CREATE TABLE ai_agent_run_audit_links" in activity_audit_link_sql
+    assert "PRIMARY KEY (run_id, lease_generation)" in activity_audit_link_sql
+    assert "CONSTRAINT uk_ai_agent_run_audit_event UNIQUE (event_id)" in activity_audit_link_sql
+    assert "CREATE TABLE ai_agent_run_audit_link_cutover" in activity_audit_link_sql
+    assert "CREATE TABLE ai_agent_run_audit_legacy_receipts" in activity_audit_link_sql
+    assert "PRE_V73_UNRECOVERABLE_LINK" in activity_audit_link_sql
+    assert "CREATE TRIGGER trg_ai_agent_runs_capture_audit_link" in activity_audit_link_sql
+    assert "OLD.lease_generation" in activity_audit_link_sql
+    assert "SET LOCAL lock_timeout = '5s'" in activity_audit_link_sql
+    activity_search_extension = (
+        PACKAGE_ROOT / "migrations" / "V74__enable_agent_activity_trigram_search.sql"
+    )
+    activity_search_index = (
+        PACKAGE_ROOT / "migrations" / "V75__index_agent_activity_text_search_online.sql"
+    )
+    assert activity_search_extension.is_file()
+    assert "CREATE EXTENSION IF NOT EXISTS pg_trgm" in activity_search_extension.read_text(
+        encoding="utf-8"
+    )
+    activity_search_sql = activity_search_index.read_text(encoding="utf-8")
+    assert activity_search_sql.startswith("-- dwp:execute-in-transaction=false")
+    assert "DROP INDEX CONCURRENTLY IF EXISTS" in activity_search_sql
+    assert "CREATE INDEX CONCURRENTLY idx_ai_agent_runs_activity_search_trgm" in activity_search_sql
+    assert "RESET lock_timeout" in activity_search_sql
+    assert "RESET statement_timeout" in activity_search_sql
+    activity_state_backfill = (
+        PACKAGE_ROOT / "migrations" / "V76__backfill_agent_run_state_changes_online.sql"
+    ).read_text(encoding="utf-8")
+    activity_state_constraint = (
+        PACKAGE_ROOT / "migrations" / "V77__validate_agent_run_state_changes.sql"
+    ).read_text(encoding="utf-8")
+    activity_state_validation = (
+        PACKAGE_ROOT / "migrations" / "V78__validate_agent_run_state_change_constraint.sql"
+    ).read_text(encoding="utf-8")
+    activity_state_requirement = (
+        PACKAGE_ROOT / "migrations" / "V83__require_agent_run_state_changes.sql"
+    ).read_text(encoding="utf-8")
+    activity_state_index = (
+        PACKAGE_ROOT / "migrations" / "V84__index_agent_run_state_changes_online.sql"
+    ).read_text(encoding="utf-8")
+    activity_audit_backfill = (
+        PACKAGE_ROOT / "migrations" / "V79__backfill_agent_run_audit_links_online.sql"
+    ).read_text(encoding="utf-8")
+    activity_audit_index = (
+        PACKAGE_ROOT / "migrations" / "V80__index_agent_run_audit_links_online.sql"
+    ).read_text(encoding="utf-8")
+    assert "GREATEST(" in activity_state_backfill
+    assert "LIMIT 5000" in activity_state_backfill
+    assert "CREATE OR REPLACE PROCEDURE" in activity_state_backfill
+    assert "CREATE OR REPLACE PROCEDURE" in activity_audit_backfill
+    assert "NOT VALID" in activity_state_constraint
+    assert "VALIDATE CONSTRAINT ck_ai_agent_runs_state_changed_at" in activity_state_validation
+    assert "ALTER COLUMN state_changed_at SET NOT NULL" in activity_state_requirement
+    assert "CREATE INDEX CONCURRENTLY idx_ai_agent_runs_owner_state_changed" in activity_state_index
+    assert "LIMIT 5000" in activity_audit_backfill
+    assert "CREATE INDEX CONCURRENTLY idx_ai_agent_run_audit_pending" in activity_audit_index
+    for online_index_sql in (activity_search_sql, activity_audit_index, activity_state_index):
+        assert "RESET lock_timeout" in online_index_sql
+        assert "RESET statement_timeout" in online_index_sql
+    source_health_migration = (
+        PACKAGE_ROOT / "migrations" / "V81__preserve_agent_source_last_success.sql"
+    )
+    assert source_health_migration.is_file()
+    source_health_sql = source_health_migration.read_text(encoding="utf-8")
+    assert "last_success_at <= last_attempt_at" in source_health_sql
+    assert "health_status <> 'SUCCESS' OR last_success_at = last_attempt_at" in source_health_sql
+    assert "NOT VALID" in source_health_sql
+    source_health_validation = (
+        PACKAGE_ROOT / "migrations" / "V82__validate_agent_source_last_success.sql"
+    ).read_text(encoding="utf-8")
+    assert "VALIDATE CONSTRAINT ck_ai_agent_run_source_success" in source_health_validation
 
 
 def test_migration_versions_are_unique() -> None:

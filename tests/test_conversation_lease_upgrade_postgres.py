@@ -59,6 +59,13 @@ def test_legacy_database_upgrades_through_applied_v33_to_latest() -> None:
         empty_conversation_id=empty_conversation_id,
         encryption=encryption,
     )
+    with connect(DATABASE_URL) as connection:
+        connection.execute(
+            """UPDATE ai_agent_runs
+                  SET completed_at = created_at - INTERVAL '1 second'
+                WHERE run_id = %s""",
+            (failed_run_id,),
+        )
     _apply_pending_migrations_through(33)
     with connect(DATABASE_URL) as connection:
         applied_v33 = connection.execute(
@@ -104,6 +111,12 @@ def test_legacy_database_upgrades_through_applied_v33_to_latest() -> None:
             """SELECT version FROM sys_schema_history
                 ORDER BY substring(version from 2)::int"""
         ).fetchall()
+        skewed_state_time_is_valid = connection.execute(
+            """SELECT state_changed_at >= created_at
+                 FROM ai_agent_runs
+                WHERE run_id = %s""",
+            (failed_run_id,),
+        ).fetchone()[0]
 
     assert messages == [
         ("USER", completed_run_id, 1),
@@ -112,6 +125,7 @@ def test_legacy_database_upgrades_through_applied_v33_to_latest() -> None:
     assert empty_count == 0
     assert nullability == {"lease_generation": "NO", "run_id": "NO"}
     assert delete_rule == "RESTRICT"
+    assert skewed_state_time_is_valid is True
     expected_versions = [
         migration.stem.split("__", 1)[0]
         for migration in sorted(

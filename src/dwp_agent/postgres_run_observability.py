@@ -102,7 +102,9 @@ def record_source_health(
                       SET health_status = EXCLUDED.health_status,
                           latency_ms = EXCLUDED.latency_ms,
                           last_attempt_at = EXCLUDED.last_attempt_at,
-                          last_success_at = EXCLUDED.last_success_at
+                          last_success_at = COALESCE(
+                              EXCLUDED.last_success_at,
+                              ai_agent_run_source_health.last_success_at)
                     WHERE EXCLUDED.last_attempt_at >=
                           ai_agent_run_source_health.last_attempt_at""",
                 (

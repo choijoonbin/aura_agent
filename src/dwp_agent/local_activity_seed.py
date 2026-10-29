@@ -111,11 +111,13 @@ def _insert_run(connection, fixture: dict[str, object], offset: int) -> None:
                run_id, tenant_id, user_id, request_id, query_hash, agent_key,
                agent_revision, run_state, answer_state, risk_tier, policy_outcome,
                status_code, locale, latency_ms, source_count, correlation_id,
-               created_at, completed_at, lease_expires_at, lease_generation,
+               created_at, completed_at, state_changed_at,
+               lease_expires_at, lease_generation,
                current_audit_id, audit_record_id, audit_link_state, data_provenance)
            VALUES (%s, 1, '900018', %s, %s, 'DWP_ASSISTANT', 1, %s, %s,
                    'L1', %s, %s, 'ko-KR', %s, %s, %s,
                    CURRENT_TIMESTAMP - INTERVAL '2 hours' - (%s * INTERVAL '11 minutes'),
+                   CURRENT_TIMESTAMP - INTERVAL '2 hours' - (%s * INTERVAL '11 minutes') + INTERVAL '4 seconds',
                    CURRENT_TIMESTAMP - INTERVAL '2 hours' - (%s * INTERVAL '11 minutes') + INTERVAL '4 seconds',
                    NULL, 1, %s, %s, 'PENDING', 'SAMPLE')
            ON CONFLICT (run_id) DO NOTHING""",
@@ -124,7 +126,7 @@ def _insert_run(connection, fixture: dict[str, object], offset: int) -> None:
             hashlib.sha256(f"local:{fixture['key']}".encode()).hexdigest(),
             fixture["state"], fixture["answer"], fixture["policy"], fixture["status"],
             fixture["latency"], fixture["sources"],
-            f"local-activity-{fixture['key']}", offset + 1, offset + 1,
+            f"local-activity-{fixture['key']}", offset + 1, offset + 1, offset + 1,
             audit_id, audit_record_id(audit_id),
         ),
     )

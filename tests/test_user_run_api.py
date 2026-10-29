@@ -82,6 +82,7 @@ class FakeUserRunStore:
             source_count=3,
             latency_ms=240,
             created_at=datetime(2026, 8, 27, 1, 0, tzinfo=timezone.utc),
+            state_changed_at=datetime(2026, 8, 27, 1, 0, 1, tzinfo=timezone.utc),
             completed_at=datetime(2026, 8, 27, 1, 0, 1, tzinfo=timezone.utc),
         )
 
@@ -128,6 +129,7 @@ def test_user_activity_is_scoped_to_verified_identity_and_bounded(
     assert response.json()["data"][0]["attempt"] == 1
     assert response.json()["data"][0]["measurementStatus"] == "NOT_AVAILABLE"
     assert response.json()["data"][0]["auditEvidence"]["status"] == "NOT_AVAILABLE"
+    assert response.json()["data"][0]["stateChangedAt"] == "2026-08-27T01:00:01Z"
     assert response.json()["hasMore"] is False
     assert response.json()["nextCursor"] is None
     assert response.json()["snapshotAt"] is not None

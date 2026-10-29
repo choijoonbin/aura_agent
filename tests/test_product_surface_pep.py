@@ -192,6 +192,7 @@ class ActivityStoreStub:
             risk_tier="L0",
             policy_outcome="ALLOW",
             created_at=datetime.now(timezone.utc),
+            state_changed_at=datetime.now(timezone.utc),
             completed_at=datetime.now(timezone.utc),
         )
 
@@ -221,6 +222,7 @@ class UserRunStoreStub:
             source_count=0,
             latency_ms=0,
             created_at=datetime.now(timezone.utc),
+            state_changed_at=datetime.now(timezone.utc),
             completed_at=datetime.now(timezone.utc),
         )
 

@@ -16,10 +16,11 @@ import dwp_agent.run_store as run_store_module
 from dwp_agent.activity_cursor import InvalidActivityCursor, decode_cursor, encode_cursor
 from dwp_agent.activity_store import (
     ActivityFilters, ActivityStoreUnavailable, InMemoryAgentActivityStore,
-    PostgresAgentActivityStore, get_agent_activity_store,
+    PostgresAgentActivityStore, _SEARCH_DOCUMENT, get_agent_activity_store,
 )
 from dwp_agent.contracts import AskResponse
 from dwp_agent.main import app
+from dwp_agent.database_migrations import apply_migrations
 from dwp_agent.run_store import InMemoryRunStore, PostgresRunStore, RunStart, RunStoreUnavailable, _apply_migrations
 from dwp_agent.user_run_store import InMemoryUserRunStore, get_user_run_store
 
@@ -86,10 +87,14 @@ def test_real_lifecycle_idempotency_fenced_retry_and_late_delivery(source):
     first_snapshot = detail(activity, tenant, first.run_id)
     assert first_snapshot.execution_version(datetime.now(timezone.utc)) == 2
     runs.fail(first, "FAILED_SAFE_CODE")
-    assert detail(activity, tenant, first.run_id).run_state == "FAILED"
-    assert detail(activity, tenant, first.run_id).execution_version(datetime.now(timezone.utc)) == 3
+    failed_snapshot = detail(activity, tenant, first.run_id)
+    assert failed_snapshot.run_state == "FAILED"
+    assert failed_snapshot.state_changed_at >= first_snapshot.state_changed_at
+    assert failed_snapshot.execution_version(datetime.now(timezone.utc)) == 3
     second = runs.begin(replace(run, run_id=str(uuid4())))
     assert second is not None and second.run_id == first.run_id and second.generation == 2
+    retry_snapshot = detail(activity, tenant, second.run_id)
+    assert retry_snapshot.state_changed_at >= failed_snapshot.state_changed_at
     runs.fail(first, "LATE_OLD_FAILURE")
     with pytest.raises(RunStoreUnavailable):
         runs.complete(response_for(run, first.run_id), lease=first, tenant_id=tenant, user_id="7")
@@ -98,6 +103,7 @@ def test_real_lifecycle_idempotency_fenced_retry_and_late_delivery(source):
     runs.fail(second, "LATE_FAILURE_AFTER_COMPLETION")
     latest = detail(activity, tenant, first.run_id)
     assert latest.run_state == "COMPLETED"
+    assert latest.state_changed_at >= retry_snapshot.state_changed_at
     assert latest.execution_version(datetime.now(timezone.utc)) == 5
     assert latest.created_at == first_snapshot.created_at
     assert runs.begin(run) is None
@@ -121,6 +127,7 @@ def test_lease_expiration_is_unknown_not_forever_running(source):
     row = detail(activity, tenant, lease.run_id)
     assert row.run_state == "RUNNING"  # Reads never change the source ledger.
     assert row.activity_state(now) == "UNKNOWN"
+    assert row.effective_state_changed_at(now) == row.lease_expires_at
     assert row.execution_version(now) == 2  # Clock expiry must not mint a source version.
     counts, attention = activity.summary(
         tenant_id=tenant,
@@ -185,6 +192,72 @@ def test_full_summary_is_not_limited_by_recent_page_and_owner_isolation(source):
     )
     assert query_counts == {"RUNNING": 1}
     assert query_attention == []
+
+
+@pytest.mark.integration
+def test_postgres_activity_search_installs_a_valid_online_trigram_index() -> None:
+    database_url = os.getenv("DWP_AGENT_INTEGRATION_DATABASE_URL", "").strip()
+    if not database_url:
+        pytest.skip("DWP_AGENT_INTEGRATION_DATABASE_URL is not configured.")
+    _apply_migrations(database_url)
+    with connect(database_url) as connection:
+        index = connection.execute(
+            """SELECT indexes.indexdef, catalog.indisvalid, catalog.indisready
+                 FROM pg_indexes indexes
+                 JOIN pg_class relation ON relation.relname = indexes.indexname
+                 JOIN pg_index catalog ON catalog.indexrelid = relation.oid
+                WHERE indexes.schemaname = 'public'
+                  AND indexes.indexname = 'idx_ai_agent_runs_activity_search_trgm'"""
+        ).fetchone()
+        assert index is not None
+        assert "gin_trgm_ops" in index[0]
+        assert index[1:] == (True, True)
+        assert all(fragment in index[0] for fragment in ("agent_key", "status_code", "run_id"))
+    assert "DWAI_ON" in _SEARCH_DOCUMENT
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    ("version", "procedure"),
+    [
+        ("V76", "backfill_ai_agent_run_state_changes"),
+        ("V79", "backfill_ai_agent_run_audit_links"),
+    ],
+)
+def test_nontransactional_backfill_migration_recovers_after_interrupted_call(
+    version: str,
+    procedure: str,
+) -> None:
+    database_url = os.getenv("DWP_AGENT_INTEGRATION_DATABASE_URL", "").strip()
+    if not database_url:
+        pytest.skip("DWP_AGENT_INTEGRATION_DATABASE_URL is not configured.")
+    _apply_migrations(database_url)
+    with connect(database_url, autocommit=True) as connection:
+        connection.execute(
+            f"CREATE PROCEDURE {procedure}() LANGUAGE plpgsql AS "
+            "$$ BEGIN NULL; END $$"
+        )
+        connection.execute(
+            "DELETE FROM sys_schema_history WHERE version = %s",
+            (version,),
+        )
+
+    # A process can stop after CREATE PROCEDURE or during CALL. The next startup
+    # must replace the orphaned procedure, resume the idempotent batches, and
+    # record the migration rather than failing permanently on duplicate DDL.
+    apply_migrations(database_url)
+
+    with connect(database_url) as connection:
+        installed = connection.execute(
+            "SELECT 1 FROM sys_schema_history WHERE version = %s",
+            (version,),
+        ).fetchone()
+        remaining = connection.execute(
+            "SELECT to_regprocedure(%s)",
+            (f"{procedure}()",),
+        ).fetchone()
+    assert installed == (1,)
+    assert remaining == (None,)
 
 
 def test_source_provider_tracks_executor_on_memory_database_transition(source, monkeypatch):
@@ -326,6 +399,7 @@ def test_activity_projects_measured_progress_and_central_audit_link(configured):
     assert event["auditRecordId"]
     assert event["auditStatus"] == "PENDING"
     assert event["dataProvenance"] == "LIVE"
+    assert event["stateChangedAt"]
     assert "private-correlation" not in str(event)
 
 
@@ -342,6 +416,7 @@ def test_execution_summary_includes_only_recent_owner_attention_snapshots(config
             configured._activity[lease.run_id],
             run_state="COMPLETED",
             completed_at=observed_at[0],
+            state_changed_at=observed_at[0],
         )
         attention_ids.append(lease.run_id)
         observed_at[0] += timedelta(seconds=1)
@@ -353,6 +428,7 @@ def test_execution_summary_includes_only_recent_owner_attention_snapshots(config
         run_state="COMPLETED",
         policy_outcome="DENY",
         completed_at=observed_at[0],
+        state_changed_at=observed_at[0],
     )
 
     response = request("/v1/activity/executions/summary")
@@ -379,6 +455,41 @@ def test_execution_summary_includes_only_recent_owner_attention_snapshots(config
     assert "private-correlation" not in response.text
 
 
+def test_attention_items_use_state_change_recency_without_reordering_feed(configured):
+    observed_at = [datetime(2026, 9, 16, 1, 0, tzinfo=timezone.utc)]
+    configured._clock = lambda: observed_at[0]
+    older = configured.begin(replace(start(), policy_outcome="HANDOFF"))
+    assert older is not None
+    observed_at[0] += timedelta(seconds=1)
+    newer = configured.begin(replace(start(), policy_outcome="DENY"))
+    assert newer is not None
+    older_created_at = configured._activity[older.run_id].created_at
+    newer_created_at = configured._activity[newer.run_id].created_at
+    configured._activity[newer.run_id] = replace(
+        configured._activity[newer.run_id],
+        run_state="COMPLETED",
+        completed_at=observed_at[0],
+        state_changed_at=observed_at[0],
+    )
+    observed_at[0] += timedelta(seconds=1)
+    configured._activity[older.run_id] = replace(
+        configured._activity[older.run_id],
+        run_state="COMPLETED",
+        completed_at=observed_at[0],
+        state_changed_at=observed_at[0],
+    )
+
+    summary = request("/v1/activity/executions/summary").json()["data"]
+    page = request("/v1/activity/events").json()["data"]
+
+    assert [item["id"] for item in summary["attentionItems"]] == [
+        older.run_id,
+        newer.run_id,
+    ]
+    assert [item["id"] for item in page["events"]] == [newer.run_id, older.run_id]
+    assert older_created_at < newer_created_at
+
+
 def test_signed_identity_required_and_v5_default_fail_closed(configured, monkeypatch):
     monkeypatch.setenv("DWP_AGENT_IDENTITY_SIGNING_SECRET", "test-identity-secret")
     assert request("/v1/activity/events").status_code == 401
@@ -396,6 +507,7 @@ def test_api_unavailable_not_empty_and_validates_time_filters(configured, monkey
     assert unavailable_events.headers["Cache-Control"] == "private, no-store, max-age=0"
     assert request("/v1/activity/executions/summary").status_code == 503
     assert request("/v1/activity/events?from=2026-09-04T00:00:00").status_code == 422
+    assert request("/v1/activity/events?query=ab").status_code == 422
     assert request("/v1/activity/events?limit=101").status_code == 422
 
 

@@ -14,6 +14,7 @@ from dwp_agent.activity_store import (
     InMemoryAgentActivityStore,
     _configure_activity_summary_snapshot,
 )
+from dwp_agent.audit_delivery_ack import acknowledge_agent_run_delivery
 from dwp_agent.main import app
 from dwp_agent.contracts import AskResponse
 from dwp_agent.run_observability import (
@@ -83,6 +84,9 @@ def test_measured_run_contract_uses_fenced_stages_skips_and_real_source_timing()
     assert summary.source_health[0].last_success_at == now[0] - timedelta(milliseconds=300)
     assert summary.audit_evidence.audit_record_id == audit_record_id(start.audit_id or "")
     assert summary.audit_evidence.status == "PENDING"
+    assert summary.state_changed_at == now[0]
+    assert summary.safe_error_code is None
+    assert summary.recovery_hint is None
     assert "query" not in summary.model_dump_json().lower()
 
 
@@ -122,9 +126,61 @@ def test_failed_attempt_is_partial_and_rejects_backward_or_cross_owner_updates()
     assert summary.current_stage == "FAILED"
     assert summary.progress_percent == 40
     assert summary.measurement_status == "PARTIAL"
+    assert summary.state_changed_at == now[0]
+    assert summary.safe_error_code == "ASK_RUNTIME_FAILED"
+    assert summary.recovery_hint == "RETRY_LATER"
     assert [stage.state for stage in summary.stages] == [
         "COMPLETED", "COMPLETED", "FAILED", "FAILED"
     ]
+
+
+@pytest.mark.parametrize(
+    ("failure_detail", "forbidden_fragments"),
+    [
+        ("PRIVATE_PROVIDER_STACK_CODE", ("PRIVATE_PROVIDER_STACK_CODE",)),
+        (
+            "PRIVATE provider text user@example.com",
+            ("PRIVATE", "user@example.com"),
+        ),
+    ],
+)
+def test_unknown_or_raw_failure_details_are_reduced_to_one_public_code(
+    failure_detail: str,
+    forbidden_fragments: tuple[str, ...],
+) -> None:
+    now = datetime(2026, 9, 7, 2, 20, tzinfo=timezone.utc)
+    store = InMemoryRunStore(clock=lambda: now)
+    start = _start(audit_id=str(uuid4()))
+    lease = store.begin(start)
+    assert lease is not None
+
+    store.fail(lease, failure_detail)
+
+    summary = InMemoryUserRunStore(store).get(
+        tenant_id="1", user_id="900018", run_id=UUID(lease.run_id)
+    )
+    assert summary is not None
+    assert summary.safe_error_code == "AGENT_EXECUTION_FAILED"
+    assert summary.recovery_hint == "CONTACT_SUPPORT"
+    serialized = summary.model_dump_json()
+    assert all(fragment not in serialized for fragment in forbidden_fragments)
+
+
+def test_expired_user_run_projects_lease_expiry_as_effective_state_change() -> None:
+    started_at = datetime.now(timezone.utc) - timedelta(minutes=3)
+    store = InMemoryRunStore(clock=lambda: started_at)
+    start = _start(audit_id=str(uuid4()))
+    lease = store.begin(start)
+    assert lease is not None
+
+    summary = InMemoryUserRunStore(store).get(
+        tenant_id="1", user_id="900018", run_id=UUID(lease.run_id)
+    )
+    snapshot = store.activity_snapshots(tenant_id="1", user_id="900018")[0]
+
+    assert summary is not None
+    assert summary.lease.status == "EXPIRED"
+    assert summary.state_changed_at == snapshot.lease_expires_at
 
 
 def test_newer_source_failure_replaces_success_with_constraint_safe_snapshot() -> None:
@@ -164,7 +220,7 @@ def test_newer_source_failure_replaces_success_with_constraint_safe_snapshot() -
         generation=lease.generation,
     )
     assert [(item.status, item.last_success_at) for item in health] == [
-        ("UNAVAILABLE", None)
+        ("UNAVAILABLE", now)
     ]
 
 
@@ -304,7 +360,9 @@ def test_public_contract_exposes_provenance_as_a_closed_enum() -> None:
 
 
 @pytest.mark.integration
-def test_postgres_completion_is_fenced_by_tenant_user_request_and_audit() -> None:
+def test_postgres_completion_is_fenced_by_tenant_user_request_and_audit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     database_url = _integration_database_url()
     _apply_migrations(database_url)
     tenant_id = str(700_000_000 + uuid4().int % 100_000_000)
@@ -347,26 +405,337 @@ def test_postgres_completion_is_fenced_by_tenant_user_request_and_audit() -> Non
         )
         with connect(database_url) as connection:
             completed = connection.execute(
-                """SELECT run_state, audit_link_state,
-                          MIN(safe_error_code),
-                          COUNT(stage_key) FILTER (WHERE stage_key = 'COMPLETED')
-                     FROM ai_agent_runs
-                     LEFT JOIN ai_agent_run_stages USING (run_id)
-                    WHERE run_id = %s
-                    GROUP BY run_state, audit_link_state""",
+                """SELECT run_state, audit_link_state, safe_error_code,
+                          state_changed_at >= created_at,
+                          (SELECT COUNT(*) FROM ai_agent_run_stages stage
+                            WHERE stage.run_id = run.run_id
+                              AND stage.stage_key = 'COMPLETED')
+                     FROM ai_agent_runs run
+                    WHERE run_id = %s""",
                 (UUID(lease.run_id),),
             ).fetchone()
         assert completed == (
             "COMPLETED",
             "PENDING",
             "MODEL_PROVIDER_UNAVAILABLE",
+            True,
             1,
         )
+
+        monkeypatch.setenv("DWP_AGENT_DATABASE_URL", database_url)
+        delivered_event = {
+            "eventId": str(audit_record_id(response.audit_id)),
+            "tenantId": int(tenant_id),
+            "sourceService": "dwp-agent-runtime",
+            "targetType": "AGENT_RUN",
+            "targetId": lease.run_id,
+        }
+        assert acknowledge_agent_run_delivery(delivered_event) is True
+        assert acknowledge_agent_run_delivery(delivered_event) is True
+        with connect(database_url) as connection:
+            link_state = connection.execute(
+                """SELECT run.audit_link_state, link.link_state
+                     FROM ai_agent_runs run
+                     JOIN ai_agent_run_audit_links link
+                       ON link.run_id = run.run_id
+                      AND link.lease_generation = run.lease_generation
+                    WHERE run.run_id = %s""",
+                (UUID(lease.run_id),),
+            ).fetchone()
+        assert link_state == ("LINKED", "LINKED")
     finally:
         with connect(database_url) as connection:
             connection.execute(
                 "DELETE FROM ai_agent_runs WHERE tenant_id = %s", (int(tenant_id),)
             )
+
+
+@pytest.mark.integration
+def test_postgres_retry_preserves_and_acknowledges_each_audit_attempt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database_url = _integration_database_url()
+    _apply_migrations(database_url)
+    tenant_id = str(700_000_000 + uuid4().int % 100_000_000)
+    first = _start(audit_id=str(uuid4()), tenant_id=tenant_id)
+    store = PostgresRunStore(database_url, _IntegrationEncryption())  # type: ignore[arg-type]
+    first_lease = store.begin(first)
+    assert first_lease is not None
+
+    try:
+        store.fail(first_lease, "ASK_RUNTIME_FAILED")
+        retry = replace(
+            first,
+            run_id=str(uuid4()),
+            audit_id=str(uuid4()),
+            correlation_id="audit-retry",
+        )
+        retry_lease = store.begin(retry)
+        assert retry_lease is not None
+        assert retry_lease.run_id == first_lease.run_id
+        assert retry_lease.generation == first_lease.generation + 1
+
+        monkeypatch.setenv("DWP_AGENT_DATABASE_URL", database_url)
+        first_event = {
+            "eventId": str(audit_record_id(first.audit_id or "")),
+            "tenantId": int(tenant_id),
+            "sourceService": "dwp-agent-runtime",
+            "targetType": "AGENT_RUN",
+            "targetId": retry_lease.run_id,
+        }
+        retry_event = {
+            **first_event,
+            "eventId": str(audit_record_id(retry.audit_id or "")),
+        }
+
+        assert acknowledge_agent_run_delivery(first_event) is True
+        assert acknowledge_agent_run_delivery(first_event) is True
+        with connect(database_url) as connection:
+            before_latest_ack = connection.execute(
+                """SELECT run.audit_record_id, run.audit_link_state,
+                          array_agg(link.link_state ORDER BY link.lease_generation)
+                     FROM ai_agent_runs run
+                     JOIN ai_agent_run_audit_links link ON link.run_id = run.run_id
+                    WHERE run.run_id = %s
+                    GROUP BY run.audit_record_id, run.audit_link_state""",
+                (UUID(retry_lease.run_id),),
+            ).fetchone()
+        assert before_latest_ack == (
+            audit_record_id(retry.audit_id or ""),
+            "PENDING",
+            ["LINKED", "PENDING"],
+        )
+
+        assert acknowledge_agent_run_delivery(retry_event) is True
+        with connect(database_url) as connection:
+            after_latest_ack = connection.execute(
+                """SELECT run.audit_link_state,
+                          array_agg(link.link_state ORDER BY link.lease_generation)
+                     FROM ai_agent_runs run
+                     JOIN ai_agent_run_audit_links link ON link.run_id = run.run_id
+                    WHERE run.run_id = %s
+                    GROUP BY run.audit_link_state""",
+                (UUID(retry_lease.run_id),),
+            ).fetchone()
+        assert after_latest_ack == ("LINKED", ["LINKED", "LINKED"])
+    finally:
+        with connect(database_url) as connection:
+            connection.execute(
+                "DELETE FROM ai_agent_runs WHERE tenant_id = %s", (int(tenant_id),)
+            )
+
+
+@pytest.mark.integration
+def test_postgres_current_projection_ack_is_safe_before_audit_backfill(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database_url = _integration_database_url()
+    _apply_migrations(database_url)
+    tenant_id = str(700_000_000 + uuid4().int % 100_000_000)
+    start = _start(audit_id=str(uuid4()), tenant_id=tenant_id)
+    store = PostgresRunStore(database_url, _IntegrationEncryption())  # type: ignore[arg-type]
+    lease = store.begin(start)
+    assert lease is not None
+    event_id = audit_record_id(start.audit_id or "")
+
+    try:
+        # Recreate the V73-to-V79 rollout window: the legacy run projection is
+        # present, but its exact attempt link has not been backfilled yet.
+        with connect(database_url) as connection:
+            connection.execute(
+                "DELETE FROM ai_agent_run_audit_links WHERE run_id = %s",
+                (UUID(lease.run_id),),
+            )
+
+        monkeypatch.setenv("DWP_AGENT_DATABASE_URL", database_url)
+        assert acknowledge_agent_run_delivery({
+            "eventId": str(event_id),
+            "occurredAt": datetime.now(timezone.utc).isoformat(),
+            "tenantId": int(tenant_id),
+            "sourceService": "dwp-agent-runtime",
+            "targetType": "AGENT_RUN",
+            "targetId": lease.run_id,
+        }) is True
+
+        # Replaying the later online backfill must preserve the acknowledgement,
+        # never recreate a permanently PENDING row after the spool was removed.
+        with connect(database_url) as connection:
+            connection.execute(
+                "DELETE FROM sys_schema_history WHERE version = 'V79'"
+            )
+        _apply_migrations(database_url)
+
+        with connect(database_url) as connection:
+            state = connection.execute(
+                """SELECT run.audit_link_state, link.link_state,
+                          legacy.event_id
+                     FROM ai_agent_runs run
+                     JOIN ai_agent_run_audit_links link
+                       ON link.run_id = run.run_id
+                      AND link.lease_generation = run.lease_generation
+                     LEFT JOIN ai_agent_run_audit_legacy_receipts legacy
+                       ON legacy.run_id = run.run_id
+                    WHERE run.run_id = %s""",
+                (UUID(lease.run_id),),
+            ).fetchone()
+        assert state == ("LINKED", "LINKED", None)
+    finally:
+        with connect(database_url) as connection:
+            connection.execute(
+                "DELETE FROM ai_agent_runs WHERE tenant_id = %s", (int(tenant_id),)
+            )
+
+
+@pytest.mark.integration
+def test_postgres_pre_v73_orphan_receipt_does_not_starve_or_link_latest_attempt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database_url = _integration_database_url()
+    _apply_migrations(database_url)
+    tenant_id = str(700_000_000 + uuid4().int % 100_000_000)
+    first = _start(audit_id=str(uuid4()), tenant_id=tenant_id)
+    store = PostgresRunStore(database_url, _IntegrationEncryption())  # type: ignore[arg-type]
+    first_lease = store.begin(first)
+    assert first_lease is not None
+
+    try:
+        store.fail(first_lease, "ASK_RUNTIME_FAILED")
+        retry = replace(
+            first,
+            run_id=str(uuid4()),
+            audit_id=str(uuid4()),
+            correlation_id="pre-v73-audit-retry",
+        )
+        retry_lease = store.begin(retry)
+        assert retry_lease is not None
+        with connect(database_url) as connection:
+            connection.execute(
+                """DELETE FROM ai_agent_run_audit_links
+                    WHERE run_id = %s AND lease_generation = %s""",
+                (UUID(retry_lease.run_id), first_lease.generation),
+            )
+            connection.execute(
+                """UPDATE ai_agent_runs
+                      SET created_at = (
+                          SELECT cutover_at - INTERVAL '1 second'
+                            FROM ai_agent_run_audit_link_cutover
+                           WHERE singleton = 1)
+                    WHERE run_id = %s""",
+                (UUID(retry_lease.run_id),),
+            )
+
+        monkeypatch.setenv("DWP_AGENT_DATABASE_URL", database_url)
+        orphan_event_id = audit_record_id(first.audit_id or "")
+        orphan_event = {
+            "eventId": str(orphan_event_id),
+            "occurredAt": datetime.now(timezone.utc).isoformat(),
+            "tenantId": int(tenant_id),
+            "sourceService": "dwp-agent-runtime",
+            "targetType": "AGENT_RUN",
+            "targetId": retry_lease.run_id,
+        }
+        assert acknowledge_agent_run_delivery(orphan_event) is True
+        assert acknowledge_agent_run_delivery(orphan_event) is True
+        assert acknowledge_agent_run_delivery({
+            **orphan_event,
+            "eventId": str(uuid4()),
+            "metadata": {"auditLinkSchemaVersion": 2, "leaseGeneration": 1},
+        }) is False
+        assert acknowledge_agent_run_delivery({
+            **orphan_event,
+            "eventId": str(uuid4()),
+            "occurredAt": (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat(),
+        }) is False
+
+        with connect(database_url) as connection:
+            state = connection.execute(
+                """SELECT run.audit_link_state,
+                          receipt.reason,
+                          current_link.link_state
+                     FROM ai_agent_runs run
+                     JOIN ai_agent_run_audit_legacy_receipts receipt
+                       ON receipt.run_id = run.run_id AND receipt.event_id = %s
+                     JOIN ai_agent_run_audit_links current_link
+                       ON current_link.run_id = run.run_id
+                      AND current_link.lease_generation = run.lease_generation
+                    WHERE run.run_id = %s""",
+                (orphan_event_id, UUID(retry_lease.run_id)),
+            ).fetchone()
+        assert state == ("PENDING", "PRE_V73_UNRECOVERABLE_LINK", "PENDING")
+    finally:
+        with connect(database_url) as connection:
+            connection.execute(
+                "DELETE FROM ai_agent_runs WHERE tenant_id = %s", (int(tenant_id),)
+            )
+
+
+@pytest.mark.integration
+def test_postgres_rolling_upgrade_trigger_captures_old_writer_and_transition_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database_url = _integration_database_url()
+    _apply_migrations(database_url)
+    tenant_id = 700_000_000 + uuid4().int % 100_000_000
+    run_id = uuid4()
+    audit_id = str(uuid4())
+    event_id = audit_record_id(audit_id)
+
+    try:
+        with connect(database_url) as connection:
+            connection.execute(
+                """INSERT INTO ai_agent_runs (
+                       run_id, tenant_id, user_id, request_id, query_hash,
+                       agent_key, agent_revision, run_state, risk_tier, policy_outcome,
+                       locale, correlation_id, lease_expires_at, lease_generation,
+                       current_audit_id, audit_record_id, audit_link_state)
+                   VALUES (%s, %s, 'old-writer', 'old-writer-request', %s,
+                           'DWP_ASSISTANT', 1, 'RUNNING', 'L1', 'ALLOW',
+                           'ko-KR', 'old-writer-correlation',
+                           CURRENT_TIMESTAMP + INTERVAL '2 minutes', 1,
+                           %s, %s, 'PENDING')""",
+                (run_id, tenant_id, "a" * 64, audit_id, event_id),
+            )
+        with connect(database_url) as connection:
+            before = connection.execute(
+                """SELECT run.state_changed_at, link.event_id, link.link_state
+                     FROM ai_agent_runs run
+                     JOIN ai_agent_run_audit_links link
+                       ON link.run_id = run.run_id
+                      AND link.lease_generation = run.lease_generation
+                    WHERE run.run_id = %s""",
+                (run_id,),
+            ).fetchone()
+        assert before is not None
+        assert before[1:] == (event_id, "PENDING")
+
+        with connect(database_url) as connection:
+            connection.execute("SELECT pg_sleep(0.01)")
+            connection.execute(
+                """UPDATE ai_agent_runs
+                      SET run_state = 'FAILED', safe_error_code = 'ASK_RUNTIME_FAILED',
+                          completed_at = CURRENT_TIMESTAMP, lease_expires_at = NULL
+                    WHERE run_id = %s""",
+                (run_id,),
+            )
+        with connect(database_url) as connection:
+            transitioned_at = connection.execute(
+                "SELECT state_changed_at FROM ai_agent_runs WHERE run_id = %s",
+                (run_id,),
+            ).fetchone()[0]
+        assert transitioned_at > before[0]
+
+        monkeypatch.setenv("DWP_AGENT_DATABASE_URL", database_url)
+        assert acknowledge_agent_run_delivery({
+            "eventId": str(event_id),
+            "occurredAt": datetime.now(timezone.utc).isoformat(),
+            "tenantId": tenant_id,
+            "sourceService": "dwp-agent-runtime",
+            "targetType": "AGENT_RUN",
+            "targetId": str(run_id),
+        }) is True
+    finally:
+        with connect(database_url) as connection:
+            connection.execute("DELETE FROM ai_agent_runs WHERE run_id = %s", (run_id,))
 
 
 @pytest.mark.integration
@@ -412,7 +781,7 @@ def test_postgres_newer_source_failure_replaces_success_without_constraint_error
                       AND source_type = 'WORK_ITEM'""",
                 (UUID(lease.run_id), lease.generation),
             ).fetchone()
-        assert row == ("UNAVAILABLE", None)
+        assert row == ("UNAVAILABLE", observed_at)
     finally:
         with connect(database_url) as connection:
             connection.execute(

@@ -103,7 +103,10 @@ class InMemoryAgentActivityStore:
             for row in rows
             if row.activity_state(now) in {"NEEDS_INPUT", "POLICY_BLOCKED"}
         ]
-        attention.sort(key=lambda row: (row.created_at, row.run_id), reverse=True)
+        attention.sort(
+            key=lambda row: (row.effective_state_changed_at(now), row.run_id),
+            reverse=True,
+        )
         return counts, attention[:attention_limit]
 
 
@@ -120,7 +123,7 @@ _COLUMNS = """run_id, tenant_id, user_id, agent_key, agent_revision, run_state,
         AND stage.lease_generation = ai_agent_runs.lease_generation
         AND stage.stage_key NOT IN ('COMPLETED', 'FAILED')
         AND stage.stage_state IN ('COMPLETED', 'SKIPPED')),
-    safe_error_code"""
+    safe_error_code, state_changed_at"""
 
 # No source payload, query, response envelope, correlation text or citation is read.
 _STATE = """CASE WHEN run_state = 'RUNNING' THEN
@@ -128,6 +131,11 @@ _STATE = """CASE WHEN run_state = 'RUNNING' THEN
     WHEN run_state = 'FAILED' THEN 'FAILED'
     WHEN policy_outcome = 'DENY' THEN 'POLICY_BLOCKED'
     WHEN policy_outcome = 'HANDOFF' THEN 'NEEDS_INPUT' ELSE 'COMPLETED' END"""
+
+_SEARCH_DOCUMENT = """lower(
+    'DWAI_ON DWAI·ON Agent execution 에이전트 실행 ' ||
+    agent_key || ' ' || COALESCE(status_code, '') || ' ' || run_id::text
+)"""
 
 
 class PostgresAgentActivityStore:
@@ -154,9 +162,9 @@ class PostgresAgentActivityStore:
             parts.append("created_at < %s")
             params.append(filters.to_at)
         if filters.query:
-            parts.append("""POSITION(LOWER(%s) IN LOWER(CONCAT(
-                'DWAI_ON DWAI·ON Agent execution 에이전트 실행 ', agent_key, ' ', status_code, ' ', run_id::text))) > 0""")
-            params.append(filters.query)
+            parts.append(f"({_SEARCH_DOCUMENT}) LIKE %s ESCAPE '!'")
+            escaped = filters.query.lower().replace("!", "!!").replace("%", "!%").replace("_", "!_")
+            params.append(f"%{escaped}%")
         return " AND ".join(parts), params
 
     def _query(self, sql: str, params: list[object]) -> list[tuple]:
@@ -207,7 +215,7 @@ class PostgresAgentActivityStore:
                 attention_rows = connection.execute(
                     f"SELECT {_COLUMNS} FROM ai_agent_runs "
                     f"WHERE {attention_where} "
-                    "ORDER BY created_at DESC, run_id DESC LIMIT %s",
+                    "ORDER BY state_changed_at DESC, run_id DESC LIMIT %s",
                     [*params, now, attention_limit],
                 ).fetchall()
         except (PsycopgError, ValueError) as error:
@@ -238,6 +246,7 @@ def _snapshot(row: tuple) -> ActivityRunSnapshot:
         audit_id=row[16], audit_record_id=row[17], audit_link_state=row[18],
         data_provenance=RunDataProvenance(row[19]), current_stage=current_stage,
         progress_percent=int(row[21]) if row[20] is not None else None,
+        state_changed_at=row[23],
     )
 
 

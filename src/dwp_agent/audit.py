@@ -178,6 +178,7 @@ def record_ask_run(
     user_id: str,
     roles: list[str] | None = None,
     model_safe_error_code: str | None = None,
+    lease_generation: int,
 ) -> None:
     event = {
         "id": response.audit_id,
@@ -206,6 +207,8 @@ def record_ask_run(
             "citationCount": len(response.citations),
             "agentKey": response.agent_registry.entry_key,
             "agentRevision": response.agent_registry.revision,
+            "auditLinkSchemaVersion": 2,
+            "leaseGeneration": lease_generation,
         },
     }
     if model_safe_error_code is not None:
@@ -265,6 +268,7 @@ def record_ask_failure(
     agent_key: str,
     agent_revision: int,
     risk_tier: str,
+    lease_generation: int,
     roles: list[str] | None = None,
 ) -> None:
     occurred_at = datetime.now(timezone.utc)
@@ -275,6 +279,8 @@ def record_ask_failure(
         "riskTier": risk_tier,
         "agentKey": agent_key,
         "agentRevision": agent_revision,
+        "auditLinkSchemaVersion": 2,
+        "leaseGeneration": lease_generation,
     }
     event = {
         "id": audit_id,

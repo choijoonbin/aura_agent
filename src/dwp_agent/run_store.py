@@ -9,6 +9,7 @@ from uuid import UUID
 
 from psycopg import connect
 
+from .audit_link_store import record_run_audit_link
 from .contracts import AskResponse
 from .in_memory_run_store import InMemoryRunStore
 from .run_store_types import RunLease, RunStart
@@ -145,9 +146,11 @@ class PostgresRunStore:
                     run_id, tenant_id, user_id, request_id, query_hash,
                     agent_key, agent_revision, run_state, risk_tier, policy_outcome,
                     locale, correlation_id, lease_expires_at, lease_generation,
-                    current_audit_id, audit_record_id, audit_link_state)
+                    current_audit_id, audit_record_id, audit_link_state,
+                    state_changed_at)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, 'RUNNING', %s, %s, %s, %s,
-                        CURRENT_TIMESTAMP + INTERVAL '2 minutes', 1, %s, %s, %s)
+                        CURRENT_TIMESTAMP + INTERVAL '2 minutes', 1, %s, %s, %s,
+                        CURRENT_TIMESTAMP)
                 ON CONFLICT (tenant_id, user_id, request_id) DO NOTHING
                 RETURNING run_id, lease_generation
                 """,
@@ -169,6 +172,12 @@ class PostgresRunStore:
                 ),
             ).fetchone()
             if row is not None:
+                record_run_audit_link(
+                    connection,
+                    run_id=row[0],
+                    lease_generation=int(row[1]),
+                    audit_id=start.audit_id,
+                )
                 start_stage(connection, str(row[0]), int(row[1]))
                 return RunLease(run_id=str(row[0]), generation=int(row[1]))
 
@@ -202,7 +211,8 @@ class PostgresRunStore:
                        lease_expires_at = CURRENT_TIMESTAMP + INTERVAL '2 minutes',
                        lease_generation = lease_generation + 1,
                        current_audit_id = %s, audit_record_id = %s,
-                       audit_link_state = %s, data_provenance = 'LIVE'
+                       audit_link_state = %s, data_provenance = 'LIVE',
+                       state_changed_at = CURRENT_TIMESTAMP
                  WHERE run_id = %s
                    AND (run_state = 'FAILED'
                         OR (run_state = 'RUNNING' AND lease_expires_at <= CURRENT_TIMESTAMP))
@@ -223,6 +233,12 @@ class PostgresRunStore:
             ).fetchone()
             if retry is None:
                 return None
+            record_run_audit_link(
+                connection,
+                run_id=retry[0],
+                lease_generation=int(retry[1]),
+                audit_id=start.audit_id,
+            )
             start_stage(connection, str(retry[0]), int(retry[1]))
             return RunLease(run_id=str(retry[0]), generation=int(retry[1]))
 
@@ -327,6 +343,7 @@ class PostgresRunStore:
                        response_nonce = NULL,
                        response_ciphertext = NULL,
                        completed_at = %s, lease_expires_at = NULL,
+                       state_changed_at = CURRENT_TIMESTAMP,
                        current_audit_id = COALESCE(current_audit_id, %s),
                        audit_record_id = COALESCE(audit_record_id, %s),
                        audit_link_state = 'PENDING'
@@ -363,6 +380,12 @@ class PostgresRunStore:
             ).rowcount
             if updated != 1:
                 raise RunStoreUnavailable("Agent run could not be completed.")
+            record_run_audit_link(
+                connection,
+                run_id=UUID(lease.run_id),
+                lease_generation=lease.generation,
+                audit_id=response.audit_id,
+            )
             finish_attempt_stage(connection, lease, RunStageKey.COMPLETED)
             activate_conversation_messages(
                 connection,
@@ -413,7 +436,8 @@ class PostgresRunStore:
                 """
                 UPDATE ai_agent_runs
                    SET run_state = 'FAILED', safe_error_code = %s,
-                       completed_at = CURRENT_TIMESTAMP, lease_expires_at = NULL
+                       completed_at = CURRENT_TIMESTAMP, lease_expires_at = NULL,
+                       state_changed_at = CURRENT_TIMESTAMP
                  WHERE run_id = %s AND run_state = 'RUNNING'
                    AND lease_generation = %s
                    AND lease_expires_at > CURRENT_TIMESTAMP

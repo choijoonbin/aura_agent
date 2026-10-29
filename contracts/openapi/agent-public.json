@@ -572,6 +572,18 @@
             "title": "State",
             "type": "string"
           },
+          "stateChangedAt": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Statechangedat"
+          },
           "summary": {
             "title": "Summary",
             "type": "string"
@@ -16556,6 +16568,37 @@
         "title": "RunMeasurementStatus",
         "type": "string"
       },
+      "RunRecoveryHint": {
+        "enum": [
+          "RETRY_LATER",
+          "REVIEW_CONFIGURATION",
+          "CHECK_SOURCE_CONNECTION",
+          "REVIEW_REQUEST",
+          "CONTACT_SUPPORT"
+        ],
+        "title": "RunRecoveryHint",
+        "type": "string"
+      },
+      "RunSafeErrorCode": {
+        "enum": [
+          "AGENT_EXECUTION_FAILED",
+          "AGENT_SAFETY_CONFIGURATION_REQUIRED",
+          "ASK_RUNTIME_FAILED",
+          "CONTEXT_SOURCE_NOT_CONFIGURED",
+          "CONTEXT_SOURCE_UNAVAILABLE",
+          "MODEL_CALL_FAILED",
+          "MODEL_GROUNDING_CONTRACT_INVALID",
+          "MODEL_OUTPUT_CONTRACT_INVALID",
+          "MODEL_OUTPUT_MISSING",
+          "MODEL_PROVIDER_UNAVAILABLE",
+          "MODEL_RESPONSE_INVALID_JSON",
+          "MODEL_ROUTE_CONFIGURATION_INVALID",
+          "MODEL_ROUTE_CONFIGURATION_REQUIRED",
+          "NO_SCOPED_EVIDENCE"
+        ],
+        "title": "RunSafeErrorCode",
+        "type": "string"
+      },
       "RunSourceHealthStatus": {
         "enum": [
           "SUCCESS",
@@ -19956,6 +19999,16 @@
             ],
             "title": "Progresspercent"
           },
+          "recoveryHint": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RunRecoveryHint"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "riskTier": {
             "$ref": "#/components/schemas/RiskTier"
           },
@@ -19966,6 +20019,16 @@
           },
           "runState": {
             "$ref": "#/components/schemas/AgentRunState"
+          },
+          "safeErrorCode": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RunSafeErrorCode"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "sourceCount": {
             "minimum": 0.0,
@@ -19985,6 +20048,18 @@
             },
             "title": "Stages",
             "type": "array"
+          },
+          "stateChangedAt": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Statechangedat"
           },
           "statusCode": {
             "anyOf": [

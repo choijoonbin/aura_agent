@@ -81,6 +81,7 @@ class InMemoryRunStore:
                 run_state="RUNNING", risk_tier=start.risk_tier,
                 policy_outcome=start.policy_outcome,
                 created_at=previous_snapshot.created_at if previous_snapshot else now,
+                state_changed_at=now,
                 generation=lease.generation, lease_expires_at=now + timedelta(minutes=2),
                 current_stage=RunStageKey.AUTHORIZING,
                 progress_percent=0,
@@ -163,7 +164,7 @@ class InMemoryRunStore:
                     last_success_at=(
                         observation.observed_at
                         if observation.status == "SUCCESS"
-                        else None
+                        else current.last_success_at if current is not None else None
                     ),
                 )
 
@@ -225,6 +226,7 @@ class InMemoryRunStore:
                 safe_error_code=safe_error_code,
                 source_count=response.source_count, latency_ms=response.model_route.latency_ms,
                 completed_at=response.completed_at, lease_expires_at=None,
+                state_changed_at=terminal_at,
                 current_stage=RunStageKey.COMPLETED,
                 progress_percent=progress_percent(self._current_stages_locked(lease)),
                 audit_id=response.audit_id, audit_record_id=audit_record_id(response.audit_id),
@@ -245,6 +247,7 @@ class InMemoryRunStore:
                     self._activity[lease.run_id], run_state="FAILED",
                     safe_error_code=safe_error_code[:120],
                     completed_at=terminal_at, lease_expires_at=None,
+                    state_changed_at=terminal_at,
                     current_stage=RunStageKey.FAILED,
                     progress_percent=progress_percent(self._current_stages_locked(lease)),
                 )

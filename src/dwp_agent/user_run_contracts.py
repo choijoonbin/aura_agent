@@ -40,6 +40,31 @@ class RunAuditEvidenceStatus(StrEnum):
     NOT_AVAILABLE = "NOT_AVAILABLE"
 
 
+class RunRecoveryHint(StrEnum):
+    RETRY_LATER = "RETRY_LATER"
+    REVIEW_CONFIGURATION = "REVIEW_CONFIGURATION"
+    CHECK_SOURCE_CONNECTION = "CHECK_SOURCE_CONNECTION"
+    REVIEW_REQUEST = "REVIEW_REQUEST"
+    CONTACT_SUPPORT = "CONTACT_SUPPORT"
+
+
+class RunSafeErrorCode(StrEnum):
+    AGENT_EXECUTION_FAILED = "AGENT_EXECUTION_FAILED"
+    AGENT_SAFETY_CONFIGURATION_REQUIRED = "AGENT_SAFETY_CONFIGURATION_REQUIRED"
+    ASK_RUNTIME_FAILED = "ASK_RUNTIME_FAILED"
+    CONTEXT_SOURCE_NOT_CONFIGURED = "CONTEXT_SOURCE_NOT_CONFIGURED"
+    CONTEXT_SOURCE_UNAVAILABLE = "CONTEXT_SOURCE_UNAVAILABLE"
+    MODEL_CALL_FAILED = "MODEL_CALL_FAILED"
+    MODEL_GROUNDING_CONTRACT_INVALID = "MODEL_GROUNDING_CONTRACT_INVALID"
+    MODEL_OUTPUT_CONTRACT_INVALID = "MODEL_OUTPUT_CONTRACT_INVALID"
+    MODEL_OUTPUT_MISSING = "MODEL_OUTPUT_MISSING"
+    MODEL_PROVIDER_UNAVAILABLE = "MODEL_PROVIDER_UNAVAILABLE"
+    MODEL_RESPONSE_INVALID_JSON = "MODEL_RESPONSE_INVALID_JSON"
+    MODEL_ROUTE_CONFIGURATION_INVALID = "MODEL_ROUTE_CONFIGURATION_INVALID"
+    MODEL_ROUTE_CONFIGURATION_REQUIRED = "MODEL_ROUTE_CONFIGURATION_REQUIRED"
+    NO_SCOPED_EVIDENCE = "NO_SCOPED_EVIDENCE"
+
+
 class UserAgentRunLease(ContractModel):
     status: RunLeaseStatus
     expires_at: datetime | None = None
@@ -77,10 +102,13 @@ class UserAgentRunSummary(ContractModel):
     risk_tier: RiskTier
     policy_outcome: PolicyOutcome
     status_code: str | None = Field(default=None, max_length=128)
+    safe_error_code: RunSafeErrorCode | None = None
+    recovery_hint: RunRecoveryHint | None = None
     source_count: int = Field(ge=0)
     latency_ms: int = Field(ge=0)
     conversation_id: UUID | None = None
     created_at: datetime
+    state_changed_at: datetime | None = None
     completed_at: datetime | None = None
     activity_title: str = Field(default="DWAI·ON Agent execution", min_length=1, max_length=160)
     attempt: int = Field(default=1, ge=1)

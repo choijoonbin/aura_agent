@@ -5,10 +5,13 @@ import logging
 import os
 import urllib.error
 from pathlib import Path
+from uuid import UUID
 
 import dwp_agent.audit as audit_module
 import dwp_agent.audit_delivery as audit_delivery_module
+import dwp_agent.audit_delivery_ack as audit_delivery_ack_module
 from dwp_agent.audit_delivery import DurableAuditPublisher
+from dwp_agent.audit_delivery_ack import acknowledge_agent_run_delivery
 
 
 class Response:
@@ -69,6 +72,7 @@ def test_record_ask_failure_publishes_canonical_failed_outcome(monkeypatch) -> N
         agent_key="work-assistant",
         agent_revision=7,
         risk_tier="L2",
+        lease_generation=3,
         roles=["USER", " USER ", ""],
     )
 
@@ -83,6 +87,8 @@ def test_record_ask_failure_publishes_canonical_failed_outcome(monkeypatch) -> N
         "riskTier": "L2",
         "agentKey": "work-assistant",
         "agentRevision": 7,
+        "auditLinkSchemaVersion": 2,
+        "leaseGeneration": 3,
     }
 
 
@@ -133,6 +139,183 @@ def test_flush_normalizes_only_legacy_top_level_outcome_and_deletes_after_succes
         {"eventId": "canonical-event", "outcome": "SUCCESS"},
     ]
     assert not list(tmp_path.glob("*.json"))
+
+
+def test_collector_success_retains_spool_until_local_acknowledgement(
+    monkeypatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("DWP_AUDIT_COLLECTOR_URL", "http://audit.test/internal/events")
+    monkeypatch.setenv("DWP_AUDIT_INGEST_TOKEN", "test-token")
+    monkeypatch.setenv("DWP_AUDIT_SPOOL_DIR", str(tmp_path))
+    acknowledgement_available = False
+    acknowledged: list[str] = []
+
+    def acknowledge(event: object) -> bool:
+        assert isinstance(event, dict)
+        acknowledged.append(str(event["eventId"]))
+        return acknowledgement_available
+
+    publisher = DurableAuditPublisher(acknowledge_delivery=acknowledge)
+    event_file = tmp_path / "001-agent-run.json"
+    event_file.write_text(
+        json.dumps({"eventId": "agent-event", "targetType": "AGENT_RUN"}),
+        encoding="utf-8",
+    )
+    deliveries = 0
+
+    def urlopen(*_args, **_kwargs):
+        nonlocal deliveries
+        deliveries += 1
+        return Response(202)
+
+    monkeypatch.setattr("urllib.request.urlopen", urlopen)
+
+    assert publisher.flush_once() is False
+    assert event_file.exists()
+
+    acknowledgement_available = True
+    assert publisher.flush_once() is True
+    assert not event_file.exists()
+    assert deliveries == 2
+    assert acknowledged == ["agent-event", "agent-event"]
+
+
+def test_acknowledgement_failures_rotate_so_newer_spool_entries_progress(
+    monkeypatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("DWP_AUDIT_COLLECTOR_URL", "http://audit.test/internal/events")
+    monkeypatch.setenv("DWP_AUDIT_INGEST_TOKEN", "test-token")
+    monkeypatch.setenv("DWP_AUDIT_SPOOL_DIR", str(tmp_path))
+    monkeypatch.setenv("DWP_AUDIT_BATCH_SIZE", "2")
+    attempts: list[list[str]] = []
+
+    def acknowledge(event: object) -> bool:
+        assert isinstance(event, dict)
+        return event["eventId"] == "new-event"
+
+    publisher = DurableAuditPublisher(acknowledge_delivery=acknowledge)
+    for index, event_id in enumerate(("legacy-1", "legacy-2", "new-event"), start=1):
+        path = tmp_path / f"00{index}.json"
+        path.write_text(json.dumps({"eventId": event_id}), encoding="utf-8")
+        os.utime(path, ns=(index, index))
+
+    def urlopen(request, **_kwargs):
+        attempts.append([event["eventId"] for event in json.loads(request.data)])
+        return Response(202)
+
+    monkeypatch.setattr("urllib.request.urlopen", urlopen)
+
+    assert publisher.flush_once() is False
+    assert publisher.flush_once() is False
+    assert attempts == [["legacy-1", "legacy-2"], ["new-event", "legacy-1"]]
+    assert not (tmp_path / "003.json").exists()
+    assert (tmp_path / "001.json").exists()
+    assert (tmp_path / "002.json").exists()
+
+
+def test_agent_run_acknowledgement_binds_tenant_target_and_event_id(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("DWP_AGENT_DATABASE_URL", "postgresql://audit-ack/test")
+    run_id = UUID("00000000-0000-4000-8000-000000000301")
+    event_id = UUID("00000000-0000-4000-8000-000000000302")
+    observed: list[tuple[object, ...]] = []
+    materialized: list[tuple[object, ...]] = []
+    settings: list[str] = []
+    result: tuple[str] | None = ("LINKED",)
+
+    class Connection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args) -> None:
+            return None
+
+        def execute(self, query, parameters=None):
+            if str(query).lstrip().startswith("SET LOCAL"):
+                settings.append(str(query))
+                return self
+            assert "tenant_id = %s" in query
+            if "INSERT INTO ai_agent_run_audit_links" in query:
+                assert "run.audit_record_id = %s" in query
+                assert "ON CONFLICT (run_id, lease_generation) DO NOTHING" in query
+                materialized.append(parameters)
+                return self
+            assert "link.run_id = %s" in query
+            assert "link.event_id = %s" in query
+            assert "run.audit_record_id = ack.event_id" in query
+            observed.append(parameters)
+            return self
+
+        def fetchone(self):
+            return result
+
+    monkeypatch.setattr(
+        audit_delivery_ack_module,
+        "connect",
+        lambda database_url, connect_timeout: Connection(),
+    )
+    event = {
+        "eventId": str(event_id),
+        "tenantId": 42,
+        "sourceService": "dwp-agent-runtime",
+        "targetType": "AGENT_RUN",
+        "targetId": str(run_id),
+    }
+
+    assert acknowledge_agent_run_delivery(event) is True
+    assert materialized == [(42, run_id, event_id)]
+    assert observed == [(
+        42,
+        run_id,
+        event_id,
+        event_id,
+        True,
+        None,
+        42,
+        run_id,
+        event_id,
+        event_id,
+        event_id,
+        42,
+        run_id,
+    )]
+    assert settings == [
+        "SET LOCAL lock_timeout = '2s'",
+        "SET LOCAL statement_timeout = '5s'",
+    ]
+
+    result = None
+    assert acknowledge_agent_run_delivery(event) is False
+    assert acknowledge_agent_run_delivery({**event, "tenantId": 43}) is False
+    assert acknowledge_agent_run_delivery({**event, "targetId": "invalid"}) is False
+
+
+def test_non_agent_run_delivery_needs_no_local_run_acknowledgement(monkeypatch) -> None:
+    monkeypatch.delenv("DWP_AGENT_DATABASE_URL", raising=False)
+
+    assert acknowledge_agent_run_delivery({"targetType": "AGENT_PLAN"}) is True
+
+
+def test_agent_run_acknowledgement_defers_on_transient_database_failure(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("DWP_AGENT_DATABASE_URL", "postgresql://audit-ack/test")
+
+    def unavailable(*_args, **_kwargs):
+        raise audit_delivery_ack_module.PsycopgError("transient test failure")
+
+    monkeypatch.setattr(audit_delivery_ack_module, "connect", unavailable)
+
+    assert acknowledge_agent_run_delivery(
+        {
+            "eventId": "00000000-0000-4000-8000-000000000302",
+            "tenantId": 42,
+            "sourceService": "dwp-agent-runtime",
+            "targetType": "AGENT_RUN",
+            "targetId": "00000000-0000-4000-8000-000000000301",
+        }
+    ) is False
 
 
 def test_retryable_server_failure_preserves_original_legacy_spool_file(
